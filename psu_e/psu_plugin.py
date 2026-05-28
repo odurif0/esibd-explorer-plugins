@@ -93,7 +93,7 @@ _PSU_PANEL_DIAGNOSTICS_TITLE_STYLE = "color: #cbd5e1; font-weight: 700;"
 _PSU_PANEL_DIAGNOSTICS_TEXT_STYLE = "color: #e2e8f0;"
 _PSU_PANEL_SECTION_HEADER_STYLE = "color: #cbd5e1; font-weight: 700; font-size: 13px;"
 _PSU_PANEL_CARD_MIN_WIDTH = 220
-_PSU_PANEL_CARD_MAX_WIDTH = 340
+_PSU_PANEL_CARD_MAX_WIDTH = 280
 _PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 700
 _PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
@@ -1712,10 +1712,6 @@ class PSUDevice(Device):
                 (
                     ("Vget", "voltage_monitor"),
                     ("Iget", "current_monitor"),
-                    ("Tadc", "temperature_monitor"),
-                    ("Dropout", "dropout_monitor"),
-                    ("Range", "range_monitor"),
-                    ("Rails", "rails_monitor"),
                 )
             ):
                 name_label = QLabel(label_text)
@@ -1747,6 +1743,12 @@ class PSUDevice(Device):
         cards_layout.addStretch(1)
         layout.addWidget(cards_row)
 
+        global_diag_center = QWidget()
+        global_diag_center_layout = QHBoxLayout(global_diag_center)
+        global_diag_center_layout.setContentsMargins(0, 0, 0, 0)
+        global_diag_center_layout.setSpacing(0)
+        global_diag_center_layout.addStretch(1)
+
         global_diag_frame = QFrame()
         global_diag_frame.setStyleSheet(_PSU_PANEL_DIAGNOSTICS_STYLE)
         global_diag_frame.setMaximumWidth(_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH)
@@ -1759,25 +1761,56 @@ class PSUDevice(Device):
         global_diag_layout.setHorizontalSpacing(10)
         global_diag_layout.setVerticalSpacing(6)
 
+        diag_widgets: dict[str, Any] = {}
+        channel_numbers = sorted(ch.channel_number() for ch in self.getChannels() if ch.real)
+        col_offset = 1
+        for ch_no in channel_numbers:
+            ch_header = QLabel(f"CH{ch_no}")
+            ch_header.setStyleSheet(_PSU_PANEL_SECTION_HEADER_STYLE)
+            global_diag_layout.addWidget(ch_header, 0, col_offset)
+
+            for row, (label_text, key) in enumerate(
+                (
+                    ("Tadc", f"temperature_monitor_ch{ch_no}"),
+                    ("Dropout", f"dropout_monitor_ch{ch_no}"),
+                    ("Range", f"range_monitor_ch{ch_no}"),
+                    ("Rails", f"rails_monitor_ch{ch_no}"),
+                ),
+                start=1,
+            ):
+                if ch_no == channel_numbers[0]:
+                    name_label = QLabel(label_text)
+                    name_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
+                    global_diag_layout.addWidget(name_label, row, 0)
+                value_label = QLabel("n/a")
+                value_label.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+                global_diag_layout.addWidget(value_label, row, col_offset)
+                diag_widgets[key] = value_label
+            col_offset += 1
+
+        flags_row = col_offset + 1
         flags_name = QLabel("Flags")
         flags_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         flags_value = QLabel("n/a")
         flags_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-        global_diag_layout.addWidget(flags_name, 0, 0)
-        global_diag_layout.addWidget(flags_value, 0, 1)
-        self.channelPanelGlobalDiagnostics = {
-            "flags": flags_value,
-        }
+        global_diag_layout.addWidget(flags_name, flags_row, 0)
+        global_diag_layout.addWidget(flags_value, flags_row, 1, 1, col_offset - 1)
+        diag_widgets["flags"] = flags_value
 
+        ilim_row = flags_row + 1
         ilim_name = QLabel("Ilim active")
         ilim_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         ilim_value = QLabel("n/a")
         ilim_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-        global_diag_layout.addWidget(ilim_name, 1, 0)
-        global_diag_layout.addWidget(ilim_value, 1, 1)
-        self.channelPanelGlobalDiagnostics["ilim_active"] = ilim_value
+        global_diag_layout.addWidget(ilim_name, ilim_row, 0)
+        global_diag_layout.addWidget(ilim_value, ilim_row, 1, 1, col_offset - 1)
+        diag_widgets["ilim_active"] = ilim_value
 
-        layout.addWidget(global_diag_frame)
+        self.channelPanelGlobalDiagnostics = diag_widgets
+
+        global_diag_center_layout.addWidget(global_diag_frame)
+        global_diag_center_layout.addStretch(1)
+        layout.addWidget(global_diag_center)
 
         advanced_section = QWidget()
         advanced_section_layout = QVBoxLayout(advanced_section)
@@ -2166,10 +2199,6 @@ class PSUDevice(Device):
             for style_key in (
                 "voltage_monitor_style",
                 "current_monitor_style",
-                "temperature_monitor_style",
-                "dropout_monitor_style",
-                "range_monitor_style",
-                "rails_monitor_style",
             ):
                 widget_key = style_key.replace("_style", "")
                 widget = widgets.get(widget_key)
@@ -2197,6 +2226,27 @@ class PSUDevice(Device):
         global_diag = getattr(self, "channelPanelGlobalDiagnostics", None)
         if isinstance(global_diag, dict):
             controller = getattr(self, "controller", None)
+            for ch_idx in cards:
+                ch_snapshot = self._channel_panel_snapshot(ch_idx)
+                for key, text in (
+                    ("temperature_monitor", ch_snapshot.get("temperature_monitor", "n/a")),
+                    ("dropout_monitor", ch_snapshot.get("dropout_monitor", "n/a")),
+                    ("range_monitor", ch_snapshot.get("range_monitor", "n/a")),
+                    ("rails_monitor", ch_snapshot.get("rails_monitor", "n/a")),
+                ):
+                    widget = global_diag.get(f"{key}_ch{ch_idx}")
+                    if widget is not None and hasattr(widget, "setText"):
+                        widget.setText(str(text))
+                for style_key, fallback in (
+                    ("temperature_monitor_style", _PSU_PANEL_METRIC_VALUE_STYLE),
+                    ("dropout_monitor_style", _PSU_PANEL_METRIC_VALUE_STYLE),
+                    ("range_monitor_style", _PSU_PANEL_METRIC_VALUE_STYLE),
+                    ("rails_monitor_style", _PSU_PANEL_METRIC_VALUE_STYLE),
+                ):
+                    widget_key = f"{style_key.replace('_style', '')}_ch{ch_idx}"
+                    widget = global_diag.get(widget_key)
+                    if widget is not None and hasattr(widget, "setStyleSheet"):
+                        widget.setStyleSheet(ch_snapshot.get(style_key, fallback))
             flags_widget = global_diag.get("flags")
             if flags_widget is not None and hasattr(flags_widget, "setText"):
                 flags_widget.setText(
@@ -3966,7 +4016,7 @@ class PSUController(DeviceController):
         self._last_live_readback_refresh_monotonic = (
             time.monotonic() if refreshed_at is None else float(refreshed_at)
         )
-        self._sync_status_to_gui()
+        self._sync_status_to_gui(sync_manual_panel=bool(output_enabled_map))
 
     def _apply_snapshot(
         self,
@@ -4135,13 +4185,11 @@ class PSUController(DeviceController):
                 flag=PRINT.ERROR,
             )
         finally:
-            self._sync_status_to_gui()
-
-    def updateValues(self) -> None:
+            self._sync_status_to_gui(sync_manual_panel=True)
         if self.values is None:
             return
 
-        self._sync_status_to_gui()
+        self._sync_status_to_gui(sync_manual_panel=True)
         for channel in self.controllerParent.getChannels():
             channel_no = channel.channel_number()
             if channel.real:

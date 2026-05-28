@@ -1633,6 +1633,8 @@ def test_load_operating_config_now_loads_selected_psu_config():
     assert sync_calls == [
         ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
         ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
+        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
+        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
     ]
     assert controller._manual_apply_pending_state is None
     assert printed == [("Loaded PSU config 7.", None)]
