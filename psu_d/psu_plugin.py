@@ -93,9 +93,9 @@ _PSU_PANEL_DIAGNOSTICS_TITLE_STYLE = "color: #cbd5e1; font-weight: 700;"
 _PSU_PANEL_DIAGNOSTICS_TEXT_STYLE = "color: #e2e8f0;"
 _PSU_PANEL_SECTION_HEADER_STYLE = "color: #cbd5e1; font-weight: 700; font-size: 13px;"
 _PSU_PANEL_CARD_MIN_WIDTH = 220
-_PSU_PANEL_CARD_MAX_WIDTH = 300
-_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 612
-_PSU_PANEL_OPERATOR_MAX_WIDTH = 820
+_PSU_PANEL_CARD_MAX_WIDTH = 340
+_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 700
+_PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
 _PSU_HOUSEKEEPING_REFRESH_PERIOD_S = 2.0
 _PSU_MANUAL_NUMERIC_DEBOUNCE_MS = 250
@@ -142,6 +142,8 @@ _PSU_CURRENT_ZERO_OK_ABS_TOLERANCE_A = 0.001
 _PSU_CURRENT_ZERO_WARN_ABS_TOLERANCE_A = 0.01
 _PSU_DROPOUT_WARN_V = 10.0
 _PSU_DROPOUT_ERROR_V = 5.0
+_PSU_TEMPERATURE_WARN_C = 55.0
+_PSU_TEMPERATURE_ERROR_C = 70.0
 _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V = 0.01
 _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A = 0.001
 _PSU_SETPOINT_VERIFY_REL_TOLERANCE = 0.01
@@ -467,6 +469,17 @@ def _format_full_range_text(*, enabled: Any, supported: Any = True) -> str:
     if not _coerce_bool(supported, default=True):
         return "n/a"
     return "Full" if _coerce_bool(enabled, default=False) else "Half"
+
+
+def _temperature_feedback_state(temp_c: Any) -> str:
+    value = _coerce_float(temp_c, np.nan)
+    if _is_nan(value):
+        return "default"
+    if value > _PSU_TEMPERATURE_ERROR_C:
+        return "error"
+    if value > _PSU_TEMPERATURE_WARN_C:
+        return "warn"
+    return "ok"
 
 
 def _dropout_feedback_state(dropout_v: Any) -> str:
@@ -1699,6 +1712,10 @@ class PSUDevice(Device):
                 (
                     ("Vget", "voltage_monitor"),
                     ("Iget", "current_monitor"),
+                    ("Tadc", "temperature_monitor"),
+                    ("Dropout", "dropout_monitor"),
+                    ("Range", "range_monitor"),
+                    ("Rails", "rails_monitor"),
                 )
             ):
                 name_label = QLabel(label_text)
@@ -1729,6 +1746,38 @@ class PSUDevice(Device):
             }
         cards_layout.addStretch(1)
         layout.addWidget(cards_row)
+
+        global_diag_frame = QFrame()
+        global_diag_frame.setStyleSheet(_PSU_PANEL_DIAGNOSTICS_STYLE)
+        global_diag_frame.setMaximumWidth(_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH)
+        global_diag_frame.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        global_diag_layout = QGridLayout(global_diag_frame)
+        global_diag_layout.setContentsMargins(12, 10, 12, 10)
+        global_diag_layout.setHorizontalSpacing(10)
+        global_diag_layout.setVerticalSpacing(6)
+
+        flags_name = QLabel("Flags")
+        flags_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
+        flags_value = QLabel("n/a")
+        flags_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+        global_diag_layout.addWidget(flags_name, 0, 0)
+        global_diag_layout.addWidget(flags_value, 0, 1)
+        self.channelPanelGlobalDiagnostics = {
+            "flags": flags_value,
+        }
+
+        ilim_name = QLabel("Ilim active")
+        ilim_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
+        ilim_value = QLabel("n/a")
+        ilim_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+        global_diag_layout.addWidget(ilim_name, 1, 0)
+        global_diag_layout.addWidget(ilim_value, 1, 1)
+        self.channelPanelGlobalDiagnostics["ilim_active"] = ilim_value
+
+        layout.addWidget(global_diag_frame)
 
         advanced_section = QWidget()
         advanced_section_layout = QVBoxLayout(advanced_section)
@@ -1894,6 +1943,31 @@ class PSUDevice(Device):
                     current_limit_active=getattr(controller, "current_limit_active", False),
                 )
             ),
+            "temperature_monitor": _format_temperature_text(
+                getattr(controller, "adc_temperatures", {}).get(channel_index, np.nan)
+            ),
+            "temperature_monitor_style": _psu_feedback_style(
+                _temperature_feedback_state(
+                    getattr(controller, "adc_temperatures", {}).get(channel_index, np.nan)
+                )
+            ),
+            "dropout_monitor": _format_voltage_text(
+                getattr(controller, "dropout_values", {}).get(channel_index, np.nan)
+            ),
+            "dropout_monitor_style": _psu_feedback_style(
+                _dropout_feedback_state(
+                    getattr(controller, "dropout_values", {}).get(channel_index, np.nan)
+                )
+            ),
+            "range_monitor": _format_full_range_text(
+                enabled=getattr(controller, "full_range_by_channel", {}).get(channel_index, False),
+                supported=getattr(controller, "full_range_supported_by_channel", {}).get(
+                    channel_index, False
+                ),
+            ),
+            "range_monitor_style": _PSU_PANEL_METRIC_VALUE_STYLE,
+            "rails_monitor": getattr(controller, "rail_summaries", {}).get(channel_index, "n/a") or "n/a",
+            "rails_monitor_style": _PSU_PANEL_METRIC_VALUE_STYLE,
         }
 
     def _channel_panel_diagnostics_snapshot(self) -> dict[str, str]:
@@ -2078,6 +2152,10 @@ class PSUDevice(Device):
                 "title",
                 "voltage_monitor",
                 "current_monitor",
+                "temperature_monitor",
+                "dropout_monitor",
+                "range_monitor",
+                "rails_monitor",
             ):
                 widget = widgets.get(key)
                 if widget is not None and hasattr(widget, "setText"):
@@ -2085,12 +2163,18 @@ class PSUDevice(Device):
             card = widgets.get("card")
             if card is not None and hasattr(card, "setStyleSheet"):
                 card.setStyleSheet(snapshot["card_style"])
-            voltage_monitor = widgets.get("voltage_monitor")
-            if voltage_monitor is not None and hasattr(voltage_monitor, "setStyleSheet"):
-                voltage_monitor.setStyleSheet(snapshot["voltage_monitor_style"])
-            current_monitor = widgets.get("current_monitor")
-            if current_monitor is not None and hasattr(current_monitor, "setStyleSheet"):
-                current_monitor.setStyleSheet(snapshot["current_monitor_style"])
+            for style_key in (
+                "voltage_monitor_style",
+                "current_monitor_style",
+                "temperature_monitor_style",
+                "dropout_monitor_style",
+                "range_monitor_style",
+                "rails_monitor_style",
+            ):
+                widget_key = style_key.replace("_style", "")
+                widget = widgets.get(widget_key)
+                if widget is not None and hasattr(widget, "setStyleSheet"):
+                    widget.setStyleSheet(snapshot[style_key])
             tooltip = self._channel_panel_card_tooltip(channel_index)
             if card is not None and hasattr(card, "setToolTip"):
                 card.setToolTip(tooltip)
@@ -2109,6 +2193,24 @@ class PSUDevice(Device):
                 checked=bool(snapshot["display_checked"]),
                 enabled=bool(snapshot["display_enabled"]),
             )
+
+        global_diag = getattr(self, "channelPanelGlobalDiagnostics", None)
+        if isinstance(global_diag, dict):
+            controller = getattr(self, "controller", None)
+            flags_widget = global_diag.get("flags")
+            if flags_widget is not None and hasattr(flags_widget, "setText"):
+                flags_widget.setText(
+                    str(getattr(controller, "device_state_summary", "n/a") or "n/a")
+                )
+            ilim_widget = global_diag.get("ilim_active")
+            if ilim_widget is not None and hasattr(ilim_widget, "setText"):
+                active = getattr(controller, "current_limit_active", False)
+                ilim_widget.setText("Yes" if active else "No")
+                if active:
+                    ilim_widget.setStyleSheet(_psu_feedback_style("error"))
+                else:
+                    ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+
         self._update_manual_panel()
 
     def _channel_panel_card_tooltip(self, channel_index: int) -> str:
