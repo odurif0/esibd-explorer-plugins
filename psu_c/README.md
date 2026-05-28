@@ -1,4 +1,4 @@
-# PSU_C Plugin
+# PSU_A Plugin
 
 Runs the PSU from ESIBD Explorer and monitors live voltage/current readbacks.
 
@@ -18,7 +18,7 @@ including the PSU driver files and vendor DLL.
    and extract it into your ESIBD Explorer `plugins` folder.
 3. Set the Explorer `plugin path` to that `plugins` folder.
 4. Restart ESIBD Explorer.
-5. Enable the `PSU_C` plugin in the Plugin Manager.
+5. Enable the `PSU_A` plugin in the Plugin Manager.
 
 ## Device Configuration
 
@@ -104,5 +104,5 @@ diagnostics tooltip instead of the main operator view.
 
 ## Portability Note
 
-To copy this plugin to another machine, keep the whole `psu_c/` directory
+To copy this plugin to another machine, keep the whole `psu_a/` directory
 together, including the embedded `vendor/` subtree.

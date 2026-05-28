@@ -3968,7 +3968,7 @@ class PSUController(DeviceController):
         refresh_time = time.monotonic() if refreshed_at is None else float(refreshed_at)
         self._last_housekeeping_refresh_monotonic = refresh_time
         self._last_live_readback_refresh_monotonic = refresh_time
-        self._sync_status_to_gui()
+        self._sync_status_to_gui(sync_manual_panel=True)
 
     def loadOperatingConfigNowFromThread(self, parallel: bool = True) -> None:
         if parallel:
@@ -4520,7 +4520,7 @@ class PSUController(DeviceController):
         if live_readbacks is not None:
             self._apply_live_readbacks(live_readbacks)
 
-    def _sync_status_to_gui(self) -> None:
+    def _sync_status_to_gui(self, *, sync_manual_panel: bool = False) -> None:
         self.controllerParent.main_state = self.main_state
         self.controllerParent.hardware_main_state = self.hardware_main_state
         self.controllerParent.output_summary = self.output_state_summary
@@ -4549,6 +4549,14 @@ class PSUController(DeviceController):
             update_status_widgets = getattr(self.controllerParent, "_update_status_widgets", None)
             if callable(update_status_widgets):
                 update_status_widgets()
+            if sync_manual_panel:
+                sync_manual = getattr(
+                    self.controllerParent,
+                    "_sync_manual_panel_from_controller",
+                    None,
+                )
+                if callable(sync_manual):
+                    sync_manual()
 
         _invoke_gui_callback(_refresh_gui)
 

@@ -16,7 +16,7 @@ import pytest
 
 PLUGIN_PATH = (
     Path(__file__).resolve().parents[1]
-    / "psu"
+    / "psu_a"
     / "psu_plugin.py"
 )
 
@@ -459,7 +459,7 @@ def test_controller_read_numbers_reports_snapshot_apply_failures_explicitly():
     assert controller.errorCount == 1
     assert printed == [
         (
-            "Failed to apply PSU housekeeping snapshot: list index out of range",
+            "Failed to apply PSU housekeeping snapshot: IndexError: list index out of range",
             module.PRINT.ERROR,
         )
     ]
@@ -1631,6 +1631,7 @@ def test_load_operating_config_now_loads_selected_psu_config():
         ("collect_housekeeping", 5.0),
     ]
     assert sync_calls == [
+        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
         ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
     ]
     assert controller._manual_apply_pending_state is None
