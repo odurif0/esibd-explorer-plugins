@@ -2025,6 +2025,13 @@ class PSUDevice(Device):
             "tooltip": "\n".join(tooltip_lines),
         }
 
+    def _schedule_delayed_refresh(self, delay_s: float) -> None:
+        try:
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(int(delay_s * 1000), self._update_status_widgets)
+        except ImportError:
+            _invoke_gui_callback(self._update_status_widgets)
+
     def _update_manual_panel(self) -> None:
         controls = getattr(self, "manualPanelControls", None)
         if not isinstance(controls, dict):
@@ -2418,7 +2425,6 @@ class PSUDevice(Device):
             return
         if self._set_config_setting_value(attr_name, self._combo_current_value(combo)):
             self._update_config_controls()
-            self._update_status_widgets()
 
     def loadOperatingConfigNow(self) -> None:
         controller = getattr(self, "controller", None)
@@ -2427,6 +2433,7 @@ class PSUDevice(Device):
         load_now = getattr(controller, "loadOperatingConfigNowFromThread", None)
         if callable(load_now):
             load_now(parallel=True)
+            self._schedule_delayed_refresh(1.0)
             return
         controller.loadOperatingConfigNow()
 

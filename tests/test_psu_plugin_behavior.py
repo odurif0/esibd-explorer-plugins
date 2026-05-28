@@ -524,7 +524,7 @@ def test_psu_config_selector_change_updates_operating_slot():
     module.PSUDevice._config_selector_changed(device, "operating_config")
 
     assert device.operating_config == 7
-    assert updates == ["selectors", "status"]
+    assert updates == ["selectors"]
 
 
 def test_psu_controller_lock_section_uses_raw_lock_and_propagates_errors():
