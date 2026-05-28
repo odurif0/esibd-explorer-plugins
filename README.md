@@ -10,7 +10,11 @@ One plugin for one device.
 |----------|-------------|
 | `ampr_a` | Drives AMPR_A high-voltage channels and monitors output voltages |
 | `ampr_b` | Drives AMPR_B high-voltage channels and monitors output voltages |
-| `psu`    | Drives the 2 PSU outputs and monitors voltage/current readbacks |
+| `psu_a`  | Drives PSU_A outputs and monitors voltage/current readbacks |
+| `psu_b`  | Drives PSU_B outputs and monitors voltage/current readbacks |
+| `psu_c`  | Drives PSU_C outputs and monitors voltage/current readbacks |
+| `psu_d`  | Drives PSU_D outputs and monitors voltage/current readbacks |
+| `psu_e`  | Drives PSU_E outputs and monitors voltage/current readbacks |
 | `dmmr`   | Reads DMMR module currents and monitors live picoammeter values |
 | `amx`    | Drives AMX frequency and pulser timing and monitors pulser readbacks |
 
@@ -26,7 +30,11 @@ One plugin for one device.
    <ESIBD Explorer>/plugins/
    ├── ampr_a/
    ├── ampr_b/
-   ├── psu/
+   ├── psu_a/
+   ├── psu_b/
+   ├── psu_c/
+   ├── psu_d/
+   ├── psu_e/
    ├── dmmr/
    └── amx/
    ```
