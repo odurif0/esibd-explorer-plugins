@@ -2026,11 +2026,15 @@ class PSUDevice(Device):
         }
 
     def _schedule_delayed_refresh(self, delay_s: float) -> None:
+        def _do_refresh() -> None:
+            self._update_status_widgets()
+            self._sync_manual_panel_from_controller()
+
         try:
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(int(delay_s * 1000), self._update_status_widgets)
+            QTimer.singleShot(int(delay_s * 1000), _do_refresh)
         except ImportError:
-            _invoke_gui_callback(self._update_status_widgets)
+            _invoke_gui_callback(_do_refresh)
 
     def _update_manual_panel(self) -> None:
         controls = getattr(self, "manualPanelControls", None)
@@ -2433,7 +2437,8 @@ class PSUDevice(Device):
         load_now = getattr(controller, "loadOperatingConfigNowFromThread", None)
         if callable(load_now):
             load_now(parallel=True)
-            self._schedule_delayed_refresh(1.0)
+            self._schedule_delayed_refresh(1.5)
+            self._schedule_delayed_refresh(3.5)
             return
         controller.loadOperatingConfigNow()
 
