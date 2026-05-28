@@ -1254,6 +1254,7 @@ class PSUDevice(Device):
         apply_now = getattr(controller, "applyManualStateFromThread", None)
         if callable(apply_now):
             apply_now(state, parallel=True)
+            self._schedule_delayed_refresh(1.5)
             return
         controller.applyManualState(state)
 
@@ -1745,8 +1746,9 @@ class PSUDevice(Device):
 
         diag_frame = QFrame()
         diag_frame.setStyleSheet(_PSU_PANEL_DIAGNOSTICS_STYLE)
+        diag_frame.setFixedWidth(_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH)
         diag_frame.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
         diag_layout = QGridLayout(diag_frame)
