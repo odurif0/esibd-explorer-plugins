@@ -914,6 +914,7 @@ class PSUDevice(Device):
     STATE = "State"
     OUTPUTS = "Outputs"
     AVAILABLE_CONFIGS = "Available configs"
+    INTERLOCK_MONITORING = "Interlock monitoring"
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -991,6 +992,7 @@ class PSUDevice(Device):
     available_configs_text: str
     available_configs: list[dict[str, Any]]
     loaded_state_text: str
+    interlock_monitoring: bool
 
     def _current_channel_items(self) -> list[dict[str, Any]]:
         return [channel.asDict() for channel in self.getChannels()]
@@ -2836,6 +2838,16 @@ class PSUDevice(Device):
             internal=True,
             restore=False,
         )
+        settings[f"{self.name}/{self.INTERLOCK_MONITORING}"] = parameterDict(
+            value=True,
+            toolTip=(
+                "Enable interlock monitoring. Disable for testing without "
+                "the physical interlock cable connected."
+            ),
+            parameterType=PARAMETERTYPE.BOOL,
+            attr="interlock_monitoring",
+            advanced=True,
+        )
         settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
         settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
         return settings
@@ -3622,6 +3634,9 @@ class PSUController(DeviceController):
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            if not _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", True), default=True):
+                self.device.set_interlock_enabled(False, False, timeout_s=float(self.controllerParent.connect_timeout_s))
+                self.print("Interlock monitoring disabled.", flag=PRINT.WARNING)
             self._refresh_available_configs()
             self._update_state()
             self.signalComm.initCompleteSignal.emit()
