@@ -1743,23 +1743,16 @@ class PSUDevice(Device):
         cards_layout.addStretch(1)
         layout.addWidget(cards_row)
 
-        global_diag_center = QWidget()
-        global_diag_center_layout = QHBoxLayout(global_diag_center)
-        global_diag_center_layout.setContentsMargins(0, 0, 0, 0)
-        global_diag_center_layout.setSpacing(0)
-        global_diag_center_layout.addStretch(1)
-
-        global_diag_frame = QFrame()
-        global_diag_frame.setStyleSheet(_PSU_PANEL_DIAGNOSTICS_STYLE)
-        global_diag_frame.setMaximumWidth(_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH)
-        global_diag_frame.setSizePolicy(
+        diag_frame = QFrame()
+        diag_frame.setStyleSheet(_PSU_PANEL_DIAGNOSTICS_STYLE)
+        diag_frame.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Fixed,
         )
-        global_diag_layout = QGridLayout(global_diag_frame)
-        global_diag_layout.setContentsMargins(12, 10, 12, 10)
-        global_diag_layout.setHorizontalSpacing(10)
-        global_diag_layout.setVerticalSpacing(6)
+        diag_layout = QGridLayout(diag_frame)
+        diag_layout.setContentsMargins(12, 10, 12, 10)
+        diag_layout.setHorizontalSpacing(10)
+        diag_layout.setVerticalSpacing(6)
 
         diag_widgets: dict[str, Any] = {}
         channel_numbers = sorted(ch.channel_number() for ch in self.getChannels() if ch.real)
@@ -1767,7 +1760,7 @@ class PSUDevice(Device):
         for ch_no in channel_numbers:
             ch_header = QLabel(f"CH{ch_no}")
             ch_header.setStyleSheet(_PSU_PANEL_SECTION_HEADER_STYLE)
-            global_diag_layout.addWidget(ch_header, 0, col_offset)
+            diag_layout.addWidget(ch_header, 0, col_offset)
 
             for row, (label_text, key) in enumerate(
                 (
@@ -1781,10 +1774,10 @@ class PSUDevice(Device):
                 if ch_no == channel_numbers[0]:
                     name_label = QLabel(label_text)
                     name_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
-                    global_diag_layout.addWidget(name_label, row, 0)
+                    diag_layout.addWidget(name_label, row, 0)
                 value_label = QLabel("n/a")
                 value_label.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-                global_diag_layout.addWidget(value_label, row, col_offset)
+                diag_layout.addWidget(value_label, row, col_offset)
                 diag_widgets[key] = value_label
             col_offset += 1
 
@@ -1793,8 +1786,8 @@ class PSUDevice(Device):
         flags_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         flags_value = QLabel("n/a")
         flags_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-        global_diag_layout.addWidget(flags_name, flags_row, 0)
-        global_diag_layout.addWidget(flags_value, flags_row, 1, 1, col_offset - 1)
+        diag_layout.addWidget(flags_name, flags_row, 0)
+        diag_layout.addWidget(flags_value, flags_row, 1, 1, col_offset - 1)
         diag_widgets["flags"] = flags_value
 
         ilim_row = flags_row + 1
@@ -1802,15 +1795,13 @@ class PSUDevice(Device):
         ilim_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         ilim_value = QLabel("n/a")
         ilim_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-        global_diag_layout.addWidget(ilim_name, ilim_row, 0)
-        global_diag_layout.addWidget(ilim_value, ilim_row, 1, 1, col_offset - 1)
+        diag_layout.addWidget(ilim_name, ilim_row, 0)
+        diag_layout.addWidget(ilim_value, ilim_row, 1, 1, col_offset - 1)
         diag_widgets["ilim_active"] = ilim_value
 
         self.channelPanelGlobalDiagnostics = diag_widgets
 
-        global_diag_center_layout.addWidget(global_diag_frame)
-        global_diag_center_layout.addStretch(1)
-        layout.addWidget(global_diag_center)
+        cards_layout.addWidget(diag_frame)
 
         advanced_section = QWidget()
         advanced_section_layout = QVBoxLayout(advanced_section)
@@ -4166,6 +4157,7 @@ class PSUController(DeviceController):
                 if device is None:
                     return
                 device.load_config(config_index, timeout_s=timeout_s)
+            time.sleep(0.3)
             self._update_state()
             self._set_loaded_config_text(self._format_loaded_config_text(config_index))
             sync_manual = getattr(
