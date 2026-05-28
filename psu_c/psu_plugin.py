@@ -94,7 +94,7 @@ _PSU_PANEL_DIAGNOSTICS_TEXT_STYLE = "color: #e2e8f0;"
 _PSU_PANEL_SECTION_HEADER_STYLE = "color: #cbd5e1; font-weight: 700; font-size: 13px;"
 _PSU_PANEL_CARD_MIN_WIDTH = 220
 _PSU_PANEL_CARD_MAX_WIDTH = 280
-_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 700
+_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 400
 _PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
 _PSU_HOUSEKEEPING_REFRESH_PERIOD_S = 2.0
@@ -532,7 +532,7 @@ def _current_limit_feedback_state(
 ) -> str:
     enabled_bool = _coerce_bool(enabled, default=False)
     if enabled_bool and _coerce_bool(current_limit_active, default=False):
-        return "error"
+        return "warn"
     measured = _coerce_float(measured_a, np.nan)
     if _is_nan(measured):
         return "default"
@@ -2261,7 +2261,7 @@ class PSUDevice(Device):
                 active = getattr(controller, "current_limit_active", False)
                 ilim_widget.setText("Yes" if active else "No")
                 if active:
-                    ilim_widget.setStyleSheet(_psu_feedback_style("error"))
+                    ilim_widget.setStyleSheet(_psu_feedback_style("warn"))
                 else:
                     ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
 
