@@ -1678,8 +1678,8 @@ class PSUDevice(Device):
                 step=0.1,
                 maximum=10000.0,
             )
-            voltage_widget.valueChanged.connect(
-                lambda _value: self._manual_panel_changed(debounce=True)
+            voltage_widget.editingFinished.connect(
+                lambda: self._manual_panel_changed(debounce=False)
             )
             current_label = QLabel("Ilim")
             current_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
@@ -1689,8 +1689,8 @@ class PSUDevice(Device):
                 step=0.01,
                 maximum=10000.0,
             )
-            current_widget.valueChanged.connect(
-                lambda _value: self._manual_panel_changed(debounce=True)
+            current_widget.editingFinished.connect(
+                lambda: self._manual_panel_changed(debounce=False)
             )
 
             control_layout.addWidget(output_label, 0, 0)
