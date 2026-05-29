@@ -962,7 +962,10 @@ class PSUDevice(Device):
         if channels:
             base_estimate_storage = getattr(super(), "estimateStorage", None)
             if callable(base_estimate_storage):
-                base_estimate_storage()
+                try:
+                    base_estimate_storage()
+                except (KeyError, AttributeError):
+                    pass
             return
 
         self.maxDataPoints = 0
