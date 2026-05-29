@@ -3708,9 +3708,8 @@ class PSUController(DeviceController):
 
     def _interlock_monitoring_changed(self) -> None:
         enabled = _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", True), default=True)
-        controller = getattr(self, "controller", None)
-        device = getattr(controller, "device", None) if controller else None
-        if device is None or not getattr(controller, "initialized", False):
+        device = getattr(self, "device", None)
+        if device is None or not getattr(self, "initialized", False):
             return
         timeout_s = float(getattr(self.controllerParent, "connect_timeout_s", 5.0))
         try:
