@@ -956,6 +956,12 @@ class PSUDevice(Device):
     def getChannels(self) -> "list[PSUChannel]":
         return cast("list[PSUChannel]", super().getChannels())
 
+    def _interlock_monitoring_changed(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None or not getattr(controller, "initialized", False):
+            return
+        controller._interlock_monitoring_changed()
+
     def estimateStorage(self) -> None:
         """Handle the no-channel bootstrap state used before PSU hardware sync."""
         channels = list(getattr(self, "channels", []) or [])

@@ -32,6 +32,7 @@ def _install_esibd_stubs() -> None:
     class PARAMETERTYPE(Enum):
         INT = "INT"
         FLOAT = "FLOAT"
+        BOOL = "BOOL"
         LABEL = "LABEL"
 
     class _PluginTypeValue:
@@ -584,6 +585,7 @@ def test_channel_panel_snapshot_formats_psu_readbacks_for_fixed_channels():
         current_values={1: 0.0123},
         voltage_setpoints={1: "350 V"},
         current_setpoints={1: "0.015 A"},
+        psu_enabled_actual=True,
     )
 
     snapshot = module.PSUDevice._channel_panel_snapshot(device, 1)
