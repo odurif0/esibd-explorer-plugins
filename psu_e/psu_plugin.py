@@ -2567,7 +2567,15 @@ class PSUDevice(Device):
             )
             for channel_index in _PSU_CHANNEL_IDS
         ]
-        return "Temp: " + " | ".join(parts)
+        text = "Temp: " + " | ".join(parts)
+        state = _normalize_runtime_state(getattr(self, "main_state", "Disconnected"))
+        if state == "ST_ERR_ILOCK":
+            text += "  |  Interlock error — connect cable or disable monitoring"
+        elif state == "ST_ERR_PSU_DIS":
+            text += "  |  PSU disabled — apply values or load a config"
+        elif state.startswith("ST_ERR"):
+            text += f"  |  Error: {state}"
+        return text
 
     def _status_tooltip_text(self) -> str:
         """Return the full PSU status tooltip for the toolbar widgets."""
@@ -2914,6 +2922,7 @@ class PSUDevice(Device):
             parameterType=PARAMETERTYPE.BOOL,
             attr="interlock_monitoring",
             advanced=True,
+            event=self._interlock_monitoring_changed,
         )
         settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
         settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
@@ -3683,6 +3692,20 @@ class PSUController(DeviceController):
             "current_values": measured_currents,
         }
 
+    def _interlock_monitoring_changed(self) -> None:
+        enabled = _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", True), default=True)
+        controller = getattr(self, "controller", None)
+        device = getattr(controller, "device", None) if controller else None
+        if device is None or not getattr(controller, "initialized", False):
+            return
+        timeout_s = float(getattr(self.controllerParent, "connect_timeout_s", 5.0))
+        try:
+            device.set_interlock_enabled(enabled, enabled, timeout_s=timeout_s)
+            state = "enabled" if enabled else "disabled"
+            self.print(f"Interlock monitoring {state}.", flag=PRINT.INFO)
+        except Exception as exc:
+            self.print(f"Could not change interlock monitoring: {exc}", flag=PRINT.WARNING)
+
     def runInitialization(self) -> None:
         self.initialized = False
         self._dispose_device()
@@ -3826,7 +3849,7 @@ class PSUController(DeviceController):
         if device is None:
             return
         device.set_output_enabled(False, False, timeout_s=timeout_s)
-        device.set_device_enabled(False, timeout_s=timeout_s)
+        device.set_device_enabled(True, timeout_s=timeout_s)
         self._set_loaded_config_text("Manual outputs OFF")
 
     def _verify_manual_state_unlocked(
