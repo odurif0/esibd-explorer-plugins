@@ -3863,6 +3863,7 @@ class PSUController(DeviceController):
             return
         device.set_output_enabled(False, False, timeout_s=timeout_s)
         device.set_device_enabled(True, timeout_s=timeout_s)
+        self._update_state()
         self._set_loaded_config_text("Manual outputs OFF")
 
     def _verify_manual_state_unlocked(

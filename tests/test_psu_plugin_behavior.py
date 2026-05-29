@@ -1127,6 +1127,7 @@ def test_toggle_on_without_startup_configs_enters_manual_standby():
         ("set_output_enabled", False, False, 9.0),
         ("set_device_enabled", True, 9.0),
         ("collect_housekeeping", 5.0),
+        ("collect_housekeeping", 5.0),
     ]
     assert controller.loaded_state_text == "Manual outputs OFF"
     assert parent.loaded_state_text == "Manual outputs OFF"
