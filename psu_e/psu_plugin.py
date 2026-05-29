@@ -3673,13 +3673,13 @@ class PSUController(DeviceController):
 
         get_device_enabled = getattr(device, "get_device_enabled", None)
         get_output_enabled = getattr(device, "get_output_enabled", None)
-        get_channel_voltage = getattr(device, "get_channel_voltage", None)
-        get_channel_current = getattr(device, "get_channel_current", None)
+        get_measured_voltage = getattr(device, "get_channel_measured_voltage", None)
+        get_measured_current = getattr(device, "get_channel_measured_current", None)
         if not (
             callable(get_device_enabled)
             and callable(get_output_enabled)
-            and callable(get_channel_voltage)
-            and callable(get_channel_current)
+            and callable(get_measured_voltage)
+            and callable(get_measured_current)
         ):
             return None
 
@@ -3691,11 +3691,11 @@ class PSUController(DeviceController):
         measured_currents: dict[int, float] = {}
         for channel_no in self._real_channel_numbers():
             measured_voltages[channel_no] = _coerce_float(
-                get_channel_voltage(channel_no, timeout_s=timeout_s),
+                get_measured_voltage(channel_no, timeout_s=timeout_s),
                 np.nan,
             )
             measured_currents[channel_no] = _coerce_float(
-                get_channel_current(channel_no, timeout_s=timeout_s),
+                get_measured_current(channel_no, timeout_s=timeout_s),
                 np.nan,
             )
         return {

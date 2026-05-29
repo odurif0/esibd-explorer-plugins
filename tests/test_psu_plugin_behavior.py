@@ -637,12 +637,12 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
             calls.append(("get_output_enabled", timeout_s))
             return (False, True)
 
-        def get_channel_voltage(self, channel, timeout_s=None):
-            calls.append(("get_channel_voltage", channel, timeout_s))
+        def get_channel_measured_voltage(self, channel, timeout_s=None):
+            calls.append(("get_channel_measured_voltage", channel, timeout_s))
             return {0: 22.0, 1: 4.5}[channel]
 
-        def get_channel_current(self, channel, timeout_s=None):
-            calls.append(("get_channel_current", channel, timeout_s))
+        def get_channel_measured_current(self, channel, timeout_s=None):
+            calls.append(("get_channel_measured_current", channel, timeout_s))
             return {0: 0.22, 1: 0.045}[channel]
 
     class FakeChannel:
@@ -671,16 +671,16 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
         ("collect_housekeeping", 2.5),
         ("get_device_enabled", 2.5),
         ("get_output_enabled", 2.5),
-        ("get_channel_voltage", 0, 2.5),
-        ("get_channel_current", 0, 2.5),
-        ("get_channel_voltage", 1, 2.5),
-        ("get_channel_current", 1, 2.5),
+        ("get_channel_measured_voltage", 0, 2.5),
+        ("get_channel_measured_current", 0, 2.5),
+        ("get_channel_measured_voltage", 1, 2.5),
+        ("get_channel_measured_current", 1, 2.5),
         ("get_device_enabled", 2.5),
         ("get_output_enabled", 2.5),
-        ("get_channel_voltage", 0, 2.5),
-        ("get_channel_current", 0, 2.5),
-        ("get_channel_voltage", 1, 2.5),
-        ("get_channel_current", 1, 2.5),
+        ("get_channel_measured_voltage", 0, 2.5),
+        ("get_channel_measured_current", 0, 2.5),
+        ("get_channel_measured_voltage", 1, 2.5),
+        ("get_channel_measured_current", 1, 2.5),
     ]
     assert controller.values == {0: 22.0, 1: 4.5}
     assert controller.current_values == {0: 0.22, 1: 0.045}

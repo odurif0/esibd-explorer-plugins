@@ -867,6 +867,42 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         self._raise_on_status(status, f"get_psu_set_output_current({channel})")
         return setpoint, limit
 
+    def get_channel_measured_voltage(
+        self,
+        channel: int,
+        timeout_s: Optional[float] = None,
+    ) -> float:
+        """Return the measured output voltage of one PSU channel in volts (via GetPSUData)."""
+        self._require_connected()
+        timeout_s = self._resolve_io_timeout(timeout_s)
+        status, voltage, _current, _dropout = self._call_locked_with_timeout(
+            PSUBase.get_psu_data,
+            timeout_s,
+            f"get_psu_data[{channel}]",
+            self,
+            channel,
+        )
+        self._raise_on_status(status, f"get_psu_data({channel})")
+        return voltage
+
+    def get_channel_measured_current(
+        self,
+        channel: int,
+        timeout_s: Optional[float] = None,
+    ) -> float:
+        """Return the measured output current of one PSU channel in amperes (via GetPSUData)."""
+        self._require_connected()
+        timeout_s = self._resolve_io_timeout(timeout_s)
+        status, _voltage, current, _dropout = self._call_locked_with_timeout(
+            PSUBase.get_psu_data,
+            timeout_s,
+            f"get_psu_data[{channel}]",
+            self,
+            channel,
+        )
+        self._raise_on_status(status, f"get_psu_data({channel})")
+        return current
+
     def _get_product_info_unlocked(self) -> dict:
         product_no_status, product_no = PSUBase.get_product_no(self)
         self._raise_on_status(product_no_status, "get_product_no")
@@ -1080,6 +1116,10 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
             "psu_state": {
                 "hex": hex(psu_state),
                 "current_limit_active": bool(psu_state & self.PSU_STATE_ILIM_ACT),
+                "interlock_active": bool(psu_state & (1 << 18)),
+                "psu_enabled_actual": bool(psu_state & (1 << 19)),
+                "interlock_out_disabled": bool(psu_state & (1 << 8)),
+                "interlock_bnc_disabled": bool(psu_state & (1 << 9)),
             },
             "housekeeping": {
                 "volt_rect_v": volt_rect,
