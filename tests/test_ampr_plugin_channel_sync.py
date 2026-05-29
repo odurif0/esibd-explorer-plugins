@@ -1566,16 +1566,16 @@ def test_toggle_on_failure_logs_runtime_diagnostics():
         def initialize(self, timeout_s):
             raise RuntimeError("AMPR did not reach ST_ON")
 
-        def get_state(self):
+        def get_state(self, **kwargs):
             return self.NO_ERR, "0x2", "ST_STBY"
 
-        def get_device_state(self):
+        def get_device_state(self, **kwargs):
             return self.NO_ERR, "0x1", ["DS_PSU_ENB"]
 
-        def get_voltage_state(self):
+        def get_voltage_state(self, **kwargs):
             return self.NO_ERR, "0x0", ["VOLTAGE_OK"]
 
-        def get_interlock_state(self):
+        def get_interlock_state(self, **kwargs):
             return self.NO_ERR, "0x0", []
 
     original_toggle_on = getattr(module.DeviceController, "toggleOn", None)
@@ -1592,6 +1592,7 @@ def test_toggle_on_failure_logs_runtime_diagnostics():
             isOn=lambda: True,
             connect_timeout_s=7.5,
             startup_timeout_s=15.0,
+            poll_timeout_s=1.0,
             _set_on_ui_state=lambda on: ui_states.append(on),
         )
         controller._update_state = lambda: setattr(controller, "main_state", "ST_STBY")
@@ -1675,16 +1676,16 @@ def test_shutdown_communication_logs_diagnostics_on_failure():
         def shutdown(self):
             raise RuntimeError("boom")
 
-        def get_state(self):
+        def get_state(self, **kwargs):
             return self.NO_ERR, "0x8006", "ST_ERR_PSU_DIS"
 
-        def get_device_state(self):
+        def get_device_state(self, **kwargs):
             return self.NO_ERR, "0x0", ["DEVICE_OK"]
 
-        def get_voltage_state(self):
+        def get_voltage_state(self, **kwargs):
             return self.NO_ERR, "0x0", ["VOLTAGE_OK"]
 
-        def get_interlock_state(self):
+        def get_interlock_state(self, **kwargs):
             return self.NO_ERR, "0x0", []
 
     original_close = getattr(module.DeviceController, "closeCommunication", None)
@@ -1698,6 +1699,7 @@ def test_shutdown_communication_logs_diagnostics_on_failure():
         controller.main_state = "ST_ON"
         controller.detected_module_ids = [2]
         controller.detected_modules_text = "2"
+        controller.controllerParent = types.SimpleNamespace(poll_timeout_s=1.0)
         controller._update_state = lambda: setattr(controller, "main_state", "ST_ERR_PSU_DIS")
         controller._sync_status_to_gui = lambda: None
         controller._dispose_device = lambda: disposed.append(True)
