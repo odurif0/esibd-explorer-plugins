@@ -1944,6 +1944,11 @@ class PSUDevice(Device):
             else "n/a"
         )
 
+        psu_actually_enabled = _coerce_bool(
+            getattr(controller, "psu_enabled_actual", None), default=None
+        )
+        readback_available = psu_actually_enabled is True
+
         return {
             "title": f"CH{channel_index}",
             "output_state": output_state,
@@ -1962,33 +1967,45 @@ class PSUDevice(Device):
                 ),
             ),
             "voltage_set": str(voltage_setpoints.get(channel_index, "n/a") or "n/a"),
-            "voltage_monitor": _format_voltage_text(
-                voltage_monitors.get(channel_index, np.nan)
+            "voltage_monitor": (
+                _format_voltage_text(voltage_monitors.get(channel_index, np.nan))
+                if readback_available
+                else "n/a"
             ),
             "current_set": str(current_setpoints.get(channel_index, "n/a") or "n/a"),
-            "current_monitor": _format_current_text(
-                current_monitors.get(channel_index, np.nan)
+            "current_monitor": (
+                _format_current_text(current_monitors.get(channel_index, np.nan))
+                if readback_available
+                else "n/a"
             ),
-            "voltage_monitor_style": _psu_feedback_style(
-                _voltage_feedback_state(
-                    enabled=output_enabled.get(channel_index, False),
-                    measured_v=voltage_monitors.get(channel_index, np.nan),
-                    set_v=getattr(controller, "voltage_setpoint_values", {}).get(
-                        channel_index,
-                        np.nan,
-                    ),
+            "voltage_monitor_style": (
+                _psu_feedback_style(
+                    _voltage_feedback_state(
+                        enabled=output_enabled.get(channel_index, False),
+                        measured_v=voltage_monitors.get(channel_index, np.nan),
+                        set_v=getattr(controller, "voltage_setpoint_values", {}).get(
+                            channel_index,
+                            np.nan,
+                        ),
+                    )
                 )
+                if readback_available
+                else _PSU_PANEL_METRIC_VALUE_STYLE
             ),
-            "current_monitor_style": _psu_feedback_style(
-                _current_limit_feedback_state(
-                    enabled=output_enabled.get(channel_index, False),
-                    measured_a=current_monitors.get(channel_index, np.nan),
-                    limit_a=getattr(controller, "current_limit_values", {}).get(
-                        channel_index,
-                        np.nan,
-                    ),
-                    current_limit_active=getattr(controller, "current_limit_active", False),
+            "current_monitor_style": (
+                _psu_feedback_style(
+                    _current_limit_feedback_state(
+                        enabled=output_enabled.get(channel_index, False),
+                        measured_a=current_monitors.get(channel_index, np.nan),
+                        limit_a=getattr(controller, "current_limit_values", {}).get(
+                            channel_index,
+                            np.nan,
+                        ),
+                        current_limit_active=getattr(controller, "current_limit_active", False),
+                    )
                 )
+                if readback_available
+                else _PSU_PANEL_METRIC_VALUE_STYLE
             ),
             "temperature_monitor": _format_temperature_text(
                 getattr(controller, "adc_temperatures", {}).get(channel_index, np.nan)
