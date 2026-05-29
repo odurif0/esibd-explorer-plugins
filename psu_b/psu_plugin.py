@@ -1743,7 +1743,7 @@ class PSUDevice(Device):
                 "voltage": voltage_widget,
                 "current_limit": current_widget,
             }
-        cards_layout.addStretch(1)
+        cards_layout.addStretch(0)
         layout.addWidget(cards_row)
 
         diag_frame = QFrame()
@@ -1824,6 +1824,7 @@ class PSUDevice(Device):
         self.channelPanelGlobalDiagnostics = diag_widgets
 
         cards_layout.addWidget(diag_frame)
+        cards_layout.addStretch(1)
 
         advanced_section = QWidget()
         advanced_section_layout = QVBoxLayout(advanced_section)
