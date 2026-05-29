@@ -921,6 +921,7 @@ class PSUDevice(Device):
         self.channelType = PSUChannel
         self.maxDataPoints = 0
         self.maxStorage = 0
+        self.interval = 1000
 
     def initGUI(self) -> None:
         super().initGUI()
