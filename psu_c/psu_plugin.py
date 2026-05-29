@@ -2927,8 +2927,10 @@ class PSUDevice(Device):
             advanced=True,
             event=self._interlock_monitoring_changed,
         )
-        settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
-        settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
+        if f"{self.name}/Interval" in settings:
+            settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
+        if f"{self.name}/{self.MAXDATAPOINTS}" in settings:
+            settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
         return settings
 
     def _set_on_ui_state(self, on: bool) -> None:
