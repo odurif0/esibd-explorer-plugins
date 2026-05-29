@@ -2926,10 +2926,10 @@ class PSUDevice(Device):
             restore=False,
         )
         settings[f"{self.name}/{self.INTERLOCK_MONITORING}"] = parameterDict(
-            value=True,
+            value=False,
             toolTip=(
-                "Enable interlock monitoring. Disable for testing without "
-                "the physical interlock cable connected."
+                "Enable interlock monitoring. Enable only when the physical "
+                "interlock cable is connected."
             ),
             parameterType=PARAMETERTYPE.BOOL,
             attr="interlock_monitoring",
@@ -3707,7 +3707,7 @@ class PSUController(DeviceController):
         }
 
     def _interlock_monitoring_changed(self) -> None:
-        enabled = _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", True), default=True)
+        enabled = _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", False), default=False)
         device = getattr(self, "device", None)
         if device is None or not getattr(self, "initialized", False):
             return
@@ -3737,7 +3737,7 @@ class PSUController(DeviceController):
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
-            if not _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", True), default=True):
+            if not _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", False), default=False):
                 self.device.set_interlock_enabled(False, False, timeout_s=float(self.controllerParent.connect_timeout_s))
                 self.print("Interlock monitoring disabled.", flag=PRINT.WARNING)
             self._refresh_available_configs()
