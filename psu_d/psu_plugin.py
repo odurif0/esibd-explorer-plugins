@@ -1803,6 +1803,24 @@ class PSUDevice(Device):
         diag_layout.addWidget(ilim_value, ilim_row, 1, 1, col_offset - 1)
         diag_widgets["ilim_active"] = ilim_value
 
+        ilock_row = ilim_row + 1
+        ilock_name = QLabel("Interlock")
+        ilock_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
+        ilock_value = QLabel("n/a")
+        ilock_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+        diag_layout.addWidget(ilock_name, ilock_row, 0)
+        diag_layout.addWidget(ilock_value, ilock_row, 1, 1, col_offset - 1)
+        diag_widgets["interlock"] = ilock_value
+
+        psu_enb_row = ilock_row + 1
+        psu_enb_name = QLabel("PSU enabled")
+        psu_enb_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
+        psu_enb_value = QLabel("n/a")
+        psu_enb_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+        diag_layout.addWidget(psu_enb_name, psu_enb_row, 0)
+        diag_layout.addWidget(psu_enb_value, psu_enb_row, 1, 1, col_offset - 1)
+        diag_widgets["psu_enabled"] = psu_enb_value
+
         self.channelPanelGlobalDiagnostics = diag_widgets
 
         cards_layout.addWidget(diag_frame)
@@ -2266,6 +2284,37 @@ class PSUDevice(Device):
                     ilim_widget.setStyleSheet(_psu_feedback_style("warn"))
                 else:
                     ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+            ilock_widget = global_diag.get("interlock")
+            if ilock_widget is not None and hasattr(ilock_widget, "setText"):
+                ilock_active = getattr(controller, "interlock_active", None)
+                ilock_out_dis = getattr(controller, "interlock_out_disabled", False)
+                ilock_bnc_dis = getattr(controller, "interlock_bnc_disabled", False)
+                if ilock_active is None:
+                    ilock_widget.setText("n/a")
+                    ilock_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+                elif ilock_active:
+                    parts = []
+                    if ilock_out_dis:
+                        parts.append("OUT disabled")
+                    if ilock_bnc_dis:
+                        parts.append("BNC disabled")
+                    ilock_widget.setText("OK" + (f" ({', '.join(parts)})" if parts else ""))
+                    ilock_widget.setStyleSheet(_psu_feedback_style("ok"))
+                else:
+                    ilock_widget.setText("ERROR — check cable")
+                    ilock_widget.setStyleSheet(_psu_feedback_style("error"))
+            psu_enb_widget = global_diag.get("psu_enabled")
+            if psu_enb_widget is not None and hasattr(psu_enb_widget, "setText"):
+                psu_enb = getattr(controller, "psu_enabled_actual", None)
+                if psu_enb is None:
+                    psu_enb_widget.setText("n/a")
+                    psu_enb_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+                elif psu_enb:
+                    psu_enb_widget.setText("Yes")
+                    psu_enb_widget.setStyleSheet(_psu_feedback_style("ok"))
+                else:
+                    psu_enb_widget.setText("No")
+                    psu_enb_widget.setStyleSheet(_psu_feedback_style("error"))
 
         self._update_manual_panel()
 
@@ -4134,6 +4183,11 @@ class PSUController(DeviceController):
             snapshot.get("psu_state", {}).get("current_limit_active"),
             False,
         )
+        psu_state_data = snapshot.get("psu_state", {})
+        self.interlock_active = _coerce_bool(psu_state_data.get("interlock_active"), False)
+        self.psu_enabled_actual = _coerce_bool(psu_state_data.get("psu_enabled_actual"), False)
+        self.interlock_out_disabled = _coerce_bool(psu_state_data.get("interlock_out_disabled"), False)
+        self.interlock_bnc_disabled = _coerce_bool(psu_state_data.get("interlock_bnc_disabled"), False)
         self.adc_temperatures = adc_temperatures
         self.dropout_values = dropout_values
         self.rail_summaries = rail_summaries

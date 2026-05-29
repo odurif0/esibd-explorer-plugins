@@ -1080,6 +1080,10 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
             "psu_state": {
                 "hex": hex(psu_state),
                 "current_limit_active": bool(psu_state & self.PSU_STATE_ILIM_ACT),
+                "interlock_active": bool(psu_state & (1 << 18)),
+                "psu_enabled_actual": bool(psu_state & (1 << 19)),
+                "interlock_out_disabled": bool(psu_state & (1 << 8)),
+                "interlock_bnc_disabled": bool(psu_state & (1 << 9)),
             },
             "housekeeping": {
                 "volt_rect_v": volt_rect,
