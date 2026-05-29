@@ -2322,13 +2322,11 @@ class PSUDevice(Device):
                 if ilock_active is None:
                     ilock_widget.setText("n/a")
                     ilock_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+                elif ilock_out_dis and ilock_bnc_dis:
+                    ilock_widget.setText("OK (disabled)")
+                    ilock_widget.setStyleSheet(_psu_feedback_style("ok"))
                 elif ilock_active:
-                    parts = []
-                    if ilock_out_dis:
-                        parts.append("OUT disabled")
-                    if ilock_bnc_dis:
-                        parts.append("BNC disabled")
-                    ilock_widget.setText("OK" + (f" ({', '.join(parts)})" if parts else ""))
+                    ilock_widget.setText("OK")
                     ilock_widget.setStyleSheet(_psu_feedback_style("ok"))
                 else:
                     ilock_widget.setText("ERROR — check cable")
@@ -2336,10 +2334,11 @@ class PSUDevice(Device):
             psu_enb_widget = global_diag.get("psu_enabled")
             if psu_enb_widget is not None and hasattr(psu_enb_widget, "setText"):
                 psu_enb = getattr(controller, "psu_enabled_actual", None)
+                device_enb = _coerce_bool(getattr(controller, "device_enabled", None), False)
                 if psu_enb is None:
                     psu_enb_widget.setText("n/a")
                     psu_enb_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-                elif psu_enb:
+                elif psu_enb or device_enb:
                     psu_enb_widget.setText("Yes")
                     psu_enb_widget.setStyleSheet(_psu_feedback_style("ok"))
                 else:
@@ -4244,14 +4243,6 @@ class PSUController(DeviceController):
         self.psu_enabled_actual = _coerce_bool(psu_state_data.get("psu_enabled_actual"), False)
         self.interlock_out_disabled = _coerce_bool(psu_state_data.get("interlock_out_disabled"), False)
         self.interlock_bnc_disabled = _coerce_bool(psu_state_data.get("interlock_bnc_disabled"), False)
-        self.print(
-            f"DEBUG psu_state: hex={psu_state_data.get('hex')}, "
-            f"interlock_active={psu_state_data.get('interlock_active')}, "
-            f"psu_enabled_actual={psu_state_data.get('psu_enabled_actual')}, "
-            f"out_dis={psu_state_data.get('interlock_out_disabled')}, "
-            f"bnc_dis={psu_state_data.get('interlock_bnc_disabled')}",
-            flag=PRINT.INFO,
-        )
         self.adc_temperatures = adc_temperatures
         self.dropout_values = dropout_values
         self.rail_summaries = rail_summaries
@@ -4860,6 +4851,11 @@ class PSUController(DeviceController):
         device = self.device
         self.device = None
         self.initialized = False
+        self.interlock_active = False
+        self.psu_enabled_actual = False
+        self.interlock_out_disabled = False
+        self.interlock_bnc_disabled = False
+        self.current_limit_active = False
         if device is None:
             return
         try:
