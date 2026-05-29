@@ -3863,6 +3863,7 @@ class PSUController(DeviceController):
             return
         device.set_output_enabled(False, False, timeout_s=timeout_s)
         device.set_device_enabled(True, timeout_s=timeout_s)
+        time.sleep(0.3)
         self._update_state()
         self._set_loaded_config_text("Manual outputs OFF")
 
@@ -4243,6 +4244,14 @@ class PSUController(DeviceController):
         self.psu_enabled_actual = _coerce_bool(psu_state_data.get("psu_enabled_actual"), False)
         self.interlock_out_disabled = _coerce_bool(psu_state_data.get("interlock_out_disabled"), False)
         self.interlock_bnc_disabled = _coerce_bool(psu_state_data.get("interlock_bnc_disabled"), False)
+        self.print(
+            f"DEBUG psu_state: hex={psu_state_data.get('hex')}, "
+            f"interlock_active={psu_state_data.get('interlock_active')}, "
+            f"psu_enabled_actual={psu_state_data.get('psu_enabled_actual')}, "
+            f"out_dis={psu_state_data.get('interlock_out_disabled')}, "
+            f"bnc_dis={psu_state_data.get('interlock_bnc_disabled')}",
+            flag=PRINT.INFO,
+        )
         self.adc_temperatures = adc_temperatures
         self.dropout_values = dropout_values
         self.rail_summaries = rail_summaries
