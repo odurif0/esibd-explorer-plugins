@@ -920,6 +920,7 @@ class PSUDevice(Device):
         super().__init__(**kwargs)
         self.channelType = PSUChannel
         self.maxDataPoints = 0
+        self.maxStorage = 0
 
     def initGUI(self) -> None:
         super().initGUI()
