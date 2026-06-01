@@ -2010,7 +2010,8 @@ class PSUDevice(Device):
         psu_actually_enabled = _coerce_bool(
             getattr(controller, "psu_enabled_actual", None), default=None
         )
-        readback_available = psu_actually_enabled is True
+        ch_output_on = output_enabled.get(channel_index, False)
+        readback_available = psu_actually_enabled is True and ch_output_on
 
         return {
             "title": f"CH{channel_index}",
