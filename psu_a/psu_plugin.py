@@ -964,15 +964,18 @@ class PSUDevice(Device):
         controller._interlock_monitoring_changed()
 
     def _start_gui_poll_timer(self) -> None:
-        self._stop_gui_poll_timer()
-        try:
-            from PyQt6.QtCore import QTimer
-        except ImportError:
-            return
-        timer = QTimer(self)
-        timer.timeout.connect(self._gui_poll_tick)
-        timer.start(int(_PSU_GUI_POLL_PERIOD_S * 1000))
-        self._guiPollTimer = timer
+        def _create_and_start() -> None:
+            self._stop_gui_poll_timer()
+            try:
+                from PyQt6.QtCore import QTimer
+            except ImportError:
+                return
+            timer = QTimer(self)
+            timer.timeout.connect(self._gui_poll_tick)
+            timer.start(int(_PSU_GUI_POLL_PERIOD_S * 1000))
+            self._guiPollTimer = timer
+
+        _invoke_gui_callback(_create_and_start)
 
     def _stop_gui_poll_timer(self) -> None:
         timer = getattr(self, "_guiPollTimer", None)
@@ -986,7 +989,12 @@ class PSUDevice(Device):
         if controller is None or not getattr(controller, "initialized", False):
             self._stop_gui_poll_timer()
             return
-        controller.readNumbers()
+        from threading import Thread
+        Thread(
+            target=controller.readNumbers,
+            name=f"{self.name} guiPoll",
+            daemon=True,
+        ).start()
 
     def estimateStorage(self) -> None:
         """Handle the no-channel bootstrap state used before PSU hardware sync."""
