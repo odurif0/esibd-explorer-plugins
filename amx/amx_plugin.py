@@ -53,6 +53,7 @@ _AMX_MONITOR_OK_RELATIVE_TOLERANCE = 0.01
 _AMX_MONITOR_WARN_RELATIVE_TOLERANCE = 0.10
 _AMX_MONITOR_RELATIVE_FLOOR_DUTY = 1.0
 _AMX_NUMERIC_DEBOUNCE_MS = 250
+_AMX_MAX_CONSECUTIVE_POLL_ERRORS = 10
 _AMX_FREQUENCY_SPINBOX_STYLE = (
     "QDoubleSpinBox {"
     " background-color: #0f172a;"
@@ -2301,6 +2302,7 @@ class AMXController(DeviceController):
         self._channel_apply_state_lock = Lock()
         self._channel_apply_pending: dict[int, AMXChannel] = {}
         self._channel_apply_worker_running = False
+        self._consecutive_poll_errors = 0
         self.values: dict[int, float] = {}
         self.width_us_values: dict[int, str] = {}
         self.width_values: dict[int, str] = {}
@@ -2380,6 +2382,7 @@ class AMXController(DeviceController):
             self.controllerParent._sync_channels()
         self.initializeValues(reset=True)
         self.initialized = True
+        self._consecutive_poll_errors = 0
         self.super_init_complete_called = True
         self._sync_status_to_gui()
 
@@ -2621,10 +2624,15 @@ class AMXController(DeviceController):
             self._refresh_loaded_config_status()
         self._apply_runtime_settings(timeout_s)
         device.set_device_enabled(True, timeout_s=timeout_s)
-        return self._wait_for_startup_ready_snapshot(
-            config_index=config_index,
-            settle_timeout_s=timeout_s,
-        )
+        try:
+            return self._wait_for_startup_ready_snapshot(
+                config_index=config_index,
+                settle_timeout_s=timeout_s,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                device.set_device_enabled(False, timeout_s=timeout_s)
+            raise
 
     def _ensure_transport_connected(self, timeout_s: float) -> Any:
         """Ensure the AMX transport is connected before runtime commands."""
@@ -2851,21 +2859,31 @@ class AMXController(DeviceController):
                     return
                 snapshot = device.collect_housekeeping(timeout_s=timeout_s)
                 self._apply_snapshot(snapshot)
+                self._consecutive_poll_errors = 0
         except TimeoutError as exc:
             if str(exc) == lock_timeout_message:
                 return
-            self.errorCount += 1
-            self.print("Timed out while polling AMX housekeeping.", flag=PRINT.ERROR)
-            self.initializeValues(reset=True)
+            self._poll_error("Timed out while polling AMX housekeeping.", exc=None)
             return
         except Exception as exc:  # noqa: BLE001
-            self.errorCount += 1
-            self.print(
+            self._poll_error(
                 f"Failed to read AMX housekeeping: {self._format_exception(exc)}",
+                exc=exc,
+            )
+            return
+
+    def _poll_error(self, message: str, *, exc: Exception | None) -> None:
+        self.errorCount += 1
+        self._consecutive_poll_errors += 1
+        self.print(message, flag=PRINT.ERROR)
+        self.initializeValues(reset=True)
+        if self._consecutive_poll_errors >= _AMX_MAX_CONSECUTIVE_POLL_ERRORS:
+            self.print(
+                f"Too many consecutive AMX polling errors ({self._consecutive_poll_errors}). "
+                "Closing communication.",
                 flag=PRINT.ERROR,
             )
-            self.initializeValues(reset=True)
-            return
+            self.closeCommunication()
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
         device = self.device
@@ -3129,7 +3147,8 @@ class AMXController(DeviceController):
                 self._apply_snapshot(snapshot)
         except Exception:
             try:
-                self.main_state = str(device.get_status().get("connected", False))
+                connected = bool(device.get_status().get("connected", False))
+                self.main_state = "Error" if connected else "Disconnected"
             except Exception:
                 self.main_state = "Unknown"
             self.device_enabled_state = "Unknown"
