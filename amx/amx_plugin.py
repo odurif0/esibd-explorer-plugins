@@ -2755,7 +2755,7 @@ class AMXController(DeviceController):
         width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2)
         if channel.enabled and width_us > 0.0:
             width_ticks = round(width_us * _safe_device_attr(device, "CLOCK", 100e6) / 1e6) - width_offset
-            width_ticks = max(width_ticks, 0)
+            width_ticks = max(width_ticks, 1)
             device.set_pulser_width_ticks(pulser, width_ticks, timeout_s=timeout_s)
         else:
             device.set_pulser_width_ticks(pulser, 0, timeout_s=timeout_s)
@@ -2919,6 +2919,7 @@ class AMXController(DeviceController):
         )
         osc_offset = _coerce_int(_safe_device_attr(device, "OSC_OFFSET", 2), 2)
         width_offset = _coerce_int(_safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2), 2)
+        delay_offset = _coerce_int(_safe_device_attr(device, "PULSER_DELAY_OFFSET", 3), 3)
         total_ticks = oscillator_period + osc_offset
         ticks_per_us = _safe_device_attr(device, "CLOCK", 100e6) / 1e6
 
@@ -2940,8 +2941,8 @@ class AMXController(DeviceController):
                 duty_percent = np.nan
             new_values[pulser] = duty_percent
             new_width_ticks[pulser] = str(width_ticks)
-            new_width_us[pulser] = f"{width_ticks / ticks_per_us:.2f}"
-            new_delay_us[pulser] = f"{delay_ticks / ticks_per_us:.2f}"
+            new_width_us[pulser] = f"{(width_ticks + width_offset) / ticks_per_us:.2f}"
+            new_delay_us[pulser] = f"{(delay_ticks + delay_offset) / ticks_per_us:.2f}"
             burst = pulser_snapshot.get("burst")
             new_bursts[pulser] = "n/a" if burst is None else str(burst)
 

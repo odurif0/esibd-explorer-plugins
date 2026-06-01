@@ -665,7 +665,7 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
         delay: int,
         timeout_s: Optional[float] = None,
     ) -> None:
-        """Set one pulser delay register."""
+        """Set one pulser delay register.  0 stops the pulser."""
         if int(delay) < 0:
             raise ValueError("delay must be >= 0")
         self._require_connected()
@@ -695,7 +695,7 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
         width: int,
         timeout_s: Optional[float] = None,
     ) -> None:
-        """Set one pulser width register."""
+        """Set one pulser width register.  0 stops the pulser."""
         if int(width) < 0:
             raise ValueError("width must be >= 0")
         self._require_connected()
@@ -746,7 +746,7 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
 
         total_ticks = period + self.OSC_OFFSET
         width_register = round(total_ticks * duty_cycle - self.PULSER_WIDTH_OFFSET)
-        if width_register < 0:
+        if width_register < 1:
             raise ValueError(
                 f"duty_cycle={duty_cycle} produces an invalid width register: "
                 f"{width_register}"

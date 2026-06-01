@@ -408,6 +408,14 @@ class AMXBase:
         )
         return status, burst.value
 
+    def set_pulser_burst(self, pulser_no: int, burst: int) -> int:
+        """Set the burst size for one burst-capable pulser."""
+        pulser_no = self._validate_burst_pulser(pulser_no)
+        burst = self._validate_uint32_register(burst, "burst")
+        return self.amx_dll.COM_HVAMX4ED_SetPulserBurst(
+            self.port, pulser_no, ctypes.c_uint32(burst)
+        )
+
     def get_switch_trigger_config(self, switch_no: int):
         """Get one switch trigger configuration byte."""
         switch_no = self._validate_switch(switch_no)
@@ -479,6 +487,13 @@ class AMXBase:
             if state_value & flag:
                 active_states.append(name)
         return status, hex(state_value), active_states
+
+    def set_controller_config(self, config: int) -> int:
+        """Set the controller configuration bitfield (Enb, EnbOsc, EnbPulser, ...)."""
+        config = int(config) & 0xFFFF
+        return self.amx_dll.COM_HVAMX4ED_SetControllerConfig(
+            self.port, ctypes.c_uint16(config)
+        )
 
     def save_current_config(self, config_number: int) -> int:
         """Save the current configuration to NVM."""
