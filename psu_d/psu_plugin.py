@@ -4044,7 +4044,7 @@ class PSUController(DeviceController):
             return False, "device still enabled"
         return True, ""
 
-    def readNumbers(self) -> None:
+    def readNumbers(self, *, already_acquired: bool = False) -> None:
         if self.device is None or not getattr(self, "initialized", False):
             self.initializeValues(reset=True)
             return
@@ -4056,6 +4056,7 @@ class PSUController(DeviceController):
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to read PSU housekeeping.",
+                already_acquired=already_acquired,
             ):
                 device = self.device
                 if device is None:
@@ -4115,6 +4116,14 @@ class PSUController(DeviceController):
         update_status = getattr(self.controllerParent, "_update_status_widgets", None)
         if callable(update_status):
             update_status()
+
+    def runAcquisition(self) -> None:  # noqa: N802
+        while self.acquiring:
+            with self.lock.acquire_timeout(1, timeoutMessage='Could not acquire lock to acquire data') as lock_acquired:
+                if lock_acquired:
+                    self.readNumbers(already_acquired=True)
+                    self.signalComm.updateValuesSignal.emit()
+            time.sleep(self.controllerParent.interval / 1000)
 
     def _apply_live_readbacks(
         self,
