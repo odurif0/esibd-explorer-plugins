@@ -986,12 +986,22 @@ class PSUDevice(Device):
         if controller is None or not getattr(controller, "initialized", False):
             self._stop_gui_poll_timer()
             return
+
+        def _poll_and_sync() -> None:
+            controller.readNumbers()
+
+            def _sync_gui() -> None:
+                sync_manual = getattr(self, "_sync_manual_panel_from_controller", None)
+                if callable(sync_manual):
+                    sync_manual()
+                update_panel = getattr(self, "_update_channel_panel", None)
+                if callable(update_panel):
+                    update_panel()
+
+            _invoke_gui_callback(_sync_gui)
+
         from threading import Thread
-        Thread(
-            target=controller.readNumbers,
-            name=f"{self.name} guiPoll",
-            daemon=True,
-        ).start()
+        Thread(target=_poll_and_sync, name=f"{self.name} guiPoll", daemon=True).start()
 
     def estimateStorage(self) -> None:
         """Handle the no-channel bootstrap state used before PSU hardware sync."""
@@ -3912,9 +3922,6 @@ class PSUController(DeviceController):
         time.sleep(0.3)
         self._update_state()
         self._set_loaded_config_text("Manual outputs OFF")
-        start_poll = getattr(self.controllerParent, "_start_gui_poll_timer", None)
-        if callable(start_poll):
-            start_poll()
 
     def _verify_manual_state_unlocked(
         self,
@@ -4717,6 +4724,11 @@ class PSUController(DeviceController):
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
                     start_acquisition()
+                start_poll = getattr(
+                    self.controllerParent, "_start_gui_poll_timer", None
+                )
+                if callable(start_poll):
+                    start_poll()
                 self.print(message)
             else:
                 shutdown_confirmed = self.shutdownCommunication()
