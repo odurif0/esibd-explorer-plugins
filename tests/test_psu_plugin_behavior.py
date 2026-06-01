@@ -756,12 +756,20 @@ def test_readback_feedback_keeps_disabled_outputs_visually_checked():
             measured_a=0.005,
             limit_a=1.0,
         )
+        == "ok"
+    )
+    assert (
+        module._current_limit_feedback_state(
+            enabled=False,
+            measured_a=0.03,
+            limit_a=1.0,
+        )
         == "warn"
     )
     assert (
         module._current_limit_feedback_state(
             enabled=False,
-            measured_a=0.02,
+            measured_a=0.1,
             limit_a=1.0,
         )
         == "error"

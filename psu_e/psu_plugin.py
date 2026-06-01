@@ -139,8 +139,8 @@ _PSU_VOLTAGE_OK_RELATIVE_TOLERANCE = 0.02
 _PSU_VOLTAGE_WARN_RELATIVE_TOLERANCE = 0.05
 _PSU_CURRENT_LIMIT_WARN_RATIO = 0.95
 _PSU_CURRENT_LIMIT_ERROR_RATIO = 1.0
-_PSU_CURRENT_ZERO_OK_ABS_TOLERANCE_A = 0.001
-_PSU_CURRENT_ZERO_WARN_ABS_TOLERANCE_A = 0.01
+_PSU_CURRENT_ZERO_OK_ABS_TOLERANCE_A = 0.01
+_PSU_CURRENT_ZERO_WARN_ABS_TOLERANCE_A = 0.05
 _PSU_DROPOUT_WARN_V = 10.0
 _PSU_DROPOUT_ERROR_V = 5.0
 _PSU_TEMPERATURE_WARN_C = 55.0
@@ -529,11 +529,8 @@ def _current_limit_feedback_state(
     enabled: Any,
     measured_a: Any,
     limit_a: Any,
-    current_limit_active: Any = False,
 ) -> str:
     enabled_bool = _coerce_bool(enabled, default=False)
-    if enabled_bool and _coerce_bool(current_limit_active, default=False):
-        return "warn"
     measured = _coerce_float(measured_a, np.nan)
     if _is_nan(measured):
         return "default"
@@ -2057,7 +2054,6 @@ class PSUDevice(Device):
                             channel_index,
                             np.nan,
                         ),
-                        current_limit_active=getattr(controller, "current_limit_active", False),
                     )
                 )
                 if readback_available
@@ -4416,7 +4412,6 @@ class PSUController(DeviceController):
                                     channel_no,
                                     np.nan,
                                 ),
-                                current_limit_active=self.current_limit_active,
                             )
                         ),
                     )
