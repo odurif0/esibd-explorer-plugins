@@ -986,22 +986,12 @@ class PSUDevice(Device):
         if controller is None or not getattr(controller, "initialized", False):
             self._stop_gui_poll_timer()
             return
-
-        def _poll_and_sync() -> None:
+        try:
             controller.readNumbers()
-
-            def _sync_gui() -> None:
-                sync_manual = getattr(self, "_sync_manual_panel_from_controller", None)
-                if callable(sync_manual):
-                    sync_manual()
-                update_panel = getattr(self, "_update_channel_panel", None)
-                if callable(update_panel):
-                    update_panel()
-
-            _invoke_gui_callback(_sync_gui)
-
-        from threading import Thread
-        Thread(target=_poll_and_sync, name=f"{self.name} guiPoll", daemon=True).start()
+        except Exception:  # noqa: BLE001
+            return
+        self._update_channel_panel()
+        self._update_status_widgets()
 
     def estimateStorage(self) -> None:
         """Handle the no-channel bootstrap state used before PSU hardware sync."""
