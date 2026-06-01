@@ -1640,6 +1640,7 @@ class PSUDevice(Device):
 
         from PyQt6.QtWidgets import (
             QCheckBox,
+            QComboBox,
             QDoubleSpinBox,
             QFrame,
             QGridLayout,
