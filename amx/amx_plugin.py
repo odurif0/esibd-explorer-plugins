@@ -112,6 +112,14 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _safe_device_attr(device: Any, name: str, default: Any) -> Any:
+    """Read a device attribute with fallback, handling process-proxy RuntimeError."""
+    try:
+        return getattr(device, name, default)
+    except RuntimeError:
+        return default
+
+
 def _compact_status_text(value: Any, default: str = "n/a") -> str:
     """Return a short one-line representation for toolbar status widgets."""
     if value is None:
@@ -1621,14 +1629,19 @@ class AMXDevice(Device):
         if freq_khz <= 0:
             return
         period_us = 1000.0 / freq_khz
+        controller = getattr(self, "controller", None)
+        device = getattr(controller, "device", None) if controller is not None else None
+        width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2) if device is not None else 2
+        ticks_per_us = _safe_device_attr(device, "CLOCK", 100e6) / 1e6 if device is not None else 100.0
+        max_width_us = max(period_us - width_offset / ticks_per_us, 0.0)
         for channel in self.getChannels():
             param = channel.getParameterByName(channel.VALUE)
             if param is None:
                 continue
-            setattr(param, _PARAMETER_MAX_KEY, period_us)
+            setattr(param, _PARAMETER_MAX_KEY, max_width_us)
             current = _coerce_float(getattr(channel, "value", 0.0), 0.0)
-            if current > period_us:
-                channel.value = period_us
+            if current > max_width_us:
+                channel.value = max_width_us
             channel._update_duty_label()
 
     def _set_on_ui_state(self, on: bool) -> None:
@@ -2739,8 +2752,10 @@ class AMXController(DeviceController):
 
         pulser = channel.pulser_number()
         width_us = _coerce_float(getattr(channel, "value", 0.0), 0.0)
-        width_ticks = round(width_us * device.CLOCK / 1e6)
+        width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2)
         if channel.enabled and width_us > 0.0:
+            width_ticks = round(width_us * _safe_device_attr(device, "CLOCK", 100e6) / 1e6) - width_offset
+            width_ticks = max(width_ticks, 0)
             device.set_pulser_width_ticks(pulser, width_ticks, timeout_s=timeout_s)
         else:
             device.set_pulser_width_ticks(pulser, 0, timeout_s=timeout_s)
@@ -2902,10 +2917,10 @@ class AMXController(DeviceController):
             snapshot.get("oscillator", {}).get("period"),
             0,
         )
-        osc_offset = _coerce_int(getattr(device, "OSC_OFFSET", 2), 2)
-        width_offset = _coerce_int(getattr(device, "PULSER_WIDTH_OFFSET", 2), 2)
+        osc_offset = _coerce_int(_safe_device_attr(device, "OSC_OFFSET", 2), 2)
+        width_offset = _coerce_int(_safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2), 2)
         total_ticks = oscillator_period + osc_offset
-        ticks_per_us = getattr(device, "CLOCK", 100e6) / 1e6  # 100 ticks/us
+        ticks_per_us = _safe_device_attr(device, "CLOCK", 100e6) / 1e6
 
         new_values: dict[int, float] = {}
         new_width_us: dict[int, str] = {}
@@ -2919,7 +2934,7 @@ class AMXController(DeviceController):
                 continue
             width_ticks = _coerce_int(pulser_snapshot.get("width_ticks"), 0)
             delay_ticks = _coerce_int(pulser_snapshot.get("delay_ticks"), 0)
-            if total_ticks > 0:
+            if total_ticks > width_offset:
                 duty_percent = ((width_ticks + width_offset) / total_ticks) * 100.0
             else:
                 duty_percent = np.nan
@@ -3000,7 +3015,10 @@ class AMXController(DeviceController):
         target_on = bool(getattr(self.controllerParent, "isOn", lambda: False)())
         device = self.device
         if device is None:
+            if target_on:
+                self._restore_off_ui_state()
             self._end_transition()
+            self._sync_status_to_gui()
             return
 
         self._discard_pending_runtime_applies()
