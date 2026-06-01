@@ -98,6 +98,7 @@ _PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 400
 _PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
 _PSU_HOUSEKEEPING_REFRESH_PERIOD_S = 2.0
+_PSU_GUI_POLL_PERIOD_S = 1.0
 _PSU_MANUAL_NUMERIC_DEBOUNCE_MS = 250
 _PSU_FEEDBACK_OK_STYLE = "background-color: #2f855a; color: #ffffff; margin:0px; padding:0px 4px;"
 _PSU_FEEDBACK_WARN_STYLE = "background-color: #dd6b20; color: #ffffff; margin:0px; padding:0px 4px;"
@@ -962,6 +963,31 @@ class PSUDevice(Device):
             return
         controller._interlock_monitoring_changed()
 
+    def _start_gui_poll_timer(self) -> None:
+        self._stop_gui_poll_timer()
+        try:
+            from PyQt6.QtCore import QTimer
+        except ImportError:
+            return
+        timer = QTimer(self)
+        timer.timeout.connect(self._gui_poll_tick)
+        timer.start(int(_PSU_GUI_POLL_PERIOD_S * 1000))
+        self._guiPollTimer = timer
+
+    def _stop_gui_poll_timer(self) -> None:
+        timer = getattr(self, "_guiPollTimer", None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._guiPollTimer = None
+
+    def _gui_poll_tick(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None or not getattr(controller, "initialized", False):
+            self._stop_gui_poll_timer()
+            return
+        controller.readNumbers()
+
     def estimateStorage(self) -> None:
         """Handle the no-channel bootstrap state used before PSU hardware sync."""
         channels = list(getattr(self, "channels", []) or [])
@@ -1233,7 +1259,7 @@ class PSUDevice(Device):
             current_widget = widgets.get("current_limit")
             output_enabled[channel_index] = bool(output_widget.isChecked())
             full_range_enabled[channel_index] = (
-                bool(range_widget.isChecked())
+                range_widget.currentIndex() == 0
                 if _coerce_bool(full_range_supported.get(channel_index, False), False)
                 else False
             )
@@ -1319,10 +1345,18 @@ class PSUDevice(Device):
                         widgets.get("output_enabled"),
                         bool(output_enabled.get(channel_index, False)),
                     )
-                    self._set_control_checked(
-                        widgets.get("full_range"),
-                        bool(full_range_enabled.get(channel_index, False)),
-                    )
+                    range_w = widgets.get("full_range")
+                    if range_w is not None and hasattr(range_w, "setCurrentIndex"):
+                        block = getattr(range_w, "blockSignals", None)
+                        if callable(block):
+                            block(True)
+                        try:
+                            range_w.setCurrentIndex(
+                                0 if full_range_enabled.get(channel_index, False) else 1
+                            )
+                        finally:
+                            if callable(block):
+                                block(False)
                     self._set_control_value(
                         widgets.get("voltage"),
                         _coerce_float(voltage_values.get(channel_index), 0.0),
@@ -1677,12 +1711,13 @@ class PSUDevice(Device):
             )
             range_label = QLabel("Range")
             range_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
-            range_box = QCheckBox("Full")
+            range_box = QComboBox()
+            range_box.addItems(["Full", "Half"])
             range_box.setToolTip(
                 "Full range enables maximum voltage. Half range lowers voltage capability and allows higher current."
             )
-            range_box.toggled.connect(
-                lambda _checked: self._manual_panel_changed(debounce=False)
+            range_box.currentIndexChanged.connect(
+                lambda _index: self._manual_panel_changed(debounce=False)
             )
             voltage_label = QLabel("Vset")
             voltage_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
@@ -3872,6 +3907,9 @@ class PSUController(DeviceController):
         time.sleep(0.3)
         self._update_state()
         self._set_loaded_config_text("Manual outputs OFF")
+        start_poll = getattr(self.controllerParent, "_start_gui_poll_timer", None)
+        if callable(start_poll):
+            start_poll()
 
     def _verify_manual_state_unlocked(
         self,
@@ -4857,6 +4895,9 @@ class PSUController(DeviceController):
     def _dispose_device(self) -> None:
         device = self.device
         self.device = None
+        stop_poll = getattr(self.controllerParent, "_stop_gui_poll_timer", None)
+        if callable(stop_poll):
+            stop_poll()
         self.initialized = False
         self.interlock_active = None
         self.psu_enabled_actual = None

@@ -780,9 +780,10 @@ def test_manual_panel_sync_updates_controls_without_live_apply():
             self.stopped = True
 
     class FakeControl:
-        def __init__(self, *, checked=False, value=0.0):
+        def __init__(self, *, checked=False, value=0.0, combo_index=0):
             self.checked = checked
             self._value = value
+            self._combo_index = combo_index
             self.blocked = False
 
         def blockSignals(self, blocked):
@@ -795,6 +796,12 @@ def test_manual_panel_sync_updates_controls_without_live_apply():
 
         def isChecked(self):
             return self.checked
+
+        def setCurrentIndex(self, index):
+            self._combo_index = index
+
+        def currentIndex(self):
+            return self._combo_index
 
         def setValue(self, value):
             self._value = float(value)
@@ -815,13 +822,13 @@ def test_manual_panel_sync_updates_controls_without_live_apply():
     device.manualPanelControls = {
         0: {
             "output_enabled": FakeControl(),
-            "full_range": FakeControl(),
+            "full_range": FakeControl(combo_index=1),
             "voltage": FakeControl(),
             "current_limit": FakeControl(),
         },
         1: {
             "output_enabled": FakeControl(checked=True),
-            "full_range": FakeControl(checked=True),
+            "full_range": FakeControl(combo_index=0),
             "voltage": FakeControl(),
             "current_limit": FakeControl(),
         },
@@ -833,8 +840,8 @@ def test_manual_panel_sync_updates_controls_without_live_apply():
     assert emitted == []
     assert device.manualPanelControls[0]["output_enabled"].isChecked() is True
     assert device.manualPanelControls[1]["output_enabled"].isChecked() is False
-    assert device.manualPanelControls[0]["full_range"].isChecked() is True
-    assert device.manualPanelControls[1]["full_range"].isChecked() is False
+    assert device.manualPanelControls[0]["full_range"].currentIndex() == 0
+    assert device.manualPanelControls[1]["full_range"].currentIndex() == 1
     assert device.manualPanelControls[0]["voltage"].value() == 12.5
     assert device.manualPanelControls[1]["voltage"].value() == 22.5
     assert device.manualPanelControls[0]["current_limit"].value() == 0.125
@@ -853,12 +860,16 @@ def test_manual_panel_change_applies_values_immediately():
             self.stopped = True
 
     class FakeControl:
-        def __init__(self, *, checked=False, value=0.0):
+        def __init__(self, *, checked=False, value=0.0, combo_index=0):
             self.checked = checked
             self._value = value
+            self._combo_index = combo_index
 
         def isChecked(self):
             return self.checked
+
+        def currentIndex(self):
+            return self._combo_index
 
         def value(self):
             return self._value
@@ -879,13 +890,13 @@ def test_manual_panel_change_applies_values_immediately():
     device.manualPanelControls = {
         0: {
             "output_enabled": FakeControl(checked=True),
-            "full_range": FakeControl(checked=True),
+            "full_range": FakeControl(combo_index=0),
             "voltage": FakeControl(value=10.0),
             "current_limit": FakeControl(value=0.1),
         },
         1: {
             "output_enabled": FakeControl(checked=False),
-            "full_range": FakeControl(checked=False),
+            "full_range": FakeControl(combo_index=1),
             "voltage": FakeControl(value=20.0),
             "current_limit": FakeControl(value=0.2),
         },
@@ -919,12 +930,16 @@ def test_manual_panel_numeric_change_is_debounced_until_timer_fires():
             self.starts.append(timeout_ms)
 
     class FakeControl:
-        def __init__(self, *, checked=False, value=0.0):
+        def __init__(self, *, checked=False, value=0.0, combo_index=0):
             self.checked = checked
             self._value = value
+            self._combo_index = combo_index
 
         def isChecked(self):
             return self.checked
+
+        def currentIndex(self):
+            return self._combo_index
 
         def value(self):
             return self._value
@@ -945,13 +960,13 @@ def test_manual_panel_numeric_change_is_debounced_until_timer_fires():
     device.manualPanelControls = {
         0: {
             "output_enabled": FakeControl(checked=True),
-            "full_range": FakeControl(checked=True),
+            "full_range": FakeControl(combo_index=0),
             "voltage": FakeControl(value=10.0),
             "current_limit": FakeControl(value=0.1),
         },
         1: {
             "output_enabled": FakeControl(checked=False),
-            "full_range": FakeControl(checked=False),
+            "full_range": FakeControl(combo_index=1),
             "voltage": FakeControl(value=20.0),
             "current_limit": FakeControl(value=0.2),
         },
