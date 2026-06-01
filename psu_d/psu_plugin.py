@@ -2079,6 +2079,9 @@ class PSUDevice(Device):
 
     def _schedule_delayed_refresh(self, delay_s: float) -> None:
         def _do_refresh() -> None:
+            controller = getattr(self, "controller", None)
+            if controller is not None and getattr(controller, "initialized", False):
+                controller.readNumbers()
             self._update_status_widgets()
             self._sync_manual_panel_from_controller()
 
@@ -2308,11 +2311,15 @@ class PSUDevice(Device):
                 )
             ilim_widget = global_diag.get("ilim_active")
             if ilim_widget is not None and hasattr(ilim_widget, "setText"):
-                active = getattr(controller, "current_limit_active", False)
-                ilim_widget.setText("Yes" if active else "No")
-                if active:
+                active = getattr(controller, "current_limit_active", None)
+                if active is None:
+                    ilim_widget.setText("n/a")
+                    ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+                elif active:
+                    ilim_widget.setText("Yes")
                     ilim_widget.setStyleSheet(_psu_feedback_style("warn"))
                 else:
+                    ilim_widget.setText("No")
                     ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
             ilock_widget = global_diag.get("interlock")
             if ilock_widget is not None and hasattr(ilock_widget, "setText"):
@@ -4851,11 +4858,12 @@ class PSUController(DeviceController):
         device = self.device
         self.device = None
         self.initialized = False
-        self.interlock_active = False
-        self.psu_enabled_actual = False
-        self.interlock_out_disabled = False
-        self.interlock_bnc_disabled = False
-        self.current_limit_active = False
+        self.interlock_active = None
+        self.psu_enabled_actual = None
+        self.interlock_out_disabled = None
+        self.interlock_bnc_disabled = None
+        self.current_limit_active = None
+        self.device_enabled = None
         if device is None:
             return
         try:
