@@ -98,7 +98,6 @@ _PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 400
 _PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
 _PSU_HOUSEKEEPING_REFRESH_PERIOD_S = 2.0
-_PSU_GUI_POLL_PERIOD_S = 1.0
 _PSU_MANUAL_NUMERIC_DEBOUNCE_MS = 250
 _PSU_FEEDBACK_OK_STYLE = "background-color: #2f855a; color: #ffffff; margin:0px; padding:0px 4px;"
 _PSU_FEEDBACK_WARN_STYLE = "background-color: #dd6b20; color: #ffffff; margin:0px; padding:0px 4px;"
@@ -959,39 +958,6 @@ class PSUDevice(Device):
         if controller is None or not getattr(controller, "initialized", False):
             return
         controller._interlock_monitoring_changed()
-
-    def _start_gui_poll_timer(self) -> None:
-        def _create_and_start() -> None:
-            self._stop_gui_poll_timer()
-            try:
-                from PyQt6.QtCore import QTimer
-            except ImportError:
-                return
-            timer = QTimer(self)
-            timer.timeout.connect(self._gui_poll_tick)
-            timer.start(int(_PSU_GUI_POLL_PERIOD_S * 1000))
-            self._guiPollTimer = timer
-
-        _invoke_gui_callback(_create_and_start)
-
-    def _stop_gui_poll_timer(self) -> None:
-        timer = getattr(self, "_guiPollTimer", None)
-        if timer is not None:
-            timer.stop()
-            timer.deleteLater()
-            self._guiPollTimer = None
-
-    def _gui_poll_tick(self) -> None:
-        controller = getattr(self, "controller", None)
-        if controller is None or not getattr(controller, "initialized", False):
-            self._stop_gui_poll_timer()
-            return
-        try:
-            controller.readNumbers()
-        except Exception:  # noqa: BLE001
-            return
-        self._update_channel_panel()
-        self._update_status_widgets()
 
     def estimateStorage(self) -> None:
         """Handle the no-channel bootstrap state used before PSU hardware sync."""
@@ -4141,6 +4107,15 @@ class PSUController(DeviceController):
             self.initializeValues(reset=True)
             return
 
+    def updateValues(self) -> None:
+        super().updateValues()
+        update_panel = getattr(self.controllerParent, "_update_channel_panel", None)
+        if callable(update_panel):
+            update_panel()
+        update_status = getattr(self.controllerParent, "_update_status_widgets", None)
+        if callable(update_status):
+            update_status()
+
     def _apply_live_readbacks(
         self,
         readbacks: dict[str, Any],
@@ -4715,11 +4690,6 @@ class PSUController(DeviceController):
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
                     start_acquisition()
-                start_poll = getattr(
-                    self.controllerParent, "_start_gui_poll_timer", None
-                )
-                if callable(start_poll):
-                    start_poll()
                 self.print(message)
             else:
                 shutdown_confirmed = self.shutdownCommunication()
@@ -4902,9 +4872,6 @@ class PSUController(DeviceController):
     def _dispose_device(self) -> None:
         device = self.device
         self.device = None
-        stop_poll = getattr(self.controllerParent, "_stop_gui_poll_timer", None)
-        if callable(stop_poll):
-            stop_poll()
         self.initialized = False
         self.interlock_active = None
         self.psu_enabled_actual = None
