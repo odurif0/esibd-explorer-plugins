@@ -949,6 +949,34 @@ class PSUDevice(Device):
         self._ensure_channel_panel()
         self._update_channel_column_visibility()
         self._sync_acquisition_controls()
+        try:
+            from PyQt6.QtCore import QTimer
+        except ImportError:
+            return
+        self._refreshTimer = QTimer(self)
+        self._refreshTimer.timeout.connect(self._refresh_tick)
+
+    def _start_refresh_timer(self) -> None:
+        timer = getattr(self, "_refreshTimer", None)
+        if timer is not None and not timer.isActive():
+            timer.start(self.interval)
+
+    def _stop_refresh_timer(self) -> None:
+        timer = getattr(self, "_refreshTimer", None)
+        if timer is not None:
+            timer.stop()
+
+    def _refresh_tick(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None or not getattr(controller, "initialized", False):
+            self._stop_refresh_timer()
+            return
+        try:
+            controller.readNumbers()
+        except Exception:  # noqa: BLE001
+            return
+        self._update_channel_panel()
+        self._update_status_widgets()
 
     def getChannels(self) -> "list[PSUChannel]":
         return cast("list[PSUChannel]", super().getChannels())
@@ -4699,6 +4727,11 @@ class PSUController(DeviceController):
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
                     start_acquisition()
+                start_refresh = getattr(
+                    self.controllerParent, "_start_refresh_timer", None
+                )
+                if callable(start_refresh):
+                    start_refresh()
                 self.print(message)
             else:
                 shutdown_confirmed = self.shutdownCommunication()
@@ -4879,6 +4912,9 @@ class PSUController(DeviceController):
         return lock
 
     def _dispose_device(self) -> None:
+        stop_refresh = getattr(self.controllerParent, "_stop_refresh_timer", None)
+        if callable(stop_refresh):
+            stop_refresh()
         device = self.device
         self.device = None
         self.initialized = False
