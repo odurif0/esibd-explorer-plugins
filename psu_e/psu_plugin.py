@@ -958,25 +958,42 @@ class PSUDevice(Device):
 
     def _start_refresh_timer(self) -> None:
         timer = getattr(self, "_refreshTimer", None)
-        if timer is not None and not timer.isActive():
-            timer.start(self.interval)
+        if timer is None:
+            return
+        if not timer.isActive():
+            _invoke_gui_callback(lambda: timer.start(self.interval))
 
     def _stop_refresh_timer(self) -> None:
         timer = getattr(self, "_refreshTimer", None)
         if timer is not None:
-            timer.stop()
+            _invoke_gui_callback(lambda: timer.stop())
 
     def _refresh_tick(self) -> None:
         controller = getattr(self, "controller", None)
         if controller is None or not getattr(controller, "initialized", False):
             self._stop_refresh_timer()
             return
+        from threading import Thread
+        Thread(
+            target=self._refresh_read_and_sync,
+            name=f"{self.name} refreshTick",
+            daemon=True,
+        ).start()
+
+    def _refresh_read_and_sync(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return
         try:
             controller.readNumbers()
         except Exception:  # noqa: BLE001
             return
-        self._update_channel_panel()
-        self._update_status_widgets()
+
+        def _sync() -> None:
+            self._update_channel_panel()
+            self._update_status_widgets()
+
+        _invoke_gui_callback(_sync)
 
     def getChannels(self) -> "list[PSUChannel]":
         return cast("list[PSUChannel]", super().getChannels())
