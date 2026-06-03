@@ -955,23 +955,11 @@ class PSUDevice(Device):
             return
         self._refreshTimer = QTimer(self)
         self._refreshTimer.timeout.connect(self._refresh_tick)
-
-    def _start_refresh_timer(self) -> None:
-        timer = getattr(self, "_refreshTimer", None)
-        if timer is None:
-            return
-        if not timer.isActive():
-            _invoke_gui_callback(lambda: timer.start(self.interval))
-
-    def _stop_refresh_timer(self) -> None:
-        timer = getattr(self, "_refreshTimer", None)
-        if timer is not None:
-            _invoke_gui_callback(lambda: timer.stop())
+        self._refreshTimer.start(self.interval)
 
     def _refresh_tick(self) -> None:
         controller = getattr(self, "controller", None)
         if controller is None or not getattr(controller, "initialized", False):
-            self._stop_refresh_timer()
             return
         from threading import Thread
         Thread(
@@ -4744,11 +4732,6 @@ class PSUController(DeviceController):
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
                     start_acquisition()
-                start_refresh = getattr(
-                    self.controllerParent, "_start_refresh_timer", None
-                )
-                if callable(start_refresh):
-                    start_refresh()
                 self.print(message)
             else:
                 shutdown_confirmed = self.shutdownCommunication()
@@ -4929,9 +4912,6 @@ class PSUController(DeviceController):
         return lock
 
     def _dispose_device(self) -> None:
-        stop_refresh = getattr(self.controllerParent, "_stop_refresh_timer", None)
-        if callable(stop_refresh):
-            stop_refresh()
         device = self.device
         self.device = None
         self.initialized = False
