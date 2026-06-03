@@ -961,27 +961,12 @@ class PSUDevice(Device):
         controller = getattr(self, "controller", None)
         if controller is None or not getattr(controller, "initialized", False):
             return
-        from threading import Thread
-        Thread(
-            target=self._refresh_read_and_sync,
-            name=f"{self.name} refreshTick",
-            daemon=True,
-        ).start()
-
-    def _refresh_read_and_sync(self) -> None:
-        controller = getattr(self, "controller", None)
-        if controller is None:
-            return
         try:
             controller.readNumbers()
         except Exception:  # noqa: BLE001
             return
-
-        def _sync() -> None:
-            self._update_channel_panel()
-            self._update_status_widgets()
-
-        _invoke_gui_callback(_sync)
+        self._update_channel_panel()
+        self._update_status_widgets()
 
     def getChannels(self) -> "list[PSUChannel]":
         return cast("list[PSUChannel]", super().getChannels())
