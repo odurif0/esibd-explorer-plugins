@@ -26,6 +26,7 @@ from esibd.core import (
     parameterDict,
 )
 from esibd.plugins import Device, Plugin
+from PyQt6.QtCore import pyqtSignal
 
 _BUNDLED_RUNTIME_DIRNAME = "runtime"
 _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_psu_runtime"
@@ -886,6 +887,8 @@ def providePlugins() -> "list[type[Plugin]]":
 class PSUDevice(Device):
     """Drive the PSU through stored configs or manual setpoints and monitor readbacks."""
 
+    refreshPanelSignal = pyqtSignal()
+
     documentation = (
         "Loads PSU configurations or applies manual setpoints and monitors live voltage/current readbacks."
     )
@@ -956,15 +959,37 @@ class PSUDevice(Device):
         self._refreshTimer = QTimer(self)
         self._refreshTimer.timeout.connect(self._refresh_tick)
         self._refreshTimer.start(self.interval)
+        self.refreshPanelSignal.connect(self._apply_panel_refresh)
 
     def _refresh_tick(self) -> None:
         controller = getattr(self, "controller", None)
         if controller is None or not getattr(controller, "initialized", False):
             return
+        if getattr(self, "_refreshInProgress", False):
+            return
+        self._refreshInProgress = True
+        from threading import Thread
+        Thread(
+            target=self._refresh_read_background,
+            name=f"{self.name} refreshTick",
+            daemon=True,
+        ).start()
+
+    def _refresh_read_background(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            self._refreshInProgress = False
+            return
         try:
             controller.readNumbers()
         except Exception:  # noqa: BLE001
-            return
+            pass
+        finally:
+            self._refreshInProgress = False
+        if controller.initialized:
+            self.refreshPanelSignal.emit()
+
+    def _apply_panel_refresh(self) -> None:
         self._update_channel_panel()
         self._update_status_widgets()
 
@@ -1831,16 +1856,7 @@ class PSUDevice(Device):
         diag_layout.addWidget(flags_value, flags_row, 1, 1, col_offset - 1)
         diag_widgets["flags"] = flags_value
 
-        ilim_row = flags_row + 1
-        ilim_name = QLabel("Ilim active")
-        ilim_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
-        ilim_value = QLabel("n/a")
-        ilim_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-        diag_layout.addWidget(ilim_name, ilim_row, 0)
-        diag_layout.addWidget(ilim_value, ilim_row, 1, 1, col_offset - 1)
-        diag_widgets["ilim_active"] = ilim_value
-
-        ilock_row = ilim_row + 1
+        ilock_row = flags_row + 1
         ilock_name = QLabel("Interlock")
         ilock_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         ilock_value = QLabel("n/a")
@@ -2091,8 +2107,6 @@ class PSUDevice(Device):
         ]
         flags = str(getattr(controller, "device_state_summary", "") or "").strip() or "n/a"
         tooltip_lines = [f"Device flags: {flags}"]
-        if _coerce_bool(getattr(controller, "current_limit_active", False), False):
-            tooltip_lines.append("Current limit/compliance is currently active.")
         for channel_index, summary in zip(_PSU_CHANNEL_IDS, summaries):
             tooltip_lines.append(summary)
             rail_summary = str(rail_summaries.get(channel_index, "") or "").strip() or "n/a"
@@ -2335,18 +2349,6 @@ class PSUDevice(Device):
                 flags_widget.setText(
                     str(getattr(controller, "device_state_summary", "n/a") or "n/a")
                 )
-            ilim_widget = global_diag.get("ilim_active")
-            if ilim_widget is not None and hasattr(ilim_widget, "setText"):
-                active = getattr(controller, "current_limit_active", None)
-                if active is None:
-                    ilim_widget.setText("n/a")
-                    ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
-                elif active:
-                    ilim_widget.setText("Yes")
-                    ilim_widget.setStyleSheet(_psu_feedback_style("warn"))
-                else:
-                    ilim_widget.setText("No")
-                    ilim_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
             ilock_widget = global_diag.get("interlock")
             if ilock_widget is not None and hasattr(ilock_widget, "setText"):
                 ilock_active = getattr(controller, "interlock_active", None)
