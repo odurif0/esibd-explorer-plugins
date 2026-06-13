@@ -2108,6 +2108,7 @@ class PSUDevice(Device):
             if controller is not None and getattr(controller, "initialized", False):
                 controller.readNumbers()
             self._update_status_widgets()
+            self._update_channel_panel()
             self._sync_manual_panel_from_controller()
 
         try:
@@ -4135,14 +4136,6 @@ class PSUController(DeviceController):
         if callable(update_status):
             update_status()
 
-    def runAcquisition(self) -> None:  # noqa: N802
-        while self.acquiring:
-            with self.lock.acquire_timeout(1, timeoutMessage='Could not acquire lock to acquire data') as lock_acquired:
-                if lock_acquired:
-                    self.readNumbers(already_acquired=True)
-                    self.signalComm.updateValuesSignal.emit()
-            time.sleep(self.controllerParent.interval / 1000)
-
     def _apply_live_readbacks(
         self,
         readbacks: dict[str, Any],
@@ -4714,9 +4707,6 @@ class PSUController(DeviceController):
                 )
                 if callable(sync_manual):
                     sync_manual()
-                start_acquisition = getattr(self, "startAcquisition", None)
-                if callable(start_acquisition):
-                    start_acquisition()
                 self.print(message)
             else:
                 shutdown_confirmed = self.shutdownCommunication()
