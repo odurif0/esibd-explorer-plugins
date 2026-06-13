@@ -2317,7 +2317,6 @@ class AMXController(DeviceController):
         self._channel_apply_worker_running = False
         self._consecutive_poll_errors = 0
         self.values: dict[int, float] = {}
-        self.width_us_values: dict[int, str] = {}
         self.width_values: dict[int, str] = {}
         self.delay_values: dict[int, str] = {}
         self.burst_values: dict[int, str] = {}
@@ -2326,11 +2325,6 @@ class AMXController(DeviceController):
         if getattr(self, "values", None) is None or reset:
             self.values = {
                 channel.pulser_number(): np.nan
-                for channel in self.controllerParent.getChannels()
-                if channel.real
-            }
-            self.width_us_values = {
-                channel.pulser_number(): "n/a"
                 for channel in self.controllerParent.getChannels()
                 if channel.real
             }
@@ -2856,7 +2850,29 @@ class AMXController(DeviceController):
         with self._channel_apply_state_lock:
             self._channel_apply_pending.clear()
 
-    def readNumbers(self) -> None:
+    def runAcquisition(self) -> None:
+        """Poll AMX housekeeping and push readbacks to the GUI from the acquisition thread.
+
+        The framework runs this loop in ``acquisitionThread`` and expects
+        ``readNumbers`` to perform the hardware read. The controller lock is not
+        reentrant, so we acquire it once here and forward ``already_acquired=True``;
+        without that, every poll silently aborted on the held lock and left the duty
+        monitors and the status badge frozen at their startup snapshot.
+        """
+        while self.acquiring:
+            try:
+                with self._controller_lock_section(
+                    "Could not acquire lock to acquire AMX data.",
+                    timeout_s=1.0,
+                    log_timeout=False,
+                ):
+                    self.readNumbers(already_acquired=True)
+                    self.signalComm.updateValuesSignal.emit()
+            except TimeoutError:
+                pass
+            time.sleep(self.controllerParent.interval / 1000)
+
+    def readNumbers(self, *, already_acquired: bool = False) -> None:
         if self.device is None or not getattr(self, "initialized", False):
             self.initializeValues(reset=True)
             return
@@ -2866,6 +2882,7 @@ class AMXController(DeviceController):
         try:
             with self._controller_lock_section(
                 lock_timeout_message,
+                already_acquired=already_acquired,
                 timeout_s=0.0,
                 log_timeout=False,
             ):
@@ -2924,7 +2941,6 @@ class AMXController(DeviceController):
         ticks_per_us = _safe_device_attr(device, "CLOCK", 100e6) / 1e6
 
         new_values: dict[int, float] = {}
-        new_width_us: dict[int, str] = {}
         new_width_ticks: dict[int, str] = {}
         new_delay_us: dict[int, str] = {}
         new_bursts: dict[int, str] = {}
@@ -2941,13 +2957,11 @@ class AMXController(DeviceController):
                 duty_percent = np.nan
             new_values[pulser] = duty_percent
             new_width_ticks[pulser] = str(width_ticks)
-            new_width_us[pulser] = f"{(width_ticks + width_offset) / ticks_per_us:.2f}"
             new_delay_us[pulser] = f"{(delay_ticks + delay_offset) / ticks_per_us:.2f}"
             burst = pulser_snapshot.get("burst")
             new_bursts[pulser] = "n/a" if burst is None else str(burst)
 
         self.values = new_values
-        self.width_us_values = new_width_us
         self.width_values = new_width_ticks
         self.delay_values = new_delay_us
         self.burst_values = new_bursts
@@ -3245,9 +3259,6 @@ class AMXController(DeviceController):
         log_timeout: bool = True,
     ):
         lock = getattr(self, "lock", None)
-        if lock is None:
-            lock = Lock()
-            self.lock = lock
         acquire = getattr(lock, "acquire", None)
         release = getattr(lock, "release", None)
         if callable(acquire) and callable(release):

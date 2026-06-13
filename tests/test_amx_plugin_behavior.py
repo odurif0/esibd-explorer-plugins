@@ -1127,6 +1127,120 @@ def test_amx_controller_read_numbers_skips_busy_poll_without_error():
     assert initialize_calls == []
 
 
+def test_controller_read_numbers_runs_while_framework_holds_the_lock():
+    """Regression: readNumbers must read housekeeping when the acquisition loop
+    already holds the non-reentrant controller lock.
+
+    Forwarding already_acquired=True keeps the duty monitors and status badge live
+    during operation; without it every poll silently aborted.
+    """
+    module = _load_module()
+
+    class FakeDevice:
+        OSC_OFFSET = 2
+        PULSER_WIDTH_OFFSET = 2
+
+        def collect_housekeeping(self, timeout_s=None):
+            return {
+                "device_enabled": True,
+                "main_state": {"name": "ST_ON"},
+                "device_state": {"flags": ["DEVST_OK"]},
+                "controller_state": {"flags": ["CTRLST_OK"]},
+                "oscillator": {"period": 99998},
+                "pulsers": [
+                    {"pulser": 0, "width_ticks": 49998, "delay_ticks": 0, "burst": 3},
+                ],
+            }
+
+    class FakeChannel:
+        def __init__(self, pulser):
+            self.id = pulser
+            self.real = True
+            self.enabled = True
+
+        def pulser_number(self):
+            return self.id
+
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.5,
+        getChannels=lambda: [FakeChannel(0)],
+        main_state="",
+        device_enabled_state="",
+        available_configs_text="",
+    )
+    controller = module.AMXController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+
+    # Hold the non-reentrant lock the same way the framework acquisition loop does.
+    assert controller.lock.acquire()
+    try:
+        controller.readNumbers(already_acquired=True)
+    finally:
+        controller.lock.release()
+
+    assert controller.main_state == "ST_ON"
+    assert controller.values[0] == pytest.approx(50.0)
+
+
+def test_controller_run_acquisition_reads_and_emits_under_lock(monkeypatch):
+    """runAcquisition forwards already_acquired=True so each tick actually reads."""
+    module = _load_module()
+
+    class FakeDevice:
+        OSC_OFFSET = 2
+        PULSER_WIDTH_OFFSET = 2
+
+        def collect_housekeeping(self, timeout_s=None):
+            return {
+                "device_enabled": True,
+                "main_state": {"name": "ST_ON"},
+                "device_state": {"flags": ["DEVST_OK"]},
+                "controller_state": {"flags": ["CTRLST_OK"]},
+                "oscillator": {"period": 99998},
+                "pulsers": [
+                    {"pulser": 0, "width_ticks": 49998, "delay_ticks": 0, "burst": 3},
+                ],
+            }
+
+    class FakeChannel:
+        def __init__(self, pulser):
+            self.id = pulser
+            self.real = True
+            self.enabled = True
+
+        def pulser_number(self):
+            return self.id
+
+    emitted = []
+
+    class FakeSignal:
+        def emit(self):
+            emitted.append(True)
+
+    parent = types.SimpleNamespace(
+        interval=1000,
+        poll_timeout_s=2.5,
+        getChannels=lambda: [FakeChannel(0)],
+        main_state="",
+        device_enabled_state="",
+        available_configs_text="",
+    )
+    controller = module.AMXController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.signalComm.updateValuesSignal = FakeSignal()
+
+    # Stop the loop after one completed iteration.
+    monkeypatch.setattr(module.time, "sleep", lambda *_args: setattr(controller, "acquiring", False))
+
+    controller.acquiring = True
+    controller.runAcquisition()
+
+    assert controller.values[0] == pytest.approx(50.0)
+    assert emitted == [True]
+
+
 def test_frequency_widget_change_is_debounced_until_timer_fires():
     module = _load_module()
     calls = []
