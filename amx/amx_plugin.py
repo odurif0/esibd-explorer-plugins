@@ -1894,7 +1894,7 @@ class AMXChannel(Channel):
     """AMX pulser channel definition."""
 
     ID = "Pulser"
-    DELAY_TICKS = "Delay ticks"
+    DELAY_US = "Delay us"
     WIDTH_TICKS = "Width ticks"
     BURST = "Burst"
     DUTY = "Duty"
@@ -1903,7 +1903,7 @@ class AMXChannel(Channel):
 
     def getDefaultChannel(self) -> dict[str, dict]:
         self.id: int
-        self.delay_ticks: str
+        self.delay_us: str
         self.width_ticks: str
         self.burst: str
 
@@ -1947,13 +1947,13 @@ class AMXChannel(Channel):
             header="Pulser",
             attr="id",
         )
-        channel[self.DELAY_TICKS] = parameterDict(
+        channel[self.DELAY_US] = parameterDict(
             value="n/a",
             parameterType=PARAMETERTYPE.LABEL,
             advanced=True,
             indicator=True,
             header="Delay (us)",
-            attr="delay_ticks",
+            attr="delay_us",
         )
         channel[self.WIDTH_TICKS] = parameterDict(
             value="n/a",
@@ -1986,7 +1986,7 @@ class AMXChannel(Channel):
         # AMX-specific columns before display controls.
         self.displayedParameters.extend([
             self.DUTY, self.FREQ_KHZ, self.ID,
-            self.DELAY_TICKS, self.WIDTH_TICKS, self.BURST,
+            self.DELAY_US, self.WIDTH_TICKS, self.BURST,
             self.ACTIVE, self.DISPLAY,
         ])
 
@@ -2143,7 +2143,7 @@ class AMXChannel(Channel):
     def realChanged(self) -> None:
         getter = getattr(self, "getParameterByName", None)
         if callable(getter):
-            for parameter_name in (self.ID, self.DUTY, self.FREQ_KHZ, self.DELAY_TICKS, self.WIDTH_TICKS, self.BURST):
+            for parameter_name in (self.ID, self.DUTY, self.FREQ_KHZ, self.DELAY_US, self.WIDTH_TICKS, self.BURST):
                 parameter = getter(parameter_name)
                 if parameter is not None and hasattr(parameter, "setVisible"):
                     parameter.setVisible(self.real)
@@ -2278,7 +2278,7 @@ class AMXChannel(Channel):
         self._set_parameter_value_without_events(self.WIDTH_TICKS, text)
 
     def setDelayText(self, text: str) -> None:
-        self._set_parameter_value_without_events(self.DELAY_TICKS, text)
+        self._set_parameter_value_without_events(self.DELAY_US, text)
 
     def setDutyText(self, text: str) -> None:
         self._set_parameter_value_without_events(self.DUTY, text)
