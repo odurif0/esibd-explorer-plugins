@@ -2404,8 +2404,8 @@ class PSUDevice(Device):
                     ilock_widget.setText("n/a")
                     ilock_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
                 elif ilock_out_dis and ilock_bnc_dis:
-                    ilock_widget.setText("OK (disabled)")
-                    ilock_widget.setStyleSheet(_psu_feedback_style("ok"))
+                    ilock_widget.setText("Off (not monitored)")
+                    ilock_widget.setStyleSheet(_psu_feedback_style("warn"))
                 elif ilock_active:
                     ilock_widget.setText("OK")
                     ilock_widget.setStyleSheet(_psu_feedback_style("ok"))

@@ -54,6 +54,27 @@ _AMX_MONITOR_WARN_RELATIVE_TOLERANCE = 0.10
 _AMX_MONITOR_RELATIVE_FLOOR_DUTY = 1.0
 _AMX_NUMERIC_DEBOUNCE_MS = 250
 _AMX_MAX_CONSECUTIVE_POLL_ERRORS = 10
+
+
+def _amx_transport_failure_is_fatal(exc: Exception) -> bool:
+    """Return True when an exception clearly indicates a dead AMX transport."""
+    text = str(exc).strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "unusable",
+            "transport is unusable",
+            "transport became unusable",
+            "marked unusable",
+            "worker became unusable",
+            "worker is unavailable",
+            "worker exited unexpectedly",
+            "worker timed out",
+            "worker is no longer running",
+        )
+    )
 _AMX_FREQUENCY_SPINBOX_STYLE = (
     "QDoubleSpinBox {"
     " background-color: #0f172a;"
@@ -3209,7 +3230,19 @@ class AMXController(DeviceController):
                     timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
                 )
                 self._apply_snapshot(snapshot)
-        except Exception:
+        except Exception as exc:
+            if _amx_transport_failure_is_fatal(exc):
+                # Poisoned/unusable transport: stop acquisition and route the
+                # close through the GUI-thread signal (mirrors _poll_error).
+                self.acquiring = False
+                close_signal = getattr(
+                    getattr(self, "signalComm", None), "closeCommunicationSignal", None
+                )
+                emit = getattr(close_signal, "emit", None)
+                if callable(emit):
+                    emit()
+                else:
+                    self.closeCommunication()
             try:
                 connected = bool(device.get_status().get("connected", False))
                 self.main_state = "Error" if connected else "Disconnected"

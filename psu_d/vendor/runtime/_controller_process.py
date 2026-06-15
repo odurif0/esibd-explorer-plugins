@@ -42,7 +42,17 @@ def _restore_exception(payload: dict[str, str]) -> BaseException:
     except Exception:
         exc_type = RuntimeError
 
-    return exc_type(payload["message"])
+    exc = exc_type(payload["message"])
+    # Preserve the worker-side traceback for debugging; it is otherwise lost
+    # when the exception crosses the process boundary.
+    remote_traceback = payload.get("traceback") or ""
+    if remote_traceback:
+        try:
+            exc.add_note(f"Remote worker traceback:\n{remote_traceback}")
+        except AttributeError:
+            # add_note is only available on Python 3.11+.
+            exc._remote_traceback = remote_traceback
+    return exc
 
 
 def _controller_worker_main(connection, controller_path: str, controller_kwargs: dict[str, Any]):
