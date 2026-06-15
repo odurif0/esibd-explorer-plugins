@@ -465,11 +465,25 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         """Best-effort close for an unusable inline transport.
 
         After a timed-out DLL call, the normal serialized close path cannot run
-        because the transport lock may still be held by the blocked worker
-        thread. Try a direct ``close_port`` in a short-lived helper thread so a
-        fresh controller instance can reuse the COM port when the DLL accepts
-        the close.
+        because the transport lock is GUARANTEED to still be held by the blocked
+        daemon thread (which cannot be interrupted while inside the native DLL
+        call). A direct ``close_port`` is attempted in a short-lived helper
+        thread so a fresh controller instance can reuse the COM port when the
+        vendor DLL accepts the close.
+
+        CAUTION: this unavoidably issues close_port concurrently with the still-
+        blocked abandoned thread. The vendor DLL's per-port thread safety is not
+        guaranteed; this is a least-bad recovery path, not a clean shutdown. The
+        call is made idempotent so repeated transport failures do not spawn
+        multiple competing close threads.
         """
+        if getattr(self, "_force_disconnect_attempted", False):
+            self.logger.warning(
+                "DMMR force-close already attempted for this instance; not retrying "
+                "to avoid concurrent close_port calls against the abandoned thread."
+            )
+            return False
+        self._force_disconnect_attempted = True
         result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
         close_port = super().close_port
 

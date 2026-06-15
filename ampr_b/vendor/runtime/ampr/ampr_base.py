@@ -1033,29 +1033,27 @@ class AMPRBase:
         Returns
         -------
         tuple
-            (status, volt_24vp, volt_24vn, volt_12vp, volt_12vn, volt_5v0, volt_3v3,
-             temp_psu, temp_board, volt_ref).
+            (status, volt_3v3, temp_cpu, volt_5v0, volt_12vp, volt_12vn,
+             volt_1v8p, volt_1v8n). The seven output doubles match the order
+             declared by COM-AMPR-12.h GetModuleHousekeeping (Address then
+             Volt3V3, TempCPU, Volt5V0, Volt12Vp, Volt12Vn, Volt1V8p, Volt1V8n).
 
         """
-        volt_24vp = ctypes.c_double()
-        volt_24vn = ctypes.c_double()
+        volt_3v3 = ctypes.c_double()
+        temp_cpu = ctypes.c_double()
+        volt_5v0 = ctypes.c_double()
         volt_12vp = ctypes.c_double()
         volt_12vn = ctypes.c_double()
-        volt_5v0 = ctypes.c_double()
-        volt_3v3 = ctypes.c_double()
-        temp_psu = ctypes.c_double()
-        temp_board = ctypes.c_double()
-        volt_ref = ctypes.c_double()
-        
+        volt_1v8p = ctypes.c_double()
+        volt_1v8n = ctypes.c_double()
+
         status = self.ampr_dll.COM_AMPR_12_GetModuleHousekeeping(
-            ctypes.c_uint(address), ctypes.byref(volt_24vp), ctypes.byref(volt_24vn),
-            ctypes.byref(volt_12vp), ctypes.byref(volt_12vn), ctypes.byref(volt_5v0),
-            ctypes.byref(volt_3v3), ctypes.byref(temp_psu), ctypes.byref(temp_board),
-            ctypes.byref(volt_ref))
-        
-        return (status, volt_24vp.value, volt_24vn.value, volt_12vp.value, 
-                volt_12vn.value, volt_5v0.value, volt_3v3.value,
-                temp_psu.value, temp_board.value, volt_ref.value)
+            ctypes.c_uint(address), ctypes.byref(volt_3v3), ctypes.byref(temp_cpu),
+            ctypes.byref(volt_5v0), ctypes.byref(volt_12vp), ctypes.byref(volt_12vn),
+            ctypes.byref(volt_1v8p), ctypes.byref(volt_1v8n))
+
+        return (status, volt_3v3.value, temp_cpu.value, volt_5v0.value,
+                volt_12vp.value, volt_12vn.value, volt_1v8p.value, volt_1v8n.value)
 
     # Voltage control methods for modules
     

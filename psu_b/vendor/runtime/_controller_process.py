@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import multiprocessing as mp
+import threading
 import traceback
 from typing import Any
 
@@ -67,7 +68,24 @@ def _controller_worker_main(connection, controller_path: str, controller_kwargs:
             except EOFError:
                 break
 
-            operation = request["op"]
+            try:
+                operation = request["op"]
+            except (KeyError, TypeError):
+                connection.send(
+                    {
+                        "kind": "response",
+                        "ok": False,
+                        "error": _serialize_exception(
+                            ValueError(
+                                f"Malformed controller request (missing 'op'): {request!r}"
+                            )
+                        ),
+                        "transport_poisoned": bool(
+                            getattr(controller, "_transport_poisoned", False)
+                        ),
+                    }
+                )
+                continue
             if operation == "close":
                 break
 
@@ -122,6 +140,7 @@ class ControllerProcessProxy:
         self._label = label
         self._closed = False
         self._closed_reason = ""
+        self._request_lock = threading.Lock()
 
         context = mp.get_context("spawn")
         parent_conn, child_conn = context.Pipe()
@@ -187,13 +206,11 @@ class ControllerProcessProxy:
         try:
             if self._process.is_alive():
                 try:
-                    self._connection.send({"op": "close"})
+                    with self._request_lock:
+                        self._connection.send({"op": "close"})
                 except (BrokenPipeError, EOFError, OSError):
                     pass
                 self._process.join(timeout=1.0)
-                if self._process.is_alive():
-                    self._process.terminate()
-                    self._process.join(timeout=1.0)
         finally:
             self._closed = True
             self._close_transport()
@@ -201,14 +218,18 @@ class ControllerProcessProxy:
     def _request(self, payload: dict[str, Any], *, timeout_s: float, action: str):
         self._ensure_available()
 
-        try:
-            self._connection.send(payload)
-        except (BrokenPipeError, EOFError, OSError) as exc:
-            self._mark_closed(f"{self._label} worker is unavailable: {exc}")
-            raise RuntimeError(self._closed_reason) from exc
+        # Serialize parent-side send/recv on the shared pipe so concurrent
+        # callers (poll loop vs apply workers vs config load in process mode)
+        # cannot interleave requests and mismatch responses.
+        with self._request_lock:
+            try:
+                self._connection.send(payload)
+            except (BrokenPipeError, EOFError, OSError) as exc:
+                self._mark_closed(f"{self._label} worker is unavailable: {exc}")
+                raise RuntimeError(self._closed_reason) from exc
 
-        response = self._recv_with_timeout(timeout_s, action=action)
-        return self._handle_response(response, action=action)
+            response = self._recv_with_timeout(timeout_s, action=action)
+            return self._handle_response(response, action=action)
 
     def _recv_with_timeout(self, timeout_s: float, *, action: str):
         if self._closed:
@@ -217,7 +238,7 @@ class ControllerProcessProxy:
         if self._connection.poll(timeout_s):
             try:
                 return self._connection.recv()
-            except EOFError as exc:
+            except (EOFError, OSError) as exc:
                 self._mark_closed(
                     f"{self._label} worker exited unexpectedly during {action}."
                 )
@@ -268,6 +289,17 @@ class ControllerProcessProxy:
         if self._process.is_alive():
             self._process.terminate()
             self._process.join(timeout=1.0)
+            if self._process.is_alive():
+                kill = getattr(self._process, "kill", None)
+                if callable(kill):
+                    kill()
+                    self._process.join(timeout=1.0)
+        close_process = getattr(self._process, "close", None)
+        if callable(close_process) and not self._process.is_alive():
+            try:
+                close_process()
+            except Exception:
+                pass
 
     def __del__(self):  # pragma: no cover - best effort cleanup
         try:

@@ -77,7 +77,16 @@ class TimeoutSafeDllMixin:
     _INSTRUMENT_NAME = "CGC"
 
     def _on_transport_poisoned(self) -> None:
-        """Hook for instrument-specific cleanup after a timed-out DLL call."""
+        """Hook for instrument-specific cleanup after a timed-out DLL call.
+
+        The transport is already unusable when this runs, so the timed-out DLL
+        call's thread is still blocked and typically still holds the COM port:
+        the device can no longer be commanded from this instance. For
+        high-voltage devices the outputs may therefore stay energized at their
+        last setpoint. Subclasses should surface a loud operator warning here
+        and rely on the hardware interlock as the authoritative fail-safe; a
+        fresh transport path would be required to attempt an explicit disable.
+        """
 
     def _raise_if_transport_poisoned(self):
         if self._transport_poisoned:
@@ -91,9 +100,16 @@ class TimeoutSafeDllMixin:
         self._transport_poisoned = True
         self._transport_error = (
             f"Timed out during '{step_name}'. "
-            "The device may be powered off or unresponsive."
+            "The device may be powered off or unresponsive. "
+            "WARNING: high-voltage outputs may remain energized at their last "
+            "setpoint because this transport can no longer command a disable; "
+            "manually verify outputs are OFF via the hardware interlock / front "
+            "panel before approaching the device."
         )
         self.connected = False
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            logger.error(self._transport_error)
         self._on_transport_poisoned()
 
     def _call_locked_with_timeout(self, method, timeout_s, step_name, *args, **kwargs):

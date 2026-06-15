@@ -2259,6 +2259,18 @@ class AMPRController(DeviceController):
         ):
             return
 
+        self.print(
+            "Communication with the AMPR high-voltage amplifier was lost. "
+            "OUTPUTS MAY REMAIN ENERGIZED AT THEIR LAST SETPOINT because the "
+            "device can no longer be commanded to disable them. Manually verify "
+            "all outputs are OFF via the front panel / hardware interlock before "
+            "approaching the device.",
+            flag=PRINT.ERROR,
+        )
+
+        # Cancel any in-flight voltage ramp so the background toggle thread stops
+        # commanding an amplifier whose transport is gone.
+        self._cancel_ramp = True
         self.main_state = _AMPR_COMMUNICATION_LOST_STATE
         self.device_state_summary = "Unknown"
         self.interlock_state_summary = "Unknown"
@@ -2575,9 +2587,16 @@ class AMPRController(DeviceController):
             f"Starting AMPR ramp-{label} at {rate_v_s:.1f} V/s "
             f"(estimated {estimated_duration_s:.1f} s)."
         )
+        self._cancel_ramp = False
         self.ramping = True
         try:
             for step in range(1, steps + 1):
+                if getattr(self, "_cancel_ramp", False):
+                    self.print(
+                        f"AMPR ramp-{label} cancelled before completion.",
+                        flag=PRINT.WARNING,
+                    )
+                    return
                 fraction = step / steps
                 step_targets = {
                     key: normalized_start[key]

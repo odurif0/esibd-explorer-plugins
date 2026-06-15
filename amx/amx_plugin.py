@@ -2749,7 +2749,15 @@ class AMXController(DeviceController):
         width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2)
         if channel.enabled and width_us > 0.0:
             width_ticks = round(width_us * _safe_device_attr(device, "CLOCK", 100e6) / 1e6) - width_offset
-            width_ticks = max(width_ticks, 1)
+            if width_ticks < 1:
+                # The requested width is below the minimum representable width;
+                # surface it instead of silently driving a 1-tick pulse.
+                self.print(
+                    f"AMX pulser {pulser} width {width_us:g} us is below the minimum "
+                    "representable width; driving the hardware minimum (1 tick).",
+                    flag=PRINT.WARNING,
+                )
+                width_ticks = 1
             device.set_pulser_width_ticks(pulser, width_ticks, timeout_s=timeout_s)
         else:
             device.set_pulser_width_ticks(pulser, 0, timeout_s=timeout_s)
@@ -2869,7 +2877,19 @@ class AMXController(DeviceController):
                     self.readNumbers(already_acquired=True)
                     self.signalComm.updateValuesSignal.emit()
             except TimeoutError:
-                pass
+                # The controller lock is held by a hardware write (e.g. a
+                # frequency change re-applying all pulsers); reads are skipped
+                # until it completes. Surface this occasionally so the operator
+                # understands why the duty monitors are paused.
+                self._acquisition_lock_timeouts = (
+                    getattr(self, "_acquisition_lock_timeouts", 0) + 1
+                )
+                if self._acquisition_lock_timeouts % 10 == 1:
+                    self.print(
+                        "AMX monitors paused: controller lock busy (a hardware "
+                        "write is in progress). Readings resume when it completes.",
+                        flag=PRINT.WARNING,
+                    )
             time.sleep(self.controllerParent.interval / 1000)
 
     def readNumbers(self, *, already_acquired: bool = False) -> None:
@@ -2915,7 +2935,18 @@ class AMXController(DeviceController):
                 "Closing communication.",
                 flag=PRINT.ERROR,
             )
-            self.closeCommunication()
+            # Stop the acquisition loop immediately and route the close through
+            # the GUI-thread signal so it does not run synchronously on the
+            # acquisition thread (which can re-enter and freeze the monitors).
+            self.acquiring = False
+            close_signal = getattr(
+                getattr(self, "signalComm", None), "closeCommunicationSignal", None
+            )
+            emit = getattr(close_signal, "emit", None)
+            if callable(emit):
+                emit()
+            else:
+                self.closeCommunication()
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
         device = self.device

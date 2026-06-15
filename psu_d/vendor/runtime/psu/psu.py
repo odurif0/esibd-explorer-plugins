@@ -755,6 +755,49 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         self._raise_on_status(status, "get_interlock_enable")
         return connector_output, connector_bnc
 
+    def _read_device_limit(self, channel: int, quantity: str, timeout_s) -> Optional[float]:
+        """Best-effort read of the device-reported setpoint limit (V or A)."""
+        try:
+            if quantity == "voltage":
+                _setpoint, limit = self.get_channel_voltage_limits(
+                    channel, timeout_s=timeout_s
+                )
+            else:
+                _setpoint, limit = self.get_channel_current_limits(
+                    channel, timeout_s=timeout_s
+                )
+        except Exception:
+            return None
+        return limit
+
+    def _bounded_setpoint(
+        self, channel: int, value: float, quantity: str, timeout_s
+    ) -> float:
+        """Clamp a setpoint into [0, device-reported limit] for HV safety.
+
+        The device's own reported limit (VoltageLimit/CurrentLimit) is the
+        authoritative bound. When it cannot be read (unresponsive transport),
+        the value is still floored at 0 but otherwise forwarded, leaving the
+        device firmware's internal limit as the final backstop. Never raises.
+        """
+        if value < 0:
+            return 0.0
+        limit = self._read_device_limit(channel, quantity, timeout_s)
+        if (
+            limit is not None
+            and math.isfinite(limit)
+            and limit > 0
+            and value > limit
+        ):
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.warning(
+                    f"PSU {quantity} setpoint {value} for channel {channel} "
+                    f"clamped to device-reported limit {limit}."
+                )
+            return float(limit)
+        return value
+
     def set_channel_voltage(
         self,
         channel: int,
@@ -764,6 +807,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         """Set one PSU channel output voltage in volts."""
         self._require_connected()
         voltage_v = self._coerce_finite_setpoint(voltage_v, "voltage")
+        voltage_v = self._bounded_setpoint(channel, voltage_v, "voltage", timeout_s)
         timeout_s = self._resolve_io_timeout(timeout_s)
         status = self._call_locked_with_timeout(
             PSUBase.set_psu_output_voltage,
@@ -820,6 +864,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         """Set one PSU channel output current in amperes."""
         self._require_connected()
         current_a = self._coerce_finite_setpoint(current_a, "current")
+        current_a = self._bounded_setpoint(channel, current_a, "current", timeout_s)
         timeout_s = self._resolve_io_timeout(timeout_s)
         status = self._call_locked_with_timeout(
             PSUBase.set_psu_output_current,

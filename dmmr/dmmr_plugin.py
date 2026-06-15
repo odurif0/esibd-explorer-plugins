@@ -953,7 +953,6 @@ class DMMRDevice(Device):
         from PyQt6.QtWidgets import (
             QCheckBox,
             QFrame,
-            QGridLayout,
             QHBoxLayout,
             QLabel,
             QPushButton,
@@ -2255,13 +2254,16 @@ class DMMRController(DeviceController):
         # immediately to avoid a cascade of redundant module-read errors.
         if not self.acquiring:
             return
-        self.initializeValues(reset=True)
 
         if not getattr(self.controllerParent, "isOn", lambda: False)():
             return
 
+        # Capture last-good readings before resetting so a single slow/failing
+        # module does not wipe every other channel to NaN for this poll cycle.
+        previous_values = dict(getattr(self, "values", {}) or {})
+        self.initializeValues(reset=True)
         new_values = {
-            channel.module_address(): np.nan
+            channel.module_address(): previous_values.get(channel.module_address(), np.nan)
             for channel in self.controllerParent.getChannels()
             if channel.real
         }
@@ -2284,10 +2286,11 @@ class DMMRController(DeviceController):
             except TimeoutError:
                 self.errorCount += 1
                 self.print(
-                    f"Timed out while reading DMMR module {module}; keeping partial results.",
+                    f"Timed out while reading DMMR module {module}; "
+                    "continuing with remaining modules (last-good value retained).",
                     flag=PRINT.ERROR,
                 )
-                break
+                continue
             except Exception as exc:  # noqa: BLE001
                 self.errorCount += 1
                 self.print(
@@ -2618,6 +2621,15 @@ class DMMRController(DeviceController):
             and self.device is None
         ):
             return
+
+        self.print(
+            "Communication with the DMMR picoammeter was lost. Live current "
+            "readings are no longer reliable, and the monitored channels may "
+            "still be energized by their high-voltage sources. Do not assume "
+            "any channel is safe based on the last displayed value; verify the "
+            "state of the controlling HV devices before approaching the setup.",
+            flag=PRINT.ERROR,
+        )
 
         self.main_state = _DMMR_COMMUNICATION_LOST_STATE
         self.device_state_summary = "Unknown"

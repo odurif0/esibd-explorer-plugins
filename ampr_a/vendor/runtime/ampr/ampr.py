@@ -328,7 +328,11 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                 )
                 return False
             
-            status = self._call_locked(super().close_port)
+            status = self._call_locked_with_timeout(
+                super().close_port,
+                self._resolve_io_timeout(None),
+                "close_port",
+            )
             
             if status == self.NO_ERR:
                 self.connected = False
@@ -1028,20 +1032,18 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             if status == self.NO_ERR:
                 info["state"] = state
 
-            hk_status, volt_24vp, volt_24vn, volt_12vp, volt_12vn, volt_5v0, volt_3v3, temp_psu, temp_board, volt_ref = self._call_locked(
+            hk_status, volt_3v3, temp_cpu, volt_5v0, volt_12vp, volt_12vn, volt_1v8p, volt_1v8n = self._call_locked(
                 super().get_module_housekeeping, address
             )
             if hk_status == self.NO_ERR:
                 info['housekeeping'] = {
-                    'volt_24vp': volt_24vp,
-                    'volt_24vn': volt_24vn,
+                    'volt_3v3': volt_3v3,
+                    'temp_cpu': temp_cpu,
+                    'volt_5v0': volt_5v0,
                     'volt_12vp': volt_12vp,
                     'volt_12vn': volt_12vn,
-                    'volt_5v0': volt_5v0,
-                    'volt_3v3': volt_3v3,
-                    'temp_psu': temp_psu,
-                    'temp_board': temp_board,
-                    'volt_ref': volt_ref
+                    'volt_1v8p': volt_1v8p,
+                    'volt_1v8n': volt_1v8n,
                 }
             
             # Get voltage data for all channels
