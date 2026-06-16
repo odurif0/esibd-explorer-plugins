@@ -58,6 +58,9 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
         self.device_id = device_id
         self.com = int(com)
         self.stream = int(stream)
+        # The shared DllPortClaimRegistryMixin identifies a claimed DLL channel
+        # by `port_num`; on the HD controller that channel is the stream (0..15).
+        self.port_num = int(stream)
         self.baudrate = int(baudrate)
         if self.baudrate <= 0:
             raise ValueError("baudrate must be > 0")
@@ -180,6 +183,32 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
             "matching driver for that instrument."
         )
 
+    @staticmethod
+    def _err_open_hint(com_number):
+        """Actionable hint appended to an ERR_OPEN (-2) failure.
+
+        The vendor DLL returns ``-2`` when it cannot open the COM port. On Windows
+        the recurring reasons are: another process already holds the port, the COM
+        number is wrong or the device is off/unplugged, and - for ports numbered 10
+        and above - the legacy ``COMnn`` name can fail because Windows expects the
+        ``\\\\.\\`` device prefix that the DLL does not always emit.
+        """
+        try:
+            com_number = int(com_number)
+        except (TypeError, ValueError):
+            com_number = -1
+        lines = [
+            "Hint: the COM port could not be opened. Check that:",
+            "  - no other process holds the port (close ESIBD Explorer / serial terminals),",
+            "  - the device is powered on and the COM number matches Device Manager > Ports,",
+        ]
+        if com_number >= 10:
+            lines.append(
+                f"  - COM{com_number} may exceed the DLL's COM1-COM9 range: reassign the "
+                "port to COM1-COM9 in Device Manager > Port Settings > Advanced."
+            )
+        return "\n" + "\n".join(lines)
+
     def connect(self, timeout_s: float = 5.0) -> bool:
         """Connect to the AMX device."""
         try:
@@ -205,8 +234,9 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
                 open_port, timeout_s, "open_port", self.com, self.stream
             )
             if status != self.NO_ERR:
+                hint = self._err_open_hint(self.com) if status == self.ERR_OPEN else ""
                 raise RuntimeError(
-                    f"AMX open_port failed: {self.format_status(status)}"
+                    f"AMX open_port failed: {self.format_status(status)}{hint}"
                 )
 
             self._set_port_claimed(True)

@@ -202,3 +202,37 @@ def test_collect_housekeeping_standby_is_not_on(monkeypatch):
     assert snapshot["main_state"]["name"] == "STATE_STANDBY"
     assert "STATE_ON" not in snapshot["main_state"]["name"]
     assert snapshot["pulsers"] == []
+
+
+def test_hd_controller_exposes_port_num_for_shared_mixin(monkeypatch):
+    """Regression: the shared DllPortClaimRegistryMixin reads self.port_num; the
+    HD controller must expose it (it slipped through the port->stream rename)."""
+    import ctypes as _ctypes
+    controller_cls, _base_cls = _load_hd_controller_classes()
+
+    class _FakeDll:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(_ctypes, "WinDLL", _FakeDll, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    ctrl = controller_cls("hd_reg_test", com=10, stream=3, baudrate=230400)
+    assert ctrl.stream == 3
+    assert ctrl.port_num == 3          # mixin port-claim id == stream channel
+    assert ctrl.com == 10
+    # The mixin method that previously raised AttributeError must now run cleanly.
+    ctrl._warn_on_other_process_ports()
+
+
+def test_err_open_hint_flags_high_com_ports():
+    """The -2 (ERR_OPEN) hint must warn about the COM>=10 Windows naming gotcha,
+    and always remind about a port held by another process."""
+    controller_cls, _base_cls = _load_hd_controller_classes()
+    hint_hi = controller_cls._err_open_hint(10)
+    assert "COM1-COM9" in hint_hi
+    assert "holds the port" in hint_hi
+
+    hint_lo = controller_cls._err_open_hint(5)
+    assert "COM1-COM9" not in hint_lo   # below the COM10 boundary
+    assert "holds the port" in hint_lo  # but the port-held reminder still applies
