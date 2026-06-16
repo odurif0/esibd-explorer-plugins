@@ -17,10 +17,11 @@ One plugin for one device.
 | `psu_e`  | Drives PSU_E outputs and monitors voltage/current readbacks |
 | `dmmr`   | Reads DMMR module currents and monitors live picoammeter values |
 | `amx`    | Drives AMX frequency and pulser timing and monitors pulser readbacks |
+| `amx_hd` | Drives AMX HD (HV-AMX-CTRL-4EDH) frequency and timer timing and monitors timer readbacks |
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.1.1.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.1.2.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -36,7 +37,8 @@ One plugin for one device.
    ├── psu_d/
    ├── psu_e/
    ├── dmmr/
-   └── amx/
+   ├── amx/
+   └── amx_hd/
    ```
 
 3. **Enable** the plugins you need in the Plugin Manager.

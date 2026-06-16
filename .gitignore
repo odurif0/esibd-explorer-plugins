@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 .claude/
 *.zip
+
+# runtime device logs (created at runtime, never shipped)
+logs/
