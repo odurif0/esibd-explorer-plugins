@@ -818,9 +818,24 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
         self._raise_on_status(fw_version_status, "get_fw_version")
         fw_date_status, fw_date = AMXHDBase.get_fw_date(self)
         self._raise_on_status(fw_date_status, "get_fw_date")
-        hw_type_status, hw_type = AMXHDBase.get_hw_type(self)
+        # HD GetHwType returns the hardware type plus the count of every
+        # implemented module kind (10 values); GetHwVersion returns the board
+        # and FPGA versions (3 values). Both are richer than the normal AMX,
+        # which returns a single value, so unpack them fully.
+        (
+            hw_type_status,
+            hw_type,
+            num_signal,
+            num_register,
+            num_burst_timer,
+            num_timer,
+            num_oscil,
+            num_mapping,
+            num_switch_dual_level,
+            num_switch_tri_level,
+        ) = AMXHDBase.get_hw_type(self)
         self._raise_on_status(hw_type_status, "get_hw_type")
-        hw_version_status, hw_version = AMXHDBase.get_hw_version(self)
+        hw_version_status, hw_version, fpga_version = AMXHDBase.get_hw_version(self)
         self._raise_on_status(hw_version_status, "get_hw_version")
         return {
             "product_no": product_no,
@@ -832,6 +847,17 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
             "hardware": {
                 "type": hw_type,
                 "version": hw_version,
+                "fpga_version": fpga_version,
+                "modules": {
+                    "signal": num_signal,
+                    "register": num_register,
+                    "burst_timer": num_burst_timer,
+                    "timer": num_timer,
+                    "oscillator": num_oscil,
+                    "mapping": num_mapping,
+                    "switch_dual_level": num_switch_dual_level,
+                    "switch_tri_level": num_switch_tri_level,
+                },
             },
         }
 

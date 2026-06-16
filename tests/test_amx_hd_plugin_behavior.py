@@ -236,3 +236,33 @@ def test_err_open_hint_flags_high_com_ports():
     hint_lo = controller_cls._err_open_hint(5)
     assert "COM1-COM9" not in hint_lo   # below the COM10 boundary
     assert "holds the port" in hint_lo  # but the port-held reminder still applies
+
+
+def test_get_product_info_unpacks_hd_hw_type_and_version(monkeypatch):
+    """Regression: HD GetHwType returns 10 values and GetHwVersion returns 3;
+    get_product_info must unpack both fully (it previously expected 2, raising
+    'too many values to unpack')."""
+    controller_cls, base_cls = _load_hd_controller_classes()
+    ctrl = _make_controller(controller_cls)
+
+    monkeypatch.setattr(base_cls, "get_product_no", lambda self: (0, 77057))
+    monkeypatch.setattr(base_cls, "get_product_id", lambda self: (0, "HV-AMX-CTRL-4EDH"))
+    monkeypatch.setattr(base_cls, "get_fw_version", lambda self: (0, 257))
+    monkeypatch.setattr(base_cls, "get_fw_date", lambda self: (0, "2024-05-01"))
+    # HD GetHwType -> status + hw_type + 8 module counts.
+    monkeypatch.setattr(base_cls, "get_hw_type", lambda self: (
+        0, 0x0B21, 4, 4, 1, 4, 1, 1, 2, 2,
+    ))
+    # HD GetHwVersion -> status + board version + fpga version.
+    monkeypatch.setattr(base_cls, "get_hw_version", lambda self: (0, 5, 12))
+
+    info = ctrl._get_product_info_unlocked()
+
+    assert info["product_id"] == "HV-AMX-CTRL-4EDH"
+    assert info["hardware"]["type"] == 0x0B21
+    assert info["hardware"]["version"] == 5
+    assert info["hardware"]["fpga_version"] == 12
+    modules = info["hardware"]["modules"]
+    assert modules["timer"] == 4
+    assert modules["oscillator"] == 1
+    assert modules["switch_dual_level"] == 2
