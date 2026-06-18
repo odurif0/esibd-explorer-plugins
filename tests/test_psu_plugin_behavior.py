@@ -596,6 +596,48 @@ def test_psu_controller_read_numbers_acquires_lock_for_housekeeping():
     assert lock_calls == [("Could not acquire lock to read PSU housekeeping.", False)]
 
 
+def test_read_numbers_lock_timeout_is_not_a_transport_failure(monkeypatch):
+    """Regression: a controller-lock timeout while polling PSU housekeeping is
+    transient congestion (e.g. an in-flight range switch holding the lock while
+    the HV discharges), NOT a communication fault. It must not count toward the
+    transport-failure threshold (which would, after 3 strikes, falsely declare
+    the PSU lost and raise the HV 'outputs may remain energized' alarm) and must
+    not wipe the live readbacks."""
+    module = _load_module()
+
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        getChannels=lambda: [],
+        main_state="ST_ON",
+        output_summary="12 V",
+        available_configs_text="",
+    )
+    controller = module.PSUController(parent)
+    controller.device = types.SimpleNamespace()
+    controller.initialized = True
+    controller.values = {"seed": 1.0}  # prior readback; must survive a skip
+
+    transport_notes = []
+    transport_losses = []
+    monkeypatch.setattr(
+        controller, "_note_transport_failure",
+        lambda: transport_notes.append(1) or 0,
+    )
+    monkeypatch.setattr(controller, "_handle_transport_loss", lambda: transport_losses.append(1))
+
+    @contextlib.contextmanager
+    def blocking_lock_section(timeout_message, *, already_acquired=False):
+        raise TimeoutError(timeout_message)
+
+    controller._controller_lock_section = blocking_lock_section
+    controller.readNumbers()
+
+    assert controller.errorCount == 0          # not counted as an error
+    assert transport_notes == []               # not recorded as a transport fault
+    assert transport_losses == []              # PSU not declared lost
+    assert controller.values == {"seed": 1.0}  # readbacks preserved, not wiped
+
+
 def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_polls(
     monkeypatch,
 ):

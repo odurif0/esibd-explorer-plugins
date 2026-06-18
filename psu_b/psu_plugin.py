@@ -4147,12 +4147,17 @@ class PSUController(DeviceController):
                 else:
                     return
         except TimeoutError:
-            self.errorCount += 1
-            self.print("Timed out while polling PSU housekeeping.", flag=PRINT.ERROR)
-            if self._note_transport_failure() >= _PSU_TRANSPORT_FAILURE_THRESHOLD:
-                self._handle_transport_loss()
-                return
-            self.initializeValues(reset=True)
+            # The controller lock is held by another in-flight operation
+            # (typically a range switch, which waits up to
+            # _PSU_RANGE_SWITCH_SETTLE_S for the HV to discharge before it
+            # switches the relay). That is transient congestion, NOT a
+            # communication fault: a real DLL hang raises RuntimeError and is
+            # handled by the except-Exception branch below. Counting a
+            # lock-timeout toward the transport-failure threshold would
+            # falsely declare the PSU lost (3 strikes) and raise the HV
+            # "outputs may remain energized" alarm merely because a range
+            # switch was in progress. Skip this poll cycle and keep the last
+            # readbacks instead of wiping them.
             return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
