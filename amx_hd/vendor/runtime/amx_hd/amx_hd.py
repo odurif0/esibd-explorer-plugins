@@ -982,6 +982,61 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
             "collect_housekeeping",
         )
 
+    def collect_state_snapshot(self, timeout_s: Optional[float] = None) -> dict:
+        """Lightweight state-only snapshot for startup-readiness polling.
+
+        Queries only the device/controller state and the enable bit (~3 DLL
+        calls) instead of the full :meth:`collect_housekeeping` (~21 calls), so
+        the ON transition can poll for STATE_ON quickly instead of holding the
+        transport lock for ~1-2 s per iteration. Returns the same
+        ``main_state`` / ``device_enabled`` / ``device_state`` /
+        ``controller_state`` keys the readiness check and status display read;
+        ``housekeeping`` / ``oscillator`` / ``pulsers`` are intentionally absent
+        (call :meth:`collect_housekeeping` for those).
+        """
+        self._require_connected()
+        return self._call_locked_with_timeout(
+            self._collect_state_unlocked,
+            self._resolve_io_timeout(timeout_s),
+            "collect_state_snapshot",
+        )
+
+    def _collect_state_unlocked(self) -> dict:
+        (
+            state_status,
+            main_state_hex,
+            main_state_name,
+            device_state_hex,
+            device_state_flags,
+            _temperature_state_hex,
+            _temperature_state_flags,
+        ) = AMXHDBase.get_device_state(self)
+        self._raise_on_status(state_status, "get_device_state")
+        (
+            controller_state_status,
+            controller_state_hex,
+            _controller_config,
+            controller_state_flags,
+        ) = AMXHDBase.get_state(self)
+        self._raise_on_status(controller_state_status, "get_state")
+        device_enabled_status, device_enabled = AMXHDBase.get_device_enable(self)
+        self._raise_on_status(device_enabled_status, "get_device_enable")
+        return {
+            "device_enabled": bool(device_enabled),
+            "main_state": {
+                "hex": main_state_hex,
+                "name": main_state_name,
+            },
+            "device_state": {
+                "hex": device_state_hex,
+                "flags": device_state_flags,
+            },
+            "controller_state": {
+                "hex": controller_state_hex,
+                "flags": controller_state_flags,
+            },
+        }
+
     def shutdown(
         self,
         *,

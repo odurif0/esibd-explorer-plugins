@@ -2592,7 +2592,11 @@ class AMXHDController(DeviceController):
         device = self.device
         if device is None:
             raise RuntimeError("AMX device disconnected.")
-        return device.collect_housekeeping(timeout_s=self._startup_snapshot_timeout_s())
+        # Lightweight state-only read: startup polling only needs to detect
+        # STATE_ON + device_enabled. The full collect_housekeeping (~21 DLL
+        # calls) would hold the controller lock for ~1-2 s per iteration and
+        # stall the ON transition for many seconds.
+        return device.collect_state_snapshot(timeout_s=self._startup_snapshot_timeout_s())
 
     def _startup_snapshot_ready(self, snapshot: dict[str, Any]) -> bool:
         state = str(snapshot.get("main_state", {}).get("name", "") or "")
@@ -3152,7 +3156,13 @@ class AMXHDController(DeviceController):
         confirmation_reason = "shutdown confirmation was not completed"
         try:
             with self._controller_lock_section(
-                "Could not acquire lock to shut down the AMX."
+                "Could not acquire lock to shut down the AMX.",
+                # The periodic state refresh holds this lock for the duration of
+                # a full collect_housekeeping (~1-2 s), which exceeds the default
+                # 1 s lock timeout and made the OFF toggle reliably fail with
+                # "Could not acquire lock to shut down". Wait long enough to let
+                # an in-flight refresh release the lock instead of giving up.
+                timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0)),
             ):
                 device = self.device
                 if device is None:
@@ -3230,6 +3240,13 @@ class AMXHDController(DeviceController):
                     timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
                 )
                 self._apply_snapshot(snapshot)
+        except TimeoutError:
+            # The controller lock is briefly held by another operation (an
+            # in-flight command, or an overlapping refresh on this slow HD
+            # device where collect_housekeeping takes ~1-2 s). This is
+            # transient: skip this cycle and keep the last known status instead
+            # of flickering the display to Error/Unknown.
+            return
         except Exception as exc:
             if _amx_transport_failure_is_fatal(exc):
                 # Poisoned/unusable transport: stop acquisition and route the

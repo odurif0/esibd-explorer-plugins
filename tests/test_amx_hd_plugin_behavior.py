@@ -266,3 +266,44 @@ def test_get_product_info_unpacks_hd_hw_type_and_version(monkeypatch):
     assert modules["timer"] == 4
     assert modules["oscillator"] == 1
     assert modules["switch_dual_level"] == 2
+
+
+def test_collect_state_snapshot_is_lightweight(monkeypatch):
+    """The startup-readiness poll uses a state-only snapshot: it must read the
+    state + enable bit and must NOT pull the full housekeeping (which holds the
+    transport lock for ~1-2 s and stalled the ON transition)."""
+    controller_cls, base_cls = _load_hd_controller_classes()
+    ctrl = _make_controller(controller_cls)
+
+    heavy_calls = {"housekeeping": 0, "oscillator": 0, "timer_count": 0}
+
+    monkeypatch.setattr(base_cls, "get_device_state", lambda self: (
+        0, "0x1", "STATE_ON", "0x0", ["DEVST_OK"], "0x0", ["TMPST_OK"]
+    ))
+    monkeypatch.setattr(base_cls, "get_state", lambda self: (0, "0x401", 0, ["ST_ENABLE"]))
+    monkeypatch.setattr(base_cls, "get_device_enable", lambda self: (0, True))
+    # Heavy primitives must NOT be touched by the lightweight snapshot.
+    monkeypatch.setattr(
+        base_cls, "get_housekeeping",
+        lambda self: heavy_calls.__setitem__("housekeeping", heavy_calls["housekeeping"] + 1) or (0, 12.0, 11.5, 5.0, 3.3, 3.31, 2.51, 1.2, 42.5),
+    )
+    monkeypatch.setattr(
+        base_cls, "get_oscillator_period",
+        lambda self, oscillator=0: heavy_calls.__setitem__("oscillator", heavy_calls["oscillator"] + 1) or (0, 49998),
+    )
+    monkeypatch.setattr(
+        base_cls, "get_timer_count",
+        lambda self: heavy_calls.__setitem__("timer_count", heavy_calls["timer_count"] + 1) or (0, 4),
+    )
+
+    snap = ctrl._collect_state_unlocked()
+
+    # State-only keys present and correctly mapped (HD STATE_ON = 0x0001).
+    assert snap["main_state"]["name"] == "STATE_ON"
+    assert snap["device_enabled"] is True
+    assert snap["device_state"]["flags"] == ["DEVST_OK"]
+    assert snap["controller_state"]["flags"] == ["ST_ENABLE"]
+    # Heavy keys absent -> the readiness poll does not pay for them.
+    for absent in ("housekeeping", "oscillator", "pulsers"):
+        assert absent not in snap
+    assert heavy_calls == {"housekeeping": 0, "oscillator": 0, "timer_count": 0}
