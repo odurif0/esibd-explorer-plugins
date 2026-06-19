@@ -54,6 +54,25 @@ _AMX_MONITOR_WARN_RELATIVE_TOLERANCE = 0.10
 _AMX_MONITOR_RELATIVE_FLOOR_DUTY = 1.0
 _AMX_NUMERIC_DEBOUNCE_MS = 250
 _AMX_MAX_CONSECUTIVE_POLL_ERRORS = 10
+# A timed-out open_port poisons the COM port for the lifetime of the ESIBD
+# Explorer process: the blocked vendor-DLL call keeps an exclusive OS handle, so
+# no new instance can reopen it and every later retry fails with ERR_OPEN (-2)
+# even once the device is powered on. The operator-facing guidance below makes
+# that explicit instead of letting the user loop on a confusing
+# 'Error opening port' message while the hardware is actually fine.
+_AMX_POISONED_PORT_RECOVERY = (
+    "The COM port is now locked inside this ESIBD Explorer process: the timed-out "
+    "attempt left a blocked vendor-DLL call holding an exclusive handle to the port. "
+    "This instance can no longer reopen it, so every later retry will keep failing "
+    "with 'Error opening port' (-2) even once the device is powered on. Power the "
+    "device on, then RESTART ESIBD Explorer to release the port before trying again."
+)
+_AMX_POISONED_PORT_RETRY = (
+    "This retry is failing because an earlier timed-out connection attempt locked "
+    "the COM port inside this ESIBD Explorer process. The device may well be powered "
+    "on now, but the port cannot be reopened from this instance. RESTART ESIBD "
+    "Explorer to release the port and retry."
+)
 
 
 def _amx_transport_failure_is_fatal(exc: Exception) -> bool:
@@ -75,6 +94,31 @@ def _amx_transport_failure_is_fatal(exc: Exception) -> bool:
             "worker is no longer running",
         )
     )
+
+
+def _amx_poisoned_port_guidance(
+    exc: Exception,
+    *,
+    poisoned_com: int | None,
+    current_com: int | None,
+) -> str:
+    """Return operator guidance for a failed AMX init, or "" when none applies.
+
+    Mirrors the two poisoning scenarios recorded across retries by the
+    controller: a transport just poisoned by this failure, or a transport that
+    was poisoned earlier in the session and is still locking the port. Returning
+    "" keeps unrelated init failures (genuine cabling, wrong COM number, ...)
+    free of misleading "restart the app" advice.
+    """
+    if _amx_transport_failure_is_fatal(exc):
+        return _AMX_POISONED_PORT_RECOVERY
+    if (
+        poisoned_com is not None
+        and current_com is not None
+        and int(poisoned_com) == int(current_com)
+    ):
+        return _AMX_POISONED_PORT_RETRY
+    return ""
 _AMX_FREQUENCY_SPINBOX_STYLE = (
     "QDoubleSpinBox {"
     " background-color: #0f172a;"
@@ -2337,6 +2381,9 @@ class AMXHDController(DeviceController):
         self._channel_apply_pending: dict[int, AMXHDChannel] = {}
         self._channel_apply_worker_running = False
         self._consecutive_poll_errors = 0
+        # COM port (if any) whose transport was poisoned by a timed-out DLL call
+        # earlier in this session and is therefore still locked in-process.
+        self._poisoned_com: int | None = None
         self.values: dict[int, float] = {}
         self.width_values: dict[int, str] = {}
         self.delay_values: dict[int, str] = {}
@@ -2373,14 +2420,35 @@ class AMXHDController(DeviceController):
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
             self._restore_off_ui_state()
-            self.print(
+            guidance = self._init_failure_guidance(exc)
+            message = (
                 f"AMX initialization failed on COM{int(self.controllerParent.com)}: "
-                f"{self._format_exception(exc)}",
-                flag=PRINT.ERROR,
+                f"{self._format_exception(exc)}"
             )
+            if guidance:
+                message = f"{message}\n{guidance}"
+            self.print(message, flag=PRINT.ERROR)
             self._dispose_device()
         finally:
             self.initializing = False
+
+    def _init_failure_guidance(self, exc: Exception) -> str:
+        """Operator guidance appended to an init-failure message, or "" if none.
+
+        Tracks whether a transport was poisoned by a timed-out DLL call earlier
+        in this session so that later retries explain why they still fail (the
+        COM port is locked in-process) instead of looping on a bare
+        'Error opening port' (-2) while the hardware is actually responsive.
+        """
+        current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
+        guidance = _amx_poisoned_port_guidance(
+            exc,
+            poisoned_com=getattr(self, "_poisoned_com", None),
+            current_com=current_com,
+        )
+        if _amx_transport_failure_is_fatal(exc) and current_com >= 0:
+            self._poisoned_com = current_com
+        return guidance
 
     def initComplete(self) -> None:
         self._finalize_transport_initialization()
@@ -2410,6 +2478,9 @@ class AMXHDController(DeviceController):
             self.controllerParent._sync_channels()
         self.initializeValues(reset=True)
         self.initialized = True
+        # A fresh transport reached this far, so any earlier in-process port
+        # poisoning is no longer relevant for this COM port.
+        self._poisoned_com = None
         self._consecutive_poll_errors = 0
         self.super_init_complete_called = True
         self._sync_status_to_gui()

@@ -106,12 +106,17 @@ def _clear_test_modules() -> None:
         sys.modules.pop(name, None)
 
 
-def _load_hd_controller_classes():
+def _load_hd_plugin_module():
     _clear_test_modules()
     _install_esibd_stubs()
     spec = importlib.util.spec_from_file_location("amx_hd_plugin_test", PLUGIN_HD_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_hd_controller_classes():
+    module = _load_hd_plugin_module()
 
     runtime_name = module._bundled_runtime_module_name(PLUGIN_HD_PATH.parent)
     module._get_amx_driver_class()  # ensures the private runtime package is loaded
@@ -307,3 +312,66 @@ def test_collect_state_snapshot_is_lightweight(monkeypatch):
     for absent in ("housekeeping", "oscillator", "pulsers"):
         assert absent not in snap
     assert heavy_calls == {"housekeeping": 0, "oscillator": 0, "timer_count": 0}
+
+
+class _ComParent:
+    """Minimal controllerParent exposing only what the guidance / finalize paths read."""
+
+    def __init__(self, com):
+        self.com = com
+
+    def getChannels(self):
+        return []
+
+
+def test_init_failure_guidance_explains_poisoned_port_recovery():
+    """A timed-out open_port locks the COM port for the process lifetime: the
+    init-failure guidance must tell the operator to restart ESIBD Explorer
+    instead of letting retries loop on a confusing '-2 (Error opening port)'."""
+    plugin = _load_hd_plugin_module()
+    controller = plugin.AMXHDController(controllerParent=_ComParent(com=10))
+
+    # Attempt 1: device OFF, open_port times out and poisons the transport.
+    fatal_exc = RuntimeError(
+        "AMX HD DLL call timed out during 'open_port'. The device may be powered "
+        "off or unresponsive. The AMX HD instance is now marked unusable."
+    )
+    guidance1 = controller._init_failure_guidance(fatal_exc)
+    assert "RESTART ESIBD Explorer" in guidance1
+    assert controller._poisoned_com == 10  # recorded for later retries
+
+    # Attempt 2: device now ON (green LED), fresh instance, but the port is still
+    # locked in-process -> open_port returns -2 immediately.
+    retry_exc = RuntimeError("AMX open_port failed: -2 (Error opening port)")
+    guidance2 = controller._init_failure_guidance(retry_exc)
+    assert "RESTART ESIBD Explorer" in guidance2
+    assert "locked the COM port" in guidance2
+    # The non-fatal retry must not clobber the recorded poisoned COM.
+    assert controller._poisoned_com == 10
+
+
+def test_init_failure_guidance_silent_without_prior_poisoning():
+    """A garden-variety init failure with no prior poisoning yields no guidance,
+    so unrelated cabling / COM-number problems are not mis-attributed."""
+    plugin = _load_hd_plugin_module()
+    controller = plugin.AMXHDController(controllerParent=_ComParent(com=10))
+
+    assert controller._init_failure_guidance(
+        RuntimeError("AMX open_port failed: -2 (Error opening port)")
+    ) == ""
+    assert controller._poisoned_com is None
+
+
+def test_init_failure_guidance_forgets_poisoning_on_success():
+    """A fresh transport reaching init completion clears any prior poisoning so
+    later failures are not mis-attributed (e.g. the operator switched COM port)."""
+    plugin = _load_hd_plugin_module()
+    controller = plugin.AMXHDController(controllerParent=_ComParent(com=10))
+
+    controller._init_failure_guidance(
+        RuntimeError("...The AMX HD instance is now marked unusable.")
+    )
+    assert controller._poisoned_com == 10
+
+    controller._finalize_transport_initialization()
+    assert controller._poisoned_com is None

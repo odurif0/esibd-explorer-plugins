@@ -130,6 +130,52 @@ def _transport_failure_is_fatal(exc: Exception) -> bool:
     )
 
 
+# A timed-out open_port poisons the COM port for the lifetime of the ESIBD
+# Explorer process: the blocked vendor-DLL call keeps an exclusive OS handle, so
+# no new instance can reopen it and every later retry fails with ERR_OPEN (-2)
+# even once the device is powered on. The operator-facing guidance below makes
+# that explicit instead of letting the user loop on a confusing
+# 'Error opening port' message while the hardware is actually fine.
+_AMPR_POISONED_PORT_RECOVERY = (
+    "The COM port is now locked inside this ESIBD Explorer process: the timed-out "
+    "attempt left a blocked vendor-DLL call holding an exclusive handle to the port. "
+    "This instance can no longer reopen it, so every later retry will keep failing "
+    "with 'Error opening port' (-2) even once the device is powered on. Power the "
+    "device on, then RESTART ESIBD Explorer to release the port before trying again."
+)
+_AMPR_POISONED_PORT_RETRY = (
+    "This retry is failing because an earlier timed-out connection attempt locked "
+    "the COM port inside this ESIBD Explorer process. The device may well be powered "
+    "on now, but the port cannot be reopened from this instance. RESTART ESIBD "
+    "Explorer to release the port and retry."
+)
+
+
+def _ampr_poisoned_port_guidance(
+    exc: Exception,
+    *,
+    poisoned_com: int | None,
+    current_com: int | None,
+) -> str:
+    """Return operator guidance for a failed AMPR init, or "" when none applies.
+
+    A timed-out open_port poisons the COM port for the lifetime of the process
+    (the blocked vendor-DLL thread keeps an exclusive OS handle), so no new
+    instance can reopen it and every retry fails with ERR_OPEN (-2). Surface
+    that instead of letting the operator loop on a confusing 'Error opening
+    port' while the hardware is actually fine.
+    """
+    if _transport_failure_is_fatal(exc):
+        return _AMPR_POISONED_PORT_RECOVERY
+    if (
+        poisoned_com is not None
+        and current_com is not None
+        and int(poisoned_com) == int(current_com)
+    ):
+        return _AMPR_POISONED_PORT_RETRY
+    return ""
+
+
 def _invoke_gui_callback(callback: Any) -> None:
     """Run GUI updates directly in tests and queue them on the Qt GUI thread."""
     if not callable(callback):
@@ -1649,6 +1695,9 @@ class AMPRController(DeviceController):
         self._transition_lock = Lock()
         self._forced_close_state: str | None = None
         self._consecutive_transport_failures = 0
+        # COM port (if any) whose transport was poisoned by a timed-out DLL call
+        # earlier in this session and is therefore still locked in-process.
+        self._poisoned_com: int | None = None
 
     def initializeValues(self, reset: bool = False) -> None:
         if getattr(self, "values", None) is None or reset:
@@ -1690,14 +1739,35 @@ class AMPRController(DeviceController):
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
             self._restore_off_ui_state()
-            self.print(
+            guidance = self._init_failure_guidance(exc)
+            message = (
                 f"AMPR initialization failed on COM{int(self.controllerParent.com)}: "
-                f"{self._format_exception(exc)}",
-                flag=PRINT.ERROR,
+                f"{self._format_exception(exc)}"
             )
+            if guidance:
+                message = f"{message}\n{guidance}"
+            self.print(message, flag=PRINT.ERROR)
             self._dispose_device()
         finally:
             self.initializing = False
+
+    def _init_failure_guidance(self, exc: Exception) -> str:
+        """Operator guidance appended to an init-failure message, or "" if none.
+
+        Tracks whether a transport was poisoned by a timed-out DLL call earlier
+        in this session so that later retries explain why they still fail (the
+        COM port is locked in-process) instead of looping on a bare
+        'Error opening port' (-2) while the hardware is actually responsive.
+        """
+        current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
+        guidance = _ampr_poisoned_port_guidance(
+            exc,
+            poisoned_com=getattr(self, "_poisoned_com", None),
+            current_com=current_com,
+        )
+        if _transport_failure_is_fatal(exc) and current_com >= 0:
+            self._poisoned_com = current_com
+        return guidance
 
     def initComplete(self) -> None:
         if self.device is not None and self.detected_module_ids:
@@ -1710,6 +1780,9 @@ class AMPRController(DeviceController):
                 self.controllerParent.exportConfiguration(useDefaultFile=True)
         self.initializeValues()
         self.initialized = True
+        # A fresh transport reached this far, so any earlier in-process port
+        # poisoning is no longer relevant for this COM port.
+        self._poisoned_com = None
         self.super_init_complete_called = True
         self._sync_status_to_gui()
         if self.device is None:

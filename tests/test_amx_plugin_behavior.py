@@ -1398,3 +1398,40 @@ def test_amx_channel_timing_queue_keeps_latest_per_pulser(monkeypatch):
 
     assert applied == [(1, 2.0), (2, 3.0)]
     assert controller._channel_apply_worker_running is False
+
+
+def test_init_failure_guidance_explains_poisoned_port_recovery():
+    """A timed-out open_port locks the COM port for the process lifetime; the
+    init-failure guidance must tell the operator to restart ESIBD Explorer
+    instead of letting retries loop on a confusing '-2 (Error opening port)'."""
+    module = _load_module()
+    controller = module.AMXController(types.SimpleNamespace(com=10))
+
+    # Attempt 1: device OFF, open_port times out and poisons the transport.
+    fatal_exc = RuntimeError(
+        "AMX DLL call timed out during 'open_port'. The device may be powered "
+        "off or unresponsive. The AMX instance is now marked unusable."
+    )
+    guidance1 = controller._init_failure_guidance(fatal_exc)
+    assert "RESTART ESIBD Explorer" in guidance1
+    assert controller._poisoned_com == 10  # recorded for later retries
+
+    # Attempt 2: device now ON, fresh instance, but the port is still locked
+    # in-process -> open_port returns -2 immediately.
+    retry_exc = RuntimeError("AMX open_port failed: -2 (Error opening port)")
+    guidance2 = controller._init_failure_guidance(retry_exc)
+    assert "RESTART ESIBD Explorer" in guidance2
+    assert "locked the COM port" in guidance2
+    assert controller._poisoned_com == 10  # not clobbered by the non-fatal retry
+
+
+def test_init_failure_guidance_silent_without_prior_poisoning():
+    """A garden-variety init failure with no prior poisoning yields no guidance,
+    so unrelated cabling / COM-number problems are not mis-attributed."""
+    module = _load_module()
+    controller = module.AMXController(types.SimpleNamespace(com=10))
+
+    assert controller._init_failure_guidance(
+        RuntimeError("AMX open_port failed: -2 (Error opening port)")
+    ) == ""
+    assert controller._poisoned_com is None
