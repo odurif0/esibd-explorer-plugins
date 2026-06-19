@@ -375,3 +375,99 @@ def test_init_failure_guidance_forgets_poisoning_on_success():
 
     controller._finalize_transport_initialization()
     assert controller._poisoned_com is None
+
+
+def test_restore_ui_state_for_device_reflects_real_hardware_state():
+    """A failed ON must not strand the ON/OFF button at OFF when the AMX is
+    genuinely ON: the button must reflect the real state so the OFF toggle
+    (-> shutdown) stays reachable. This is the core of the deadlock fix."""
+    plugin = _load_hd_plugin_module()
+    restored = []
+    parent = _ComParent(com=10)
+    parent._set_on_ui_state = lambda on: restored.append(bool(on))
+    controller = plugin.AMXHDController(controllerParent=parent)
+
+    controller.main_state = "STATE_ON"
+    controller._restore_ui_state_for_device()
+    assert restored == [True]  # device genuinely ON -> button stays ON -> OFF reachable
+
+    restored.clear()
+    controller.main_state = "STATE_STANDBY"
+    controller._restore_ui_state_for_device()
+    assert restored == [False]  # device OFF/standby -> restore OFF as before
+
+
+def test_is_standby_operating_config_detects_standby_slot():
+    """A standby-named slot must be flagged so it cannot be used as Operating."""
+    plugin = _load_hd_plugin_module()
+    device = object.__new__(plugin.AMXHDDevice)
+    device.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operating A", "active": True, "valid": True},
+        {"index": 2, "name": "low-standby pulse", "active": True, "valid": True},
+    ]
+    assert plugin.AMXHDDevice._is_standby_operating_config(device, 0) is True
+    assert plugin.AMXHDDevice._is_standby_operating_config(device, 2) is True  # substring match
+    assert plugin.AMXHDDevice._is_standby_operating_config(device, 1) is False
+    assert plugin.AMXHDDevice._is_standby_operating_config(device, -1) is False
+    assert plugin.AMXHDDevice._is_standby_operating_config(device, 99) is False  # not listed
+
+
+def _make_device_stub(plugin):
+    device = object.__new__(plugin.AMXHDDevice)
+    device.name = "AMX_HD"
+    device.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operating A", "active": True, "valid": True},
+    ]
+    state = {"operating_config": 0}
+
+    device._setting = lambda name: None
+    device._config_setting_value = lambda attr: state.get(attr, -1)
+
+    written = []
+    def _set(attr, val):
+        written.append((attr, val))
+        state[attr] = val
+        return True
+    device._set_config_setting_value = _set
+    device._update_config_controls = lambda: None
+    device._update_status_widgets = lambda: None
+    logs = []
+    device.print = lambda msg, flag=None: logs.append(msg)
+    device._combo_current_value = lambda combo: state.get("operating_config", -1)
+    return device, written, logs, state
+
+
+def test_config_selector_changed_refuses_standby_operating_selection():
+    """Selecting a standby slot as Operating config is refused BEFORE being
+    persisted, and reverted to Skip (-1), so ON cannot dead-end on it."""
+    plugin = _load_hd_plugin_module()
+    device, written, logs, _state = _make_device_stub(plugin)
+    device.operatingConfigCombo = object()  # truthy placeholder
+
+    plugin.AMXHDDevice._config_selector_changed(device, "operating_config")
+
+    # The standby choice (0) is refused and coerced to -1, never persisted as 0.
+    assert ("operating_config", -1) in written
+    assert all(v != 0 for _k, v in written)
+    assert any("standby slot" in m for m in logs)
+
+
+def test_coerce_invalid_operating_config_resets_persisted_standby():
+    """A persisted Operating config that resolves to a standby slot is reset to
+    Skip (-1) once, after the transport is ready (idempotent)."""
+    plugin = _load_hd_plugin_module()
+    device, written, logs, state = _make_device_stub(plugin)
+
+    device._coerce_invalid_operating_config()
+    assert state["operating_config"] == -1
+    assert ("operating_config", -1) in written
+    assert any("standby slot" in m for m in logs)
+
+    # Idempotent: a second call is a no-op (value already -1).
+    written.clear()
+    logs.clear()
+    device._coerce_invalid_operating_config()
+    assert written == []
+    assert logs == []
