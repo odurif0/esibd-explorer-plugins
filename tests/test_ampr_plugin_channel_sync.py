@@ -1845,3 +1845,37 @@ def test_controller_formats_open_port_error_with_operator_hint():
     assert "RuntimeError:" in message
     assert "Windows could not open COM5." in message
     assert "already in use" in message
+
+
+def test_init_failure_guidance_explains_poisoned_port_recovery():
+    """A timed-out open_port locks the COM port for the process lifetime; the
+    init-failure guidance must tell the operator to restart ESIBD Explorer
+    instead of letting retries loop on a confusing '-2 (Error opening port)'.
+    AMPR's _format_exception already hints 'already in use' for the -2 case but
+    never recommends a restart, so the poisoned-port guidance complements it."""
+    module = _load_module()
+    controller = module.AMPRController(types.SimpleNamespace(com=10))
+
+    fatal_exc = RuntimeError(
+        "AMPR DLL call timed out during 'open_port'. The device may be powered "
+        "off or unresponsive. The AMPR instance is now marked unusable."
+    )
+    guidance1 = controller._init_failure_guidance(fatal_exc)
+    assert "RESTART ESIBD Explorer" in guidance1
+    assert controller._poisoned_com == 10
+
+    retry_exc = RuntimeError("AMPR open_port failed: -2 (Error opening port)")
+    guidance2 = controller._init_failure_guidance(retry_exc)
+    assert "RESTART ESIBD Explorer" in guidance2
+    assert "locked the COM port" in guidance2
+    assert controller._poisoned_com == 10
+
+
+def test_init_failure_guidance_silent_without_prior_poisoning():
+    module = _load_module()
+    controller = module.AMPRController(types.SimpleNamespace(com=10))
+
+    assert controller._init_failure_guidance(
+        RuntimeError("AMPR open_port failed: -2 (Error opening port)")
+    ) == ""
+    assert controller._poisoned_com is None
