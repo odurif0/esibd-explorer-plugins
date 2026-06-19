@@ -649,7 +649,8 @@ def test_controller_toggle_on_requires_operating_config():
     assert restored == [True]
     assert messages == [
         (
-            "Cannot start AMX: select an AMX config first.",
+            "Cannot start AMX: select an AMX config first. Select a valid "
+            "(non-standby) Operating config. Use Close communication to disconnect.",
             module.PRINT.WARNING,
         )
     ]
@@ -1435,3 +1436,35 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
         RuntimeError("AMX open_port failed: -2 (Error opening port)")
     ) == ""
     assert controller._poisoned_com is None
+
+
+def test_restore_ui_state_for_device_reflects_real_hardware_state():
+    """Mirror of the AMX HD test: a failed ON must keep the button ON when the
+    AMX is genuinely ON, so the OFF toggle stays reachable (deadlock fix)."""
+    module = _load_module()
+    restored = []
+    parent = types.SimpleNamespace(com=10)
+    parent._set_on_ui_state = lambda on: restored.append(bool(on))
+    controller = module.AMXController(parent)
+
+    controller.main_state = "STATE_ON"
+    controller._restore_ui_state_for_device()
+    assert restored == [True]
+
+    restored.clear()
+    controller.main_state = "STATE_STANDBY"
+    controller._restore_ui_state_for_device()
+    assert restored == [False]
+
+
+def test_is_standby_operating_config_detects_standby_slot():
+    """Mirror: a standby-named slot cannot be used as the Operating config."""
+    module = _load_module()
+    device = object.__new__(module.AMXDevice)
+    device.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operating A", "active": True, "valid": True},
+    ]
+    assert module.AMXDevice._is_standby_operating_config(device, 0) is True
+    assert module.AMXDevice._is_standby_operating_config(device, 1) is False
+    assert module.AMXDevice._is_standby_operating_config(device, -1) is False

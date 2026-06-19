@@ -803,6 +803,42 @@ class AMXHDDevice(Device):
             )
         return entries
 
+    def _is_standby_operating_config(self, config_index: int) -> bool:
+        """Return True if ``config_index`` is a standby-named slot.
+
+        A standby slot is a valid parking config but must not drive operation
+        (it keeps the AMX disabled); selecting it as the Operating config makes
+        every ON attempt dead-end. Mirrors the controller-side
+        ``_config_entry_is_standby_like`` using the device-side
+        ``available_configs`` snapshot.
+        """
+        if _coerce_int(config_index, -1) < 0:
+            return False
+        for config in self._available_config_entries():
+            if _coerce_int(config.get("index"), -1) == int(config_index):
+                name = str(config.get("name", "") or "").strip().lower()
+                return bool(name) and "standby" in name
+        return False
+
+    def _coerce_invalid_operating_config(self) -> None:
+        """Reset a persisted Operating config that resolves to a standby slot.
+
+        Runs once after the transport is ready (``available_configs`` known).
+        Idempotent: after the reset the value is -1, so subsequent calls are
+        no-ops.
+        """
+        current = self._config_setting_value("operating_config")
+        if current >= 0 and self._is_standby_operating_config(current):
+            self.print(
+                f"{self.name}: saved Operating config {current} is a standby slot "
+                "and cannot be used for operation; resetting to Skip (-1). "
+                "Choose a valid (non-standby) signal config before turning ON.",
+                flag=PRINT.WARNING,
+            )
+            self._set_config_setting_value("operating_config", -1)
+            self._update_config_controls()
+            self._update_status_widgets()
+
     def _config_selector_tooltip_text(self, attr_name: str) -> str:
         setting_name = self._config_setting_name(attr_name)
         setting = self._setting(setting_name)
@@ -1064,7 +1100,21 @@ class AMXHDDevice(Device):
         )
         if combo is None:
             return
-        if self._set_config_setting_value(attr_name, self._combo_current_value(combo)):
+        value = self._combo_current_value(combo)
+        # A standby slot is a parking config, not an operating one: refuse it
+        # (before persisting) so ON cannot silently dead-end on it.
+        if attr_name == "operating_config" and self._is_standby_operating_config(value):
+            self.print(
+                f"{self.name}: config {value} is a standby slot and cannot be used "
+                "as the Operating config. Select a valid (non-standby) signal "
+                "config. Reverting to Skip (-1).",
+                flag=PRINT.WARNING,
+            )
+            self._set_config_setting_value(attr_name, -1)
+            self._update_config_controls()
+            self._update_status_widgets()
+            return
+        if self._set_config_setting_value(attr_name, value):
             self._update_config_controls()
             self._update_status_widgets()
 
@@ -2484,6 +2534,12 @@ class AMXHDController(DeviceController):
         self._consecutive_poll_errors = 0
         self.super_init_complete_called = True
         self._sync_status_to_gui()
+        # Drop a persisted Operating config that resolves to a standby slot so
+        # the operator is not silently stranded (ON would dead-end on it).
+        # available_configs was just synced to the device by _sync_status_to_gui.
+        coerce = getattr(self.controllerParent, "_coerce_invalid_operating_config", None)
+        if callable(coerce):
+            coerce()
 
     def _shutdown_kwargs(self) -> dict[str, Any]:
         standby_config = self._resolved_safety_config("standby_config")
@@ -3175,9 +3231,15 @@ class AMXHDController(DeviceController):
             if target_on:
                 ready, reason, config_index = self._operating_config_ready()
                 if not ready:
-                    self._restore_off_ui_state()
+                    self._restore_ui_state_for_device()
+                    state_note = (
+                        " The AMX is currently ON — click OFF to shut down and reset."
+                        if _state_is_on(getattr(self, "main_state", ""))
+                        else " Use Close communication to disconnect."
+                    )
                     self.print(
-                        f"Cannot start {self.controllerParent.name}: {reason}.",
+                        f"Cannot start {self.controllerParent.name}: {reason}."
+                        f" Select a valid (non-standby) Operating config.{state_note}",
                         flag=PRINT.WARNING,
                     )
                     return
@@ -3196,7 +3258,7 @@ class AMXHDController(DeviceController):
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             if target_on:
-                self._restore_off_ui_state()
+                self._restore_ui_state_for_device()
             self.print(
                 f"Failed to toggle AMX: {self._format_exception(exc)}",
                 flag=PRINT.ERROR,
@@ -3400,6 +3462,23 @@ class AMXHDController(DeviceController):
             return
         if hasattr(self.controllerParent, "onAction"):
             self.controllerParent.onAction.state = True
+
+    def _restore_ui_state_for_device(self) -> None:
+        """Restore the ON/OFF button to the device's real state after a
+        transition that did not complete, so the operator can always reach OFF
+        to reset.
+
+        A failed/aborted ON must not strand the UI: when the hardware is
+        genuinely STATE_ON we keep the button ON (so the next click toggles to
+        OFF -> shutdownCommunication); otherwise we restore OFF as before.
+        ``main_state`` is the authoritative controller value, refreshed by the
+        transport-init ``_update_state``; it never crosses the controller/device
+        boundary, and defaults to a non-ON string (no None risk).
+        """
+        if _state_is_on(getattr(self, "main_state", "")):
+            self._restore_on_ui_state()
+        else:
+            self._restore_off_ui_state()
 
     @contextlib.contextmanager
     def _controller_lock_section(
