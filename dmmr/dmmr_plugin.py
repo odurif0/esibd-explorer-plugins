@@ -2451,6 +2451,7 @@ class DMMRController(DeviceController):
             self.stopAcquisition()
             self.acquiring = False
 
+        enable_completed = False
         try:
             if target_on:
                 measurement_modules = self._measurement_modules()
@@ -2469,6 +2470,9 @@ class DMMRController(DeviceController):
                         raise RuntimeError(
                             f"set_enable(True) failed: {self._format_status(enable_status, device=device)}"
                         )
+                    # set_enable(True) succeeded: a later step failing must not
+                    # leave acquisition enabled with the button forced OFF.
+                    enable_completed = True
                     set_module_auto_range = getattr(device, "set_module_auto_range", None)
                     if callable(set_module_auto_range):
                         for module in measurement_modules:
@@ -2520,6 +2524,8 @@ class DMMRController(DeviceController):
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             if target_on:
+                if enable_completed:
+                    self._safe_disable_after_toggle_failure()
                 self._restore_off_ui_state()
             else:
                 self._restore_on_ui_state()
@@ -2865,6 +2871,63 @@ class DMMRController(DeviceController):
         sync_local = getattr(self.controllerParent, "_sync_local_on_action", None)
         if callable(sync_local):
             sync_local()
+
+    def _safe_disable_after_toggle_failure(self) -> None:
+        """Best-effort cleanup after a failed DMMR acquisition startup.
+
+        Disables acquisition so the device is not left enabled while the ON/OFF
+        button is forced OFF (which would strand the operator: clicking only
+        re-attempts the failing ON). Mirrors the AMPR controller's
+        safe-disable-on-failure pattern. Never raises: any cleanup issue is
+        reported as a warning.
+        """
+        device = self.device
+        if device is None:
+            return
+        cleanup_errors: list[str] = []
+        try:
+            with self._controller_lock_section(
+                "Could not acquire lock for DMMR failure cleanup."
+            ):
+                device = self.device
+                if device is None:
+                    cleanup_errors.append("device disappeared")
+                else:
+                    timeout_s = float(
+                        getattr(self.controllerParent, "connect_timeout_s", 5.0)
+                    )
+                    try:
+                        automatic_status = device.set_automatic_current(
+                            False, timeout_s=timeout_s
+                        )
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(
+                            f"set_automatic_current(False) failed: {cleanup_exc}"
+                        )
+                    else:
+                        if automatic_status != device.NO_ERR:
+                            cleanup_errors.append(
+                                "set_automatic_current(False) failed: "
+                                f"{self._format_status(automatic_status, device=device)}"
+                            )
+                    try:
+                        enable_status = device.set_enable(False, timeout_s=timeout_s)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        cleanup_errors.append(f"set_enable(False) failed: {cleanup_exc}")
+                    else:
+                        if enable_status != device.NO_ERR:
+                            cleanup_errors.append(
+                                f"set_enable(False) failed: "
+                                f"{self._format_status(enable_status, device=device)}"
+                            )
+        except TimeoutError:
+            cleanup_errors.append("lock timeout")
+        if cleanup_errors:
+            self.print(
+                "DMMR startup cleanup encountered issues: "
+                + "; ".join(cleanup_errors),
+                flag=PRINT.WARNING,
+            )
 
     @contextlib.contextmanager
     def _controller_lock_section(
