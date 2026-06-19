@@ -2284,12 +2284,8 @@ class DMMRController(DeviceController):
                         timeout_s=float(self.controllerParent.poll_timeout_s),
                     )
             except TimeoutError:
-                self.errorCount += 1
-                self.print(
-                    f"Timed out while reading DMMR module {module}; "
-                    "continuing with remaining modules (last-good value retained).",
-                    flag=PRINT.ERROR,
-                )
+                # Transient controller-lock contention (another operation holds
+                # the lock); skip this module this cycle, last-good value kept.
                 continue
             except Exception as exc:  # noqa: BLE001
                 self.errorCount += 1
@@ -2572,7 +2568,8 @@ class DMMRController(DeviceController):
                     return
                 status, _state_hex, state_name = device.get_state(timeout_s=timeout_s)
         except TimeoutError:
-            self.errorCount += 1
+            # Transient controller-lock contention; skip this refresh and keep
+            # the last state. A real device fault is handled by except-Exception.
             return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1

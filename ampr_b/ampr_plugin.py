@@ -1771,7 +1771,9 @@ class AMPRController(DeviceController):
                         return
                     voltages = device.get_module_voltages(module)
             except TimeoutError:
-                self.errorCount += 1
+                # Transient controller-lock contention (another operation holds
+                # the lock); skip this module this cycle. A real read fault is
+                # raised by the device and handled by except-Exception below.
                 continue
             except Exception as exc:  # noqa: BLE001
                 self.errorCount += 1
@@ -2209,7 +2211,9 @@ class AMPRController(DeviceController):
                     return
                 status, _state_hex, state_name = device.get_state()
         except TimeoutError:
-            self.errorCount += 1
+            # Transient controller-lock contention (e.g. a voltage ramp holding
+            # the lock); skip this refresh and keep the last state. Not counted
+            # as an error: a real device fault is handled by except-Exception.
             return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1

@@ -921,21 +921,17 @@ def test_controller_read_numbers_keeps_partial_results_on_timeout():
 
     controller.readNumbers()
 
-    # After the fix, a single module timeout no longer abandons the remaining
-    # modules: polling continues, the timed-out module keeps its last-good
-    # value (NaN here on the first poll) and the remaining modules are read.
+    # A TimeoutError here means transient controller-lock contention (in
+    # production a real device-call timeout raises RuntimeError and is handled
+    # by except-Exception). It is not a fault: skip this module silently,
+    # keep its last-good value (NaN here on the first poll), and still read
+    # the remaining modules.
     assert controller.device.calls == [(1, 2.5), (2, 2.5), (3, 2.5)]
     assert controller.values[1] == 1e-12
     assert np.isnan(controller.values[2])
     assert controller.values[3] == 3e-12
-    assert controller.errorCount == 1
-    assert logs == [
-        (
-            "Timed out while reading DMMR module 2; "
-            "continuing with remaining modules (last-good value retained).",
-            module.PRINT.ERROR,
-        )
-    ]
+    assert controller.errorCount == 0
+    assert logs == []
 
 
 def test_controller_lock_section_rejects_unsupported_lock_type():
