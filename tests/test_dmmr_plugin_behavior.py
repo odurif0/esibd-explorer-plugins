@@ -1287,3 +1287,55 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
         RuntimeError("DMMR open_port failed: -2 (Error opening port)")
     ) == ""
     assert controller._poisoned_com is None
+
+
+def test_safe_disable_after_toggle_failure_disables_acquisition():
+    """Alignment with the AMPR pattern: on a failed ON, DMMR best-effort
+    disables acquisition so the device is not left enabled while the ON/OFF
+    button is forced OFF (which would strand the operator)."""
+    module = _load_module()
+    parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
+    controller = module.DMMRController(parent)
+    controller.lock = threading.Lock()
+    controller.print = lambda message, flag=None: None
+    calls = []
+
+    class FakeDevice:
+        NO_ERR = 0
+
+        def set_automatic_current(self, value, timeout_s=None):
+            calls.append(("automatic", value))
+            return self.NO_ERR
+
+        def set_enable(self, value, timeout_s=None):
+            calls.append(("enable", value))
+            return self.NO_ERR
+
+    controller.device = FakeDevice()
+    controller._safe_disable_after_toggle_failure()
+    assert ("automatic", False) in calls
+    assert ("enable", False) in calls
+
+
+def test_safe_disable_after_toggle_failure_never_raises():
+    """Cleanup must never raise: if the device is unresponsive, issues are
+    reported as a warning instead of propagating (mirrors AMPR)."""
+    module = _load_module()
+    parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
+    controller = module.DMMRController(parent)
+    controller.lock = threading.Lock()
+    logs = []
+    controller.print = lambda message, flag=None: logs.append(message)
+
+    class BrokenDevice:
+        NO_ERR = 0
+
+        def set_automatic_current(self, value, timeout_s=None):
+            raise RuntimeError("comm down")
+
+        def set_enable(self, value, timeout_s=None):
+            raise OSError("device gone")
+
+    controller.device = BrokenDevice()
+    controller._safe_disable_after_toggle_failure()  # must not raise
+    assert any("cleanup encountered issues" in m for m in logs)
