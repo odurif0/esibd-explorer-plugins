@@ -397,6 +397,70 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
     assert restored == [False]  # device OFF/standby -> restore OFF as before
 
 
+def test_restore_ui_state_standby_keeps_on_when_standby_is_deliberate():
+    """When the operator deliberately selected a standby Operating config, a
+    STATE_STANDBY hardware state is the expected outcome, not an OFF condition:
+    the ON/OFF button must stay ON so the OFF toggle (-> shutdown) is reachable.
+    """
+    plugin = _load_hd_plugin_module()
+    restored = []
+    parent = _ComParent(com=10)
+    parent._set_on_ui_state = lambda on: restored.append(bool(on))
+    parent.operating_config = 0
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+
+    controller.main_state = "STATE_STANDBY"
+    controller._restore_ui_state_for_device()
+    assert restored == [True]  # deliberate standby -> button stays ON
+
+
+def test_startup_snapshot_ready_accepts_standby_for_standby_config():
+    """A standby Operating config legitimately leaves the device in
+    STATE_STANDBY (HV not applied). The startup wait must accept that as
+    ready, not time out waiting for STATE_ON."""
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(name="AMX_HD", operating_config=0)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+
+    standby_snapshot = {
+        "main_state": {"name": "STATE_STANDBY"},
+        "device_enabled": False,
+    }
+    assert controller._startup_snapshot_ready(standby_snapshot) is True
+
+    on_snapshot = {
+        "main_state": {"name": "STATE_ON"},
+        "device_enabled": True,
+    }
+    assert controller._startup_snapshot_ready(on_snapshot) is True
+
+
+def test_startup_snapshot_ready_rejects_standby_for_non_standby_config():
+    """When the Operating config is NOT standby, STATE_STANDBY is not ready:
+    the device must reach STATE_ON."""
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(name="AMX_HD", operating_config=1)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+
+    standby_snapshot = {
+        "main_state": {"name": "STATE_STANDBY"},
+        "device_enabled": False,
+    }
+    assert controller._startup_snapshot_ready(standby_snapshot) is False
+
+
 def _make_device_stub(plugin):
     device = object.__new__(plugin.AMXHDDevice)
     device.name = "AMX_HD"
