@@ -2872,6 +2872,10 @@ class AMXHDController(DeviceController):
             )
         finally:
             self._sync_status_to_gui()
+            # Loading a standby config while ON moves the device to
+            # STATE_STANDBY; keep the ON/OFF button ON so OFF stays reachable.
+            if _state_is_standby(getattr(self, "main_state", "")):
+                _invoke_gui_callback(self._restore_on_ui_state)
 
     def _apply_channel_timing(self, channel: AMXHDChannel, timeout_s: float) -> None:
         device = self.device
@@ -3256,6 +3260,13 @@ class AMXHDController(DeviceController):
         finally:
             self._end_transition()
             self._sync_status_to_gui()
+            # For a standby Operating config, the device stays in STATE_STANDBY
+            # after ON. Ensure the ON/OFF button reflects the successful
+            # transition so the operator can toggle OFF to shut down.
+            # Queued on the GUI thread so it runs AFTER _sync_status_to_gui's
+            # callback and is not undone by it.
+            if target_on and _state_is_standby(getattr(self, "main_state", "")):
+                _invoke_gui_callback(self._restore_on_ui_state)
 
     def shutdownCommunication(self) -> bool:
         device = self.device
