@@ -803,42 +803,6 @@ class AMXHDDevice(Device):
             )
         return entries
 
-    def _is_standby_operating_config(self, config_index: int) -> bool:
-        """Return True if ``config_index`` is a standby-named slot.
-
-        A standby slot is a valid parking config but must not drive operation
-        (it keeps the AMX disabled); selecting it as the Operating config makes
-        every ON attempt dead-end. Mirrors the controller-side
-        ``_config_entry_is_standby_like`` using the device-side
-        ``available_configs`` snapshot.
-        """
-        if _coerce_int(config_index, -1) < 0:
-            return False
-        for config in self._available_config_entries():
-            if _coerce_int(config.get("index"), -1) == int(config_index):
-                name = str(config.get("name", "") or "").strip().lower()
-                return bool(name) and "standby" in name
-        return False
-
-    def _coerce_invalid_operating_config(self) -> None:
-        """Reset a persisted Operating config that resolves to a standby slot.
-
-        Runs once after the transport is ready (``available_configs`` known).
-        Idempotent: after the reset the value is -1, so subsequent calls are
-        no-ops.
-        """
-        current = self._config_setting_value("operating_config")
-        if current >= 0 and self._is_standby_operating_config(current):
-            self.print(
-                f"{self.name}: saved Operating config {current} is a standby slot "
-                "and cannot be used for operation; resetting to Skip (-1). "
-                "Choose a valid (non-standby) signal config before turning ON.",
-                flag=PRINT.WARNING,
-            )
-            self._set_config_setting_value("operating_config", -1)
-            self._update_config_controls()
-            self._update_status_widgets()
-
     def _config_selector_tooltip_text(self, attr_name: str) -> str:
         setting_name = self._config_setting_name(attr_name)
         setting = self._setting(setting_name)
@@ -1101,19 +1065,6 @@ class AMXHDDevice(Device):
         if combo is None:
             return
         value = self._combo_current_value(combo)
-        # A standby slot is a parking config, not an operating one: refuse it
-        # (before persisting) so ON cannot silently dead-end on it.
-        if attr_name == "operating_config" and self._is_standby_operating_config(value):
-            self.print(
-                f"{self.name}: config {value} is a standby slot and cannot be used "
-                "as the Operating config. Select a valid (non-standby) signal "
-                "config. Reverting to Skip (-1).",
-                flag=PRINT.WARNING,
-            )
-            self._set_config_setting_value(attr_name, -1)
-            self._update_config_controls()
-            self._update_status_widgets()
-            return
         if self._set_config_setting_value(attr_name, value):
             self._update_config_controls()
             self._update_status_widgets()
@@ -2534,12 +2485,6 @@ class AMXHDController(DeviceController):
         self._consecutive_poll_errors = 0
         self.super_init_complete_called = True
         self._sync_status_to_gui()
-        # Drop a persisted Operating config that resolves to a standby slot so
-        # the operator is not silently stranded (ON would dead-end on it).
-        # available_configs was just synced to the device by _sync_status_to_gui.
-        coerce = getattr(self.controllerParent, "_coerce_invalid_operating_config", None)
-        if callable(coerce):
-            coerce()
 
     def _shutdown_kwargs(self) -> dict[str, Any]:
         standby_config = self._resolved_safety_config("standby_config")
@@ -2690,8 +2635,6 @@ class AMXHDController(DeviceController):
                     f"config {config_index} is inactive on the controller",
                     config_index,
                 )
-            if self._config_entry_is_standby_like(entry):
-                return False, f"config {config_index} is a standby slot", config_index
         elif self.available_configs:
             return (
                 False,
@@ -2700,6 +2643,20 @@ class AMXHDController(DeviceController):
             )
 
         return True, "", config_index
+
+    def _warn_if_standby_operating(self, config_index: int) -> None:
+        """Non-blocking notice when the Operating config is a standby-named slot.
+
+        The operator is trusted to know a standby config does not apply HV; this
+        only reminds them, it does not block.
+        """
+        entry = self._config_entry_by_index(config_index)
+        if entry is not None and self._config_entry_is_standby_like(entry):
+            self.print(
+                f"{self.controllerParent.name}: config {config_index} is a standby "
+                "slot — HV will not be applied.",
+                flag=PRINT.WARNING,
+            )
 
     def _apply_runtime_settings(self, timeout_s: float) -> None:
         device = self.device
@@ -2871,6 +2828,7 @@ class AMXHDController(DeviceController):
             )
             return
 
+        self._warn_if_standby_operating(config_index)
         self._discard_pending_runtime_applies()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
@@ -3239,10 +3197,11 @@ class AMXHDController(DeviceController):
                     )
                     self.print(
                         f"Cannot start {self.controllerParent.name}: {reason}."
-                        f" Select a valid (non-standby) Operating config.{state_note}",
+                        f" Select a valid Operating config.{state_note}",
                         flag=PRINT.WARNING,
                     )
                     return
+                self._warn_if_standby_operating(config_index)
                 self._start_operating_mode(
                     config_index=config_index,
                     timeout_s=timeout_s,
