@@ -461,6 +461,39 @@ def test_startup_snapshot_ready_rejects_standby_for_non_standby_config():
     assert controller._startup_snapshot_ready(standby_snapshot) is False
 
 
+def test_device_active_predicate():
+    """_device_active() is the single source of truth for whether the device is
+    in its expected operating state. STATE_ON is always active. STATE_STANDBY
+    is active only when the Operating config is a standby slot."""
+    plugin = _load_hd_plugin_module()
+    configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+
+    # Standby Operating config: STATE_STANDBY is active.
+    parent = types.SimpleNamespace(name="AMX_HD", operating_config=0)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = configs
+
+    controller.main_state = "STATE_ON"
+    assert controller._device_active() is True
+    controller.main_state = "STATE_STANDBY"
+    assert controller._device_active() is True
+    controller.main_state = "Disconnected"
+    assert controller._device_active() is False
+
+    # Normal Operating config: STATE_STANDBY is NOT active.
+    parent = types.SimpleNamespace(name="AMX_HD", operating_config=1)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = configs
+
+    controller.main_state = "STATE_ON"
+    assert controller._device_active() is True
+    controller.main_state = "STATE_STANDBY"
+    assert controller._device_active() is False
+
+
 def _make_device_stub(plugin):
     device = object.__new__(plugin.AMXHDDevice)
     device.name = "AMX_HD"
