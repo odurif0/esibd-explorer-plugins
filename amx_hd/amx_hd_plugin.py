@@ -308,6 +308,11 @@ def _state_is_on(state: Any) -> bool:
     return normalized in {"ST_ON", "STATE_ON"}
 
 
+def _state_is_standby(state: Any) -> bool:
+    normalized = _normalize_runtime_state(state).strip().upper()
+    return normalized in {"ST_STANDBY", "STATE_STANDBY"}
+
+
 def _action_label(action: Any) -> str:
     """Extract a stable label from QAction-like objects and test doubles."""
     for attr_name in ("toolTip", "text", "objectName"):
@@ -2616,6 +2621,11 @@ class AMXHDController(DeviceController):
         name = str(entry.get("name", "") or "").strip().lower()
         return bool(name) and "standby" in name
 
+    def _operating_config_is_standby(self) -> bool:
+        """Return True if the currently selected Operating config is a standby slot."""
+        entry = self._config_entry_by_index(self._selected_operating_config_index())
+        return self._config_entry_is_standby_like(entry)
+
     def _operating_config_ready(self) -> tuple[bool, str, int]:
         config_index = self._selected_operating_config_index()
         if config_index < 0:
@@ -2684,7 +2694,13 @@ class AMXHDController(DeviceController):
 
     def _startup_snapshot_ready(self, snapshot: dict[str, Any]) -> bool:
         state = str(snapshot.get("main_state", {}).get("name", "") or "")
-        return bool(snapshot.get("device_enabled", False)) and _state_is_on(state)
+        if bool(snapshot.get("device_enabled", False)) and _state_is_on(state):
+            return True
+        # A standby operating config keeps the device in STATE_STANDBY (HV not
+        # applied); that is the expected outcome, not a startup failure.
+        if self._operating_config_is_standby() and _state_is_standby(state):
+            return True
+        return False
 
     def _startup_failure_message(
         self,
@@ -2696,8 +2712,9 @@ class AMXHDController(DeviceController):
         flags = snapshot.get("device_state", {}).get("flags", [])
         flags_text = ", ".join(str(flag) for flag in flags) if flags else "n/a"
         device_enabled = "ON" if bool(snapshot.get("device_enabled", False)) else "OFF"
+        expected = "STATE_STANDBY" if self._operating_config_is_standby() else "STATE_ON"
         return (
-            f"AMX did not reach STATE_ON after loading config {config_index}: "
+            f"AMX did not reach {expected} after loading config {config_index}: "
             f"state={state}, device={device_enabled}, flags={flags_text}."
         )
 
@@ -2739,15 +2756,22 @@ class AMXHDController(DeviceController):
             device.load_config(config_index, timeout_s=timeout_s)
             self._refresh_loaded_config_status()
         self._apply_runtime_settings(timeout_s)
-        device.set_device_enabled(True, timeout_s=timeout_s)
+        is_standby = self._config_entry_is_standby_like(
+            self._config_entry_by_index(config_index)
+        )
+        # A standby operating config keeps the device in STATE_STANDBY (HV not
+        # applied); do not force-enable it. The operator knowingly selected standby.
+        if not is_standby:
+            device.set_device_enabled(True, timeout_s=timeout_s)
         try:
             return self._wait_for_startup_ready_snapshot(
                 config_index=config_index,
                 settle_timeout_s=timeout_s,
             )
         except Exception:
-            with contextlib.suppress(Exception):
-                device.set_device_enabled(False, timeout_s=timeout_s)
+            if not is_standby:
+                with contextlib.suppress(Exception):
+                    device.set_device_enabled(False, timeout_s=timeout_s)
             raise
 
     def _ensure_transport_connected(self, timeout_s: float) -> Any:
@@ -3202,11 +3226,18 @@ class AMXHDController(DeviceController):
                     )
                     return
                 self._warn_if_standby_operating(config_index)
+                is_standby_cfg = self._config_entry_is_standby_like(
+                    self._config_entry_by_index(config_index)
+                )
                 self._start_operating_mode(
                     config_index=config_index,
                     timeout_s=timeout_s,
                     lock_message="Could not acquire lock to start the AMX.",
-                    success_message="AMX timing enabled.",
+                    success_message=(
+                        "AMX operating in standby (HV not applied)."
+                        if is_standby_cfg
+                        else "AMX timing enabled."
+                    ),
                     restart_acquisition=True,
                 )
             else:
@@ -3428,13 +3459,18 @@ class AMXHDController(DeviceController):
         to reset.
 
         A failed/aborted ON must not strand the UI: when the hardware is
-        genuinely STATE_ON we keep the button ON (so the next click toggles to
-        OFF -> shutdownCommunication); otherwise we restore OFF as before.
-        ``main_state`` is the authoritative controller value, refreshed by the
-        transport-init ``_update_state``; it never crosses the controller/device
-        boundary, and defaults to a non-ON string (no None risk).
+        genuinely STATE_ON — or deliberately STATE_STANDBY because the operator
+        selected a standby Operating config — we keep the button ON (so the next
+        click toggles to OFF -> shutdownCommunication); otherwise we restore OFF
+        as before.  ``main_state`` is the authoritative controller value,
+        refreshed by the transport-init ``_update_state``; it never crosses the
+        controller/device boundary, and defaults to a non-ON string (no None
+        risk).
         """
-        if _state_is_on(getattr(self, "main_state", "")):
+        state = getattr(self, "main_state", "")
+        if _state_is_on(state):
+            self._restore_on_ui_state()
+        elif self._operating_config_is_standby() and _state_is_standby(state):
             self._restore_on_ui_state()
         else:
             self._restore_off_ui_state()
