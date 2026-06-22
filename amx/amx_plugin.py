@@ -757,21 +757,29 @@ class AMXDevice(Device):
         setting_name = self._config_setting_name(attr_name)
         setting = self._setting(setting_name)
         if setting is not None:
-            return _coerce_int(getattr(setting, "value", None), getattr(self, attr_name, -1))
+            val = getattr(setting, "value", None)
+            if val is not None:
+                return _coerce_int(val, -1)
+            return _coerce_int(getattr(self, f"_{attr_name}_backup", -1), -1)
+        backup = getattr(self, f"_{attr_name}_backup", None)
+        if backup is not None:
+            return _coerce_int(backup, -1)
         return _coerce_int(getattr(self, attr_name, -1), -1)
 
     def _set_config_setting_value(self, attr_name: str, value: int) -> bool:
         value = _coerce_int(value, -1)
+        backup_attr = f"_{attr_name}_backup"
+        previous = _coerce_int(getattr(self, backup_attr, None), None)
+        setattr(self, backup_attr, value)
         setting_name = self._config_setting_name(attr_name)
         setting = self._setting(setting_name)
         if setting is not None:
             if _coerce_int(getattr(setting, "value", None), value) == value:
-                return False
+                return previous != value
             setting.value = value
             return True
-        if _coerce_int(getattr(self, attr_name, value), value) == value:
+        if previous == value:
             return False
-        setattr(self, attr_name, value)
         return True
 
     def _available_config_entries(self) -> list[dict[str, Any]]:
@@ -2603,10 +2611,11 @@ class AMXController(DeviceController):
         self.loaded_config_text = _format_loaded_config_text(status)
 
     def _selected_operating_config_index(self) -> int:
-        return _coerce_int(
-            getattr(self.controllerParent, "operating_config", -1),
-            -1,
-        )
+        parent = self.controllerParent
+        getter = getattr(parent, "_config_setting_value", None)
+        if callable(getter):
+            return getter("operating_config")
+        return _coerce_int(getattr(parent, "operating_config", -1), -1)
 
     def _config_entry_by_index(self, config_index: int) -> dict[str, Any] | None:
         for entry in self.available_configs:
