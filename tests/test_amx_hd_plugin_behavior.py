@@ -397,22 +397,6 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
     assert restored == [False]  # device OFF/standby -> restore OFF as before
 
 
-def test_is_standby_operating_config_detects_standby_slot():
-    """A standby-named slot must be flagged so it cannot be used as Operating."""
-    plugin = _load_hd_plugin_module()
-    device = object.__new__(plugin.AMXHDDevice)
-    device.available_configs = [
-        {"index": 0, "name": "Standby", "active": True, "valid": True},
-        {"index": 1, "name": "Operating A", "active": True, "valid": True},
-        {"index": 2, "name": "low-standby pulse", "active": True, "valid": True},
-    ]
-    assert plugin.AMXHDDevice._is_standby_operating_config(device, 0) is True
-    assert plugin.AMXHDDevice._is_standby_operating_config(device, 2) is True  # substring match
-    assert plugin.AMXHDDevice._is_standby_operating_config(device, 1) is False
-    assert plugin.AMXHDDevice._is_standby_operating_config(device, -1) is False
-    assert plugin.AMXHDDevice._is_standby_operating_config(device, 99) is False  # not listed
-
-
 def _make_device_stub(plugin):
     device = object.__new__(plugin.AMXHDDevice)
     device.name = "AMX_HD"
@@ -439,35 +423,38 @@ def _make_device_stub(plugin):
     return device, written, logs, state
 
 
-def test_config_selector_changed_refuses_standby_operating_selection():
-    """Selecting a standby slot as Operating config is refused BEFORE being
-    persisted, and reverted to Skip (-1), so ON cannot dead-end on it."""
+def test_config_selector_changed_allows_standby_operating_selection():
+    """Selecting a standby slot as Operating config is persisted as-is. The
+    operator is trusted to know a standby config does not apply HV; a
+    non-blocking warning is emitted at ON time, not at selection time."""
     plugin = _load_hd_plugin_module()
     device, written, logs, _state = _make_device_stub(plugin)
     device.operatingConfigCombo = object()  # truthy placeholder
 
     plugin.AMXHDDevice._config_selector_changed(device, "operating_config")
 
-    # The standby choice (0) is refused and coerced to -1, never persisted as 0.
-    assert ("operating_config", -1) in written
-    assert all(v != 0 for _k, v in written)
-    assert any("standby slot" in m for m in logs)
+    # The standby choice (0) is persisted, NOT reverted to -1.
+    assert ("operating_config", 0) in written
+    assert all(v != -1 for _k, v in written)
+    assert not any("standby slot" in m for m in logs)
 
 
-def test_coerce_invalid_operating_config_resets_persisted_standby():
-    """A persisted Operating config that resolves to a standby slot is reset to
-    Skip (-1) once, after the transport is ready (idempotent)."""
+def test_warn_if_standby_operating_emits_non_blocking_notice():
+    """A standby-named Operating config triggers a non-blocking reminder at ON
+    time (not a refusal); a normal config emits nothing."""
     plugin = _load_hd_plugin_module()
-    device, written, logs, state = _make_device_stub(plugin)
+    parent = types.SimpleNamespace(name="AMX_HD")
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+    logs = []
+    controller.print = lambda msg, flag=None: logs.append(msg)
 
-    device._coerce_invalid_operating_config()
-    assert state["operating_config"] == -1
-    assert ("operating_config", -1) in written
-    assert any("standby slot" in m for m in logs)
+    controller._warn_if_standby_operating(0)
+    assert any("standby slot" in m and "HV will not be applied" in m for m in logs)
 
-    # Idempotent: a second call is a no-op (value already -1).
-    written.clear()
     logs.clear()
-    device._coerce_invalid_operating_config()
-    assert written == []
+    controller._warn_if_standby_operating(1)
     assert logs == []

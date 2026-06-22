@@ -650,7 +650,7 @@ def test_controller_toggle_on_requires_operating_config():
     assert messages == [
         (
             "Cannot start AMX: select an AMX config first. Select a valid "
-            "(non-standby) Operating config. Use Close communication to disconnect.",
+            "Operating config. Use Close communication to disconnect.",
             module.PRINT.WARNING,
         )
     ]
@@ -1457,14 +1457,22 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
     assert restored == [False]
 
 
-def test_is_standby_operating_config_detects_standby_slot():
-    """Mirror: a standby-named slot cannot be used as the Operating config."""
+def test_warn_if_standby_operating_emits_non_blocking_notice():
+    """A standby-named Operating config triggers a non-blocking reminder at ON
+    time (not a refusal); a normal config emits nothing."""
     module = _load_module()
-    device = object.__new__(module.AMXDevice)
-    device.available_configs = [
+    parent = types.SimpleNamespace(name="AMX")
+    controller = module.AMXController(parent)
+    controller.available_configs = [
         {"index": 0, "name": "Standby", "active": True, "valid": True},
-        {"index": 1, "name": "Operating A", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
     ]
-    assert module.AMXDevice._is_standby_operating_config(device, 0) is True
-    assert module.AMXDevice._is_standby_operating_config(device, 1) is False
-    assert module.AMXDevice._is_standby_operating_config(device, -1) is False
+    logs = []
+    controller.print = lambda msg, flag=None: logs.append(msg)
+
+    controller._warn_if_standby_operating(0)
+    assert any("standby slot" in m and "HV will not be applied" in m for m in logs)
+
+    logs.clear()
+    controller._warn_if_standby_operating(1)
+    assert logs == []
