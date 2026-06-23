@@ -2527,9 +2527,12 @@ class AMXHDController(DeviceController):
         elif self.available_configs:
             return {}
 
-        # If the device is already in STATE_STANDBY, the standby config is
-        # already loaded — no need to reload it.  Just disconnect.
-        if _state_is_standby(getattr(self, "main_state", "")):
+        # If the standby config is already loaded, or the state is already
+        # STATE_STANDBY, no need to reload it. Just disconnect.
+        if (
+            _coerce_int(getattr(self, "_loaded_config_index", -1), -1) == standby_config
+            or _state_is_standby(getattr(self, "main_state", ""))
+        ):
             return {"disable_device": False}
 
         return {
@@ -2620,6 +2623,7 @@ class AMXHDController(DeviceController):
         device = self.device
         if device is None:
             self.loaded_config_text = "n/a"
+            self._loaded_config_index = -1
             return
 
         get_status = getattr(device, "get_status", None)
@@ -2637,6 +2641,7 @@ class AMXHDController(DeviceController):
             )
             return
 
+        self._loaded_config_index = _coerce_int(status.get("memory_config"), -1)
         self.loaded_config_text = _format_loaded_config_text(status)
 
     def _selected_operating_config_index(self) -> int:
@@ -2796,6 +2801,7 @@ class AMXHDController(DeviceController):
 
         if load_config_first:
             device.load_config(config_index, timeout_s=timeout_s)
+            self._loaded_config_index = config_index
             self._refresh_loaded_config_status()
         self._apply_runtime_settings(timeout_s)
         is_standby = self._config_entry_is_standby_like(
@@ -3148,6 +3154,11 @@ class AMXHDController(DeviceController):
                 if device is None:
                     return
                 snapshot = device.collect_housekeeping(timeout_s=timeout_s)
+                if (
+                    self.device is not device
+                    or not getattr(self, "initialized", False)
+                ):
+                    return
                 self._apply_snapshot(snapshot)
                 self._consecutive_poll_errors = 0
         except TimeoutError as exc:
@@ -3433,6 +3444,7 @@ class AMXHDController(DeviceController):
         self.available_configs = []
         self.available_configs_text = "n/a"
         self.loaded_config_text = "n/a"
+        self._loaded_config_index = -1
         self._discard_pending_runtime_applies()
         self._dispose_device()
         self.initialized = False
