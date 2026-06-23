@@ -685,8 +685,8 @@ def test_stop_acquisition_for_transition_tolerates_missing_getDevice():
 
 
 def test_shutdown_kwargs_skips_standby_parking_when_already_in_standby():
-    """If the device is already in STATE_STANDBY, _shutdown_kwargs must not
-    return a standby_config — the config is already loaded, just disconnect."""
+    """If the device is already safe, _shutdown_kwargs must not return a
+    standby_config -- the config is already loaded, just disconnect."""
     plugin = _load_hd_plugin_module()
     parent = types.SimpleNamespace(name="AMX_HD", standby_config=0)
     controller = plugin.AMXHDController(controllerParent=parent)
@@ -697,10 +697,65 @@ def test_shutdown_kwargs_skips_standby_parking_when_already_in_standby():
     assert controller._shutdown_kwargs() == {"disable_device": False}
 
     controller.main_state = "STATE_ON"
+    controller._loaded_config_index = 0
+    assert controller._shutdown_kwargs() == {"disable_device": False}
+
+    controller._loaded_config_index = 29
     assert controller._shutdown_kwargs() == {
         "standby_config": 0,
         "disable_device": False,
     }
+
+
+def test_read_numbers_ignores_snapshot_after_disconnect():
+    """A stale polling read must not overwrite Disconnected after close.
+
+    collect_housekeeping can return after closeCommunication() has disposed the
+    device.  In that case readNumbers must ignore the stale snapshot so the
+    status badge stays Disconnected.
+    """
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(
+        name="AMX_HD",
+        poll_timeout_s=5.0,
+        interval=100,
+        getChannels=lambda: [],
+        main_state="Disconnected",
+        device_enabled_state="OFF",
+        available_configs_text="n/a",
+        loaded_config_text="n/a",
+        _sync_acquisition_controls=lambda: None,
+        _update_config_controls=lambda: None,
+        _update_status_widgets=lambda: None,
+    )
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.lock = threading.Lock()
+    controller.errorCount = 0
+    controller.initialized = True
+    controller.acquiring = True
+
+    class _FakeDevice:
+        OSC_OFFSET = 2
+        PULSER_WIDTH_OFFSET = 2
+
+        def collect_housekeeping(self, timeout_s=None):
+            controller.device = None
+            controller.initialized = False
+            return {
+                "device_enabled": False,
+                "main_state": {"name": "STATE_STANDBY"},
+                "device_state": {"flags": []},
+                "controller_state": {"flags": []},
+                "oscillator": {"period": 0},
+                "pulsers": [],
+            }
+
+    controller.device = _FakeDevice()
+    controller.main_state = "Disconnected"
+
+    controller.readNumbers()
+
+    assert controller.main_state == "Disconnected"
 
 
 def test_start_operating_mode_uses_extended_lock_timeout():
