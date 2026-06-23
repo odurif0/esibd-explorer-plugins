@@ -684,6 +684,25 @@ def test_stop_acquisition_for_transition_tolerates_missing_getDevice():
     assert controller.acquiring is False
 
 
+def test_shutdown_kwargs_skips_standby_parking_when_already_in_standby():
+    """If the device is already in STATE_STANDBY, _shutdown_kwargs must not
+    return a standby_config — the config is already loaded, just disconnect."""
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(name="AMX_HD", standby_config=0)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+    ]
+    controller.main_state = "STATE_STANDBY"
+    assert controller._shutdown_kwargs() == {"disable_device": False}
+
+    controller.main_state = "STATE_ON"
+    assert controller._shutdown_kwargs() == {
+        "standby_config": 0,
+        "disable_device": False,
+    }
+
+
 def test_start_operating_mode_uses_extended_lock_timeout():
     """_start_operating_mode must use a lock timeout >= poll_timeout_s +
     startup_timeout_s so that an in-flight collect_housekeeping does not
@@ -708,8 +727,7 @@ def test_start_operating_mode_uses_extended_lock_timeout():
     controller.lock = _FakeLock()
     controller._ensure_transport_connected = lambda timeout_s: None
     controller._load_operating_config_and_enable_device = lambda **kw: None
-    controller._update_state = lambda: None
-    controller.startAcquisition = lambda: None
+    controller._restart_acquisition_after_transition = lambda: None
 
     controller._start_operating_mode(
         config_index=0,

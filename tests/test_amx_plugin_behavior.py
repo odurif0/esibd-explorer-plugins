@@ -436,6 +436,7 @@ def test_controller_toggle_on_refreshes_loaded_config_after_initialize():
     controller.available_configs = [
         {"index": 9, "name": "Operate", "active": True, "valid": True},
     ]
+    controller._restart_acquisition_after_transition = lambda: None
 
     controller.toggleOn()
 
@@ -527,6 +528,7 @@ def test_controller_toggle_on_waits_for_state_on_after_enable():
         {"index": 9, "name": "Operate", "active": True, "valid": True},
     ]
     controller.print = lambda message, flag=None: messages.append((message, flag))
+    controller._restart_acquisition_after_transition = lambda: None
     original_sleep = module.time.sleep
     module.time.sleep = lambda _seconds: None
 
@@ -609,6 +611,7 @@ def test_controller_toggle_on_reconnects_transport_before_loading_operating_conf
         {"index": 0, "name": "Standby", "active": True, "valid": True},
         {"index": 9, "name": "Operate", "active": True, "valid": True},
     ]
+    controller._restart_acquisition_after_transition = lambda: None
 
     controller.toggleOn()
 
