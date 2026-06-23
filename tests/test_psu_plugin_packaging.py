@@ -757,6 +757,75 @@ def test_psu_partial_startup_exposes_toolbar_disconnect_action():
     assert device.closeCommunicationAction.visible is False
 
 
+def test_psu_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
+    _clear_test_modules()
+    _install_esibd_stubs()
+
+    module = _import_plugin_module_from_path("psu_plugin_test", PLUGIN_PATH)
+
+    device = object.__new__(module.PSUDevice)
+    device.useOnOffLogic = True
+    device.onAction = types.SimpleNamespace(state=False)
+    device.controller = types.SimpleNamespace(shutdownCommunication=lambda: False)
+    sync_states = []
+    warnings = []
+    update_calls = []
+    acquisition_sync_calls = []
+    device._stop_refresh_timer = lambda: None
+    device._sync_local_on_action = lambda: sync_states.append(device.onAction.state)
+    device._sync_acquisition_controls = lambda: acquisition_sync_calls.append(True)
+    device._update_status_widgets = lambda: update_calls.append(True)
+    device.print = lambda message, flag=None: warnings.append((message, flag))
+    device.recording = True
+
+    module.PSUDevice.shutdownCommunication(device)
+
+    assert device.onAction.state is True
+    assert sync_states == [True]
+    assert device.recording is False
+    assert acquisition_sync_calls == [True]
+    assert update_calls == [True]
+    assert any("shutdown could not be confirmed" in message for message, _ in warnings)
+    assert warnings[-1][1] == module.PRINT.WARNING
+
+
+def test_psu_device_close_communication_bypasses_shutdown_when_transport_is_lost():
+    _clear_test_modules()
+    _install_esibd_stubs()
+
+    module = _import_plugin_module_from_path("psu_plugin_test", PLUGIN_PATH)
+
+    close_calls = []
+    device = object.__new__(module.PSUDevice)
+    device.useOnOffLogic = True
+    device.onAction = types.SimpleNamespace(state=True)
+    sync_states = []
+    acquisition_sync_calls = []
+    update_calls = []
+    device._stop_refresh_timer = lambda: None
+    device._sync_local_on_action = lambda: sync_states.append(device.onAction.state)
+    device._sync_acquisition_controls = lambda: acquisition_sync_calls.append(True)
+    device._update_status_widgets = lambda: update_calls.append(True)
+    device.recording = True
+    device.shutdownCommunication = lambda: (_ for _ in ()).throw(
+        AssertionError("forced communication loss must not call shutdownCommunication")
+    )
+    device.controller = types.SimpleNamespace(
+        initialized=True,
+        _forced_close_state=module._PSU_COMMUNICATION_LOST_STATE,
+        closeCommunication=lambda **kwargs: close_calls.append(kwargs),
+    )
+
+    module.PSUDevice.closeCommunication(device)
+
+    assert device.onAction.state is False
+    assert sync_states == [False]
+    assert device.recording is False
+    assert acquisition_sync_calls == [True]
+    assert update_calls == [True]
+    assert close_calls == [{"final_state": module._PSU_COMMUNICATION_LOST_STATE}]
+
+
 def test_psu_toggle_recording_rejects_disconnected_device():
     _clear_test_modules()
     _install_esibd_stubs()

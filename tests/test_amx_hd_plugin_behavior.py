@@ -461,6 +461,72 @@ def test_startup_snapshot_ready_rejects_standby_for_non_standby_config():
     assert controller._startup_snapshot_ready(standby_snapshot) is False
 
 
+def test_hd_controller_startup_wait_logs_progress_when_state_is_slow(monkeypatch):
+    plugin = _load_hd_plugin_module()
+    now = {"value": 0.0}
+    snapshots = [
+        {
+            "device_enabled": False,
+            "main_state": {"name": "STATE_ERR_FPGA_DIS"},
+            "device_state": {"flags": ["DEVST_FPGA_DIS"]},
+            "controller_state": {"flags": []},
+            "oscillator": {"period": 100000},
+            "pulsers": [],
+        },
+        {
+            "device_enabled": False,
+            "main_state": {"name": "STATE_ERR_FPGA_DIS"},
+            "device_state": {"flags": ["DEVST_FPGA_DIS"]},
+            "controller_state": {"flags": []},
+            "oscillator": {"period": 100000},
+            "pulsers": [],
+        },
+        {
+            "device_enabled": True,
+            "main_state": {"name": "STATE_ON"},
+            "device_state": {"flags": ["DEVST_OK"]},
+            "controller_state": {"flags": []},
+            "oscillator": {"period": 100000},
+            "pulsers": [],
+        },
+    ]
+
+    def _collect_snapshot():
+        now["value"] += 0.6
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(
+        plugin.time,
+        "sleep",
+        lambda seconds: now.__setitem__("value", now["value"] + seconds),
+    )
+
+    printed = []
+    parent = types.SimpleNamespace(name="AMX_HD", operating_config=1)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller._collect_startup_snapshot = _collect_snapshot
+    controller._apply_snapshot = lambda snapshot: None
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+
+    snapshot = controller._wait_for_startup_ready_snapshot(
+        config_index=1,
+        settle_timeout_s=3.0,
+    )
+
+    assert snapshot["main_state"]["name"] == "STATE_ON"
+    assert any(
+        message.startswith("Waiting for AMX startup after config 1:")
+        and flag == plugin.PRINT.WARNING
+        for message, flag in printed
+    )
+    assert any(
+        message == "AMX startup reached state=STATE_ON, device=ON took 2.0 s."
+        and flag == plugin.PRINT.WARNING
+        for message, flag in printed
+    )
+
+
 def test_device_active_predicate():
     """_device_active() is the single source of truth for whether the device is
     in its expected operating state. STATE_ON is always active. STATE_STANDBY
@@ -758,6 +824,63 @@ def test_read_numbers_ignores_snapshot_after_disconnect():
     assert controller.main_state == "Disconnected"
 
 
+def test_hd_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
+    plugin = _load_hd_plugin_module()
+
+    device = object.__new__(plugin.AMXHDDevice)
+    device.useOnOffLogic = True
+    device.onAction = types.SimpleNamespace(state=False)
+    device.controller = types.SimpleNamespace(shutdownCommunication=lambda: False)
+    sync_states = []
+    acquisition_sync_calls = []
+    update_calls = []
+    warnings = []
+    device._sync_local_on_action = lambda: sync_states.append(device.onAction.state)
+    device._sync_acquisition_controls = lambda: acquisition_sync_calls.append(True)
+    device._update_status_widgets = lambda: update_calls.append(True)
+    device.print = lambda message, flag=None: warnings.append((message, flag))
+    device.recording = True
+
+    plugin.AMXHDDevice.shutdownCommunication(device)
+
+    assert device.onAction.state is True
+    assert sync_states == [True]
+    assert device.recording is False
+    assert acquisition_sync_calls == [True]
+    assert update_calls == [True]
+    assert any("shutdown could not be confirmed" in message for message, _ in warnings)
+    assert warnings[-1][1] == plugin.PRINT.WARNING
+
+
+def test_hd_device_close_communication_stops_recording_when_disconnected():
+    plugin = _load_hd_plugin_module()
+
+    close_calls = []
+    device = object.__new__(plugin.AMXHDDevice)
+    device.useOnOffLogic = True
+    device.onAction = types.SimpleNamespace(state=True)
+    device.controller = types.SimpleNamespace(
+        initialized=False,
+        closeCommunication=lambda: close_calls.append(True),
+    )
+    sync_states = []
+    acquisition_sync_calls = []
+    update_calls = []
+    device._sync_local_on_action = lambda: sync_states.append(device.onAction.state)
+    device._sync_acquisition_controls = lambda: acquisition_sync_calls.append(True)
+    device._update_status_widgets = lambda: update_calls.append(True)
+    device.recording = True
+
+    plugin.AMXHDDevice.closeCommunication(device)
+
+    assert close_calls == [True]
+    assert device.onAction.state is False
+    assert sync_states == [False]
+    assert device.recording is False
+    assert acquisition_sync_calls == [True]
+    assert update_calls == [True]
+
+
 def test_start_operating_mode_uses_extended_lock_timeout():
     """_start_operating_mode must use a lock timeout >= poll_timeout_s +
     startup_timeout_s so that an in-flight collect_housekeeping does not
@@ -793,3 +916,37 @@ def test_start_operating_mode_uses_extended_lock_timeout():
     )
 
     assert lock_timeouts == [15.0]
+
+
+def test_hd_controller_lock_section_logs_slow_lock_acquisition(monkeypatch):
+    plugin = _load_hd_plugin_module()
+    now = {"value": 0.0}
+    printed = []
+
+    class FakeLock:
+        def __init__(self):
+            self.release_calls = 0
+
+        def acquire(self, timeout=-1):
+            now["value"] = 1.3
+            return True
+
+        def release(self):
+            self.release_calls += 1
+
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: now["value"])
+    controller = plugin.AMXHDController(controllerParent=types.SimpleNamespace())
+    controller.lock = FakeLock()
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+
+    with controller._controller_lock_section("Could not acquire lock to start the AMX."):
+        pass
+
+    assert controller.lock.release_calls == 1
+    assert printed == [
+        (
+            "AMX controller lock acquired after 1.3 s: "
+            "Could not acquire lock to start the AMX.",
+            plugin.PRINT.WARNING,
+        )
+    ]

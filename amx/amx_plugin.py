@@ -54,6 +54,8 @@ _AMX_MONITOR_WARN_RELATIVE_TOLERANCE = 0.10
 _AMX_MONITOR_RELATIVE_FLOOR_DUTY = 1.0
 _AMX_NUMERIC_DEBOUNCE_MS = 250
 _AMX_MAX_CONSECUTIVE_POLL_ERRORS = 10
+_AMX_SLOW_OPERATION_LOG_THRESHOLD_S = 1.0
+_AMX_STARTUP_PROGRESS_LOG_INTERVAL_S = 1.0
 
 
 def _amx_transport_failure_is_fatal(exc: Exception) -> bool:
@@ -1914,6 +1916,8 @@ class AMXDevice(Device):
         if self.useOnOffLogic and not hasattr(self, "onAction"):
             if controller:
                 controller.closeCommunication()
+            self.recording = False
+            self._sync_acquisition_controls()
             self._update_status_widgets()
             return
         if controller and getattr(controller, "initialized", False):
@@ -1924,6 +1928,8 @@ class AMXDevice(Device):
             self._sync_local_on_action()
         if controller:
             controller.closeCommunication()
+        self.recording = False
+        self._sync_acquisition_controls()
         self._update_status_widgets()
 
     def shutdownCommunication(self) -> None:
@@ -1940,6 +1946,8 @@ class AMXDevice(Device):
                 "the hardware state is verified.",
                 flag=PRINT.WARNING,
             )
+        self.recording = False
+        self._sync_acquisition_controls()
         self._update_status_widgets()
 
     def setOn(self, on: "bool | None" = None) -> None:
@@ -2711,6 +2719,39 @@ class AMXController(DeviceController):
         state = str(snapshot.get("main_state", {}).get("name", "") or "")
         return bool(snapshot.get("device_enabled", False)) and _state_is_on(state)
 
+    def _startup_snapshot_summary(self, snapshot: dict[str, Any]) -> str:
+        state = str(snapshot.get("main_state", {}).get("name", "Unknown") or "Unknown")
+        device_enabled = "ON" if bool(snapshot.get("device_enabled", False)) else "OFF"
+        return f"state={state}, device={device_enabled}"
+
+    def _print_if_slow(
+        self,
+        message: str,
+        started_s: float,
+        *,
+        threshold_s: float = _AMX_SLOW_OPERATION_LOG_THRESHOLD_S,
+    ) -> None:
+        elapsed_s = time.monotonic() - started_s
+        if elapsed_s >= threshold_s:
+            self.print(f"{message} took {elapsed_s:.1f} s.", flag=PRINT.WARNING)
+
+    def _print_lock_wait_if_slow(
+        self,
+        timeout_message: str,
+        started_s: float,
+        *,
+        log_timeout: bool,
+    ) -> None:
+        if not log_timeout:
+            return
+        elapsed_s = time.monotonic() - started_s
+        if elapsed_s >= _AMX_SLOW_OPERATION_LOG_THRESHOLD_S:
+            self.print(
+                f"AMX controller lock acquired after {elapsed_s:.1f} s: "
+                f"{timeout_message}",
+                flag=PRINT.WARNING,
+            )
+
     def _startup_failure_message(
         self,
         *,
@@ -2732,21 +2773,37 @@ class AMXController(DeviceController):
         config_index: int,
         settle_timeout_s: float,
     ) -> dict[str, Any]:
-        deadline = time.monotonic() + max(float(settle_timeout_s), 0.1)
+        settle_timeout_s = max(float(settle_timeout_s), 0.1)
+        started_s = time.monotonic()
+        deadline = started_s + settle_timeout_s
+        next_progress_s = started_s + _AMX_STARTUP_PROGRESS_LOG_INTERVAL_S
         latest_snapshot: dict[str, Any] | None = None
         while True:
             snapshot = self._collect_startup_snapshot()
             latest_snapshot = snapshot
             self._apply_snapshot(snapshot)
             if self._startup_snapshot_ready(snapshot):
+                self._print_if_slow(
+                    f"AMX startup reached {self._startup_snapshot_summary(snapshot)}",
+                    started_s,
+                )
                 return snapshot
-            if time.monotonic() >= deadline:
+            now_s = time.monotonic()
+            if now_s >= deadline:
                 raise RuntimeError(
                     self._startup_failure_message(
                         config_index=config_index,
                         snapshot=latest_snapshot,
                     )
                 )
+            if now_s >= next_progress_s:
+                self.print(
+                    f"Waiting for AMX startup after config {config_index}: "
+                    f"{now_s - started_s:.1f}/{settle_timeout_s:.1f} s elapsed "
+                    f"({self._startup_snapshot_summary(snapshot)}).",
+                    flag=PRINT.WARNING,
+                )
+                next_progress_s = now_s + _AMX_STARTUP_PROGRESS_LOG_INTERVAL_S
             time.sleep(0.1)
 
     def _load_operating_config_and_enable_device(
@@ -2761,11 +2818,19 @@ class AMXController(DeviceController):
             raise RuntimeError("AMX device disconnected.")
 
         if load_config_first:
+            started_s = time.monotonic()
             device.load_config(config_index, timeout_s=timeout_s)
+            self._print_if_slow(f"AMX load_config({config_index})", started_s)
             self._loaded_config_index = config_index
+            started_s = time.monotonic()
             self._refresh_loaded_config_status()
+            self._print_if_slow("AMX loaded-config refresh", started_s)
+        started_s = time.monotonic()
         self._apply_runtime_settings(timeout_s)
+        self._print_if_slow("AMX runtime settings apply", started_s)
+        started_s = time.monotonic()
         device.set_device_enabled(True, timeout_s=timeout_s)
+        self._print_if_slow("AMX set_device_enabled(ON)", started_s)
         try:
             return self._wait_for_startup_ready_snapshot(
                 config_index=config_index,
@@ -2790,7 +2855,9 @@ class AMXController(DeviceController):
                 "AMX communication is not connected and the driver does not expose "
                 "connect()."
             )
+        started_s = time.monotonic()
         connect(timeout_s=timeout_s)
+        self._print_if_slow("AMX transport reconnect", started_s)
         self._refresh_available_configs()
         self._refresh_loaded_config_status()
         return device
@@ -3333,10 +3400,12 @@ class AMXController(DeviceController):
                 if device is None:
                     shutdown_confirmed = True
                 else:
+                    started_s = time.monotonic()
                     shutdown_result = device.shutdown(
                         timeout_s=float(getattr(self.controllerParent, "startup_timeout_s", 10.0)),
                         **shutdown_kwargs,
                     )
+                    self._print_if_slow("AMX shutdown command", started_s)
                     shutdown_confirmed = shutdown_result is not False
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
@@ -3522,10 +3591,16 @@ class AMXController(DeviceController):
             if already_acquired:
                 yield
                 return
+            started_s = time.monotonic()
             if not acquire(timeout=float(timeout_s)):
                 if log_timeout:
                     self.print(timeout_message, flag=PRINT.ERROR)
                 raise TimeoutError(timeout_message)
+            self._print_lock_wait_if_slow(
+                timeout_message,
+                started_s,
+                log_timeout=log_timeout,
+            )
             try:
                 yield
             finally:
@@ -3534,6 +3609,7 @@ class AMXController(DeviceController):
 
         acquire_timeout = getattr(lock, "acquire_timeout", None)
         if callable(acquire_timeout):
+            started_s = time.monotonic()
             with acquire_timeout(
                 float(timeout_s),
                 timeoutMessage=timeout_message if log_timeout else "",
@@ -3543,6 +3619,11 @@ class AMXController(DeviceController):
                     if log_timeout:
                         self.print(timeout_message, flag=PRINT.ERROR)
                     raise TimeoutError(timeout_message)
+                self._print_lock_wait_if_slow(
+                    timeout_message,
+                    started_s,
+                    log_timeout=log_timeout,
+                )
                 yield
             return
 
