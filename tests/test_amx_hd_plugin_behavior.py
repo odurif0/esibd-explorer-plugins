@@ -536,9 +536,9 @@ def test_config_selector_changed_allows_standby_operating_selection():
     assert not any("standby slot" in m for m in logs)
 
 
-def test_warn_if_standby_operating_emits_non_blocking_notice():
-    """A standby-named Operating config triggers a non-blocking reminder at ON
-    time (not a refusal); a normal config emits nothing."""
+def test_warn_if_standby_operating_does_not_emit():
+    """A standby-named Operating config is a normal operator choice. The plugin
+    must NOT emit a warning — the operator knows HV will not be applied."""
     plugin = _load_hd_plugin_module()
     parent = types.SimpleNamespace(name="AMX_HD")
     controller = plugin.AMXHDController(controllerParent=parent)
@@ -550,9 +550,8 @@ def test_warn_if_standby_operating_emits_non_blocking_notice():
     controller.print = lambda msg, flag=None: logs.append(msg)
 
     controller._warn_if_standby_operating(0)
-    assert any("standby slot" in m and "HV will not be applied" in m for m in logs)
+    assert logs == []
 
-    logs.clear()
     controller._warn_if_standby_operating(1)
     assert logs == []
 
@@ -683,3 +682,41 @@ def test_stop_acquisition_for_transition_tolerates_missing_getDevice():
     controller._stop_acquisition_for_transition()
 
     assert controller.acquiring is False
+
+
+def test_start_operating_mode_uses_extended_lock_timeout():
+    """_start_operating_mode must use a lock timeout >= poll_timeout_s +
+    startup_timeout_s so that an in-flight collect_housekeeping does not
+    cause a spurious 'Could not acquire lock' error."""
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(
+        name="AMX_HD",
+        poll_timeout_s=5.0,
+        startup_timeout_s=10.0,
+    )
+    controller = plugin.AMXHDController(controllerParent=parent)
+    lock_timeouts = []
+
+    class _FakeLock:
+        def acquire(self, blocking=True, timeout=-1):
+            lock_timeouts.append(timeout)
+            return True
+
+        def release(self):
+            pass
+
+    controller.lock = _FakeLock()
+    controller._ensure_transport_connected = lambda timeout_s: None
+    controller._load_operating_config_and_enable_device = lambda **kw: None
+    controller._update_state = lambda: None
+    controller.startAcquisition = lambda: None
+
+    controller._start_operating_mode(
+        config_index=0,
+        timeout_s=10.0,
+        lock_message="test",
+        success_message=None,
+        restart_acquisition=True,
+    )
+
+    assert lock_timeouts == [15.0]

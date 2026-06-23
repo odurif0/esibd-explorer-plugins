@@ -2658,18 +2658,10 @@ class AMXController(DeviceController):
         return True, "", config_index
 
     def _warn_if_standby_operating(self, config_index: int) -> None:
-        """Non-blocking notice when the Operating config is a standby-named slot.
-
-        The operator is trusted to know a standby config does not apply HV; this
-        only reminds them, it does not block.
+        """No-op. Selecting a standby Operating config is a normal operator
+        choice — the operator knows HV will not be applied.  Kept as a
+        no-op for backward compatibility with tests that call it directly.
         """
-        entry = self._config_entry_by_index(config_index)
-        if entry is not None and self._config_entry_is_standby_like(entry):
-            self.print(
-                f"{self.controllerParent.name}: config {config_index} is a standby "
-                "slot — HV will not be applied.",
-                flag=PRINT.WARNING,
-            )
 
     def _apply_runtime_settings(self, timeout_s: float) -> None:
         device = self.device
@@ -2786,9 +2778,15 @@ class AMXController(DeviceController):
         lock_message: str,
         success_message: str | None = None,
         restart_acquisition: bool = False,
+        lock_timeout_s: float | None = None,
     ) -> None:
         """Load the selected operating config, apply runtime settings, and enable AMX."""
-        with self._controller_lock_section(lock_message):
+        if lock_timeout_s is None:
+            lock_timeout_s = (
+                float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
+                + float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
+            )
+        with self._controller_lock_section(lock_message, timeout_s=lock_timeout_s):
             self._ensure_transport_connected(timeout_s)
             self._load_operating_config_and_enable_device(
                 config_index=config_index,
@@ -2837,8 +2835,8 @@ class AMXController(DeviceController):
             )
             return
 
-        self._warn_if_standby_operating(config_index)
         self._discard_pending_runtime_applies()
+        self._stop_acquisition_for_transition()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
             self._start_operating_mode(
@@ -2846,6 +2844,7 @@ class AMXController(DeviceController):
                 timeout_s=timeout_s,
                 lock_message="Could not acquire lock to load the AMX config.",
                 success_message=f"Loaded AMX config {config_index}.",
+                restart_acquisition=True,
             )
         except TimeoutError:
             return
@@ -3227,7 +3226,6 @@ class AMXController(DeviceController):
                         flag=PRINT.WARNING,
                     )
                     return
-                self._warn_if_standby_operating(config_index)
                 self._start_operating_mode(
                     config_index=config_index,
                     timeout_s=timeout_s,
@@ -3271,7 +3269,11 @@ class AMXController(DeviceController):
         confirmation_reason = "shutdown confirmation was not completed"
         try:
             with self._controller_lock_section(
-                "Could not acquire lock to shut down the AMX."
+                "Could not acquire lock to shut down the AMX.",
+                timeout_s=(
+                    float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
+                    + float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
+                ),
             ):
                 device = self.device
                 if device is None:

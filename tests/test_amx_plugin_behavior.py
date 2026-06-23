@@ -1457,9 +1457,9 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
     assert restored == [False]
 
 
-def test_warn_if_standby_operating_emits_non_blocking_notice():
-    """A standby-named Operating config triggers a non-blocking reminder at ON
-    time (not a refusal); a normal config emits nothing."""
+def test_warn_if_standby_operating_does_not_emit():
+    """A standby-named Operating config is a normal operator choice. The plugin
+    must NOT emit a warning — the operator knows HV will not be applied."""
     module = _load_module()
     parent = types.SimpleNamespace(name="AMX")
     controller = module.AMXController(parent)
@@ -1471,9 +1471,8 @@ def test_warn_if_standby_operating_emits_non_blocking_notice():
     controller.print = lambda msg, flag=None: logs.append(msg)
 
     controller._warn_if_standby_operating(0)
-    assert any("standby slot" in m and "HV will not be applied" in m for m in logs)
+    assert logs == []
 
-    logs.clear()
     controller._warn_if_standby_operating(1)
     assert logs == []
 

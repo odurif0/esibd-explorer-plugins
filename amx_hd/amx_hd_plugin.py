@@ -2691,18 +2691,10 @@ class AMXHDController(DeviceController):
         return True, "", config_index
 
     def _warn_if_standby_operating(self, config_index: int) -> None:
-        """Non-blocking notice when the Operating config is a standby-named slot.
-
-        The operator is trusted to know a standby config does not apply HV; this
-        only reminds them, it does not block.
+        """No-op. Selecting a standby Operating config is a normal operator
+        choice — the operator knows HV will not be applied.  Kept as a
+        no-op for backward compatibility with tests that call it directly.
         """
-        entry = self._config_entry_by_index(config_index)
-        if entry is not None and self._config_entry_is_standby_like(entry):
-            self.print(
-                f"{self.controllerParent.name}: config {config_index} is a standby "
-                "slot — HV will not be applied.",
-                flag=PRINT.WARNING,
-            )
 
     def _apply_runtime_settings(self, timeout_s: float) -> None:
         device = self.device
@@ -2837,9 +2829,15 @@ class AMXHDController(DeviceController):
         lock_message: str,
         success_message: str | None = None,
         restart_acquisition: bool = False,
+        lock_timeout_s: float | None = None,
     ) -> None:
         """Load the selected operating config, apply runtime settings, and enable AMX."""
-        with self._controller_lock_section(lock_message):
+        if lock_timeout_s is None:
+            lock_timeout_s = (
+                float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
+                + float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
+            )
+        with self._controller_lock_section(lock_message, timeout_s=lock_timeout_s):
             self._ensure_transport_connected(timeout_s)
             self._load_operating_config_and_enable_device(
                 config_index=config_index,
@@ -2888,8 +2886,8 @@ class AMXHDController(DeviceController):
             )
             return
 
-        self._warn_if_standby_operating(config_index)
         self._discard_pending_runtime_applies()
+        self._stop_acquisition_for_transition()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
             self._start_operating_mode(
@@ -2897,6 +2895,7 @@ class AMXHDController(DeviceController):
                 timeout_s=timeout_s,
                 lock_message="Could not acquire lock to load the AMX config.",
                 success_message=f"Loaded AMX config {config_index}.",
+                restart_acquisition=True,
             )
         except TimeoutError:
             return
@@ -3278,7 +3277,6 @@ class AMXHDController(DeviceController):
                         flag=PRINT.WARNING,
                     )
                     return
-                self._warn_if_standby_operating(config_index)
                 is_standby_cfg = self._config_entry_is_standby_like(
                     self._config_entry_by_index(config_index)
                 )
@@ -3331,11 +3329,13 @@ class AMXHDController(DeviceController):
             with self._controller_lock_section(
                 "Could not acquire lock to shut down the AMX.",
                 # The periodic state refresh holds this lock for the duration of
-                # a full collect_housekeeping (~1-2 s), which exceeds the default
-                # 1 s lock timeout and made the OFF toggle reliably fail with
-                # "Could not acquire lock to shut down". Wait long enough to let
-                # an in-flight refresh release the lock instead of giving up.
-                timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0)),
+                # a full collect_housekeeping (~poll_timeout_s).  Use a timeout
+                # strictly greater than that so the shutdown waits for the
+                # in-flight poll to release the lock instead of racing it.
+                timeout_s=(
+                    float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
+                    + float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
+                ),
             ):
                 device = self.device
                 if device is None:
