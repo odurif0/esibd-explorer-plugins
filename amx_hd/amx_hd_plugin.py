@@ -1114,6 +1114,15 @@ class AMXHDDevice(Device):
         controller = getattr(self, "controller", None)
         if controller is None:
             return
+        # Sync the combo selection into the setting before starting the load
+        # thread.  If the operator changed the dropdown and immediately clicked
+        # "Load now", the currentIndexChanged signal may not have been processed
+        # yet, and the controller would read the old value.
+        combo = getattr(self, "operatingConfigCombo", None)
+        if combo is not None:
+            value = self._combo_current_value(combo)
+            if value >= 0:
+                self._set_config_setting_value("operating_config", value)
         load_now = getattr(controller, "loadOperatingConfigNowFromThread", None)
         if callable(load_now):
             load_now(parallel=True)
@@ -2518,6 +2527,11 @@ class AMXHDController(DeviceController):
         elif self.available_configs:
             return {}
 
+        # If the device is already in STATE_STANDBY, the standby config is
+        # already loaded — no need to reload it.  Just disconnect.
+        if _state_is_standby(getattr(self, "main_state", "")):
+            return {"disable_device": False}
+
         return {
             "standby_config": standby_config,
             "disable_device": False,
@@ -2844,11 +2858,8 @@ class AMXHDController(DeviceController):
                 timeout_s=timeout_s,
                 load_config_first=True,
             )
-        self._update_state()
         if restart_acquisition:
-            start_acquisition = getattr(self, "startAcquisition", None)
-            if callable(start_acquisition):
-                start_acquisition()
+            self._restart_acquisition_after_transition()
         if success_message:
             self.print(success_message)
 
@@ -2886,6 +2897,22 @@ class AMXHDController(DeviceController):
             )
             return
 
+        # Guard against concurrent Load now calls — e.g. double-click or
+        # a stale thread from a previous load.  The guard uses transitioning
+        # so it also blocks while an ON/OFF toggle is in progress.
+        if getattr(self, "transitioning", False):
+            self.print(
+                f"Cannot load {self.controllerParent.name} config: a transition is already in progress.",
+                flag=PRINT.WARNING,
+            )
+            return
+        if not self._begin_transition(True):
+            self.print(
+                f"Cannot load {self.controllerParent.name} config: a load is already in progress.",
+                flag=PRINT.WARNING,
+            )
+            return
+
         self._discard_pending_runtime_applies()
         self._stop_acquisition_for_transition()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
@@ -2898,7 +2925,7 @@ class AMXHDController(DeviceController):
                 restart_acquisition=True,
             )
         except TimeoutError:
-            return
+            pass
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             self.print(
@@ -2906,6 +2933,7 @@ class AMXHDController(DeviceController):
                 flag=PRINT.ERROR,
             )
         finally:
+            self._end_transition()
             self._sync_status_to_gui()
 
     def _apply_channel_timing(self, channel: AMXHDChannel, timeout_s: float) -> None:
@@ -3046,6 +3074,27 @@ class AMXHDController(DeviceController):
                 if getattr(device, "recording", False):
                     device.recording = False
         self.acquiring = False
+
+    def _restart_acquisition_after_transition(self) -> None:
+        """Restart acquisition after a transition without joining the old thread.
+
+        The base ``startAcquisition`` joins the old acquisition thread with a 5s
+        timeout.  But ``collect_housekeeping`` can take 20-60s on the HD device,
+        so the join always fails and logs ``Data reading thread did not
+        complete``.  Instead, just set ``acquiring = True`` and start a new
+        thread only if the old one is dead.  If the old thread is still alive
+        (in ``collect_housekeeping``), it will see ``acquiring = True`` at the
+        top of the next iteration and continue polling.
+        """
+        self.acquiring = True
+        old_thread = getattr(self, "acquisitionThread", None)
+        if old_thread is None or not old_thread.is_alive():
+            self.acquisitionThread = Thread(
+                target=self.runAcquisition,
+                name=f"{self.controllerParent.name} acquisitionThread",
+            )
+            self.acquisitionThread.daemon = True
+            self.acquisitionThread.start()
 
     def runAcquisition(self) -> None:
         """Poll AMX housekeeping and push readbacks to the GUI from the acquisition thread.
