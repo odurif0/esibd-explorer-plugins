@@ -529,7 +529,8 @@ def _format_current_text(current_a: Any) -> str:
     value = _coerce_float(current_a, np.nan)
     if _is_nan(value):
         return "n/a"
-    return f"{value:.6g} A"
+    milli = int(math.floor(value * 1000.0 + 0.5))
+    return f"{milli} mA"
 
 
 def _format_voltage_text(voltage_v: Any) -> str:

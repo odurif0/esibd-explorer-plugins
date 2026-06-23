@@ -597,7 +597,7 @@ def test_channel_panel_snapshot_formats_psu_readbacks_for_fixed_channels():
     assert snapshot["voltage_set"] == "350 V"
     assert snapshot["voltage_monitor"] == "345.6 V"
     assert snapshot["current_set"] == "0.015 A"
-    assert snapshot["current_monitor"] == "0.0123 A"
+    assert snapshot["current_monitor"] == "12 mA"
     assert "#3182ce" in snapshot["card_style"]
 
 
@@ -927,13 +927,13 @@ def test_status_widgets_show_hardware_state_when_psu_state_is_harmonized():
     module.PSUDevice._ensure_status_widgets(device)
 
     assert device.statusBadgeLabel.text == "ST_STBY"
-    assert device.statusSummaryLabel.text == "CH0 ON 12 V / 0.12 A | CH1 OFF 0 V / 0 A"
+    assert device.statusSummaryLabel.text == "CH0 ON 12 V / 120 mA | CH1 OFF 0 V / 0 mA"
     assert "Temp:" in device.diagnosticsSummaryLabel.text
     assert "CH0" in device.diagnosticsSummaryLabel.text
     tooltip = device.statusBadgeLabel.tooltips[-1]
     assert "State: ST_STBY" in tooltip
     assert "Hardware state: STATE_ERR_PSU_DIS" in tooltip
-    assert "Readbacks: CH0 ON 12 V / 0.12 A | CH1 OFF 0 V / 0 A" in tooltip
+    assert "Readbacks: CH0 ON 12 V / 120 mA | CH1 OFF 0 V / 0 mA" in tooltip
     assert "#b7791f" in device.statusBadgeLabel.styles[-1]
 
 

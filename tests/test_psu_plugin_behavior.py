@@ -371,7 +371,7 @@ def test_controller_read_numbers_maps_housekeeping_snapshot():
     assert controller.current_values == {0: 0.4, 1: 0.0}
     assert controller.output_enabled_by_channel == {0: True, 1: False}
     assert controller.voltage_setpoints == {0: "30 V", 1: "0 V"}
-    assert controller.current_setpoints == {0: "0.5 A", 1: "0 A"}
+    assert controller.current_setpoints == {0: "500 mA", 1: "0 mA"}
     assert controller.adc_temperatures == {0: 36.5, 1: 31.0}
     assert controller.dropout_values == {0: 1.25, 1: 0.0}
     assert controller.rail_summaries == {
@@ -754,7 +754,7 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
     assert controller.current_values == {0: 0.22, 1: 0.045}
     assert controller.output_enabled_by_channel == {0: False, 1: True}
     assert controller.voltage_setpoints == {0: "30 V", 1: "0 V"}
-    assert controller.current_setpoints == {0: "0.5 A", 1: "0 A"}
+    assert controller.current_setpoints == {0: "500 mA", 1: "0 mA"}
     assert parent.output_summary == "CH0=OFF, CH1=ON"
 
 
@@ -784,7 +784,7 @@ def test_format_current_text_handles_nan():
     module = _load_module()
 
     assert module._format_current_text(np.nan) == "n/a"
-    assert module._format_current_text(0.125) == "0.125 A"
+    assert module._format_current_text(0.125) == "125 mA"
 
 
 def test_format_voltage_text_handles_nan():
@@ -1479,7 +1479,7 @@ def test_apply_manual_state_warns_but_continues_on_setpoint_readback_lag():
     )
 
     assert printed[0][1] == module.PRINT.WARNING
-    assert "current limit readback 0 A does not match requested 0.01 A" in printed[0][0]
+    assert "current limit readback 0 mA does not match requested 10 mA" in printed[0][0]
     assert printed[-1] == ("Applied PSU manual values.", None)
 
 
@@ -1954,3 +1954,17 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
         RuntimeError("PSU open_port failed: -2 (Error opening port)")
     ) == ""
     assert controller._poisoned_com is None
+
+
+def test_format_current_text_rounds_to_whole_milliamps():
+    module = _load_module()
+    fmt = module._format_current_text
+
+    assert fmt(0.0) == "0 mA"
+    assert fmt(0.0004) == "0 mA"
+    assert fmt(0.0005) == "1 mA"
+    assert fmt(0.1234) == "123 mA"
+    assert fmt(0.5) == "500 mA"
+    assert fmt(1.0) == "1000 mA"
+    assert fmt(np.nan) == "n/a"
+    assert fmt(None) == "n/a"
