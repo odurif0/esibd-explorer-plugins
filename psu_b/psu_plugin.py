@@ -3256,29 +3256,53 @@ class PSUDevice(Device):
     def closeCommunication(self) -> None:
         self._stop_refresh_timer()
         controller = getattr(self, "controller", None)
+        forced_close_state = getattr(controller, "_forced_close_state", None)
         if self.useOnOffLogic and not hasattr(self, "onAction"):
             if controller:
-                controller.closeCommunication()
+                close_kwargs = (
+                    {"final_state": forced_close_state}
+                    if forced_close_state
+                    else {}
+                )
+                controller.closeCommunication(**close_kwargs)
+            self.recording = False
+            self._sync_acquisition_controls()
             self._update_status_widgets()
             return
-        if controller and getattr(controller, "initialized", False):
+        if controller and getattr(controller, "initialized", False) and not forced_close_state:
             self.shutdownCommunication()
             return
         if hasattr(self, "onAction"):
             self.onAction.state = False
             self._sync_local_on_action()
         if controller:
-            controller.closeCommunication()
+            close_kwargs = (
+                {"final_state": forced_close_state}
+                if forced_close_state
+                else {}
+            )
+            controller.closeCommunication(**close_kwargs)
+        self.recording = False
+        self._sync_acquisition_controls()
         self._update_status_widgets()
 
     def shutdownCommunication(self) -> None:
         self._stop_refresh_timer()
-        if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = False
-            self._sync_local_on_action()
         controller = getattr(self, "controller", None)
+        shutdown_confirmed = True
         if controller:
-            controller.shutdownCommunication()
+            shutdown_confirmed = bool(controller.shutdownCommunication())
+        if self.useOnOffLogic and hasattr(self, "onAction"):
+            self.onAction.state = False if shutdown_confirmed else True
+            self._sync_local_on_action()
+        if not shutdown_confirmed:
+            self.print(
+                "PSU shutdown could not be confirmed; UI remains ON until "
+                "the hardware state is verified.",
+                flag=PRINT.WARNING,
+            )
+        self.recording = False
+        self._sync_acquisition_controls()
         self._update_status_widgets()
 
     def setOn(self, on: "bool | None" = None) -> None:

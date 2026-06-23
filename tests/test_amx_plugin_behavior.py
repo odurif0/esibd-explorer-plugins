@@ -546,6 +546,71 @@ def test_controller_toggle_on_waits_for_state_on_after_enable():
     assert controller.device_enabled_state == "ON"
 
 
+def test_controller_startup_wait_logs_progress_when_state_is_slow(monkeypatch):
+    module = _load_module()
+    now = {"value": 0.0}
+    snapshots = [
+        {
+            "device_enabled": False,
+            "main_state": {"name": "STATE_ERR_FPGA_DIS"},
+            "device_state": {"flags": ["DEVST_FPGA_DIS"]},
+            "controller_state": {"flags": []},
+            "oscillator": {"period": 100000},
+            "pulsers": [],
+        },
+        {
+            "device_enabled": False,
+            "main_state": {"name": "STATE_ERR_FPGA_DIS"},
+            "device_state": {"flags": ["DEVST_FPGA_DIS"]},
+            "controller_state": {"flags": []},
+            "oscillator": {"period": 100000},
+            "pulsers": [],
+        },
+        {
+            "device_enabled": True,
+            "main_state": {"name": "STATE_ON"},
+            "device_state": {"flags": ["DEVST_OK"]},
+            "controller_state": {"flags": []},
+            "oscillator": {"period": 100000},
+            "pulsers": [],
+        },
+    ]
+
+    def _collect_snapshot():
+        now["value"] += 0.6
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda seconds: now.__setitem__("value", now["value"] + seconds),
+    )
+
+    printed = []
+    controller = module.AMXController(types.SimpleNamespace(getChannels=lambda: []))
+    controller._collect_startup_snapshot = _collect_snapshot
+    controller._apply_snapshot = lambda snapshot: None
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+
+    snapshot = controller._wait_for_startup_ready_snapshot(
+        config_index=9,
+        settle_timeout_s=3.0,
+    )
+
+    assert snapshot["main_state"]["name"] == "STATE_ON"
+    assert any(
+        message.startswith("Waiting for AMX startup after config 9:")
+        and flag == module.PRINT.WARNING
+        for message, flag in printed
+    )
+    assert any(
+        message == "AMX startup reached state=STATE_ON, device=ON took 2.0 s."
+        and flag == module.PRINT.WARNING
+        for message, flag in printed
+    )
+
+
 def test_controller_toggle_on_reconnects_transport_before_loading_operating_config():
     module = _load_module()
 
@@ -960,16 +1025,50 @@ def test_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
     device.onAction = types.SimpleNamespace(state=False)
     device.controller = types.SimpleNamespace(shutdownCommunication=lambda: False)
     sync_states = []
+    acquisition_sync_calls = []
     warnings = []
     device._sync_local_on_action = lambda: sync_states.append(device.onAction.state)
+    device._sync_acquisition_controls = lambda: acquisition_sync_calls.append(True)
     device._update_status_widgets = lambda: None
     device.print = lambda message, flag=None: warnings.append((message, flag))
+    device.recording = True
 
     module.AMXDevice.shutdownCommunication(device)
 
     assert device.onAction.state is True
     assert sync_states == [True]
+    assert device.recording is False
+    assert acquisition_sync_calls == [True]
     assert any("shutdown could not be confirmed" in message for message, _ in warnings)
+
+
+def test_device_close_communication_stops_recording_when_disconnected():
+    module = _load_module()
+
+    close_calls = []
+    device = object.__new__(module.AMXDevice)
+    device.useOnOffLogic = True
+    device.onAction = types.SimpleNamespace(state=True)
+    device.controller = types.SimpleNamespace(
+        initialized=False,
+        closeCommunication=lambda: close_calls.append(True),
+    )
+    sync_states = []
+    acquisition_sync_calls = []
+    update_calls = []
+    device._sync_local_on_action = lambda: sync_states.append(device.onAction.state)
+    device._sync_acquisition_controls = lambda: acquisition_sync_calls.append(True)
+    device._update_status_widgets = lambda: update_calls.append(True)
+    device.recording = True
+
+    module.AMXDevice.closeCommunication(device)
+
+    assert close_calls == [True]
+    assert device.onAction.state is False
+    assert sync_states == [False]
+    assert device.recording is False
+    assert acquisition_sync_calls == [True]
+    assert update_calls == [True]
 
 
 def test_controller_shutdown_parks_standby_before_disconnect_when_available():
@@ -1049,6 +1148,40 @@ def test_amx_controller_lock_section_uses_raw_lock_and_propagates_errors():
     assert controller.lock.acquire_calls == [1]
     assert controller.lock.release_calls == 1
     assert controller.lock.acquire_timeout_calls == []
+
+
+def test_amx_controller_lock_section_logs_slow_lock_acquisition(monkeypatch):
+    module = _load_module()
+    now = {"value": 0.0}
+    printed = []
+
+    class FakeLock:
+        def __init__(self):
+            self.release_calls = 0
+
+        def acquire(self, timeout=-1):
+            now["value"] = 1.3
+            return True
+
+        def release(self):
+            self.release_calls += 1
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: now["value"])
+    controller = module.AMXController(types.SimpleNamespace())
+    controller.lock = FakeLock()
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+
+    with controller._controller_lock_section("Could not acquire lock to start the AMX."):
+        pass
+
+    assert controller.lock.release_calls == 1
+    assert printed == [
+        (
+            "AMX controller lock acquired after 1.3 s: "
+            "Could not acquire lock to start the AMX.",
+            module.PRINT.WARNING,
+        )
+    ]
 
 
 def test_amx_controller_read_numbers_acquires_lock_for_housekeeping():
