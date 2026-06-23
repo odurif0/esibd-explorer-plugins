@@ -638,6 +638,32 @@ def test_read_numbers_lock_timeout_is_not_a_transport_failure(monkeypatch):
     assert controller.values == {"seed": 1.0}  # readbacks preserved, not wiped
 
 
+def test_read_numbers_skips_polling_during_manual_apply(monkeypatch):
+    module = _load_module()
+
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        getChannels=lambda: [],
+        main_state="ST_ON",
+        output_summary="12 V",
+        available_configs_text="",
+    )
+    controller = module.PSUController(parent)
+    controller.device = types.SimpleNamespace()
+    controller.initialized = True
+    controller._manual_apply_active = True
+    controller.values = {"seed": 1.0}
+
+    def fail_lock_section(*_args, **_kwargs):
+        raise AssertionError("polling should not try to acquire the PSU lock")
+
+    monkeypatch.setattr(controller, "_controller_lock_section", fail_lock_section)
+
+    controller.readNumbers()
+
+    assert controller.values == {"seed": 1.0}
+
+
 def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_polls(
     monkeypatch,
 ):
@@ -1289,6 +1315,116 @@ def test_apply_manual_state_updates_outputs_ranges_and_limits():
     assert controller.loaded_state_text == "Manual (unsaved)"
     assert parent.loaded_state_text == "Manual (unsaved)"
     assert printed == [("Applied PSU manual values.", None)]
+
+
+def test_apply_manual_state_does_not_switch_range_when_range_is_unchanged(monkeypatch):
+    module = _load_module()
+    calls = []
+
+    class FakeDevice:
+        def set_output_enabled(self, ch0, ch1, timeout_s=None):
+            calls.append(("set_output_enabled", ch0, ch1, timeout_s))
+
+        def set_output_full_range(self, ch0, ch1, timeout_s=None):
+            calls.append(("set_output_full_range", ch0, ch1, timeout_s))
+
+        def set_channel_voltage(self, channel, value, timeout_s=None):
+            calls.append(("set_channel_voltage", channel, value, timeout_s))
+
+        def set_channel_current(self, channel, value, timeout_s=None):
+            calls.append(("set_channel_current", channel, value, timeout_s))
+
+        def set_device_enabled(self, enabled, timeout_s=None):
+            calls.append(("set_device_enabled", enabled, timeout_s))
+
+    parent = types.SimpleNamespace(
+        name="PSU",
+        startup_timeout_s=9.0,
+        poll_timeout_s=5.0,
+        getChannels=lambda: [],
+        main_state="",
+        output_summary="",
+        loaded_state_text="",
+    )
+    controller = module.PSUController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.full_range_by_channel = {0: False, 1: False}
+    monkeypatch.setattr(
+        controller,
+        "_await_discharge_before_range_switch",
+        lambda *_args, **_kwargs: calls.append(("await_discharge",)),
+    )
+    monkeypatch.setattr(controller, "_verify_manual_state_unlocked", lambda **_kwargs: [])
+    monkeypatch.setattr(controller, "_verify_output_enable_state_unlocked", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "_update_state", lambda: None)
+
+    controller.applyManualState(
+        {
+            "output_enabled": {0: False, 1: False},
+            "full_range_enabled": {0: False, 1: False},
+            "voltage_values": {0: 0.0, 1: 0.0},
+            "current_limit_values": {0: 0.0, 1: 0.0},
+        }
+    )
+
+    assert ("await_discharge",) not in calls
+    assert not any(call[0] == "set_output_full_range" for call in calls)
+
+
+def test_apply_manual_state_waits_before_switching_changed_range(monkeypatch):
+    module = _load_module()
+    calls = []
+
+    class FakeDevice:
+        def set_output_enabled(self, ch0, ch1, timeout_s=None):
+            calls.append(("set_output_enabled", ch0, ch1, timeout_s))
+
+        def set_output_full_range(self, ch0, ch1, timeout_s=None):
+            calls.append(("set_output_full_range", ch0, ch1, timeout_s))
+
+        def set_channel_voltage(self, channel, value, timeout_s=None):
+            calls.append(("set_channel_voltage", channel, value, timeout_s))
+
+        def set_channel_current(self, channel, value, timeout_s=None):
+            calls.append(("set_channel_current", channel, value, timeout_s))
+
+        def set_device_enabled(self, enabled, timeout_s=None):
+            calls.append(("set_device_enabled", enabled, timeout_s))
+
+    parent = types.SimpleNamespace(
+        name="PSU",
+        startup_timeout_s=9.0,
+        poll_timeout_s=5.0,
+        getChannels=lambda: [],
+        main_state="",
+        output_summary="",
+        loaded_state_text="",
+    )
+    controller = module.PSUController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.full_range_by_channel = {0: False, 1: False}
+    monkeypatch.setattr(
+        controller,
+        "_await_discharge_before_range_switch",
+        lambda *_args, **_kwargs: calls.append(("await_discharge",)),
+    )
+    monkeypatch.setattr(controller, "_verify_manual_state_unlocked", lambda **_kwargs: [])
+    monkeypatch.setattr(controller, "_verify_output_enable_state_unlocked", lambda **_kwargs: None)
+    monkeypatch.setattr(controller, "_update_state", lambda: None)
+
+    controller.applyManualState(
+        {
+            "output_enabled": {0: False, 1: False},
+            "full_range_enabled": {0: True, 1: False},
+            "voltage_values": {0: 0.0, 1: 0.0},
+            "current_limit_values": {0: 0.0, 1: 0.0},
+        }
+    )
+
+    assert ("await_discharge",) in calls
+    assert ("set_output_full_range", True, False, 9.0) in calls
 
 
 def test_apply_manual_state_warns_but_continues_on_setpoint_readback_lag():

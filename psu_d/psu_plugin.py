@@ -1061,6 +1061,10 @@ class PSUDevice(Device):
         controller = getattr(self, "controller", None)
         if controller is None or not getattr(controller, "initialized", False):
             return
+        if bool(getattr(controller, "_manual_apply_active", False)) or bool(
+            getattr(controller, "_manual_apply_worker_running", False)
+        ):
+            return
         if getattr(self, "_refreshInProgress", False):
             return
         self._refreshInProgress = True
@@ -2213,7 +2217,12 @@ class PSUDevice(Device):
     def _schedule_delayed_refresh(self, delay_s: float) -> None:
         def _do_refresh() -> None:
             controller = getattr(self, "controller", None)
-            if controller is not None and getattr(controller, "initialized", False):
+            if (
+                controller is not None
+                and getattr(controller, "initialized", False)
+                and not bool(getattr(controller, "_manual_apply_active", False))
+                and not bool(getattr(controller, "_manual_apply_worker_running", False))
+            ):
                 controller.readNumbers()
             self._update_status_widgets()
             self._update_channel_panel()
@@ -3676,6 +3685,7 @@ class PSUController(DeviceController):
         self._manual_apply_state_lock = Lock()
         self._manual_apply_pending_state: dict[str, Any] | None = None
         self._manual_apply_worker_running = False
+        self._manual_apply_active = False
         self.values: dict[int, float] = {}
         self.current_values: dict[int, float] = {}
         self.output_enabled_by_channel: dict[int, bool] = {}
@@ -4192,6 +4202,10 @@ class PSUController(DeviceController):
         if self.device is None or not getattr(self, "initialized", False):
             self.initializeValues(reset=True)
             return
+        if bool(getattr(self, "_manual_apply_active", False)) or bool(
+            getattr(self, "_manual_apply_worker_running", False)
+        ):
+            return
 
         timeout_s = float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
         now_monotonic = time.monotonic()
@@ -4685,6 +4699,7 @@ class PSUController(DeviceController):
         )
         voltage_values = manual_state.get("voltage_values", {}) or {}
         current_limit_values = manual_state.get("current_limit_values", {}) or {}
+        self._manual_apply_active = True
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to apply PSU manual values."
@@ -4693,11 +4708,16 @@ class PSUController(DeviceController):
                 if device is None:
                     return
                 device.set_output_enabled(False, False, timeout_s=timeout_s)
-                # Allow HV to discharge before switching the range relay to
-                # avoid arcing under load.
-                self._await_discharge_before_range_switch(device, timeout_s=timeout_s)
                 set_full_range = getattr(device, "set_output_full_range", None)
-                if callable(set_full_range):
+                range_changes = tuple(
+                    bool(getattr(self, "full_range_by_channel", {}).get(channel_index, False))
+                    != full_range_enabled[channel_index]
+                    for channel_index in _PSU_CHANNEL_IDS
+                )
+                if callable(set_full_range) and any(range_changes):
+                    # Allow HV to discharge before switching the range relay to
+                    # avoid arcing under load.
+                    self._await_discharge_before_range_switch(device, timeout_s=timeout_s)
                     set_full_range(
                         full_range_enabled[0],
                         full_range_enabled[1],
@@ -4795,6 +4815,7 @@ class PSUController(DeviceController):
                 flag=PRINT.ERROR,
             )
         finally:
+            self._manual_apply_active = False
             self._sync_status_to_gui()
 
     def saveCurrentConfigFromThread(
