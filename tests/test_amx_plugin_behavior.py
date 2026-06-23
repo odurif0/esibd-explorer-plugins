@@ -1476,3 +1476,41 @@ def test_warn_if_standby_operating_emits_non_blocking_notice():
     logs.clear()
     controller._warn_if_standby_operating(1)
     assert logs == []
+
+
+def test_stop_acquisition_for_transition_does_not_call_base_stopAcquisition():
+    """_stop_acquisition_for_transition must stop recording and set acquiring=False
+    directly, without calling the base stopAcquisition (which uses a 1s lock timeout
+    and logs spurious 'Could not acquire lock to stop acquisition' errors when
+    runAcquisition holds the lock for collect_housekeeping)."""
+    module = _load_module()
+    parent = types.SimpleNamespace(name="AMX")
+    controller = module.AMXController(parent)
+
+    stop_calls = []
+    controller.stopAcquisition = lambda: stop_calls.append(True)
+    controller.acquiring = True
+
+    recording_stops = []
+
+    class _FakeDevice:
+        def __init__(self):
+            self._recording = True
+
+        @property
+        def recording(self):
+            return self._recording
+
+        @recording.setter
+        def recording(self, val):
+            self._recording = val
+            recording_stops.append(val)
+
+    fake_device = _FakeDevice()
+    controller.getDevice = lambda: fake_device
+
+    controller._stop_acquisition_for_transition()
+
+    assert stop_calls == []
+    assert controller.acquiring is False
+    assert recording_stops == [False]

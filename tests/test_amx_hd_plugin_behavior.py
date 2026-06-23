@@ -555,3 +555,131 @@ def test_warn_if_standby_operating_emits_non_blocking_notice():
     logs.clear()
     controller._warn_if_standby_operating(1)
     assert logs == []
+
+
+def test_resume_pending_on_auto_selects_standby_when_device_parked():
+    """When the device is already in STATE_STANDBY after init (parked by a
+    previous shutdown) and no Operating config is selected, the resume path
+    auto-selects the standby config so the first ON completes without requiring
+    the operator to manually pick a config first."""
+    plugin = _load_hd_plugin_module()
+    configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+    state = {"operating_config": -1, "standby_config": 0}
+    writes = []
+
+    def _get(attr):
+        return state.get(attr, -1)
+
+    def _set(attr, val):
+        writes.append((attr, val))
+        state[attr] = val
+        return True
+
+    parent = types.SimpleNamespace(
+        name="AMX_HD",
+        isOn=lambda: True,
+        _config_setting_value=_get,
+        _set_config_setting_value=_set,
+    )
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = configs
+    controller.main_state = "STATE_STANDBY"
+    toggle_calls = []
+    controller.toggleOnFromThread = lambda parallel=True: toggle_calls.append(parallel)
+    controller._begin_transition = lambda target_on: True
+
+    controller._resume_pending_on_request_after_transport_ready()
+
+    assert ("operating_config", 0) in writes
+    assert toggle_calls == [True]
+
+
+def test_resume_pending_on_does_not_auto_select_when_config_already_chosen():
+    """If an Operating config is already selected (>= 0), the resume path must
+    not override it — even if the device happens to be in STATE_STANDBY."""
+    plugin = _load_hd_plugin_module()
+    configs = [
+        {"index": 0, "name": "Standby", "active": True, "valid": True},
+        {"index": 1, "name": "Operate", "active": True, "valid": True},
+    ]
+    state = {"operating_config": 1, "standby_config": 0}
+    writes = []
+
+    def _get(attr):
+        return state.get(attr, -1)
+
+    def _set(attr, val):
+        writes.append((attr, val))
+        state[attr] = val
+        return True
+
+    parent = types.SimpleNamespace(
+        name="AMX_HD",
+        isOn=lambda: True,
+        _config_setting_value=_get,
+        _set_config_setting_value=_set,
+    )
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = configs
+    controller.main_state = "STATE_STANDBY"
+    controller.toggleOnFromThread = lambda parallel=True: None
+    controller._begin_transition = lambda target_on: True
+
+    controller._resume_pending_on_request_after_transport_ready()
+
+    assert all(attr != "operating_config" for attr, _val in writes)
+
+
+def test_stop_acquisition_for_transition_does_not_call_base_stopAcquisition():
+    """_stop_acquisition_for_transition must stop recording and set acquiring=False
+    directly, without calling the base stopAcquisition (which uses a 1s lock timeout
+    and logs spurious 'Could not acquire lock to stop acquisition' errors when
+    runAcquisition holds the lock for collect_housekeeping)."""
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(name="AMX_HD")
+    controller = plugin.AMXHDController(controllerParent=parent)
+
+    stop_calls = []
+    controller.stopAcquisition = lambda: stop_calls.append(True)
+    controller.acquiring = True
+
+    recording_stops = []
+
+    class _FakeDevice:
+        def __init__(self):
+            self._recording = True
+
+        @property
+        def recording(self):
+            return self._recording
+
+        @recording.setter
+        def recording(self, val):
+            self._recording = val
+            recording_stops.append(val)
+
+    fake_device = _FakeDevice()
+    controller.getDevice = lambda: fake_device
+
+    controller._stop_acquisition_for_transition()
+
+    assert stop_calls == []
+    assert controller.acquiring is False
+    assert recording_stops == [False]
+
+
+def test_stop_acquisition_for_transition_tolerates_missing_getDevice():
+    """If getDevice is unavailable or raises, the helper must still set
+    acquiring=False without crashing."""
+    plugin = _load_hd_plugin_module()
+    parent = types.SimpleNamespace(name="AMX_HD")
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.acquiring = True
+    controller.getDevice = lambda: (_ for _ in ()).throw(RuntimeError("no device"))
+
+    controller._stop_acquisition_for_transition()
+
+    assert controller.acquiring is False

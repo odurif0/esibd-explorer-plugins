@@ -2977,6 +2977,26 @@ class AMXController(DeviceController):
         with self._channel_apply_state_lock:
             self._channel_apply_pending.clear()
 
+    def _stop_acquisition_for_transition(self) -> None:
+        """Stop acquisition before an ON/OFF transition without spurious lock errors.
+
+        The base ``stopAcquisition`` uses a 1s lock timeout, but ``runAcquisition``
+        holds the controller lock for ``collect_housekeeping`` (~1-2 s).  The
+        timeout fires, logs ``Could not acquire lock to stop acquisition``, yet
+        still sets ``acquiring = False``.  During a transition the shutdown
+        sequence reacquires the lock with a longer timeout, so the spurious error
+        is misleading.  Here we stop recording and set ``acquiring = False``
+        directly; the acquisition thread checks this flag at the top of each
+        iteration and the lock will be reacquired properly by the transition.
+        """
+        get_device = getattr(self, "getDevice", None)
+        if callable(get_device):
+            with contextlib.suppress(Exception):
+                device = get_device()
+                if getattr(device, "recording", False):
+                    device.recording = False
+        self.acquiring = False
+
     def runAcquisition(self) -> None:
         """Poll AMX housekeeping and push readbacks to the GUI from the acquisition thread.
 
@@ -3187,10 +3207,7 @@ class AMXController(DeviceController):
             return
 
         self._discard_pending_runtime_applies()
-        stop_acquisition = getattr(self, "stopAcquisition", None)
-        if callable(stop_acquisition):
-            stop_acquisition()
-            self.acquiring = False
+        self._stop_acquisition_for_transition()
 
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
 
@@ -3242,10 +3259,7 @@ class AMXController(DeviceController):
             return True
 
         self._discard_pending_runtime_applies()
-        stop_acquisition = getattr(self, "stopAcquisition", None)
-        if callable(stop_acquisition):
-            stop_acquisition()
-            self.acquiring = False
+        self._stop_acquisition_for_transition()
         self.print("Starting AMX shutdown sequence.")
         shutdown_kwargs = self._shutdown_kwargs()
         standby_config = shutdown_kwargs.get("standby_config")
