@@ -4072,14 +4072,10 @@ class PSUController(DeviceController):
                     channel_index,
                     timeout_s=timeout_s,
                 )
-                if not _setpoint_matches(
-                    actual_current,
-                    expected_current,
-                    abs_tolerance=_PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A,
-                ):
+                if actual_current > expected_current + _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A:
                     warnings.append(
                         f"CH{channel_index} current limit readback "
-                        f"{_format_current_text(actual_current)} does not match requested "
+                        f"{_format_current_text(actual_current)} exceeds configured limit "
                         f"{_format_current_text(expected_current)}."
                     )
 

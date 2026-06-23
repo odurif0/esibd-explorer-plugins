@@ -1427,7 +1427,7 @@ def test_apply_manual_state_waits_before_switching_changed_range(monkeypatch):
     assert ("set_output_full_range", True, False, 9.0) in calls
 
 
-def test_apply_manual_state_warns_but_continues_on_setpoint_readback_lag():
+def test_apply_manual_state_does_not_warn_when_current_limit_readback_is_lower():
     module = _load_module()
     printed = []
 
@@ -1478,8 +1478,62 @@ def test_apply_manual_state_warns_but_continues_on_setpoint_readback_lag():
         }
     )
 
+    assert printed == [("Applied PSU manual values.", None)]
+
+
+def test_apply_manual_state_warns_when_current_limit_readback_exceeds_limit():
+    module = _load_module()
+    printed = []
+
+    class FakeDevice:
+        def set_output_enabled(self, _ch0, _ch1, timeout_s=None):
+            return None
+
+        def set_channel_voltage(self, _channel, _value, timeout_s=None):
+            return None
+
+        def set_channel_current(self, _channel, _value, timeout_s=None):
+            return None
+
+        def get_channel_current_limits(self, channel, timeout_s=None):
+            return ({0: 0.02, 1: 0.0}[channel], 1.0)
+
+        def set_device_enabled(self, _enabled, timeout_s=None):
+            return None
+
+        def collect_housekeeping(self, timeout_s=None):
+            return {
+                "device_enabled": False,
+                "output_enabled": (False, False),
+                "main_state": {"name": "ST_STBY"},
+                "device_state": {"flags": ["DEVICE_OK"]},
+                "channels": [],
+            }
+
+    parent = types.SimpleNamespace(
+        name="PSU",
+        startup_timeout_s=9.0,
+        poll_timeout_s=5.0,
+        getChannels=lambda: [],
+        main_state="",
+        output_summary="",
+        loaded_state_text="",
+    )
+    controller = module.PSUController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+
+    controller.applyManualState(
+        {
+            "output_enabled": {0: False, 1: False},
+            "voltage_values": {0: 0.0, 1: 0.0},
+            "current_limit_values": {0: 0.01, 1: 0.0},
+        }
+    )
+
     assert printed[0][1] == module.PRINT.WARNING
-    assert "current limit readback 0 mA does not match requested 10 mA" in printed[0][0]
+    assert "current limit readback 20 mA exceeds configured limit 10 mA" in printed[0][0]
     assert printed[-1] == ("Applied PSU manual values.", None)
 
 
