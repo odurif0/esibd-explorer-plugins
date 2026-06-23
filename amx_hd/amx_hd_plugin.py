@@ -2534,6 +2534,15 @@ class AMXHDController(DeviceController):
         is_on = getattr(self.controllerParent, "isOn", None)
         if not callable(is_on) or not bool(is_on()):
             return
+        # If no Operating config is selected but the device is already in
+        # STATE_STANDBY (parked there by a previous shutdown), auto-select the
+        # standby config so the first ON can complete without requiring the
+        # operator to manually pick a config in the dropdown first. The operator
+        # can switch to a real config afterwards via "Load now".
+        if self._selected_operating_config_index() < 0:
+            standby_config = self._resolved_safety_config("standby_config")
+            if standby_config >= 0 and _state_is_standby(getattr(self, "main_state", "")):
+                self.controllerParent._set_config_setting_value("operating_config", standby_config)
         if self.transitioning or not self._begin_transition(True):
             return
         toggle_thread = getattr(self, "toggleOnFromThread", None)
@@ -3019,6 +3028,26 @@ class AMXHDController(DeviceController):
         with self._channel_apply_state_lock:
             self._channel_apply_pending.clear()
 
+    def _stop_acquisition_for_transition(self) -> None:
+        """Stop acquisition before an ON/OFF transition without spurious lock errors.
+
+        The base ``stopAcquisition`` uses a 1s lock timeout, but ``runAcquisition``
+        holds the controller lock for ``collect_housekeeping`` (~1-2 s).  The
+        timeout fires, logs ``Could not acquire lock to stop acquisition``, yet
+        still sets ``acquiring = False``.  During a transition the shutdown
+        sequence reacquires the lock with a longer timeout, so the spurious error
+        is misleading.  Here we stop recording and set ``acquiring = False``
+        directly; the acquisition thread checks this flag at the top of each
+        iteration and the lock will be reacquired properly by the transition.
+        """
+        get_device = getattr(self, "getDevice", None)
+        if callable(get_device):
+            with contextlib.suppress(Exception):
+                device = get_device()
+                if getattr(device, "recording", False):
+                    device.recording = False
+        self.acquiring = False
+
     def runAcquisition(self) -> None:
         """Poll AMX housekeeping and push readbacks to the GUI from the acquisition thread.
 
@@ -3229,10 +3258,7 @@ class AMXHDController(DeviceController):
             return
 
         self._discard_pending_runtime_applies()
-        stop_acquisition = getattr(self, "stopAcquisition", None)
-        if callable(stop_acquisition):
-            stop_acquisition()
-            self.acquiring = False
+        self._stop_acquisition_for_transition()
 
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
 
@@ -3291,10 +3317,7 @@ class AMXHDController(DeviceController):
             return True
 
         self._discard_pending_runtime_applies()
-        stop_acquisition = getattr(self, "stopAcquisition", None)
-        if callable(stop_acquisition):
-            stop_acquisition()
-            self.acquiring = False
+        self._stop_acquisition_for_transition()
         self.print("Starting AMX shutdown sequence.")
         shutdown_kwargs = self._shutdown_kwargs()
         standby_config = shutdown_kwargs.get("standby_config")
