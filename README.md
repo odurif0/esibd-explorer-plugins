@@ -17,6 +17,8 @@ One plugin for one device.
 | `psu_e`  | Drives PSU_E outputs and monitors voltage/current readbacks |
 | `dmmr`   | Reads DMMR module currents and monitors live picoammeter values |
 | `amx`    | Drives AMX frequency and pulser timing and monitors pulser readbacks |
+| `amx_a`  | Drives AMX_A frequency and pulser timing and monitors pulser readbacks |
+| `amx_b`  | Drives AMX_B frequency and pulser timing and monitors pulser readbacks |
 | `amx_hd` | Drives AMX HD (HV-AMX-CTRL-4EDH) frequency and timer timing and monitors timer readbacks |
 
 ## Quick Start
@@ -38,6 +40,8 @@ One plugin for one device.
    ├── psu_e/
    ├── dmmr/
    ├── amx/
+   ├── amx_a/
+   ├── amx_b/
    └── amx_hd/
    ```
 
