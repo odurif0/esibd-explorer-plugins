@@ -24,6 +24,16 @@ ICON_PATH = (
     / "amx"
     / "amx.png"
 )
+PLUGIN_A_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "amx_a"
+    / "amx_plugin.py"
+)
+PLUGIN_B_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "amx_b"
+    / "amx_plugin.py"
+)
 
 
 def _install_esibd_stubs() -> None:
@@ -208,6 +218,26 @@ def test_amx_plugin_exposes_expected_metadata():
     assert module.AMXDevice.iconFile == "amx.png"
     with Image.open(ICON_PATH) as image:
         assert image.size == (128, 128)
+
+
+def test_amx_a_and_amx_b_load_as_distinct_autonomous_plugins(monkeypatch):
+    _clear_test_modules()
+    _install_esibd_stubs()
+    monkeypatch.syspath_prepend("/tmp/nonexistent-sentinel")
+
+    module_a = _import_plugin_module_from_path("amx_a_plugin_test", PLUGIN_A_PATH)
+    module_b = _import_plugin_module_from_path("amx_b_plugin_test", PLUGIN_B_PATH)
+
+    assert module_a.AMXDevice.name == "AMX_A"
+    assert module_b.AMXDevice.name == "AMX_B"
+    assert module_a.AMXDevice.supportedVersion == "1.0.1"
+    assert module_b.AMXDevice.supportedVersion == "1.0.1"
+    assert module_a.AMXDevice.iconFile == "amx.png"
+    assert module_b.AMXDevice.iconFile == "amx.png"
+    assert module_a.providePlugins() == [module_a.AMXDevice]
+    assert module_b.providePlugins() == [module_b.AMXDevice]
+    assert (PLUGIN_A_PATH.parent / "amx.png").exists()
+    assert (PLUGIN_B_PATH.parent / "amx.png").exists()
 
 
 def test_amx_plugin_exposes_simple_config_settings():
