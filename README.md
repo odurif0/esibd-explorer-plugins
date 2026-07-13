@@ -57,5 +57,11 @@ One plugin for one device.
 
 ## Running Tests
 
-Tests validate plugin packaging, runtime integrity, and behavior contracts
-against the ESIBD Explorer plugin API for development.
+Development checks run from the repository root:
+
+```bash
+python3 -m pytest -q
+ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
+```
+
+Tests remain in this repository's `tests/` directory. They are not part of plugin folders or release archives.

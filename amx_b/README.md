@@ -1,4 +1,4 @@
-# AMX Plugin
+# AMX_B Plugin
 
 Drives AMX frequency and pulser timing from ESIBD Explorer and monitors live
 pulser readbacks.
@@ -19,7 +19,7 @@ including the AMX driver files and vendor DLL.
    and extract it into your ESIBD Explorer `plugins` folder.
 3. Set the Explorer `plugin path` to that `plugins` folder.
 4. Restart ESIBD Explorer.
-5. Enable the `AMX` plugin in the Plugin Manager.
+5. Enable the `AMX_B` plugin in the Plugin Manager.
 
 ## Device Configuration
 
@@ -125,5 +125,5 @@ special cases by constructing the AMX runtime with `process_backend=True`.
 
 ## Portability Note
 
-To copy this plugin to another machine, keep the whole `amx/` directory
+To copy this plugin to another machine, keep the whole `amx_b/` directory
 together, including the embedded `vendor/` subtree.
