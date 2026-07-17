@@ -99,6 +99,17 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "COM-DMMR-8.dll",
     ),
     PluginSpec(
+        "esi",
+        "ESI",
+        "ESI",
+        "esi_plugin.py",
+        "esi",
+        "esi",
+        None,
+        "COM-ESI-CTRL.h",
+        "COM-ESI-CTRL.dll",
+    ),
+    PluginSpec(
         "psu_a",
         "PSU_A",
         "PSU_A",
