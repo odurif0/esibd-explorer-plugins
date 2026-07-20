@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import threading
 from pathlib import Path
 from typing import Optional
@@ -21,7 +22,9 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
 
     _INSTRUMENT_NAME = "ESI"
     _DEFAULT_IO_TIMEOUT_S = 5.0
-    HV_MODULE_ADDRESSES = (2, 3)
+    HEAT_MODULE_ADDRESS = 0
+    HV_MODULE_ADDRESSES = (1, 2)
+    CONTROLLED_MODULE_ADDRESSES = (HEAT_MODULE_ADDRESS, *HV_MODULE_ADDRESSES)
     MAX_ABS_VOLTAGE_V = 3000.0
     _instance_lock = threading.Lock()
     _connected_instance: Optional["_ESIController"] = None
@@ -140,7 +143,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             self.force_safe_off(timeout_s=timeout)
             self.logger.info(
                 f"Connected on COM{self.com} at {actual_baud} baud; "
-                f"modules={sorted(modules)}; HV outputs forced OFF"
+                f"modules={sorted(modules)}; HV and heater outputs forced OFF"
             )
             return True
         except Exception:
@@ -155,10 +158,10 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             raise
 
     def _prepare_safe_inventory(self, timeout: float) -> None:
-        """Disable global HV before reading and validating addressed modules."""
+        """Disable all outputs before inventory communication."""
         def prepare():
-            status = ESIBase.set_activation_state(self, False)
-            self._raise_on_status(status, "global deactivate before inventory")
+            status = ESIBase.set_enable(self, False)
+            self._raise_on_status(status, "module disable before inventory")
             status = ESIBase.set_enable(self, True)
             self._raise_on_status(status, "module communication enable")
 
@@ -167,18 +170,15 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         )
 
     def force_safe_off(self, timeout_s: Optional[float] = None) -> bool:
-        """Zero both lab HV modules and disable all activation levels."""
+        """Zero both HV targets and disable HV and heater activation."""
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
 
         def safe_off_batch():
             failures = []
-            status = ESIBase.set_activation_state(self, False)
+            status, _temperature = ESIBase.set_heat_ctrl_heater_temperature(self, 0.0)
             if status != self.NO_ERR:
-                failures.append(f"global deactivate: {self.format_status(status)}")
-            status = ESIBase.set_enable(self, True)
-            if status != self.NO_ERR:
-                failures.append(f"module communication enable: {self.format_status(status)}")
+                failures.append(f"heat target zero: {self.format_status(status)}")
             for address in self.HV_MODULE_ADDRESSES:
                 for action, status in (
                     ("zero target", ESIBase.set_hv_supply_target_output_voltage(self, address, 0.0)),
@@ -186,6 +186,9 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 ):
                     if status != self.NO_ERR:
                         failures.append(f"module {address} {action}: {self.format_status(status)}")
+            status = ESIBase.set_enable(self, False)
+            if status != self.NO_ERR:
+                failures.append(f"module disable: {self.format_status(status)}")
             return failures
 
         failures = self._call_locked_with_timeout(
@@ -228,16 +231,23 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 info["device_type"] = int(device_type)
             modules[address] = info
 
-        for address in self.HV_MODULE_ADDRESSES:
+        expected_types = {
+            self.HEAT_MODULE_ADDRESS: self.MODULE_HTCTRL_TYPE,
+            **{address: self.MODULE_HVPS_TYPE for address in self.HV_MODULE_ADDRESSES},
+        }
+        for address, expected_type in expected_types.items():
             info = modules.get(address)
             if info is None:
-                raise RuntimeError(f"Required ESI HV module {address} was not detected.")
+                module_kind = "heat" if address == self.HEAT_MODULE_ADDRESS else "HV"
+                raise RuntimeError(
+                    f"Required ESI {module_kind} module {address} was not detected."
+                )
             if info.get("presence") != self.MODULE_PRESENT:
                 raise RuntimeError(f"ESI module {address} is present but invalid.")
-            if info.get("device_type") != self.MODULE_HVPS_TYPE:
+            if info.get("device_type") != expected_type:
                 raise RuntimeError(
                     f"ESI module {address} type mismatch: expected "
-                    f"0x{self.MODULE_HVPS_TYPE:04X}, got "
+                    f"0x{expected_type:04X}, got "
                     f"0x{int(info.get('device_type', 0)):04X}."
                 )
         self._module_inventory = modules
@@ -296,8 +306,20 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             raise ValueError(f"ESI HV module address must be one of {self.HV_MODULE_ADDRESSES}.")
         return address
 
+    def _validate_controlled_address(self, address: int) -> int:
+        if isinstance(address, bool) or not isinstance(address, int):
+            raise TypeError("ESI module address must be an integer.")
+        if address not in self.CONTROLLED_MODULE_ADDRESSES:
+            raise ValueError(
+                "ESI module address must be one of "
+                f"{self.CONTROLLED_MODULE_ADDRESSES}."
+            )
+        return address
+
     def _validate_voltage(self, voltage: float) -> float:
         value = float(voltage)
+        if not math.isfinite(value):
+            raise ValueError("ESI target voltage must be finite.")
         if abs(value) > self.MAX_ABS_VOLTAGE_V:
             raise ValueError(
                 f"ESI target {value:g} V exceeds the absolute 3000 V hardware limit."
@@ -331,7 +353,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
         status = self._call_locked_with_timeout(
-            ESIBase.set_activation_state,
+            ESIBase.set_enable,
             timeout,
             "set_global_active",
             self,
@@ -344,8 +366,20 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self, address: int, active: bool, timeout_s: Optional[float] = None
     ) -> bool:
         self._require_connected()
-        address = self._validate_hv_address(address)
+        address = self._validate_controlled_address(address)
         timeout = self._resolve_timeout(timeout_s)
+        if address == self.HEAT_MODULE_ADDRESS:
+            if active:
+                return True
+            result = self._call_locked_with_timeout(
+                ESIBase.set_heat_ctrl_heater_temperature,
+                timeout,
+                "disable_heat_output",
+                self,
+                0.0,
+            )
+            self._raise_on_status(result[0], "disable_heat_output")
+            return False
         status = self._call_locked_with_timeout(
             ESIBase.set_module_activation_state,
             timeout,
@@ -357,8 +391,131 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._raise_on_status(status, f"set_output_active({address})")
         return bool(active)
 
+    def get_heat_configuration(self, timeout_s: Optional[float] = None) -> dict:
+        """Read HEAT-CTRL-2410 hardware limits and configured setpoints."""
+        self._require_connected()
+        timeout = self._resolve_timeout(timeout_s)
+
+        def configuration():
+            def checked(result, action):
+                self._raise_on_status(result[0], action)
+                return result[1:]
+
+            max_voltage, max_current, max_power, max_temperature = checked(
+                ESIBase.get_heat_ctrl_hw_limits(self), "get_heat_ctrl_hw_limits"
+            )
+            voltage_limit, = checked(
+                ESIBase.get_heat_ctrl_voltage_limit(self), "get_heat_ctrl_voltage_limit"
+            )
+            current_limit, = checked(
+                ESIBase.get_heat_ctrl_current_limit(self), "get_heat_ctrl_current_limit"
+            )
+            power_limit, = checked(
+                ESIBase.get_heat_ctrl_power_limit(self), "get_heat_ctrl_power_limit"
+            )
+            target_temperature, = checked(
+                ESIBase.get_heat_ctrl_heater_temperature(self),
+                "get_heat_ctrl_heater_temperature",
+            )
+            return {
+                "hardware_limits": {
+                    "max_voltage_v": float(max_voltage),
+                    "max_current_a": float(max_current),
+                    "max_power_w": float(max_power),
+                    "max_temperature_c": float(max_temperature),
+                },
+                "voltage_limit_v": float(voltage_limit),
+                "current_limit_a": float(current_limit),
+                "power_limit_w": float(power_limit),
+                "target_temperature_c": float(target_temperature),
+            }
+
+        return self._call_locked_with_timeout(
+            configuration, timeout * 5.0, "get_heat_configuration"
+        )
+
+    def configure_heat_limits(
+        self,
+        *,
+        voltage_v: Optional[float] = None,
+        current_a: Optional[float] = None,
+        power_w: Optional[float] = None,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
+        """Apply selected heater limits after validating hardware maxima."""
+        self._require_connected()
+        timeout = self._resolve_timeout(timeout_s)
+        requested = {
+            "voltage_v": None if voltage_v is None else float(voltage_v),
+            "current_a": None if current_a is None else float(current_a),
+            "power_w": None if power_w is None else float(power_w),
+        }
+
+        def configure():
+            status, max_voltage, max_current, max_power, _max_temperature = (
+                ESIBase.get_heat_ctrl_hw_limits(self)
+            )
+            self._raise_on_status(status, "get_heat_ctrl_hw_limits")
+            maxima = {
+                "voltage_v": float(max_voltage),
+                "current_a": float(max_current),
+                "power_w": float(max_power),
+            }
+            setters = {
+                "voltage_v": ESIBase.set_heat_ctrl_voltage_limit,
+                "current_a": ESIBase.set_heat_ctrl_current_limit,
+                "power_w": ESIBase.set_heat_ctrl_power_limit,
+            }
+            for name, value in requested.items():
+                if value is None:
+                    continue
+                if not 0 < value <= maxima[name]:
+                    raise ValueError(
+                        f"ESI heat {name} must be greater than 0 and no more "
+                        f"than the hardware maximum {maxima[name]:g}."
+                    )
+
+            applied = {}
+            for name, value in requested.items():
+                if value is None:
+                    continue
+                result = setters[name](self, value)
+                self._raise_on_status(result[0], f"set_heat_{name}")
+                applied[name] = float(result[1])
+            return applied
+
+        return self._call_locked_with_timeout(
+            configure, timeout * 4.0, "configure_heat_limits"
+        )
+
+    def set_heater_temperature(
+        self, temperature_c: float, timeout_s: Optional[float] = None
+    ) -> float:
+        """Set heater target temperature within the reported hardware limit."""
+        self._require_connected()
+        timeout = self._resolve_timeout(timeout_s)
+        target = float(temperature_c)
+
+        def set_temperature():
+            status, _max_v, _max_i, _max_p, max_temperature = (
+                ESIBase.get_heat_ctrl_hw_limits(self)
+            )
+            self._raise_on_status(status, "get_heat_ctrl_hw_limits")
+            if not 0 <= target <= float(max_temperature):
+                raise ValueError(
+                    "ESI heater target must be between 0 and the hardware "
+                    f"maximum {float(max_temperature):g} degC."
+                )
+            status, applied = ESIBase.set_heat_ctrl_heater_temperature(self, target)
+            self._raise_on_status(status, "set_heat_ctrl_heater_temperature")
+            return float(applied)
+
+        return self._call_locked_with_timeout(
+            set_temperature, timeout * 2.0, "set_heater_temperature"
+        )
+
     def collect_diagnostics(self, timeout_s: Optional[float] = None) -> dict:
-        """Collect one controller and HV-module snapshot without changing state."""
+        """Collect controller, HV, and heater state without changing outputs."""
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
 
@@ -372,14 +529,9 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             voltage_hex, voltage_flags = checked(ESIBase.get_voltage_state(self), "get_voltage_state")
             interlock_hex, interlock_flags = checked(ESIBase.get_interlock_state(self), "get_interlock_state")
             enabled, = checked(ESIBase.get_enable(self), "get_enable")
-            global_active, = checked(ESIBase.get_activation_state(self), "get_activation_state")
             housekeeping = checked(ESIBase.get_housekeeping(self), "get_housekeeping")
             modules = {}
             for address in self.HV_MODULE_ADDRESSES:
-                active, = checked(
-                    ESIBase.get_module_activation_state(self, address),
-                    f"get_module_activation_state({address})",
-                )
                 target, = checked(
                     ESIBase.get_hv_supply_target_output_voltage(self, address),
                     f"get_target({address})",
@@ -393,20 +545,47 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     f"get_current({address})",
                 )
                 modules[address] = {
-                    "active": bool(active),
+                    "active": bool(enabled and float(target) != 0.0),
                     "target_v": float(target),
                     "voltage_valid": bool(valid_v),
                     "measured_v": float(measured_v),
                     "current_valid": bool(valid_i),
                     "measured_a": float(measured_a),
                 }
+            heat_valid, heat_vout, heat_vmon, heat_imon, heat_tmon = checked(
+                ESIBase.get_heat_ctrl_monitoring(self), "get_heat_ctrl_monitoring"
+            )
+            heat_output_voltage, = checked(
+                ESIBase.get_heat_ctrl_output_voltage(self),
+                "get_heat_ctrl_output_voltage",
+            )
+            heat_power, = checked(
+                ESIBase.get_heat_ctrl_heater_power(self), "get_heat_ctrl_heater_power"
+            )
+            heat_interlock, = checked(
+                ESIBase.get_heat_ctrl_ilock_state(self), "get_heat_ctrl_ilock_state"
+            )
+            heat_hk = checked(
+                ESIBase.get_heat_ctrl_housekeeping(self),
+                "get_heat_ctrl_housekeeping",
+            )
+            heat_configuration = self.get_heat_configuration_unlocked()
+            heat_active = bool(
+                enabled and heat_configuration["target_temperature_c"] > 0.0
+            )
             return {
                 "main_state": {"hex": main_hex, "name": main_name},
                 "device_state": {"hex": device_hex, "flags": device_flags},
                 "voltage_state": {"hex": voltage_hex, "flags": voltage_flags},
                 "interlock_state": {"hex": interlock_hex, "flags": interlock_flags},
                 "enabled": bool(enabled),
-                "global_active": bool(global_active),
+                "global_active": bool(
+                    enabled
+                    and (
+                        heat_active
+                        or any(module["active"] for module in modules.values())
+                    )
+                ),
                 "housekeeping": {
                     "volt_24v": housekeeping[0],
                     "volt_5v": housekeeping[1],
@@ -415,11 +594,66 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     "temp_psu_c": housekeeping[4],
                 },
                 "modules": modules,
+                "heat": {
+                    "active": bool(heat_active),
+                    "valid": bool(heat_valid),
+                    "output_voltage_v": float(heat_output_voltage),
+                    "heater_power_w": float(heat_power),
+                    "monitor_output_v": float(heat_vout),
+                    "monitor_voltage_v": float(heat_vmon),
+                    "monitor_current_a": float(heat_imon),
+                    "monitor_temperature_c": float(heat_tmon),
+                    "interlock_state": int(heat_interlock),
+                    "housekeeping": {
+                        "valid": bool(heat_hk[0]),
+                        "volt_3v3": float(heat_hk[1]),
+                        "temp_cpu_c": float(heat_hk[2]),
+                        "volt_5v": float(heat_hk[3]),
+                        "volt_24v": float(heat_hk[4]),
+                        "temp_psu_c": float(heat_hk[5]),
+                    },
+                    **heat_configuration,
+                },
             }
 
         return self._call_locked_with_timeout(
-            snapshot, timeout * 12.0, "collect_diagnostics"
+            snapshot, timeout * 20.0, "collect_diagnostics"
         )
+
+    def get_heat_configuration_unlocked(self) -> dict:
+        """Read heat configuration while the caller already owns the DLL lock."""
+        def checked(result, action):
+            self._raise_on_status(result[0], action)
+            return result[1:]
+
+        max_voltage, max_current, max_power, max_temperature = checked(
+            ESIBase.get_heat_ctrl_hw_limits(self), "get_heat_ctrl_hw_limits"
+        )
+        voltage_limit, = checked(
+            ESIBase.get_heat_ctrl_voltage_limit(self), "get_heat_ctrl_voltage_limit"
+        )
+        current_limit, = checked(
+            ESIBase.get_heat_ctrl_current_limit(self), "get_heat_ctrl_current_limit"
+        )
+        power_limit, = checked(
+            ESIBase.get_heat_ctrl_power_limit(self), "get_heat_ctrl_power_limit"
+        )
+        target_temperature, = checked(
+            ESIBase.get_heat_ctrl_heater_temperature(self),
+            "get_heat_ctrl_heater_temperature",
+        )
+        return {
+            "hardware_limits": {
+                "max_voltage_v": float(max_voltage),
+                "max_current_a": float(max_current),
+                "max_power_w": float(max_power),
+                "max_temperature_c": float(max_temperature),
+            },
+            "voltage_limit_v": float(voltage_limit),
+            "current_limit_a": float(current_limit),
+            "power_limit_w": float(power_limit),
+            "target_temperature_c": float(target_temperature),
+        }
 
     def disconnect(self, timeout_s: Optional[float] = None) -> bool:
         if not self.connected:
@@ -430,6 +664,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         safe = False
         try:
             self.force_safe_off(timeout_s=timeout)
+            self.set_global_active(False, timeout_s=timeout)
             safe = True
         finally:
             if not self._transport_poisoned:
@@ -454,12 +689,17 @@ class ESI(ProcessIsolatedClientMixin):
         "connect": (30.0, 10.0, 90.0),
         "collect_identity": (25.0, 10.0, 90.0),
         "collect_diagnostics": (15.0, 10.0, 60.0),
+        "get_heat_configuration": (8.0, 10.0, 45.0),
+        "configure_heat_limits": (8.0, 10.0, 45.0),
+        "set_heater_temperature": (4.0, 10.0, 30.0),
         "force_safe_off": (8.0, 10.0, 45.0),
         "disconnect": (10.0, 10.0, 60.0),
     }
     NO_ERR = ESIBase.NO_ERR
     DEVICE_TYPE = ESIBase.DEVICE_TYPE
     MODULE_HVPS_TYPE = ESIBase.MODULE_HVPS_TYPE
+    MODULE_HTCTRL_TYPE = ESIBase.MODULE_HTCTRL_TYPE
+    HEAT_MODULE_ADDRESS = _ESIController.HEAT_MODULE_ADDRESS
     HV_MODULE_ADDRESSES = _ESIController.HV_MODULE_ADDRESSES
     MAX_ABS_VOLTAGE_V = _ESIController.MAX_ABS_VOLTAGE_V
 

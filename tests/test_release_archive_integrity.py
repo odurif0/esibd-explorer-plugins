@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import zipfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -14,6 +15,7 @@ from conftest import PluginSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_ZIP_PATTERN = "esibd-explorer-plugins-v*.zip"
+RELEASE_ZIP_NAME = re.compile(r"^esibd-explorer-plugins-v(\d+(?:\.\d+)*)\.zip$")
 BANNED_SEGMENTS = {"tests", "__pycache__", "logs"}
 
 
@@ -102,7 +104,17 @@ def discover_release_archives(
             )
         return (archive,)
 
-    return tuple(sorted(repo_root.glob(RELEASE_ZIP_PATTERN)))
+    archives = tuple(repo_root.glob(RELEASE_ZIP_PATTERN))
+    if not archives:
+        return ()
+
+    def version(path: Path) -> tuple[int, ...]:
+        match = RELEASE_ZIP_NAME.fullmatch(path.name)
+        if match is None:
+            raise ValueError(f"invalid release archive name: {path.name}")
+        return tuple(int(part) for part in match.group(1).split("."))
+
+    return (max(archives, key=version),)
 
 
 def release_archives_or_skip(
@@ -210,6 +222,15 @@ def test_discovery_requires_existing_env_path(tmp_path: Path) -> None:
 
     assert str(missing) in str(excinfo.value)
     assert "ESIBD_RELEASE_ZIP" in str(excinfo.value)
+
+
+def test_discovery_selects_latest_semantic_version(tmp_path: Path) -> None:
+    old = tmp_path / "esibd-explorer-plugins-v0.9.zip"
+    latest = tmp_path / "esibd-explorer-plugins-v0.10.zip"
+    old.touch()
+    latest.touch()
+
+    assert discover_release_archives(tmp_path, {}) == (latest,)
 
 
 def test_no_archive_discovery_skips_only_archive_inspection(

@@ -1,4 +1,4 @@
-"""Control the CGC ESI source and monitor its two HV supply modules."""
+"""Control the CGC ESI source, two HV supplies, and heater module."""
 
 from __future__ import annotations
 
@@ -28,8 +28,13 @@ from esibd.plugins import Device, Plugin
 _RUNTIME_PREFIX = "_esibd_bundled_esi_runtime"
 _ESI_DRIVER_CLASS: type[Any] | None = None
 _ESI_MAX_VOLTAGE = 3000.0
-_ESI_MODULES = (2, 3)
+_ESI_MAX_TEMPERATURE = 175.0
+_ESI_HEAT_MODULE = 0
+_ESI_HV_CHANNELS = ((1, 1), (2, 2))
+_ESI_HV_MODULES = tuple(address for _number, address in _ESI_HV_CHANNELS)
+_ESI_MODULES = (_ESI_HEAT_MODULE, *_ESI_HV_MODULES)
 _ESI_COMMUNICATION_LOST = "Communication lost"
+_PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -88,11 +93,12 @@ def _get_esi_driver_class() -> type[Any]:
 
 
 def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
-    """Return the stable two-channel ESI layout used by configuration sync."""
-    return [
+    """Return two ordinal HV channels plus the HEAT-CTRL-2410 channel."""
+    channels = [
         {
-            "Name": f"{device_name}_HV{address}",
+            "Name": f"{device_name}_HV{number}",
             "Module": address,
+            "Function": "HVPS-3kB",
             "Enabled": False,
             "Active": True,
             "Real": True,
@@ -101,8 +107,23 @@ def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
             "Max": _ESI_MAX_VOLTAGE,
             "Display": True,
         }
-        for address in _ESI_MODULES
+        for number, address in _ESI_HV_CHANNELS
     ]
+    channels.append(
+        {
+            "Name": f"{device_name}_HEAT",
+            "Module": _ESI_HEAT_MODULE,
+            "Function": "HEAT-CTRL-2410",
+            "Enabled": False,
+            "Active": True,
+            "Real": True,
+            "Value": 20.0,
+            "Min": 0.0,
+            "Max": _ESI_MAX_TEMPERATURE,
+            "Display": True,
+        }
+    )
+    return channels
 
 
 def providePlugins() -> "list[type[Plugin]]":
@@ -110,11 +131,11 @@ def providePlugins() -> "list[type[Plugin]]":
 
 
 class ESIDevice(Device):
-    """Two-channel electrospray high-voltage controller."""
+    """Electrospray HV and HEAT-CTRL-2410 controller."""
 
     documentation = (
-        "Controls CGC ESI HV modules 2 and 3 and monitors voltage, current, "
-        "interlocks, controller health, and module presence."
+        "Controls CGC ESI HVPS-3kB and HEAT-CTRL-2410 modules and monitors "
+        "voltage, current, temperature, power, interlocks, and controller health."
     )
     name = "ESI"
     version = "0.1.0"
@@ -132,9 +153,13 @@ class ESIDevice(Device):
     POLL_TIMEOUT = "Poll timeout (s)"
     RAMP_RATE = "Ramp rate (V/s)"
     ALLOW_NEGATIVE = "Allow negative voltage"
+    HEAT_VOLTAGE_LIMIT = "Heat voltage limit (V)"
+    HEAT_CURRENT_LIMIT = "Heat current limit (A)"
+    HEAT_POWER_LIMIT = "Heat power limit (W)"
     STATE = "State"
     INTERLOCK = "Interlock"
     MODULES = "Modules"
+    HEAT_STATUS = "Heat status"
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -203,9 +228,40 @@ class ESIDevice(Device):
             advanced=True,
         )
         for label, attr, tooltip in (
+            (
+                self.HEAT_VOLTAGE_LIMIT,
+                "heat_voltage_limit_v",
+                "Optional HEAT-CTRL-2410 voltage limit. 0 keeps the hardware setting.",
+            ),
+            (
+                self.HEAT_CURRENT_LIMIT,
+                "heat_current_limit_a",
+                "Optional HEAT-CTRL-2410 current limit. 0 keeps the hardware setting.",
+            ),
+            (
+                self.HEAT_POWER_LIMIT,
+                "heat_power_limit_w",
+                "Optional HEAT-CTRL-2410 power limit. 0 keeps the hardware setting.",
+            ),
+        ):
+            settings[f"{self.name}/{label}"] = parameterDict(
+                value=0.0,
+                minimum=0.0,
+                maximum=1000.0,
+                toolTip=tooltip,
+                parameterType=PARAMETERTYPE.FLOAT,
+                attr=attr,
+                advanced=True,
+            )
+        for label, attr, tooltip in (
             (self.STATE, "main_state", "Latest ESI controller state."),
             (self.INTERLOCK, "interlock_state", "Latest ESI interlock flags."),
             (self.MODULES, "detected_modules", "Detected module addresses and types."),
+            (
+                self.HEAT_STATUS,
+                "heat_status",
+                "Latest HEAT-CTRL-2410 temperature, power, and interlock state.",
+            ),
         ):
             settings[f"{self.name}/{label}"] = parameterDict(
                 value="Disconnected" if label == self.STATE else "n/a",
@@ -221,10 +277,12 @@ class ESIDevice(Device):
         return settings
 
     def ensureFixedChannels(self) -> None:
-        """Replace only the generic bootstrap layout with modules 2 and 3."""
+        """Replace only the generic bootstrap layout with HV1, HV2, and HEAT."""
         channels = self.getChannels()
         existing_modules = [getattr(channel, "module", None) for channel in channels]
-        if existing_modules == list(_ESI_MODULES):
+        expected_modules = [address for _number, address in _ESI_HV_CHANNELS]
+        expected_modules.append(_ESI_HEAT_MODULE)
+        if existing_modules == expected_modules:
             return
         if channels and not all(
             str(getattr(channel, "name", "")).startswith(self.name)
@@ -232,7 +290,7 @@ class ESIDevice(Device):
         ):
             self.print(
                 "Keeping the existing ESI channel configuration; expected module "
-                "addresses are 2 and 3.",
+                "mapping is HEAT=0, HV1=1, HV2=2.",
                 flag=PRINT.WARNING,
             )
             return
@@ -250,26 +308,38 @@ class ESIDevice(Device):
 
 
 class ESIChannel(Channel):
-    """One HVPS-3kB module at ESI address 2 or 3."""
+    """One HVPS-3kB output or the HEAT-CTRL-2410 temperature channel."""
 
     MODULE = "Module"
+    FUNCTION = "Function"
     channelParent: ESIDevice
 
     def getDefaultChannel(self) -> dict[str, dict]:
         self.module: int
         channel = super().getDefaultChannel()
-        channel[self.VALUE][Parameter.HEADER] = "Voltage (V)"
+        channel[self.VALUE][Parameter.HEADER] = "Target"
         channel[self.VALUE][Parameter.MIN] = 0.0
         channel[self.VALUE][Parameter.MAX] = _ESI_MAX_VOLTAGE
-        channel[self.ENABLED][Parameter.HEADER] = "HV On"
+        channel[self.VALUE][_PARAMETER_UNIT_KEY] = "V"
+        channel[self.ENABLED][Parameter.HEADER] = "Output On"
         channel[self.MODULE] = parameterDict(
             value=2,
-            minimum=2,
+            minimum=0,
             maximum=3,
-            toolTip="Fixed CGC ESI HV module address (2 or 3).",
+            toolTip="Fixed CGC ESI module address (HEAT=0, HV1=1, HV2=2).",
             parameterType=PARAMETERTYPE.INT,
             attr="module",
             header="Module",
+            indicator=True,
+            advanced=False,
+        )
+        channel[self.FUNCTION] = parameterDict(
+            value="HVPS-3kB",
+            toolTip="Controlled ESI module function.",
+            parameterType=PARAMETERTYPE.LABEL,
+            attr="function",
+            header="Function",
+            indicator=True,
             advanced=False,
         )
         return channel
@@ -277,9 +347,31 @@ class ESIChannel(Channel):
     def setDisplayedParameters(self) -> None:
         super().setDisplayedParameters()
         self.displayedParameters.append(self.MODULE)
+        self.displayedParameters.append(self.FUNCTION)
 
     def module_address(self) -> int:
         return int(self.module)
+
+    def is_heat_channel(self) -> bool:
+        return self.module_address() == _ESI_HEAT_MODULE
+
+    @property
+    def unit(self) -> str:
+        """Return the physical unit for this mixed-function ESI channel."""
+        return "degC" if getattr(self, "module", 2) == _ESI_HEAT_MODULE else "V"
+
+    def getDisplayUnit(self) -> str:
+        return self.unit
+
+    def initGUI(self, item: dict) -> None:
+        super().initGUI(item)
+        for parameter_name in (self.VALUE, self.MONITOR):
+            self.getParameterByName(parameter_name).unit = self.unit
+
+    def enabledChanged(self) -> None:
+        super().enabledChanged()
+        if not getattr(self.channelParent, "loading", False):
+            self.applyValue(apply=True)
 
 
 class ESIController(DeviceController):
@@ -295,6 +387,8 @@ class ESIController(DeviceController):
         self.initialized = False
         self.main_state = "Disconnected"
         self.identity: dict[str, Any] = {}
+        self.heat_readback_valid = False
+        self.heat_max_temperature_c = _ESI_MAX_TEMPERATURE
 
     def runInitialization(self) -> None:
         self.initialized = False
@@ -309,11 +403,31 @@ class ESIController(DeviceController):
                 process_backend=True,
             )
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            self.device.set_global_active(
+                True,
+                timeout_s=float(self.controllerParent.connect_timeout_s),
+            )
+            heat_limits = {
+                "voltage_v": float(self.controllerParent.heat_voltage_limit_v),
+                "current_a": float(self.controllerParent.heat_current_limit_a),
+                "power_w": float(self.controllerParent.heat_power_limit_w),
+            }
+            requested_limits = {
+                name: value for name, value in heat_limits.items() if value > 0
+            }
+            if requested_limits:
+                self.device.configure_heat_limits(
+                    **requested_limits,
+                    timeout_s=float(self.controllerParent.poll_timeout_s),
+                )
             self.identity = self.device.collect_identity(
                 timeout_s=float(self.controllerParent.poll_timeout_s)
             )
             snapshot = self.device.collect_diagnostics(
                 timeout_s=float(self.controllerParent.poll_timeout_s)
+            )
+            self.device.force_safe_off(
+                timeout_s=float(self.controllerParent.connect_timeout_s)
             )
             self._apply_snapshot(snapshot)
             self.signalComm.initCompleteSignal.emit()
@@ -331,8 +445,8 @@ class ESIController(DeviceController):
             super().initComplete()
         if self.initialized:
             self.print(
-                "ESI initialized with all HV outputs forced OFF. "
-                "Use the explicit ON controls to energize modules 2 and 3."
+                "ESI initialized with HV and heater outputs forced OFF. "
+                "Use the explicit output controls to energize HV1, HV2, or HEAT."
             )
 
     def initializeValues(self, reset: bool = False) -> None:
@@ -342,6 +456,9 @@ class ESIController(DeviceController):
 
     def readNumbers(self) -> None:
         if self.device is None or not self.initialized:
+            self.initializeValues(reset=True)
+            return
+        if not self.controllerParent.isOn():
             self.initializeValues(reset=True)
             return
         try:
@@ -368,14 +485,43 @@ class ESIController(DeviceController):
             return
         target = float(channel.value if channel.enabled else 0.0)
         try:
+            if not channel.enabled:
+                if not channel.is_heat_channel():
+                    self.device.set_target_voltage(
+                        channel.module_address(),
+                        0.0,
+                        timeout_s=float(self.controllerParent.poll_timeout_s),
+                    )
+                self.device.set_output_active(
+                    channel.module_address(),
+                    False,
+                    timeout_s=float(self.controllerParent.poll_timeout_s),
+                )
+                return
+            if channel.is_heat_channel():
+                self._require_valid_heat_readback()
+                # Program the target while inactive so enabling cannot restore a stale value.
+                self.device.set_heater_temperature(
+                    target,
+                    timeout_s=float(self.controllerParent.poll_timeout_s),
+                )
+            self.device.set_output_active(
+                channel.module_address(),
+                bool(channel.enabled),
+                timeout_s=float(self.controllerParent.poll_timeout_s),
+            )
+            if channel.is_heat_channel():
+                return
             current = self.values.get(channel.module_address(), 0.0) if self.values else 0.0
             if not np.isfinite(current):
                 current = 0.0
             self._ramp_target(channel.module_address(), float(current), target)
         except Exception as exc:
             self.errorCount += 1
+            rollback = self._disable_failed_channel(channel)
             self.print(
-                f"ESI rejected {target:g} V for module {channel.module_address()}: {exc}",
+                f"ESI rejected target {target:g} for module "
+                f"{channel.module_address()}: {exc}.{rollback}",
                 flag=PRINT.ERROR,
             )
 
@@ -396,19 +542,33 @@ class ESIController(DeviceController):
         timeout = float(self.controllerParent.connect_timeout_s)
         try:
             if self.controllerParent.isOn():
-                # Start from zero before activation; only enabled channels are energized.
-                for address in _ESI_MODULES:
-                    self.device.set_target_voltage(address, 0.0, timeout_s=timeout)
+                # Safe OFF guarantees stored targets are zero before this gate opens.
                 self.device.set_global_active(True, timeout_s=timeout)
+                for address in _ESI_HV_MODULES:
+                    self.device.set_target_voltage(address, 0.0, timeout_s=timeout)
+                heat_channels = [
+                    channel
+                    for channel in self.controllerParent.getChannels()
+                    if channel.is_heat_channel() and channel.enabled
+                ]
+                for channel in heat_channels:
+                    self._require_valid_heat_readback()
+                    self.device.set_heater_temperature(
+                        float(channel.value),
+                        timeout_s=float(self.controllerParent.poll_timeout_s),
+                    )
                 for channel in self.controllerParent.getChannels():
                     self.device.set_output_active(
                         channel.module_address(), bool(channel.enabled), timeout_s=timeout
                     )
                 for channel in self.controllerParent.getChannels():
-                    self.applyValue(channel)
+                    if not channel.is_heat_channel():
+                        self.applyValue(channel)
             else:
                 for channel in self.controllerParent.getChannels():
                     address = channel.module_address()
+                    if channel.is_heat_channel():
+                        continue
                     current = self.values.get(address, channel.value) if self.values else channel.value
                     if not np.isfinite(current):
                         current = channel.value
@@ -416,11 +576,83 @@ class ESIController(DeviceController):
                 self.device.force_safe_off(timeout_s=timeout)
         except Exception as exc:
             self.errorCount += 1
+            rollback_confirmed, rollback = self._force_safe_off_after_failure()
+            if rollback_confirmed:
+                self._restore_off_ui_state()
+            else:
+                self._restore_on_ui_state()
             self.print(
-                "ESI ON/OFF transition failed. HV state is not confirmed; verify "
-                f"the hardware and interlock before approaching the source: {exc}",
+                "ESI ON/OFF transition failed: "
+                f"{exc}.{rollback}",
                 flag=PRINT.ERROR,
             )
+
+    def _disable_failed_channel(self, channel: ESIChannel) -> str:
+        """Best-effort safe fallback after a channel command fails."""
+        device = self.device
+        if device is None:
+            return " Device is unavailable; output state is unconfirmed"
+        address = channel.module_address()
+        timeout = float(self.controllerParent.poll_timeout_s)
+        failures = []
+        if not channel.is_heat_channel():
+            try:
+                device.set_target_voltage(address, 0.0, timeout_s=timeout)
+            except Exception as exc:
+                failures.append(f"zero target failed: {exc}")
+        try:
+            device.set_output_active(address, False, timeout_s=timeout)
+        except Exception as exc:
+            failures.append(f"deactivation failed: {exc}")
+        if failures:
+            return (
+                " Safe disable also failed; output state is unconfirmed and the "
+                f"hardware interlock must be used: {'; '.join(failures)}"
+            )
+        return " The affected output was forced OFF"
+
+    def _require_valid_heat_readback(self) -> None:
+        if not self.heat_readback_valid:
+            raise RuntimeError(
+                "ESI heater readback is invalid or outside the hardware range; "
+                "connect and verify the temperature sensor before enabling HEAT"
+            )
+
+    def _force_safe_off_after_failure(self) -> tuple[bool, str]:
+        """Best-effort global rollback after a failed ON/OFF transition."""
+        device = self.device
+        if device is None:
+            return False, " Device is unavailable; all output states are unconfirmed"
+        try:
+            device.force_safe_off(
+                timeout_s=float(self.controllerParent.connect_timeout_s)
+            )
+        except Exception as rollback_exc:
+            return False, (
+                " Global safe OFF also failed; HV/heater state is unconfirmed. "
+                f"Use the hardware interlock before approaching the source: {rollback_exc}"
+            )
+        return True, " All outputs were forced OFF"
+
+    def _restore_off_ui_state(self) -> None:
+        """Keep the UI from claiming ON after a failed transition."""
+        sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+        if callable(sync_state):
+            sync_state(False)
+            return
+        action = getattr(self.controllerParent, "onAction", None)
+        if action is not None:
+            action.state = False
+
+    def _restore_on_ui_state(self) -> None:
+        """Keep OFF reachable while the physical output state is uncertain."""
+        sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+        if callable(sync_state):
+            sync_state(True)
+            return
+        action = getattr(self.controllerParent, "onAction", None)
+        if action is not None:
+            action.state = True
 
     def _ramp_target(self, address: int, start: float, target: float) -> None:
         """Apply one normal setpoint transition in bounded 100 ms steps."""
@@ -487,6 +719,22 @@ class ESIController(DeviceController):
             self.currents[address] = (
                 float(module["measured_a"]) if module["current_valid"] else np.nan
             )
+        heat = snapshot["heat"]
+        heat_temperature = float(heat["monitor_temperature_c"])
+        self.heat_max_temperature_c = float(
+            heat["hardware_limits"]["max_temperature_c"]
+        )
+        self.heat_readback_valid = bool(
+            heat["valid"]
+            and np.isfinite(heat_temperature)
+            and 0.0 <= heat_temperature <= self.heat_max_temperature_c
+        )
+        self.values[_ESI_HEAT_MODULE] = (
+            heat_temperature if self.heat_readback_valid else np.nan
+        )
+        self.currents[_ESI_HEAT_MODULE] = (
+            float(heat["monitor_current_a"]) if heat["valid"] else np.nan
+        )
         self.controllerParent.main_state = self.main_state
         flags = snapshot["interlock_state"]["flags"]
         self.controllerParent.interlock_state = ", ".join(flags) if flags else "OK"
@@ -495,9 +743,20 @@ class ESIController(DeviceController):
         for address in _ESI_MODULES:
             info = module_identity.get(address, module_identity.get(str(address), {}))
             product_id = info.get("product_id") if isinstance(info, dict) else None
-            label = product_id if isinstance(product_id, str) and product_id else "HVPS-3kB"
+            fallback = "HEAT-CTRL-2410" if address == _ESI_HEAT_MODULE else "HVPS-3kB"
+            label = product_id if isinstance(product_id, str) and product_id else fallback
             labels.append(f"{address}: {label}")
         self.controllerParent.detected_modules = ", ".join(labels)
+        if self.heat_readback_valid:
+            self.controllerParent.heat_status = (
+                f"T={heat_temperature:.1f} degC, "
+                f"P={float(heat['heater_power_w']):.2f} W, "
+                f"Ilock=0x{int(heat['interlock_state']):02X}"
+            )
+        else:
+            self.controllerParent.heat_status = (
+                f"INVALID T={heat_temperature:.1f} degC; check temperature sensor"
+            )
         self._sync_status()
 
     def _sync_status(self) -> None:
@@ -507,5 +766,11 @@ class ESIController(DeviceController):
         device = self.device
         self.device = None
         if device is not None:
+            with contextlib.suppress(Exception):
+                device.disconnect(
+                    timeout_s=float(
+                        getattr(self.controllerParent, "connect_timeout_s", 5.0)
+                    )
+                )
             with contextlib.suppress(Exception):
                 device.close()
