@@ -8,19 +8,19 @@ One plugin for one device.
 
 | Plugin   | Description |
 |----------|-------------|
-| `ampr_a` | Drives AMPR_A high-voltage channels and monitors output voltages |
-| `ampr_b` | Drives AMPR_B high-voltage channels and monitors output voltages |
-| `psu_a`  | Drives PSU_A outputs and monitors voltage/current readbacks |
-| `psu_b`  | Drives PSU_B outputs and monitors voltage/current readbacks |
-| `psu_c`  | Drives PSU_C outputs and monitors voltage/current readbacks |
-| `psu_d`  | Drives PSU_D outputs and monitors voltage/current readbacks |
-| `psu_e`  | Drives PSU_E outputs and monitors voltage/current readbacks |
-| `dmmr`   | Reads DMMR module currents and monitors live picoammeter values |
-| `esi`    | Controls ESI HVPS-3kB modules 2 and 3 and monitors voltage/current readbacks and interlocks |
-| `amx`    | Drives AMX frequency and pulser timing and monitors pulser readbacks |
-| `amx_a`  | Drives AMX_A frequency and pulser timing and monitors pulser readbacks |
-| `amx_b`  | Drives AMX_B frequency and pulser timing and monitors pulser readbacks |
-| `amx_hd` | Drives AMX HD (HV-AMX-CTRL-4EDH) frequency and timer timing and monitors timer readbacks |
+| `ampr_a` | Controls AMPR_A high-voltage modules |
+| `ampr_b` | Controls AMPR_B high-voltage modules |
+| `psu_a`  | Controls PSU_A power-supply modules |
+| `psu_b`  | Controls PSU_B power-supply modules |
+| `psu_c`  | Controls PSU_C power-supply modules |
+| `psu_d`  | Controls PSU_D power-supply modules |
+| `psu_e`  | Controls PSU_E power-supply modules |
+| `dmmr`   | Monitors DMMR picoammeter modules |
+| `esi`    | Controls ESI Heater and HVPS-3kB modules |
+| `amx`    | Controls AMX frequency and pulser modules |
+| `amx_a`  | Controls AMX_A frequency and pulser modules |
+| `amx_b`  | Controls AMX_B frequency and pulser modules |
+| `amx_hd` | Controls AMX HD frequency and timer modules |
 
 ## Quick Start
 
@@ -51,6 +51,10 @@ One plugin for one device.
 
 4. **Select the correct COM port** in the plugin settings for each device
    you want to control. That's it!
+
+The ESI controller requires an additional read-only hardware inventory before
+the plugin is enabled. Follow [`esi/README.md`](esi/README.md) and run the
+bundled `esi_hardware_probe.ipynb` first.
 
 ## Requirements
 

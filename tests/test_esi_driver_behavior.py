@@ -68,33 +68,40 @@ def test_connect_validates_identity_and_forces_known_off_state(
     monkeypatch.setattr(base_module.ESIBase, "open_port", lambda self, com: calls.append(("open", com)) or 0)
     monkeypatch.setattr(base_module.ESIBase, "set_comspeed", lambda self, baud: calls.append(("baud", baud)) or (0, baud))
     monkeypatch.setattr(base_module.ESIBase, "get_dev_type", lambda self: calls.append(("device_type",)) or (0, self.DEVICE_TYPE))
-    monkeypatch.setattr(base_module.ESIBase, "set_activation_state", lambda self, state: calls.append(("global", state)) or 0)
     monkeypatch.setattr(base_module.ESIBase, "set_enable", lambda self, state: calls.append(("enable", state)) or 0)
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_heater_temperature",
+        lambda self, value: calls.append(("heat_target", value)) or (0, value),
+    )
     monkeypatch.setattr(base_module.ESIBase, "set_hv_supply_target_output_voltage", lambda self, address, value: calls.append(("target", address, value)) or 0)
     monkeypatch.setattr(base_module.ESIBase, "set_module_activation_state", lambda self, address, state: calls.append(("module", address, state)) or 0)
     monkeypatch.setattr(base_module.ESIBase, "update_module_presence", lambda self: 0)
     monkeypatch.setattr(
         base_module.ESIBase,
         "get_module_presence",
-        lambda self: (0, True, 3, [0, 0, 1, 1, 1]),
+        lambda self: (0, True, 3, [1, 1, 1, 0, 1]),
     )
     monkeypatch.setattr(
         base_module.ESIBase,
         "get_module_dev_type",
-        lambda self, address: (0, self.MODULE_HVPS_TYPE),
+        lambda self, address: (
+            0,
+            self.MODULE_HTCTRL_TYPE if address == 0 else self.MODULE_HVPS_TYPE,
+        ),
     )
 
     assert controller.connect(timeout_s=0.5) is True
     assert calls[:3] == [("open", 14), ("baud", 230400), ("device_type",)]
-    assert calls[3:11] == [
-        ("global", False),
+    assert calls[3:14] == [
+        ("enable", False),
         ("enable", True),
-        ("global", False),
-        ("enable", True),
+        ("heat_target", 0.0),
+        ("target", 1, 0.0),
+        ("module", 1, False),
         ("target", 2, 0.0),
         ("module", 2, False),
-        ("target", 3, 0.0),
-        ("module", 3, False),
+        ("enable", False),
     ]
 
 
@@ -123,15 +130,18 @@ def test_discovery_requires_both_expected_hv_modules(driver_modules, monkeypatch
     monkeypatch.setattr(
         base_module.ESIBase,
         "get_module_presence",
-        lambda self: (0, True, 2, [0, 0, 1, 0, 1]),
+        lambda self: (0, True, 2, [1, 1, 0, 0, 1]),
     )
     monkeypatch.setattr(
         base_module.ESIBase,
         "get_module_dev_type",
-        lambda self, address: (0, self.MODULE_HVPS_TYPE),
+        lambda self, address: (
+            0,
+            self.MODULE_HTCTRL_TYPE if address == 0 else self.MODULE_HVPS_TYPE,
+        ),
     )
 
-    with pytest.raises(RuntimeError, match="module 3 was not detected"):
+    with pytest.raises(RuntimeError, match="module 2 was not detected"):
         controller.discover_modules(timeout_s=0.5)
 
 
@@ -142,6 +152,10 @@ def test_voltage_guard_enforces_3kv_and_explicit_negative_opt_in(driver_modules)
     assert controller._validate_voltage(3000) == 3000
     with pytest.raises(ValueError, match="3000 V hardware limit"):
         controller._validate_voltage(3000.1)
+    with pytest.raises(ValueError, match="finite"):
+        controller._validate_voltage(float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        controller._validate_voltage(float("inf"))
     with pytest.raises(ValueError, match="Negative ESI voltages are disabled"):
         controller._validate_voltage(-1)
 
@@ -153,10 +167,124 @@ def test_only_lab_hv_addresses_are_commandable(driver_modules):
     _runtime, driver_module, _base_module = driver_modules
     controller = _controller(driver_module)
 
+    assert controller._validate_hv_address(1) == 1
     assert controller._validate_hv_address(2) == 2
-    assert controller._validate_hv_address(3) == 3
     with pytest.raises(ValueError, match="must be one of"):
-        controller._validate_hv_address(0)
+        controller._validate_hv_address(3)
+
+    assert controller._validate_controlled_address(0) == 0
+
+
+def test_heat_output_disable_uses_zero_target_not_module_activation(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_heater_temperature",
+        lambda self, value: calls.append(("temperature", value)) or (0, value),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_module_activation_state",
+        lambda self, address, active: (_ for _ in ()).throw(
+            AssertionError("Heat must not use module activation")
+        ),
+    )
+
+    assert controller.set_output_active(0, True, timeout_s=0.5) is True
+    assert controller.set_output_active(0, False, timeout_s=0.5) is False
+    assert calls == [("temperature", 0.0)]
+
+
+def test_discovery_rejects_wrong_heat_controller_type(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    monkeypatch.setattr(base_module.ESIBase, "update_module_presence", lambda self: 0)
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_module_presence",
+        lambda self: (0, True, 3, [1, 1, 1, 0, 1]),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_module_dev_type",
+        lambda self, address: (0, self.MODULE_HVPS_TYPE),
+    )
+
+    with pytest.raises(RuntimeError, match="module 0 type mismatch"):
+        controller.discover_modules(timeout_s=0.5)
+
+
+def test_heater_temperature_is_limited_by_hardware(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    applied = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_heat_ctrl_hw_limits",
+        lambda self: (0, 24.0, 10.0, 200.0, 180.0),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_heater_temperature",
+        lambda self, target: applied.append(target) or (0, target),
+    )
+
+    assert controller.set_heater_temperature(125.0, timeout_s=0.5) == 125.0
+    assert applied == [125.0]
+    with pytest.raises(ValueError, match="hardware maximum 180"):
+        controller.set_heater_temperature(181.0, timeout_s=0.5)
+
+
+def test_heat_limit_overrides_validate_reported_maxima(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    applied = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_heat_ctrl_hw_limits",
+        lambda self: (0, 24.0, 8.0, 150.0, 180.0),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_voltage_limit",
+        lambda self, value: applied.append(("voltage", value)) or (0, value),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_current_limit",
+        lambda self, value: applied.append(("current", value)) or (0, value),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_power_limit",
+        lambda self, value: applied.append(("power", value)) or (0, value),
+    )
+
+    assert controller.configure_heat_limits(
+        voltage_v=20.0,
+        power_w=120.0,
+        timeout_s=0.5,
+    ) == {"voltage_v": 20.0, "power_w": 120.0}
+    assert applied == [("voltage", 20.0), ("power", 120.0)]
+    with pytest.raises(ValueError, match="hardware maximum 24"):
+        controller.configure_heat_limits(voltage_v=25.0, timeout_s=0.5)
+    applied.clear()
+    with pytest.raises(ValueError, match="hardware maximum 8"):
+        controller.configure_heat_limits(
+            voltage_v=20.0,
+            current_a=9.0,
+            timeout_s=0.5,
+        )
+    assert applied == []
 
 
 def test_second_inline_controller_is_rejected(driver_modules):
@@ -180,3 +308,4 @@ def test_process_rpc_budgets_cover_batched_dll_operations(driver_modules):
     assert driver._rpc_timeout_for("collect_diagnostics", {"timeout_s": 3.0}) == 60.0
     assert driver._rpc_timeout_for("force_safe_off", {"timeout_s": 5.0}) == 50.0
     assert driver._rpc_timeout_for("disconnect", {"timeout_s": 5.0}) == 60.0
+    assert driver._rpc_timeout_for("get_heat_configuration", {"timeout_s": 3.0}) == 45.0
