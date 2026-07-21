@@ -30,11 +30,18 @@ _ESI_DRIVER_CLASS: type[Any] | None = None
 _ESI_MAX_VOLTAGE = 3000.0
 _ESI_MAX_TEMPERATURE = 175.0
 _ESI_HEAT_MODULE = 0
-_ESI_HV_CHANNELS = ((1, 1), (2, 2))
-_ESI_HV_MODULES = tuple(address for _number, address in _ESI_HV_CHANNELS)
+_ESI_HV_OUTPUTS = (
+    (1, 1, "+", 1),
+    (1, 1, "-", -1),
+    (2, 2, "+", 1),
+    (2, 2, "-", -1),
+)
+_ESI_HV_MODULES = (1, 2)
 _ESI_MODULES = (_ESI_HEAT_MODULE, *_ESI_HV_MODULES)
 _ESI_COMMUNICATION_LOST = "Communication lost"
 _PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
+_ESI_POWER_ON_ICON = "switch-medium_on.png"
+_ESI_POWER_OFF_ICON = "switch-medium_off.png"
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -93,12 +100,13 @@ def _get_esi_driver_class() -> type[Any]:
 
 
 def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
-    """Return two ordinal HV channels plus the HEAT-CTRL-2410 channel."""
+    """Return four exclusive HV polarity channels plus the heater channel."""
     channels = [
         {
-            "Name": f"{device_name}_HV{number}",
+            "Name": f"{device_name}_HV{number}{polarity}",
             "Module": address,
-            "Function": "HVPS-3kB",
+            "Polarity": polarity,
+            "Function": f"HVPS-3kB ({polarity})",
             "Enabled": False,
             "Active": True,
             "Real": True,
@@ -107,7 +115,7 @@ def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
             "Max": _ESI_MAX_VOLTAGE,
             "Display": True,
         }
-        for number, address in _ESI_HV_CHANNELS
+        for number, address, polarity, _sign in _ESI_HV_OUTPUTS
     ]
     channels.append(
         {
@@ -167,7 +175,189 @@ class ESIDevice(Device):
 
     def initGUI(self) -> None:
         super().initGUI()
+        if hasattr(self, "initAction"):
+            self.initAction.setVisible(False)
         self.controller = ESIController(controllerParent=self)
+
+    def finalizeInit(self) -> None:
+        super().finalizeInit()
+        self._ensure_local_on_action()
+        self._ensure_status_widgets()
+        self._update_channel_column_visibility()
+
+    def _ensure_local_on_action(self) -> None:
+        if (
+            not self.useOnOffLogic
+            or hasattr(self, "deviceOnAction")
+            or not hasattr(self, "closeCommunicationAction")
+        ):
+            return
+        self.deviceOnAction = self.addStateAction(
+            event=lambda checked=False: self.setOn(on=checked),
+            toolTipFalse=f"Turn {self.name} ON.",
+            iconFalse=self.makeIcon(_ESI_POWER_ON_ICON),
+            toolTipTrue=f"Turn {self.name} OFF.",
+            iconTrue=self.makeIcon(_ESI_POWER_OFF_ICON),
+            before=self.closeCommunicationAction,
+            restore=False,
+            defaultState=False,
+        )
+        self._sync_local_on_action()
+
+    def _sync_local_on_action(self) -> None:
+        action = getattr(self, "deviceOnAction", None)
+        if action is None:
+            return
+        blocker = getattr(action, "blockSignals", None)
+        if callable(blocker):
+            blocker(True)
+        try:
+            action.state = self.isOn()
+        finally:
+            if callable(blocker):
+                blocker(False)
+
+    def _ensure_status_widgets(self) -> None:
+        """Add compact ESI status labels to the plugin toolbar."""
+        if (
+            getattr(self, "titleBar", None) is None
+            or getattr(self, "titleBarLabel", None) is None
+            or hasattr(self, "statusBadgeLabel")
+        ):
+            return
+        label_type = type(self.titleBarLabel)
+        self.statusBadgeLabel = label_type("")
+        self.statusSummaryLabel = label_type("")
+        if hasattr(self.statusBadgeLabel, "setObjectName"):
+            self.statusBadgeLabel.setObjectName(f"{self.name}StatusBadge")
+        if hasattr(self.statusSummaryLabel, "setObjectName"):
+            self.statusSummaryLabel.setObjectName(f"{self.name}StatusSummary")
+        if hasattr(self.statusSummaryLabel, "setStyleSheet"):
+            self.statusSummaryLabel.setStyleSheet("QLabel { padding-left: 6px; }")
+        insert_before = getattr(self, "stretchAction", None)
+        if insert_before is not None and hasattr(self.titleBar, "insertWidget"):
+            self.titleBar.insertWidget(insert_before, self.statusBadgeLabel)
+            self.titleBar.insertWidget(insert_before, self.statusSummaryLabel)
+        elif hasattr(self.titleBar, "addWidget"):
+            self.titleBar.addWidget(self.statusBadgeLabel)
+            self.titleBar.addWidget(self.statusSummaryLabel)
+        self._update_status_widgets()
+
+    def _status_badge_style(self) -> str:
+        state = str(getattr(self, "main_state", "Disconnected") or "Disconnected")
+        if state in ("STATE_ON", "ST_ON"):
+            background = "#2f855a"
+        elif state in ("Disconnected",):
+            background = "#718096"
+        elif "lost" in state.lower() or "unconfirmed" in state.lower():
+            background = "#c53030"
+        else:
+            background = "#4a5568"
+        return (
+            "QLabel {"
+            f" background-color: {background};"
+            " color: white;"
+            " border-radius: 3px;"
+            " padding: 2px 6px;"
+            " font-weight: 600;"
+            " }"
+        )
+
+    def _status_summary_text(self) -> str:
+        com = getattr(self, "com", "?")
+        interlock = str(getattr(self, "interlock_state", "n/a") or "n/a")
+        heat = str(getattr(self, "heat_status", "") or "")
+        parts = [f"COM{com}", f"Interlock: {interlock}"]
+        if heat:
+            parts.append(heat)
+        return " | ".join(parts)
+
+    def _update_status_widgets(self) -> None:
+        badge = getattr(self, "statusBadgeLabel", None)
+        summary = getattr(self, "statusSummaryLabel", None)
+        if badge is None or summary is None:
+            return
+        state = str(getattr(self, "main_state", "Disconnected") or "Disconnected")
+        summary_text = self._status_summary_text()
+        tooltip = "\n".join((
+            f"State: {state}",
+            f"COM: {getattr(self, 'com', '?')}",
+            f"Interlock: {getattr(self, 'interlock_state', 'n/a')}",
+            f"Modules: {getattr(self, 'detected_modules', 'n/a')}",
+            f"Heat: {getattr(self, 'heat_status', 'n/a')}",
+        ))
+        if hasattr(badge, "setText"):
+            badge.setText(state)
+        if hasattr(badge, "setToolTip"):
+            badge.setToolTip(tooltip)
+        if hasattr(badge, "setStyleSheet"):
+            badge.setStyleSheet(self._status_badge_style())
+        if hasattr(summary, "setText"):
+            summary.setText(summary_text)
+        if hasattr(summary, "setToolTip"):
+            summary.setToolTip(tooltip)
+
+    def _update_channel_column_visibility(self) -> None:
+        """Hide framework columns not useful for the ESI UI."""
+        if self.tree is None or not self.channels:
+            return
+        parameter_names = list(self.channels[0].getSortedDefaultChannel())
+        for hidden_name in (Channel.COLLAPSE, Channel.REAL):
+            if hidden_name in parameter_names:
+                self.tree.setColumnHidden(parameter_names.index(hidden_name), True)
+
+    def _set_on_ui_state(self, on: bool) -> None:
+        state = bool(on)
+        for action_name in ("onAction", "deviceOnAction"):
+            action = getattr(self, action_name, None)
+            if action is None:
+                continue
+            signal_comm = getattr(action, "signalComm", None)
+            thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
+            if thread_signal is not None:
+                thread_signal.emit(state)
+            else:
+                action.state = state
+        self._sync_local_on_action()
+
+    def setOn(self, on: "bool | None" = None) -> None:
+        if on is not None and hasattr(self, "onAction") and self.onAction.state is not on:
+            self.onAction.state = on
+        self._sync_local_on_action()
+        if getattr(self, "loading", False):
+            return
+        controller = getattr(self, "controller", None)
+        if controller and (
+            getattr(controller, "initializing", False)
+            or getattr(controller, "transitioning", False)
+        ):
+            self.print(
+                f"{self.name} ON/OFF transition already in progress.",
+                flag=PRINT.WARNING,
+            )
+            return
+        if controller and getattr(controller, "initialized", False):
+            controller.toggleOnFromThread(parallel=True)
+        elif hasattr(self, "onAction") and self.isOn():
+            self.initializeCommunication()
+
+    def enforceExclusivePolarity(self, selected: "ESIChannel") -> None:
+        if selected.is_heat_channel() or not selected.enabled:
+            return
+        for channel in self.getChannels():
+            if (
+                channel is selected
+                or channel.is_heat_channel()
+                or channel.module_address() != selected.module_address()
+                or not channel.enabled
+            ):
+                continue
+            parameter = channel.getParameterByName(channel.ENABLED)
+            setter = getattr(parameter, "setValueWithoutEvents", None)
+            if callable(setter):
+                setter(False)
+            else:
+                channel.enabled = False
 
     def getChannels(self) -> "list[ESIChannel]":
         return cast("list[ESIChannel]", super().getChannels())
@@ -280,7 +470,7 @@ class ESIDevice(Device):
         """Replace the generic bootstrap layout with HV1, HV2, and HEAT."""
         channels = self.getChannels()
         existing_modules = [getattr(channel, "module", None) for channel in channels]
-        expected_modules = [address for _number, address in _ESI_HV_CHANNELS]
+        expected_modules = [address for _number, address, _polarity, _sign in _ESI_HV_OUTPUTS]
         expected_modules.append(_ESI_HEAT_MODULE)
         if existing_modules == expected_modules:
             return
@@ -340,11 +530,13 @@ class ESIChannel(Channel):
     """One HVPS-3kB output or the HEAT-CTRL-2410 temperature channel."""
 
     MODULE = "Module"
+    POLARITY = "Polarity"
     FUNCTION = "Function"
     channelParent: ESIDevice
 
     def getDefaultChannel(self) -> dict[str, dict]:
         self.module: int
+        self.polarity: str
         channel = super().getDefaultChannel()
         channel[self.VALUE][Parameter.HEADER] = "Target"
         channel[self.VALUE][Parameter.MIN] = 0.0
@@ -362,6 +554,15 @@ class ESIChannel(Channel):
             indicator=True,
             advanced=False,
         )
+        channel[self.POLARITY] = parameterDict(
+            value="+",
+            toolTip="Physical HVPS-3kB output polarity.",
+            parameterType=PARAMETERTYPE.LABEL,
+            attr="polarity",
+            header="Output",
+            indicator=True,
+            advanced=False,
+        )
         channel[self.FUNCTION] = parameterDict(
             value="HVPS-3kB",
             toolTip="Controlled ESI module function.",
@@ -376,6 +577,7 @@ class ESIChannel(Channel):
     def setDisplayedParameters(self) -> None:
         super().setDisplayedParameters()
         self.displayedParameters.append(self.MODULE)
+        self.displayedParameters.append(self.POLARITY)
         self.displayedParameters.append(self.FUNCTION)
 
     def module_address(self) -> int:
@@ -383,6 +585,14 @@ class ESIChannel(Channel):
 
     def is_heat_channel(self) -> bool:
         return self.module_address() == _ESI_HEAT_MODULE
+
+    def polarity_sign(self) -> int:
+        if self.is_heat_channel():
+            return 0
+        return -1 if str(getattr(self, "polarity", "+")) == "-" else 1
+
+    def signed_target(self) -> float:
+        return self.polarity_sign() * abs(float(self.value)) if self.enabled else 0.0
 
     @property
     def unit(self) -> str:
@@ -398,6 +608,7 @@ class ESIChannel(Channel):
             self.getParameterByName(parameter_name).unit = self.unit
 
     def enabledChanged(self) -> None:
+        self.channelParent.enforceExclusivePolarity(self)
         super().enabledChanged()
         if not getattr(self.channelParent, "loading", False):
             self.applyValue(apply=True)
@@ -523,9 +734,8 @@ class ESIController(DeviceController):
     def applyValue(self, channel: ESIChannel) -> None:
         if self.device is None or not self.initialized or not self.controllerParent.isOn():
             return
-        target = float(channel.value if channel.enabled else 0.0)
-        try:
-            if not channel.enabled:
+        if not channel.enabled:
+            try:
                 if not channel.is_heat_channel():
                     self.device.set_target_voltage(
                         channel.module_address(),
@@ -537,30 +747,52 @@ class ESIController(DeviceController):
                     False,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
-                return
-            if channel.is_heat_channel():
+            except Exception as exc:
+                self.errorCount += 1
+                self.print(
+                    f"ESI failed to disable {channel.name}: {exc}",
+                    flag=PRINT.ERROR,
+                )
+            return
+        if channel.is_heat_channel():
+            target = float(channel.value)
+            try:
                 self._require_valid_heat_readback()
-                # Program the target while inactive so enabling cannot restore a stale value.
                 self.device.set_heater_temperature(
                     target,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
-            self.device.set_output_active(
+                self.device.set_output_active(
+                    channel.module_address(),
+                    True,
+                    timeout_s=float(self.controllerParent.poll_timeout_s),
+                )
+            except Exception as exc:
+                self.errorCount += 1
+                rollback = self._disable_failed_channel(channel)
+                self.print(
+                    f"ESI rejected temperature {target:g} for HEAT: {exc}.{rollback}",
+                    flag=PRINT.ERROR,
+                )
+            return
+        # HV polarity channel: sign the magnitude for the shared module target.
+        target = channel.signed_target()
+        try:
+            self.device.set_target_voltage(
                 channel.module_address(),
-                bool(channel.enabled),
+                target,
                 timeout_s=float(self.controllerParent.poll_timeout_s),
             )
-            if channel.is_heat_channel():
-                return
-            current = self.values.get(channel.module_address(), 0.0) if self.values else 0.0
-            if not np.isfinite(current):
-                current = 0.0
-            self._ramp_target(channel.module_address(), float(current), target)
+            self.device.set_output_active(
+                channel.module_address(),
+                True,
+                timeout_s=float(self.controllerParent.poll_timeout_s),
+            )
         except Exception as exc:
             self.errorCount += 1
             rollback = self._disable_failed_channel(channel)
             self.print(
-                f"ESI rejected target {target:g} for module "
+                f"ESI rejected target {target:g} V for module "
                 f"{channel.module_address()}: {exc}.{rollback}",
                 flag=PRINT.ERROR,
             )
@@ -569,11 +801,30 @@ class ESIController(DeviceController):
         if self.values is None:
             return
         for channel in self.controllerParent.getChannels():
-            channel.monitor = (
-                self.values.get(channel.module_address(), np.nan)
-                if channel.enabled and channel.real
-                else np.nan
-            )
+            if not (channel.enabled and channel.real):
+                channel.monitor = np.nan
+                continue
+            if channel.is_heat_channel():
+                channel.monitor = self.values.get(channel.module_address(), np.nan)
+            else:
+                # Each HV module reports one signed readback; show it on the
+                # active polarity channel only.
+                active_sign = self._active_polarity_sign(channel.module_address())
+                channel.monitor = (
+                    self.values.get(channel.module_address(), np.nan)
+                    if active_sign == channel.polarity_sign()
+                    else np.nan
+                )
+
+    def _active_polarity_sign(self, address: int) -> int:
+        for channel in self.controllerParent.getChannels():
+            if (
+                channel.module_address() == address
+                and not channel.is_heat_channel()
+                and channel.enabled
+            ):
+                return channel.polarity_sign()
+        return 0
 
     def toggleOn(self) -> None:
         super().toggleOn()
@@ -589,34 +840,10 @@ class ESIController(DeviceController):
                 self.device.set_global_active(True, timeout_s=timeout)
                 for address in _ESI_HV_MODULES:
                     self.device.set_target_voltage(address, 0.0, timeout_s=timeout)
-                heat_channels = [
-                    channel
-                    for channel in self.controllerParent.getChannels()
-                    if channel.is_heat_channel() and channel.enabled
-                ]
-                for channel in heat_channels:
-                    self._require_valid_heat_readback()
-                    self.device.set_heater_temperature(
-                        float(channel.value),
-                        timeout_s=float(self.controllerParent.poll_timeout_s),
-                    )
                 for channel in self.controllerParent.getChannels():
-                    self.device.set_output_active(
-                        channel.module_address(), bool(channel.enabled), timeout_s=timeout
-                    )
-                for channel in self.controllerParent.getChannels():
-                    if not channel.is_heat_channel():
-                        self.applyValue(channel)
+                    self.applyValue(channel)
                 self.startAcquisition()
             else:
-                for channel in self.controllerParent.getChannels():
-                    address = channel.module_address()
-                    if channel.is_heat_channel():
-                        continue
-                    current = self.values.get(address, channel.value) if self.values else channel.value
-                    if not np.isfinite(current):
-                        current = channel.value
-                    self._ramp_target(address, float(current), 0.0)
                 self.device.force_safe_off(timeout_s=timeout)
         except Exception as exc:
             self.errorCount += 1
@@ -805,6 +1032,9 @@ class ESIController(DeviceController):
 
     def _sync_status(self) -> None:
         self.controllerParent.main_state = self.main_state
+        update = getattr(self.controllerParent, "_update_status_widgets", None)
+        if callable(update):
+            update()
 
     def _dispose_device(self) -> None:
         device = self.device
