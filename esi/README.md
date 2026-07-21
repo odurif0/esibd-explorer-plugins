@@ -55,9 +55,14 @@ state is controlled by the module gate and zero/nonzero targets.
 
 The HVPS-3kB software target range is 0 to 3000 V. Each module has one shared
 unsigned target magnitude and physically distinct positive and negative
-outputs. Selecting `+` or `-` configures the corresponding voltage measurement
-channel before applying the shared magnitude; negative values are never passed
-to the vendor target function.
+outputs. The published C API has no independent target or activation command
+for either connector: `SetHVsupplyTargetOutputVoltage(Address, Voltage)` acts
+on the complete module, while `SetHVsupplyMeasRanges(..., VoltNeg, ...)` only
+selects an ADC measurement channel. The plugin therefore presents one honest
+`+/-` output pair per module with one magnitude and one ON/OFF state. Negative
+values are never passed to the vendor target function. The displayed voltage
+is the raw ADC readback currently supplied by the firmware; verify both
+physical connectors independently during commissioning.
 
 If a DLL call times out or shutdown cannot be confirmed, treat the HV state as
 unknown and use the physical interlock or front panel before approaching the

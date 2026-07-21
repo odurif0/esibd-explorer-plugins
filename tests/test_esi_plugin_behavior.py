@@ -181,32 +181,26 @@ def test_fixed_channel_layout_is_safe_and_stable():
 
     items = module._fixed_channel_items("ESI")
 
-    assert [item["Module"] for item in items] == [1, 1, 2, 2, 0]
+    assert [item["Module"] for item in items] == [1, 2, 0]
     assert [item["Name"] for item in items] == [
-        "ESI_HV1+",
-        "ESI_HV1-",
-        "ESI_HV2+",
-        "ESI_HV2-",
+        "ESI_HV1",
+        "ESI_HV2",
         "ESI_HEAT",
     ]
     assert all(item["Enabled"] is False for item in items)
-    assert [item["Value"] for item in items] == [0.0, 0.0, 0.0, 0.0, 20.0]
+    assert [item["Value"] for item in items] == [0.0, 0.0, 20.0]
     assert all(item["Min"] == 0.0 for item in items)
     assert [item["Max"] for item in items] == [
-        3000.0,
-        3000.0,
         3000.0,
         3000.0,
         175.0,
     ]
     assert [item["Function"] for item in items] == [
-        "HVPS-3kB (+)",
-        "HVPS-3kB (-)",
-        "HVPS-3kB (+)",
-        "HVPS-3kB (-)",
+        "HVPS-3kB (+/- pair)",
+        "HVPS-3kB (+/- pair)",
         "HEAT-CTRL-2410",
     ]
-    assert [item["Polarity"] for item in items if "Polarity" in item] == ["+", "-", "+", "-"]
+    assert all("Polarity" not in item for item in items)
     assert all("Unit" not in item for item in items)
 
 
@@ -244,12 +238,10 @@ def test_missing_config_creates_only_three_fixed_channels(tmp_path):
 
     device.loadConfiguration(useDefaultFile=True)
 
-    assert [item["Module"] for item in applied] == [1, 1, 2, 2, 0]
+    assert [item["Module"] for item in applied] == [1, 2, 0]
     assert [item["Name"] for item in applied] == [
-        "ESI_HV1+",
-        "ESI_HV1-",
-        "ESI_HV2+",
-        "ESI_HV2-",
+        "ESI_HV1",
+        "ESI_HV2",
         "ESI_HEAT",
     ]
     assert exported == [{"useDefaultFile": True}]
@@ -278,9 +270,95 @@ def test_generic_nine_channel_config_is_migrated_to_fixed_layout(tmp_path):
 
     device.ensureFixedChannels(persist=True)
 
-    assert [item["Module"] for item in applied] == [1, 1, 2, 2, 0]
-    assert len(applied) == 5
+    assert [item["Module"] for item in applied] == [1, 2, 0]
+    assert len(applied) == 3
     assert exported == [{"useDefaultFile": True}]
+
+
+def test_polarity_channel_config_migrates_to_safe_module_pairs(tmp_path):
+    module = _load_plugin()
+    device = object.__new__(module.ESIDevice)
+    config_file = tmp_path / "ESI.ini"
+    applied = []
+    device.channels = [
+        types.SimpleNamespace(
+            module=1, name="ESI_HV1+", value=100.0, enabled=False
+        ),
+        types.SimpleNamespace(
+            module=1, name="ESI_HV1-", value=250.0, enabled=True
+        ),
+        types.SimpleNamespace(
+            module=2, name="ESI_HV2+", value=300.0, enabled=False
+        ),
+        types.SimpleNamespace(
+            module=2, name="ESI_HV2-", value=450.0, enabled=False
+        ),
+        types.SimpleNamespace(
+            module=0, name="ESI_HEAT", value=80.0, enabled=True
+        ),
+    ]
+    device.confINI = "ESI.ini"
+    device.getChannels = lambda: device.channels
+    device.customConfigFile = lambda _name: config_file
+    device.updateChannelConfig = lambda items, _file: applied.extend(items)
+
+    device.ensureFixedChannels()
+
+    assert [item["Name"] for item in applied] == [
+        "ESI_HV1",
+        "ESI_HV2",
+        "ESI_HEAT",
+    ]
+    assert [item["Value"] for item in applied] == [250.0, 300.0, 80.0]
+    assert all(item["Enabled"] is False for item in applied)
+
+
+def test_panel_controls_one_target_and_one_output_state_per_module():
+    module = _load_plugin()
+    updates = []
+
+    class ParameterValue:
+        def __init__(self, channel, attribute):
+            self.channel = channel
+            self.attribute = attribute
+
+        @property
+        def value(self):
+            return getattr(self.channel, self.attribute)
+
+        @value.setter
+        def value(self, value):
+            setattr(self.channel, self.attribute, value)
+            updates.append((self.attribute, value))
+
+    channel = types.SimpleNamespace(
+        module=1,
+        enabled=False,
+        value=10.0,
+        VALUE=module.Channel.VALUE,
+        ENABLED=module.Channel.ENABLED,
+        module_address=lambda: 1,
+        is_heat_channel=lambda: False,
+    )
+    parameters = {
+        module.Channel.VALUE: ParameterValue(channel, "value"),
+        module.Channel.ENABLED: ParameterValue(channel, "enabled"),
+    }
+    channel.getParameterByName = lambda name: parameters[name]
+    device = object.__new__(module.ESIDevice)
+    device.loading = False
+    device.getChannels = lambda: [channel]
+    device._update_operator_panel = lambda: None
+
+    device._panel_target_changed(1, 125.0)
+    device._panel_output_selected(1, 1)
+    device._panel_output_selected(1, 0)
+
+    assert updates == [
+        ("value", 125.0),
+        ("enabled", True),
+        ("enabled", False),
+    ]
 
 
 def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypatch):
@@ -380,10 +458,7 @@ def test_operator_panel_widths_are_fixed_and_aligned():
 def test_enabled_change_forces_hardware_apply():
     module = _load_plugin()
     channel = module.ESIChannel(
-        channelParent=types.SimpleNamespace(
-            loading=False,
-            enforceExclusivePolarity=lambda _selected: None,
-        ),
+        channelParent=types.SimpleNamespace(loading=False),
         tree=None,
     )
 
@@ -398,7 +473,7 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
     calls = []
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
+        def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("target", address, value))
 
         def set_global_active(self, active, timeout_s):
@@ -452,7 +527,7 @@ def test_on_sequence_programs_heat_target_before_activation():
     calls = []
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
+        def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("hv_target", address, value))
 
         def set_heater_temperature(self, value, timeout_s):
@@ -521,7 +596,7 @@ def test_normal_target_change_is_ramped_in_bounded_steps(monkeypatch):
     calls = []
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
+        def set_hv_module_target(self, address, value, timeout_s):
             calls.append((address, value, timeout_s))
 
     parent = types.SimpleNamespace(ramp_rate_v_s=1000.0, poll_timeout_s=2.0)
@@ -549,7 +624,7 @@ def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
         def set_heater_temperature(self, target, timeout_s):
             calls.append(("temperature", target, timeout_s))
 
-        def set_target_voltage(self, *args, **kwargs):
+        def set_hv_module_target(self, *args, **kwargs):
             raise AssertionError("Heat channel must not use the HV voltage setter")
 
     parent = types.SimpleNamespace(
@@ -652,14 +727,11 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
     )
 
 
-def test_disabling_hv_zeros_target_before_deactivation():
+def test_disabling_hv_uses_module_output_gate():
     module = _load_plugin()
     calls = []
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
-            calls.append(("target", address, value, timeout_s))
-
         def set_output_active(self, address, active, timeout_s):
             calls.append(("active", address, active, timeout_s))
 
@@ -680,82 +752,38 @@ def test_disabling_hv_zeros_target_before_deactivation():
 
     controller.applyValue(channel)
 
-    assert calls == [
-        ("target", 2, 0.0, 2.0),
-        ("active", 2, False, 2.0),
-    ]
+    assert calls == [("active", 2, False, 2.0)]
 
 
-def test_disabled_polarity_cannot_zero_its_active_sibling():
-    module = _load_plugin()
-
-    active = types.SimpleNamespace(
-        module_address=lambda: 1,
-        is_heat_channel=lambda: False,
-        polarity_sign=lambda: 1,
-        enabled=True,
-    )
-    disabled = types.SimpleNamespace(
-        module_address=lambda: 1,
-        is_heat_channel=lambda: False,
-        enabled=False,
-    )
-
-    class FakeDevice:
-        def set_target_voltage(self, *args, **kwargs):
-            raise AssertionError("Disabled sibling must not zero the shared target")
-
-        def set_output_active(self, *args, **kwargs):
-            raise AssertionError("Disabled sibling must not deactivate the module")
-
-    parent = types.SimpleNamespace(
-        poll_timeout_s=2.0,
-        isOn=lambda: True,
-        getChannels=lambda: [active, disabled],
-    )
-    controller = module.ESIController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-
-    controller.applyValue(disabled)
-
-
-def test_negative_output_selects_negative_readback_with_positive_magnitude():
+def test_hv_pair_applies_one_unsigned_module_target_without_adc_selection():
     module = _load_plugin()
     calls = []
 
     class FakeDevice:
-        def select_hv_measurement(
-            self, address, *, negative, high_current, timeout_s
-        ):
-            calls.append(("measurement", address, negative, high_current, timeout_s))
+        def set_hv_module_target(self, address, value, timeout_s):
+            calls.append((address, value, timeout_s))
 
-        def set_target_voltage(self, address, value, timeout_s):
-            calls.append(("target", address, value, timeout_s))
+        def select_hv_measurement(self, *args, **kwargs):
+            raise AssertionError("ADC selection must not control the physical outputs")
 
-        def set_output_active(self, address, active, timeout_s):
-            calls.append(("active", address, active, timeout_s))
-
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        isOn=lambda: True,
+    )
     channel = types.SimpleNamespace(
-        module_address=lambda: 2,
+        module_address=lambda: 1,
         is_heat_channel=lambda: False,
-        polarity_sign=lambda: -1,
-        name="ESI_HV2-",
         enabled=True,
+        name="ESI_HV1",
         value=10.0,
     )
-    parent = types.SimpleNamespace(poll_timeout_s=2.0, isOn=lambda: True)
     controller = module.ESIController(parent)
     controller.device = FakeDevice()
     controller.initialized = True
 
     controller.applyValue(channel)
 
-    assert calls == [
-        ("measurement", 2, True, False, 2.0),
-        ("target", 2, 10.0, 2.0),
-        ("active", 2, True, 2.0),
-    ]
+    assert calls == [(1, 10.0, 2.0)]
 
 
 def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
@@ -763,7 +791,7 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     calls = []
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
+        def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("target", address, value))
 
         def set_global_active(self, active, timeout_s):
@@ -799,7 +827,7 @@ def test_failed_global_rollback_keeps_off_action_reachable():
     module = _load_plugin()
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
+        def set_hv_module_target(self, address, value, timeout_s):
             raise RuntimeError("transition failed")
 
         def force_safe_off(self, timeout_s):
@@ -828,15 +856,10 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     calls = []
 
     class FakeDevice:
-        def select_hv_measurement(
-            self, address, *, negative, high_current, timeout_s
-        ):
-            calls.append(("measurement", address, negative, high_current))
-
         def set_output_active(self, address, active, timeout_s):
             calls.append(("active", address, active))
 
-        def set_target_voltage(self, address, value, timeout_s):
+        def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("target", address, value))
             if value != 0.0:
                 raise RuntimeError("setpoint failed")
@@ -844,8 +867,7 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     channel = types.SimpleNamespace(
         module_address=lambda: 2,
         is_heat_channel=lambda: False,
-        polarity_sign=lambda: 1,
-        name="ESI_HV2+",
+        name="ESI_HV2",
         enabled=True,
         value=1000.0,
     )
@@ -864,29 +886,25 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     controller.applyValue(channel)
 
     assert calls == [
-        ("measurement", 2, False, False),
         ("target", 2, 1000.0),
         ("target", 2, 0.0),
         ("active", 2, False),
     ]
 
 
-def test_failed_hv_zero_still_attempts_deactivation():
+def test_failed_hv_disable_is_reported():
     module = _load_plugin()
     calls = []
 
     class FakeDevice:
-        def set_target_voltage(self, address, value, timeout_s):
-            calls.append(("target", address, value))
-            raise RuntimeError("zero failed")
-
         def set_output_active(self, address, active, timeout_s):
             calls.append(("active", address, active))
+            raise RuntimeError("zero failed")
 
     channel = types.SimpleNamespace(
         module_address=lambda: 2,
         is_heat_channel=lambda: False,
-        name="ESI_HV2+",
+        name="ESI_HV2",
         enabled=False,
         value=1000.0,
     )
@@ -903,7 +921,8 @@ def test_failed_hv_zero_still_attempts_deactivation():
 
     controller.applyValue(channel)
 
-    assert calls == [("target", 2, 0.0)]
+    assert calls == [("active", 2, False)]
+    assert controller.errorCount == 1
 
 
 def test_dispose_disconnects_before_closing_backend():
