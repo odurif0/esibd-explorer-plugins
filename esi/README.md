@@ -23,15 +23,15 @@ header, and 64-bit Windows DLL.
 4. Run every cell and confirm that the generated JSON report maps `ESI_HEAT`
    to address 0, `ESI_HV1` to address 1, `ESI_HV2` to address 2, and reports
    address 3 as absent.
-5. Confirm that every `safe_zero_target` and `safe_deactivation` operation in
-   the report has status `0` before operating connected equipment.
+5. Confirm that every `safe_zero_target` operation in the report has status `0`
+   before operating connected equipment.
 6. Restart ESIBD Explorer. Enable the `ESI` plugin and configure the same COM
    port in its settings.
 
 Initialization validates controller type `0x8ED6`, requires HV modules 1 and 2
 to report type `0x0A0D`, requires the heater at address 0 to report type
-`0xDB1C`, writes zero targets, deactivates the HV modules, and closes the module
-gate with `SetEnable(False)` after initialization. The operator-facing names
+`0xDB1C`, writes zero targets, and closes the module gate with
+`SetEnable(False)` after initialization. The operator-facing names
 are `ESI_HV1` (address 1), `ESI_HV2` (address 2), and `ESI_HEAT` (address 0).
 Turning the device or an output ON is always an explicit operator action.
 
@@ -47,9 +47,9 @@ Heating is blocked when the temperature readback is missing, non-finite, below
 0 degC, or above the hardware maximum. A disconnected sensor can report a high
 out-of-range value even while heater power is zero.
 
-The module-activation readback functions return vendor status `-10` on the
-validated controller firmware and are therefore not used. Effective output
-state is determined from the module gate and zero/nonzero targets.
+The module-activation read and write functions return vendor status `-10` on
+the validated controller firmware and are therefore not used. Effective output
+state is controlled by the module gate and zero/nonzero targets.
 
 ## Voltage Safety
 

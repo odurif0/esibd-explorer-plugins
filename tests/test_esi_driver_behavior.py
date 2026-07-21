@@ -75,7 +75,13 @@ def test_connect_validates_identity_and_forces_known_off_state(
         lambda self, value: calls.append(("heat_target", value)) or (0, value),
     )
     monkeypatch.setattr(base_module.ESIBase, "set_hv_supply_target_output_voltage", lambda self, address, value: calls.append(("target", address, value)) or 0)
-    monkeypatch.setattr(base_module.ESIBase, "set_module_activation_state", lambda self, address, state: calls.append(("module", address, state)) or 0)
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_module_activation_state",
+        lambda self, address, state: (_ for _ in ()).throw(
+            AssertionError("Unsupported module activation API must not be used")
+        ),
+    )
     monkeypatch.setattr(base_module.ESIBase, "update_module_presence", lambda self: 0)
     monkeypatch.setattr(
         base_module.ESIBase,
@@ -98,9 +104,7 @@ def test_connect_validates_identity_and_forces_known_off_state(
         ("enable", True),
         ("heat_target", 0.0),
         ("target", 1, 0.0),
-        ("module", 1, False),
         ("target", 2, 0.0),
-        ("module", 2, False),
         ("enable", False),
     ]
 
@@ -199,6 +203,32 @@ def test_heat_output_disable_uses_zero_target_not_module_activation(
     assert controller.set_output_active(0, True, timeout_s=0.5) is True
     assert controller.set_output_active(0, False, timeout_s=0.5) is False
     assert calls == [("temperature", 0.0)]
+
+
+def test_hv_output_state_uses_zero_target_not_module_activation(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_target_output_voltage",
+        lambda self, address, value: calls.append((address, value)) or 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_module_activation_state",
+        lambda self, address, active: (_ for _ in ()).throw(
+            AssertionError("Unsupported module activation API must not be used")
+        ),
+    )
+
+    assert controller.set_output_active(1, True, timeout_s=0.5) is True
+    assert controller.set_output_active(1, False, timeout_s=0.5) is False
+    assert calls == [(1, 0.0)]
 
 
 def test_discovery_rejects_wrong_heat_controller_type(driver_modules, monkeypatch):
