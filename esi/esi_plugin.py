@@ -55,6 +55,14 @@ _ESI_PANEL_NEG = "color: #60a5fa; font-weight: 700;"
 _ESI_PANEL_OFF = "color: #94a3b8; font-weight: 600;"
 _ESI_PANEL_OK = "color: #4ade80; font-weight: 600;"
 _ESI_PANEL_ERR = "color: #f87171; font-weight: 700;"
+_ESI_BTN_POS_ACTIVE = "QPushButton { background-color: #f59e0b; color: #1a1a2e; font-weight: 700; border-radius: 4px; }"
+_ESI_BTN_POS_OFF = "QPushButton { background-color: #374151; color: #fbbf24; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
+_ESI_BTN_NEG_ACTIVE = "QPushButton { background-color: #3b82f6; color: #1a1a2e; font-weight: 700; border-radius: 4px; }"
+_ESI_BTN_NEG_OFF = "QPushButton { background-color: #374151; color: #60a5fa; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
+_ESI_BTN_OFF_ACTIVE = "QPushButton { background-color: #4b5563; color: #e2e8f0; font-weight: 600; border-radius: 4px; }"
+_ESI_BTN_OFF_INACTIVE = "QPushButton { background-color: #374151; color: #94a3b8; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
+_ESI_BTN_HEAT_ACTIVE = "QPushButton { background-color: #d97706; color: #1a1a2e; font-weight: 700; border-radius: 4px; }"
+_ESI_BTN_HEAT_OFF = "QPushButton { background-color: #374151; color: #fbbf24; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -375,12 +383,13 @@ class ESIDevice(Device):
                 channel.enabled = False
 
     def _ensure_operator_panel(self) -> None:
-        """Build a compact operator panel above the channel table."""
+        """Replace the channel table with a compact operator control panel."""
         if hasattr(self, "esiPanel"):
             self._update_operator_panel()
             return
         try:
             from PyQt6.QtWidgets import (
+                QButtonGroup,
                 QFrame,
                 QGridLayout,
                 QHBoxLayout,
@@ -396,7 +405,7 @@ class ESIDevice(Device):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
         cards_row = QWidget()
         cards_layout = QHBoxLayout(cards_row)
@@ -408,8 +417,8 @@ class ESIDevice(Device):
         for module_number, address in ((1, 1), (2, 2)):
             card = QFrame()
             card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            card.setMinimumWidth(240)
-            card.setMaximumWidth(300)
+            card.setMinimumWidth(260)
+            card.setMaximumWidth(320)
             cl = QVBoxLayout(card)
             cl.setContentsMargins(12, 12, 12, 12)
             cl.setSpacing(8)
@@ -418,10 +427,30 @@ class ESIDevice(Device):
             title.setStyleSheet(_ESI_PANEL_TITLE)
             cl.addWidget(title)
 
-            polarity_label = QLabel("Output")
-            polarity_label.setStyleSheet(_ESI_PANEL_NAME)
-            polarity_value = QLabel("OFF")
-            polarity_value.setStyleSheet(_ESI_PANEL_OFF)
+            sel_row = QHBoxLayout()
+            sel_row.setContentsMargins(0, 0, 0, 0)
+            sel_row.setSpacing(6)
+            btn_pos = QPushButton("+")
+            btn_off = QPushButton("OFF")
+            btn_neg = QPushButton("−")
+            for btn in (btn_pos, btn_off, btn_neg):
+                btn.setFixedHeight(32)
+                btn.setMinimumWidth(60)
+            btn_pos.setStyleSheet(_ESI_BTN_POS_OFF)
+            btn_off.setStyleSheet(_ESI_BTN_OFF_ACTIVE)
+            btn_neg.setStyleSheet(_ESI_BTN_NEG_OFF)
+            sel_group = QButtonGroup(card)
+            sel_group.setExclusive(True)
+            sel_group.addButton(btn_pos, 1)
+            sel_group.addButton(btn_off, 0)
+            sel_group.addButton(btn_neg, 2)
+            sel_row.addStretch(1)
+            sel_row.addWidget(btn_pos)
+            sel_row.addWidget(btn_off)
+            sel_row.addWidget(btn_neg)
+            sel_row.addStretch(1)
+            cl.addLayout(sel_row)
+
             target_label = QLabel("Target")
             target_label.setStyleSheet(_ESI_PANEL_NAME)
             target_value = QLabel("0.0 V")
@@ -439,24 +468,28 @@ class ESIDevice(Device):
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(6)
-            grid.addWidget(polarity_label, 0, 0)
-            grid.addWidget(polarity_value, 0, 1)
-            grid.addWidget(target_label, 1, 0)
-            grid.addWidget(target_value, 1, 1)
-            grid.addWidget(measured_label, 2, 0)
-            grid.addWidget(measured_value, 2, 1)
-            grid.addWidget(current_label, 3, 0)
-            grid.addWidget(current_value, 3, 1)
+            grid.addWidget(target_label, 0, 0)
+            grid.addWidget(target_value, 0, 1)
+            grid.addWidget(measured_label, 1, 0)
+            grid.addWidget(measured_value, 1, 1)
+            grid.addWidget(current_label, 2, 0)
+            grid.addWidget(current_value, 2, 1)
             cl.addLayout(grid)
 
             cards_layout.addWidget(card)
             self.esiHVCards[address] = {
                 "card": card,
-                "polarity": polarity_value,
+                "sel_group": sel_group,
+                "btn_pos": btn_pos,
+                "btn_off": btn_off,
+                "btn_neg": btn_neg,
                 "target": target_value,
                 "measured": measured_value,
                 "current": current_value,
             }
+            sel_group.idClicked.connect(
+                lambda gid, addr=address: self._panel_polarity_selected(addr, gid)
+            )
         cards_layout.addStretch(0)
 
         heat_card = QFrame()
@@ -466,9 +499,20 @@ class ESIDevice(Device):
         heat_cl.setContentsMargins(12, 12, 12, 12)
         heat_cl.setSpacing(8)
 
+        heat_header = QHBoxLayout()
+        heat_header.setContentsMargins(0, 0, 0, 0)
+        heat_header.setSpacing(8)
         heat_title = QLabel("HEAT-CTRL-2410")
         heat_title.setStyleSheet(_ESI_PANEL_TITLE)
-        heat_cl.addWidget(heat_title)
+        heat_btn = QPushButton("OFF")
+        heat_btn.setFixedHeight(32)
+        heat_btn.setMinimumWidth(80)
+        heat_btn.setStyleSheet(_ESI_BTN_OFF_ACTIVE)
+        heat_btn.setCheckable(True)
+        heat_header.addWidget(heat_title)
+        heat_header.addStretch(1)
+        heat_header.addWidget(heat_btn)
+        heat_cl.addLayout(heat_header)
 
         heat_grid = QGridLayout()
         heat_grid.setContentsMargins(0, 0, 0, 0)
@@ -493,17 +537,8 @@ class ESIDevice(Device):
         cards_layout.addStretch(1)
         layout.addWidget(cards_row)
 
-        force_off = QPushButton("FORCE ALL OUTPUTS OFF")
-        force_off.setStyleSheet(
-            "QPushButton { background-color: #c53030; color: white; "
-            "font-weight: 700; border-radius: 4px; padding: 6px 16px; }"
-            "QPushButton:hover { background-color: #e53e3e; }"
-        )
-        force_off.clicked.connect(self._force_all_off)
-        layout.addWidget(force_off)
-        self.esiForceOffButton = force_off
-
         self.esiPanel = panel
+        self.esiHeatButton = heat_btn
         self.esiHeatWidgets = {
             "heat_target": heat_grid.itemAtPosition(0, 1).widget(),
             "heat_measured": heat_grid.itemAtPosition(1, 1).widget(),
@@ -511,20 +546,36 @@ class ESIDevice(Device):
             "heat_sensor": heat_grid.itemAtPosition(3, 1).widget(),
             "heat_interlock": heat_grid.itemAtPosition(4, 1).widget(),
         }
+        heat_btn.toggled.connect(self._panel_heat_toggled)
+
+        if self.tree is not None:
+            self.tree.setVisible(False)
         self.addContentWidget(panel)
         self._update_operator_panel()
 
-    def _force_all_off(self) -> None:
-        controller = getattr(self, "controller", None)
-        if controller is None or controller.device is None:
+    def _panel_polarity_selected(self, address: int, gid: int) -> None:
+        if getattr(self, "loading", False):
             return
-        try:
-            controller.device.force_safe_off(
-                timeout_s=float(getattr(self, "connect_timeout_s", 5.0))
-            )
-            self.print("All ESI outputs forced OFF.", flag=PRINT.WARNING)
-        except Exception as exc:
-            self.print(f"Force OFF failed: {exc}", flag=PRINT.ERROR)
+        for channel in self.getChannels():
+            if channel.module_address() != address or channel.is_heat_channel():
+                continue
+            want_enabled = gid != 0
+            want_negative = gid == 2
+            is_negative = channel.polarity_sign() < 0
+            if want_enabled and is_negative == want_negative:
+                if not channel.enabled:
+                    channel.getParameterByName(channel.ENABLED).value = True
+            else:
+                if channel.enabled:
+                    channel.getParameterByName(channel.ENABLED).value = False
+        self._update_operator_panel()
+
+    def _panel_heat_toggled(self, checked: bool) -> None:
+        if getattr(self, "loading", False):
+            return
+        for channel in self.getChannels():
+            if channel.is_heat_channel():
+                channel.getParameterByName(channel.ENABLED).value = checked
         self._update_operator_panel()
 
     def _update_operator_panel(self) -> None:
@@ -538,12 +589,11 @@ class ESIDevice(Device):
 
         for address, widgets in cards.items():
             card = widgets["card"]
-            if not connected:
-                card.setStyleSheet(_ESI_PANEL_CARD_DISC)
-                for key in ("polarity", "target", "measured", "current"):
-                    widgets[key].setText("n/a")
-                    widgets[key].setStyleSheet(_ESI_PANEL_OFF)
-                continue
+            btn_pos = widgets["btn_pos"]
+            btn_off = widgets["btn_off"]
+            btn_neg = widgets["btn_neg"]
+            sel_group = widgets["sel_group"]
+
             active_sign = 0
             active_value = 0.0
             for channel in self.getChannels():
@@ -555,20 +605,39 @@ class ESIDevice(Device):
                     active_sign = channel.polarity_sign()
                     active_value = abs(float(channel.value))
                     break
+
+            if not connected:
+                card.setStyleSheet(_ESI_PANEL_CARD_DISC)
+                for btn in (btn_pos, btn_off, btn_neg):
+                    btn.setEnabled(False)
+                for key in ("target", "measured", "current"):
+                    widgets[key].setText("n/a")
+                    widgets[key].setStyleSheet(_ESI_PANEL_OFF)
+                continue
+
+            for btn in (btn_pos, btn_off, btn_neg):
+                btn.setEnabled(True)
             if active_sign == 0:
                 card.setStyleSheet(_ESI_PANEL_CARD_OFF)
-                widgets["polarity"].setText("OFF")
-                widgets["polarity"].setStyleSheet(_ESI_PANEL_OFF)
+                sel_group.setId(btn_off, 0)
+                btn_off.setChecked(True)
+                btn_pos.setStyleSheet(_ESI_BTN_POS_OFF)
+                btn_off.setStyleSheet(_ESI_BTN_OFF_ACTIVE)
+                btn_neg.setStyleSheet(_ESI_BTN_NEG_OFF)
                 widgets["target"].setText("0.0 V")
             elif active_sign > 0:
                 card.setStyleSheet(_ESI_PANEL_CARD_ON)
-                widgets["polarity"].setText("+")
-                widgets["polarity"].setStyleSheet(_ESI_PANEL_POS)
+                btn_pos.setChecked(True)
+                btn_pos.setStyleSheet(_ESI_BTN_POS_ACTIVE)
+                btn_off.setStyleSheet(_ESI_BTN_OFF_INACTIVE)
+                btn_neg.setStyleSheet(_ESI_BTN_NEG_OFF)
                 widgets["target"].setText(f"{active_value:.1f} V")
             else:
                 card.setStyleSheet(_ESI_PANEL_CARD_ON)
-                widgets["polarity"].setText("-")
-                widgets["polarity"].setStyleSheet(_ESI_PANEL_NEG)
+                btn_neg.setChecked(True)
+                btn_pos.setStyleSheet(_ESI_BTN_POS_OFF)
+                btn_off.setStyleSheet(_ESI_BTN_OFF_INACTIVE)
+                btn_neg.setStyleSheet(_ESI_BTN_NEG_ACTIVE)
                 widgets["target"].setText(f"-{active_value:.1f} V")
             measured = values.get(address, np.nan)
             current = currents.get(address, np.nan)
@@ -579,11 +648,27 @@ class ESIDevice(Device):
                 f"{current * 1e9:.2f} nA" if np.isfinite(current) else "n/a"
             )
 
+        heat_btn = getattr(self, "esiHeatButton", None)
         heat = getattr(self, "esiHeatWidgets", None)
         if isinstance(heat, dict) and connected:
             heat_valid = getattr(controller, "heat_readback_valid", False)
             heat_temp = values.get(_ESI_HEAT_MODULE, np.nan)
-            heat_target = float(getattr(controller, "heat_max_temperature_c", 175.0))
+            heat_enabled = False
+            for channel in self.getChannels():
+                if channel.is_heat_channel():
+                    heat_enabled = channel.enabled
+                    break
+            if heat_btn is not None:
+                loading = getattr(self, "loading", False)
+                if not loading:
+                    heat_btn.blockSignals(True)
+                    heat_btn.setChecked(heat_enabled)
+                    heat_btn.blockSignals(False)
+                heat_btn.setText("ON" if heat_enabled else "OFF")
+                heat_btn.setStyleSheet(
+                    _ESI_BTN_HEAT_ACTIVE if heat_enabled else _ESI_BTN_OFF_ACTIVE
+                )
+                heat_btn.setEnabled(heat_valid)
             heat["heat_target"].setText(
                 f"{heat_temp:.1f} °C" if np.isfinite(heat_temp) else "n/a"
             )
@@ -603,6 +688,8 @@ class ESIDevice(Device):
             for widget in heat.values():
                 widget.setText("n/a")
                 widget.setStyleSheet(_ESI_PANEL_OFF)
+            if heat_btn is not None:
+                heat_btn.setEnabled(False)
 
     def getChannels(self) -> "list[ESIChannel]":
         return cast("list[ESIChannel]", super().getChannels())
