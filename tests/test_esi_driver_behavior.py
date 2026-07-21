@@ -201,6 +201,7 @@ def test_hv_ctypes_signatures_match_vendor_header(driver_modules):
         "COM_ESI_CTRL_GetEnable",
         "COM_ESI_CTRL_SetModuleActivationState",
         "COM_ESI_CTRL_GetModuleActivationState",
+        "COM_ESI_CTRL_GetModuleLEDData",
         "COM_ESI_CTRL_SetHVsupplyMeasRanges",
         "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
         "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
@@ -229,6 +230,12 @@ def test_hv_ctypes_signatures_match_vendor_header(driver_modules):
         ctypes.c_uint,
         ctypes.POINTER(ctypes.c_bool),
         ctypes.POINTER(ctypes.c_double),
+    ]
+    assert base.esi_dll.COM_ESI_CTRL_GetModuleLEDData.argtypes == [
+        ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_bool),
+        ctypes.POINTER(ctypes.c_bool),
+        ctypes.POINTER(ctypes.c_bool),
     ]
     assert all(getattr(base.esi_dll, name).restype is ctypes.c_int for name in names)
 

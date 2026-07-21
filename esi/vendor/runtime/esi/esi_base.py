@@ -201,6 +201,10 @@ class ESIBase:
                 [ctypes.c_uint, bool_ptr],
                 ctypes.c_int,
             ),
+            "COM_ESI_CTRL_GetModuleLEDData": (
+                [ctypes.c_uint, bool_ptr, bool_ptr, bool_ptr],
+                ctypes.c_int,
+            ),
             "COM_ESI_CTRL_SetHVsupplyMeasRanges": (
                 [ctypes.c_uint, ctypes.c_bool, ctypes.c_bool],
                 ctypes.c_int,
@@ -639,6 +643,19 @@ class ESIBase:
             ctypes.c_uint(address), ctypes.byref(flags)
         )
         return status, flags.value
+
+    def get_module_led_data(self, address):
+        """Get module LED data. Returns (status, red, green, blue)."""
+        red = ctypes.c_bool()
+        green = ctypes.c_bool()
+        blue = ctypes.c_bool()
+        status = self.esi_dll.COM_ESI_CTRL_GetModuleLEDData(
+            ctypes.c_uint(address),
+            ctypes.byref(red),
+            ctypes.byref(green),
+            ctypes.byref(blue),
+        )
+        return status, red.value, green.value, blue.value
 
     def get_module_state(self, address):
         """Get module state word."""
