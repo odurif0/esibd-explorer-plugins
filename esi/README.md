@@ -53,10 +53,11 @@ state is controlled by the module gate and zero/nonzero targets.
 
 ## Voltage Safety
 
-The HVPS-3kB absolute software limit is 3000 V. Negative targets are disabled
-by default because only positive operation has been confirmed on the current
-installation. The advanced negative-voltage option must only be enabled after
-checking the installed module polarity.
+The HVPS-3kB software target range is 0 to 3000 V. Each module has one shared
+unsigned target magnitude and physically distinct positive and negative
+outputs. Selecting `+` or `-` configures the corresponding voltage measurement
+channel before applying the shared magnitude; negative values are never passed
+to the vendor target function.
 
 If a DLL call times out or shutdown cannot be confirmed, treat the HV state as
 unknown and use the physical interlock or front panel before approaching the
