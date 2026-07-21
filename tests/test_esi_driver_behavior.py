@@ -218,16 +218,97 @@ def test_module_target_api_is_unsigned_and_keeps_compatibility_alias(
     controller = _controller(driver_module)
     controller.connected = True
     calls = []
+    targets = {}
+
+    def set_target(_self, address, value):
+        calls.append(("set", address, value))
+        targets[address] = value
+        return 0
+
     monkeypatch.setattr(
         base_module.ESIBase,
         "set_hv_supply_target_output_voltage",
-        lambda self, address, value: calls.append((address, value)) or 0,
+        set_target,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_target_output_voltage",
+        lambda _self, address: (
+            calls.append(("get", address)) or 0,
+            targets[address],
+        ),
     )
 
     assert controller.set_hv_module_target(1, 125.0, timeout_s=0.5) == 125.0
     assert controller.set_target_voltage(2, 250.0, timeout_s=0.5) == 250.0
 
-    assert calls == [(1, 125.0), (2, 250.0)]
+    assert calls == [
+        ("set", 1, 125.0),
+        ("get", 1),
+        ("set", 2, 250.0),
+        ("get", 2),
+    ]
+
+
+def test_module_target_rejects_unconfirmed_value(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_target_output_voltage",
+        lambda _self, _address, _value: 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_target_output_voltage",
+        lambda _self, _address: (0, 0.0),
+    )
+
+    with pytest.raises(RuntimeError, match="target verification failed"):
+        controller.set_hv_module_target(1, 10.0, timeout_s=0.5)
+
+
+def test_global_enable_is_written_then_verified(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    state = {"enabled": False}
+
+    def set_enable(_self, enabled):
+        calls.append(("set", enabled))
+        state["enabled"] = enabled
+        return 0
+
+    monkeypatch.setattr(base_module.ESIBase, "set_enable", set_enable)
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_enable",
+        lambda _self: (calls.append(("get",)) or 0, state["enabled"]),
+    )
+
+    assert controller.set_global_active(True, timeout_s=0.5) is True
+    assert calls == [("set", True), ("get",)]
+
+
+def test_global_enable_rejects_unconfirmed_state(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_enable",
+        lambda _self, _enabled: 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_enable",
+        lambda _self: (0, False),
+    )
+
+    with pytest.raises(RuntimeError, match="enable verification failed"):
+        controller.set_global_active(True, timeout_s=0.5)
 
 
 def test_hv_measurement_selector_uses_physical_polarity_and_current_range(
@@ -376,6 +457,16 @@ def test_heat_output_disable_uses_zero_target_not_module_activation(
     calls = []
     monkeypatch.setattr(
         base_module.ESIBase,
+        "set_enable",
+        lambda _self, state: calls.append(("enable", state)) or 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_enable",
+        lambda _self: (calls.append(("get_enable",)) or 0, True),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
         "set_heat_ctrl_heater_temperature",
         lambda self, value: calls.append(("temperature", value)) or (0, value),
     )
@@ -389,7 +480,11 @@ def test_heat_output_disable_uses_zero_target_not_module_activation(
 
     assert controller.set_output_active(0, True, timeout_s=0.5) is True
     assert controller.set_output_active(0, False, timeout_s=0.5) is False
-    assert calls == [("temperature", 0.0)]
+    assert calls == [
+        ("enable", True),
+        ("get_enable",),
+        ("temperature", 0.0),
+    ]
 
 
 def test_hv_output_state_uses_zero_target_not_module_activation(
@@ -402,8 +497,23 @@ def test_hv_output_state_uses_zero_target_not_module_activation(
     calls = []
     monkeypatch.setattr(
         base_module.ESIBase,
+        "set_enable",
+        lambda _self, state: calls.append(("enable", state)) or 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_enable",
+        lambda _self: (calls.append(("get_enable",)) or 0, True),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
         "set_hv_supply_target_output_voltage",
-        lambda self, address, value: calls.append((address, value)) or 0,
+        lambda _self, address, value: calls.append(("target", address, value)) or 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_target_output_voltage",
+        lambda _self, address: (calls.append(("get_target", address)) or 0, 0.0),
     )
     monkeypatch.setattr(
         base_module.ESIBase,
@@ -415,7 +525,12 @@ def test_hv_output_state_uses_zero_target_not_module_activation(
 
     assert controller.set_output_active(1, True, timeout_s=0.5) is True
     assert controller.set_output_active(1, False, timeout_s=0.5) is False
-    assert calls == [(1, 0.0)]
+    assert calls == [
+        ("enable", True),
+        ("get_enable",),
+        ("target", 1, 0.0),
+        ("get_target", 1),
+    ]
 
 
 def test_discovery_rejects_wrong_heat_controller_type(driver_modules, monkeypatch):

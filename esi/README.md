@@ -64,6 +64,12 @@ values are never passed to the vendor target function. The displayed voltage
 is the raw ADC readback currently supplied by the firmware; verify both
 physical connectors independently during commissioning.
 
+Output generation also requires the controller-wide `SetEnable(true)` gate.
+The plugin first writes and reads back the selected module target, then enables
+that shared gate and confirms it with `GetEnable`. Disabled module targets are
+kept at zero before the gate is opened. A command is treated as failed if either
+the target or enable readback does not match the request.
+
 If a DLL call times out or shutdown cannot be confirmed, treat the HV state as
 unknown and use the physical interlock or front panel before approaching the
 source.

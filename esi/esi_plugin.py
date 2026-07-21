@@ -44,6 +44,7 @@ _ESI_HEAT_CARD_WIDTH = 2 * _ESI_HV_CARD_WIDTH + _ESI_CARD_SPACING
 _ESI_PANEL_CARD_ON = "QFrame { background-color: #162433; border: 1px solid #3182ce; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_CARD_OFF = "QFrame { background-color: #202938; border: 1px solid #64748b; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_CARD_DISC = "QFrame { background-color: #151b26; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; }"
+_ESI_PANEL_CARD_ERR = "QFrame { background-color: #2d1719; border: 1px solid #ef4444; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_CARD_HEAT = "QFrame { background-color: #2d1b0e; border: 1px solid #d97706; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_TITLE = "color: #f8fafc; font-weight: 700; font-size: 14px;"
 _ESI_PANEL_NAME = "color: #cbd5e1; font-weight: 600;"
@@ -426,6 +427,14 @@ class ESIDevice(Device):
             measured_label.setStyleSheet(_ESI_PANEL_NAME)
             measured_value = QLabel("n/a")
             measured_value.setStyleSheet(_ESI_PANEL_VALUE)
+            hardware_target_label = QLabel("HW target")
+            hardware_target_label.setStyleSheet(_ESI_PANEL_NAME)
+            hardware_target_value = QLabel("n/a")
+            hardware_target_value.setStyleSheet(_ESI_PANEL_VALUE)
+            gate_label = QLabel("Gate")
+            gate_label.setStyleSheet(_ESI_PANEL_NAME)
+            gate_value = QLabel("n/a")
+            gate_value.setStyleSheet(_ESI_PANEL_VALUE)
             current_label = QLabel("Current")
             current_label.setStyleSheet(_ESI_PANEL_NAME)
             current_value = QLabel("n/a")
@@ -437,10 +446,14 @@ class ESIDevice(Device):
             grid.setVerticalSpacing(6)
             grid.addWidget(target_label, 0, 0)
             grid.addWidget(target_value, 0, 1)
-            grid.addWidget(measured_label, 1, 0)
-            grid.addWidget(measured_value, 1, 1)
-            grid.addWidget(current_label, 2, 0)
-            grid.addWidget(current_value, 2, 1)
+            grid.addWidget(hardware_target_label, 1, 0)
+            grid.addWidget(hardware_target_value, 1, 1)
+            grid.addWidget(gate_label, 2, 0)
+            grid.addWidget(gate_value, 2, 1)
+            grid.addWidget(measured_label, 3, 0)
+            grid.addWidget(measured_value, 3, 1)
+            grid.addWidget(current_label, 4, 0)
+            grid.addWidget(current_value, 4, 1)
             cl.addLayout(grid)
 
             cards_layout.addWidget(card)
@@ -450,6 +463,8 @@ class ESIDevice(Device):
                 "btn_on": btn_on,
                 "btn_off": btn_off,
                 "target": target_value,
+                "hardware_target": hardware_target_value,
+                "gate": gate_value,
                 "measured": measured_value,
                 "current": current_value,
             }
@@ -561,6 +576,8 @@ class ESIDevice(Device):
         connected = controller is not None and getattr(controller, "initialized", False)
         values = getattr(controller, "values", {}) or {}
         currents = getattr(controller, "currents", {}) or {}
+        targets = getattr(controller, "targets", {}) or {}
+        global_enabled = getattr(controller, "global_enabled", None)
 
         for address, widgets in cards.items():
             card = widgets["card"]
@@ -582,7 +599,7 @@ class ESIDevice(Device):
                 card.setStyleSheet(_ESI_PANEL_CARD_DISC)
                 for btn in (btn_on, btn_off):
                     btn.setEnabled(False)
-                for key in ("target", "measured", "current"):
+                for key in ("target", "hardware_target", "gate", "measured", "current"):
                     w = widgets[key]
                     w.setEnabled(False)
                     if hasattr(w, "setText"):
@@ -593,8 +610,25 @@ class ESIDevice(Device):
             for btn in (btn_on, btn_off):
                 btn.setEnabled(True)
             widgets["target"].setEnabled(True)
-            if output_enabled:
+            hardware_target = targets.get(address, np.nan)
+            expected_hardware_target = target_value if output_enabled else 0.0
+            target_confirmed = (
+                np.isfinite(hardware_target)
+                and np.isclose(
+                    hardware_target,
+                    expected_hardware_target,
+                    rtol=1e-9,
+                    atol=1e-6,
+                )
+            )
+            output_confirmed = output_enabled and global_enabled is True and target_confirmed
+            if output_confirmed:
                 card.setStyleSheet(_ESI_PANEL_CARD_ON)
+                btn_on.setChecked(True)
+                btn_on.setStyleSheet(_ESI_BTN_HV_ACTIVE)
+                btn_off.setStyleSheet(_ESI_BTN_OFF_INACTIVE)
+            elif output_enabled:
+                card.setStyleSheet(_ESI_PANEL_CARD_ERR)
                 btn_on.setChecked(True)
                 btn_on.setStyleSheet(_ESI_BTN_HV_ACTIVE)
                 btn_off.setStyleSheet(_ESI_BTN_OFF_INACTIVE)
@@ -608,6 +642,18 @@ class ESIDevice(Device):
             spin.blockSignals(True)
             spin.setValue(target_value)
             spin.blockSignals(False)
+            widgets["hardware_target"].setText(
+                f"{hardware_target:.1f} V" if np.isfinite(hardware_target) else "n/a"
+            )
+            widgets["hardware_target"].setStyleSheet(
+                _ESI_PANEL_OK if target_confirmed else _ESI_PANEL_ERR
+            )
+            widgets["gate"].setText(
+                "ON" if global_enabled is True else "OFF" if global_enabled is False else "n/a"
+            )
+            widgets["gate"].setStyleSheet(
+                _ESI_PANEL_OK if global_enabled is True else _ESI_PANEL_ERR
+            )
             measured = values.get(address, np.nan)
             current = currents.get(address, np.nan)
             widgets["measured"].setText(
@@ -915,6 +961,8 @@ class ESIController(DeviceController):
         self.device: Any | None = None
         self.values: dict[int, float] | None = None
         self.currents: dict[int, float] = {}
+        self.targets: dict[int, float] = {}
+        self.global_enabled: bool | None = None
         self.initialized = False
         self.main_state = "Disconnected"
         self.identity: dict[str, Any] = {}
@@ -994,6 +1042,8 @@ class ESIController(DeviceController):
         if self.values is None or reset:
             self.values = {address: np.nan for address in _ESI_MODULES}
             self.currents = {address: np.nan for address in _ESI_MODULES}
+            self.targets = {address: np.nan for address in _ESI_HV_MODULES}
+            self.global_enabled = None
 
     def readNumbers(self) -> None:
         if self.device is None or not self.initialized:
@@ -1031,6 +1081,8 @@ class ESIController(DeviceController):
                     False,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
+                if not channel.is_heat_channel():
+                    self.targets[channel.module_address()] = 0.0
             except Exception as exc:
                 self.errorCount += 1
                 self.print(
@@ -1046,11 +1098,12 @@ class ESIController(DeviceController):
                     target,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
-                self.device.set_output_active(
+                enabled = self.device.set_output_active(
                     channel.module_address(),
                     True,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
+                self.global_enabled = bool(enabled)
             except Exception as exc:
                 self.errorCount += 1
                 rollback = self._disable_failed_channel(channel)
@@ -1062,11 +1115,18 @@ class ESIController(DeviceController):
         # The C API exposes one unsigned target for the module's +/- output pair.
         target = abs(float(channel.value))
         try:
-            self.device.set_hv_module_target(
+            applied = self.device.set_hv_module_target(
                 channel.module_address(),
                 target,
                 timeout_s=float(self.controllerParent.poll_timeout_s),
             )
+            enabled = self.device.set_output_active(
+                channel.module_address(),
+                True,
+                timeout_s=float(self.controllerParent.poll_timeout_s),
+            )
+            self.targets[channel.module_address()] = float(applied)
+            self.global_enabled = bool(enabled)
         except Exception as exc:
             self.errorCount += 1
             rollback = self._disable_failed_channel(channel)
@@ -1098,10 +1158,12 @@ class ESIController(DeviceController):
         timeout = float(self.controllerParent.connect_timeout_s)
         try:
             if self.controllerParent.isOn():
-                # Safe OFF guarantees stored targets are zero before this gate opens.
-                self.device.set_global_active(True, timeout_s=timeout)
+                # Clear every stored HV target before opening the shared gate.
                 for address in _ESI_HV_MODULES:
                     self.device.set_hv_module_target(address, 0.0, timeout_s=timeout)
+                self.global_enabled = bool(
+                    self.device.set_global_active(True, timeout_s=timeout)
+                )
                 for channel in self.controllerParent.getChannels():
                     if channel.is_heat_channel() or channel.enabled:
                         self.applyValue(channel)
@@ -1247,8 +1309,11 @@ class ESIController(DeviceController):
         self.main_state = str(snapshot["main_state"]["name"])
         self.values = {}
         self.currents = {}
+        self.targets = {}
+        self.global_enabled = bool(snapshot.get("enabled", False))
         for address, module in snapshot["modules"].items():
             address = int(address)
+            self.targets[address] = float(module.get("target_v", np.nan))
             self.values[address] = (
                 float(module["measured_v"]) if module["voltage_valid"] else np.nan
             )

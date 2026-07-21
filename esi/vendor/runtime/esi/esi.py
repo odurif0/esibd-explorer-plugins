@@ -329,21 +329,36 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     def set_hv_module_target(
         self, address: int, voltage: float, timeout_s: Optional[float] = None
     ) -> float:
-        """Set the one unsigned target shared by both physical HV outputs."""
+        """Set and verify the unsigned target shared by both HV outputs."""
         self._require_connected()
         address = self._validate_hv_address(address)
         value = self._validate_voltage(voltage)
         timeout = self._resolve_timeout(timeout_s)
-        status = self._call_locked_with_timeout(
-            ESIBase.set_hv_supply_target_output_voltage,
-            timeout,
+
+        def set_and_verify():
+            status = ESIBase.set_hv_supply_target_output_voltage(
+                self, address, value
+            )
+            if status != self.NO_ERR:
+                return status, self.NO_ERR, 0.0
+            read_status, applied = ESIBase.get_hv_supply_target_output_voltage(
+                self, address
+            )
+            return status, read_status, float(applied)
+
+        status, read_status, applied = self._call_locked_with_timeout(
+            set_and_verify,
+            timeout * 2.0,
             f"set_hv_module_target[{address}]",
-            self,
-            address,
-            value,
         )
         self._raise_on_status(status, f"set_hv_module_target({address})")
-        return value
+        self._raise_on_status(read_status, f"verify_hv_module_target({address})")
+        if not math.isclose(applied, value, rel_tol=1e-9, abs_tol=1e-6):
+            raise RuntimeError(
+                f"ESI module {address} target verification failed: requested "
+                f"{value:g} V, controller reports {applied:g} V"
+            )
+        return applied
 
     def set_target_voltage(
         self, address: int, voltage: float, timeout_s: Optional[float] = None
@@ -405,25 +420,44 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     def set_global_active(self, active: bool, timeout_s: Optional[float] = None) -> bool:
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
-        status = self._call_locked_with_timeout(
-            ESIBase.set_enable,
-            timeout,
+        requested = bool(active)
+
+        def set_and_verify():
+            status = ESIBase.set_enable(self, requested)
+            if status != self.NO_ERR:
+                return status, self.NO_ERR, not requested
+            read_status, enabled = ESIBase.get_enable(self)
+            return status, read_status, bool(enabled)
+
+        status, read_status, enabled = self._call_locked_with_timeout(
+            set_and_verify,
+            timeout * 2.0,
             "set_global_active",
-            self,
-            bool(active),
         )
         self._raise_on_status(status, "set_global_active")
-        return bool(active)
+        self._raise_on_status(read_status, "verify_global_active")
+        if enabled != requested:
+            raise RuntimeError(
+                "ESI global output enable verification failed: requested "
+                f"{requested}, controller reports {enabled}"
+            )
+        return enabled
 
     def set_output_active(
         self, address: int, active: bool, timeout_s: Optional[float] = None
     ) -> bool:
+        """Gate output generation or zero one module's software target.
+
+        The vendor API only provides a controller-wide enable. Callers must
+        program disabled module targets to zero before enabling that gate.
+        """
         self._require_connected()
         address = self._validate_controlled_address(address)
         timeout = self._resolve_timeout(timeout_s)
+        if active:
+            self.set_global_active(True, timeout_s=timeout)
+            return True
         if address == self.HEAT_MODULE_ADDRESS:
-            if active:
-                return True
             result = self._call_locked_with_timeout(
                 ESIBase.set_heat_ctrl_heater_temperature,
                 timeout,
@@ -433,8 +467,6 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
             self._raise_on_status(result[0], "disable_heat_output")
             return False
-        if active:
-            return True
         self.set_hv_module_target(address, 0.0, timeout_s=timeout)
         return False
 
