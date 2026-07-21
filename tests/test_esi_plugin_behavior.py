@@ -514,9 +514,9 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
     controller.toggleOn()
 
     assert calls == [
-        ("global", True),
         ("target", 1, 0.0),
         ("target", 2, 0.0),
+        ("global", True),
         ("apply", 1, 1200.0),
     ]
     assert controller.acquiring is True
@@ -560,9 +560,9 @@ def test_on_sequence_programs_heat_target_before_activation():
     controller.toggleOn()
 
     assert calls == [
-        ("global", True),
         ("hv_target", 1, 0.0),
         ("hv_target", 2, 0.0),
+        ("global", True),
         ("heat_target", 90.0),
         ("module", 0, True),
     ]
@@ -694,14 +694,17 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
     snapshot = {
         "main_state": {"name": "STATE_ON"},
         "interlock_state": {"flags": []},
+        "enabled": True,
         "modules": {
             1: {
+                "target_v": 10.0,
                 "voltage_valid": True,
                 "measured_v": 0.0,
                 "current_valid": True,
                 "measured_a": 0.0,
             },
             2: {
+                "target_v": 0.0,
                 "voltage_valid": True,
                 "measured_v": 0.0,
                 "current_valid": True,
@@ -722,6 +725,8 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
 
     assert controller.heat_readback_valid is False
     assert module.np.isnan(controller.values[0])
+    assert controller.targets == {1: 10.0, 2: 0.0}
+    assert controller.global_enabled is True
     assert parent.heat_status == (
         "INVALID T=522.0 degC; check temperature sensor"
     )
@@ -761,7 +766,12 @@ def test_hv_pair_applies_one_unsigned_module_target_without_adc_selection():
 
     class FakeDevice:
         def set_hv_module_target(self, address, value, timeout_s):
-            calls.append((address, value, timeout_s))
+            calls.append(("target", address, value, timeout_s))
+            return value
+
+        def set_output_active(self, address, active, timeout_s):
+            calls.append(("active", address, active, timeout_s))
+            return active
 
         def select_hv_measurement(self, *args, **kwargs):
             raise AssertionError("ADC selection must not control the physical outputs")
@@ -783,7 +793,10 @@ def test_hv_pair_applies_one_unsigned_module_target_without_adc_selection():
 
     controller.applyValue(channel)
 
-    assert calls == [(1, 10.0, 2.0)]
+    assert calls == [
+        ("target", 1, 10.0, 2.0),
+        ("active", 1, True, 2.0),
+    ]
 
 
 def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
@@ -817,6 +830,8 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     controller.toggleOn()
 
     assert calls == [
+        ("target", 1, 0.0),
+        ("target", 2, 0.0),
         ("global", True),
         ("safe_off", 5.0),
     ]
@@ -890,6 +905,46 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
         ("target", 2, 0.0),
         ("active", 2, False),
     ]
+
+
+def test_failed_hv_gate_activation_rolls_target_back_to_zero():
+    module = _load_plugin()
+    calls = []
+
+    class FakeDevice:
+        def set_hv_module_target(self, address, value, timeout_s):
+            calls.append(("target", address, value))
+            return value
+
+        def set_output_active(self, address, active, timeout_s):
+            calls.append(("active", address, active))
+            if active:
+                raise RuntimeError("enable verification failed")
+            return False
+
+    channel = types.SimpleNamespace(
+        module_address=lambda: 1,
+        is_heat_channel=lambda: False,
+        name="ESI_HV1",
+        enabled=True,
+        value=10.0,
+    )
+    parent = types.SimpleNamespace(poll_timeout_s=2.0, isOn=lambda: True)
+    controller = module.ESIController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.errorCount = 0
+    controller.print = lambda *args, **kwargs: None
+
+    controller.applyValue(channel)
+
+    assert calls == [
+        ("target", 1, 10.0),
+        ("active", 1, True),
+        ("target", 1, 0.0),
+        ("active", 1, False),
+    ]
+    assert controller.errorCount == 1
 
 
 def test_failed_hv_disable_is_reported():
