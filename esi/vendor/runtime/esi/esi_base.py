@@ -173,6 +173,7 @@ class ESIBase:
             raise ESIDllLoadError(
                 f"Unable to load CGC ESI DLL from '{self.esi_dll_path}'."
             ) from exc
+        self._configure_hv_dll_signatures()
 
         self.err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
@@ -183,6 +184,66 @@ class ESIBase:
         self.com = com
         self.log = log
         self.idn = idn
+
+    def _configure_hv_dll_signatures(self) -> None:
+        """Declare the HV ABI exactly as published in COM-ESI-CTRL.h."""
+        bool_ptr = ctypes.POINTER(ctypes.c_bool)
+        double_ptr = ctypes.POINTER(ctypes.c_double)
+        byte_ptr = ctypes.POINTER(ctypes.c_ubyte)
+        signatures = {
+            "COM_ESI_CTRL_SetEnable": ([ctypes.c_bool], ctypes.c_int),
+            "COM_ESI_CTRL_GetEnable": ([bool_ptr], ctypes.c_int),
+            "COM_ESI_CTRL_SetModuleActivationState": (
+                [ctypes.c_uint, ctypes.c_bool],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetModuleActivationState": (
+                [ctypes.c_uint, bool_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_SetHVsupplyMeasRanges": (
+                [ctypes.c_uint, ctypes.c_bool, ctypes.c_bool],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetHVsupplyOutputVoltage": (
+                [ctypes.c_uint, bool_ptr, double_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetHVsupplyOutputCurrent": (
+                [ctypes.c_uint, bool_ptr, double_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetHVsupplyPhase": (
+                [ctypes.c_uint, bool_ptr, double_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetHVsupplyTargetOutputVoltage": (
+                [ctypes.c_uint, double_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage": (
+                [ctypes.c_uint, ctypes.c_double],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetHVsupplyParamsPWM": (
+                [
+                    ctypes.c_uint,
+                    double_ptr,
+                    double_ptr,
+                    double_ptr,
+                    double_ptr,
+                    double_ptr,
+                    double_ptr,
+                    bool_ptr,
+                    byte_ptr,
+                ],
+                ctypes.c_int,
+            ),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(self.esi_dll, name)
+            function.argtypes = argtypes
+            function.restype = restype
 
     def describe_error(self, status: int) -> str:
         """Return the vendor message for a driver status code."""

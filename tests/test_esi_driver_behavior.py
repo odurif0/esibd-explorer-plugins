@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import logging
 import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,7 @@ def _controller(driver_module):
     controller._transport_poisoned = False
     controller._transport_error = None
     controller._module_inventory = {}
+    controller._hv_measurement_requests = {}
     controller.thread_lock = threading.Lock()
     controller.logger = logging.getLogger("test_esi_driver")
     controller.err_dict = {"-15": "Wrong argument"}
@@ -163,6 +166,70 @@ def test_voltage_guard_enforces_unsigned_3kv_vendor_range(driver_modules):
         controller._validate_voltage(-1)
 
 
+def test_hv_ctypes_signatures_match_vendor_header(driver_modules):
+    _runtime, _driver_module, base_module = driver_modules
+
+    class FakeFunction:
+        argtypes = None
+        restype = None
+
+    names = (
+        "COM_ESI_CTRL_SetEnable",
+        "COM_ESI_CTRL_GetEnable",
+        "COM_ESI_CTRL_SetModuleActivationState",
+        "COM_ESI_CTRL_GetModuleActivationState",
+        "COM_ESI_CTRL_SetHVsupplyMeasRanges",
+        "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
+        "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
+        "COM_ESI_CTRL_GetHVsupplyPhase",
+        "COM_ESI_CTRL_GetHVsupplyTargetOutputVoltage",
+        "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage",
+        "COM_ESI_CTRL_GetHVsupplyParamsPWM",
+    )
+    base = object.__new__(base_module.ESIBase)
+    base.esi_dll = types.SimpleNamespace(
+        **{name: FakeFunction() for name in names}
+    )
+
+    base._configure_hv_dll_signatures()
+
+    assert base.esi_dll.COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage.argtypes == [
+        ctypes.c_uint,
+        ctypes.c_double,
+    ]
+    assert base.esi_dll.COM_ESI_CTRL_SetHVsupplyMeasRanges.argtypes == [
+        ctypes.c_uint,
+        ctypes.c_bool,
+        ctypes.c_bool,
+    ]
+    assert base.esi_dll.COM_ESI_CTRL_GetHVsupplyOutputVoltage.argtypes == [
+        ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_bool),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    assert all(getattr(base.esi_dll, name).restype is ctypes.c_int for name in names)
+
+
+def test_module_target_api_is_unsigned_and_keeps_compatibility_alias(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_target_output_voltage",
+        lambda self, address, value: calls.append((address, value)) or 0,
+    )
+
+    assert controller.set_hv_module_target(1, 125.0, timeout_s=0.5) == 125.0
+    assert controller.set_target_voltage(2, 250.0, timeout_s=0.5) == 250.0
+
+    assert calls == [(1, 125.0), (2, 250.0)]
+
+
 def test_hv_measurement_selector_uses_physical_polarity_and_current_range(
     driver_modules,
     monkeypatch,
@@ -185,9 +252,106 @@ def test_hv_measurement_selector_uses_physical_polarity_and_current_range(
         high_current=False,
         timeout_s=0.5,
     )
+    selected_again = controller.select_hv_measurement(
+        2,
+        negative=True,
+        high_current=False,
+        timeout_s=0.5,
+    )
 
-    assert selected == (True, False)
+    assert selected is True
+    assert selected_again is True
     assert calls == [(2, True, False)]
+
+
+def test_hv_measurement_selector_caches_firmware_command_receive_failure(
+    driver_modules,
+    monkeypatch,
+    caplog,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_meas_ranges",
+        lambda self, address, negative, high_current: calls.append(
+            (address, negative, high_current)
+        ) or self.ERR_COMMAND_RECEIVE,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_output_voltage",
+        lambda self, address: (0, True, 0.0),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="test_esi_driver"):
+        assert controller.select_hv_measurement(
+            1, negative=False, timeout_s=0.5
+        ) is False
+        assert controller.select_hv_measurement(
+            1, negative=False, timeout_s=0.5
+        ) is False
+        assert controller.select_hv_measurement(
+            2, negative=True, timeout_s=0.5
+        ) is False
+        assert controller.select_hv_measurement(
+            1, negative=True, timeout_s=0.5
+        ) is False
+
+    assert calls == [
+        (1, False, False),
+        (2, True, False),
+        (1, True, False),
+    ]
+    assert "did not acknowledge measurement-channel selection" in caplog.text
+
+
+def test_hv_measurement_selector_does_not_mask_transport_failure(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_meas_ranges",
+        lambda self, address, negative, high_current: self.ERR_COMMAND_RECEIVE,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_output_voltage",
+        lambda self, address: (self.ERR_COMMAND_RECEIVE, False, 0.0),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="verify_hv_readback_after_selector_rejection",
+    ):
+        controller.select_hv_measurement(1, negative=False, timeout_s=0.5)
+
+    assert controller._hv_measurement_requests == {}
+
+
+def test_hv_measurement_selector_keeps_other_failures_blocking(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_meas_ranges",
+        lambda self, address, negative, high_current: self.ERR_COMMAND_WRONG,
+    )
+
+    with pytest.raises(RuntimeError, match=r"select_hv_measurement\(1\) failed"):
+        controller.select_hv_measurement(1, negative=False, timeout_s=0.5)
+
+    assert controller._hv_measurement_requests == {}
 
 
 def test_only_lab_hv_addresses_are_commandable(driver_modules):

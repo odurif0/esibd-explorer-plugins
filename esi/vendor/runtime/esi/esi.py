@@ -51,6 +51,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._transport_poisoned = False
         self._transport_error = None
         self._module_inventory: dict[int, dict] = {}
+        self._hv_measurement_requests: dict[int, tuple[bool, bool, bool]] = {}
         self.thread_lock = thread_lock or threading.Lock()
         self.logger = build_device_logger(
             instrument_name=self._INSTRUMENT_NAME,
@@ -111,6 +112,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         timeout = self._resolve_timeout(timeout_s)
         if self.connected:
             return True
+        self._hv_measurement_requests.clear()
         self._claim_single_instance()
         opened = False
         try:
@@ -324,9 +326,10 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
         return value
 
-    def set_target_voltage(
+    def set_hv_module_target(
         self, address: int, voltage: float, timeout_s: Optional[float] = None
     ) -> float:
+        """Set the one unsigned target shared by both physical HV outputs."""
         self._require_connected()
         address = self._validate_hv_address(address)
         value = self._validate_voltage(voltage)
@@ -334,13 +337,19 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         status = self._call_locked_with_timeout(
             ESIBase.set_hv_supply_target_output_voltage,
             timeout,
-            f"set_target_voltage[{address}]",
+            f"set_hv_module_target[{address}]",
             self,
             address,
             value,
         )
-        self._raise_on_status(status, f"set_target_voltage({address})")
+        self._raise_on_status(status, f"set_hv_module_target({address})")
         return value
+
+    def set_target_voltage(
+        self, address: int, voltage: float, timeout_s: Optional[float] = None
+    ) -> float:
+        """Compatibility alias for the module-level HV target."""
+        return self.set_hv_module_target(address, voltage, timeout_s=timeout_s)
 
     def select_hv_measurement(
         self,
@@ -349,22 +358,49 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         negative: bool,
         high_current: bool = False,
         timeout_s: Optional[float] = None,
-    ) -> tuple[bool, bool]:
-        """Select the physical HV voltage output and current measurement range."""
+    ) -> bool:
+        """Select the HV ADC channels and tolerate a verified missing acknowledgement."""
         self._require_connected()
         address = self._validate_hv_address(address)
+        requested = bool(negative), bool(high_current)
+        previous = self._hv_measurement_requests.get(address)
+        if previous is not None and previous[:2] == requested:
+            return previous[2]
         timeout = self._resolve_timeout(timeout_s)
-        status = self._call_locked_with_timeout(
-            ESIBase.set_hv_supply_meas_ranges,
-            timeout,
+
+        def select_and_verify():
+            status = ESIBase.set_hv_supply_meas_ranges(
+                self,
+                address,
+                *requested,
+            )
+            if status != self.ERR_COMMAND_RECEIVE:
+                return status, None
+            readback_status, _valid, _voltage = (
+                ESIBase.get_hv_supply_output_voltage(self, address)
+            )
+            return status, readback_status
+
+        status, readback_status = self._call_locked_with_timeout(
+            select_and_verify,
+            timeout * 2.0,
             f"select_hv_measurement[{address}]",
-            self,
-            address,
-            bool(negative),
-            bool(high_current),
         )
+        if status == self.ERR_COMMAND_RECEIVE:
+            self._raise_on_status(
+                readback_status,
+                f"verify_hv_readback_after_selector_rejection({address})",
+            )
+            self._hv_measurement_requests[address] = (*requested, False)
+            self.logger.warning(
+                "HV module %d did not acknowledge measurement-channel "
+                "selection; serial readback remains responsive",
+                address,
+            )
+            return False
         self._raise_on_status(status, f"select_hv_measurement({address})")
-        return bool(negative), bool(high_current)
+        self._hv_measurement_requests[address] = (*requested, True)
+        return True
 
     def set_global_active(self, active: bool, timeout_s: Optional[float] = None) -> bool:
         self._require_connected()
@@ -399,7 +435,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             return False
         if active:
             return True
-        self.set_target_voltage(address, 0.0, timeout_s=timeout)
+        self.set_hv_module_target(address, 0.0, timeout_s=timeout)
         return False
 
     def get_heat_configuration(self, timeout_s: Optional[float] = None) -> dict:
