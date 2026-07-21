@@ -390,6 +390,7 @@ class ESIDevice(Device):
         try:
             from PyQt6.QtWidgets import (
                 QButtonGroup,
+                QDoubleSpinBox,
                 QFrame,
                 QGridLayout,
                 QHBoxLayout,
@@ -451,10 +452,19 @@ class ESIDevice(Device):
             sel_row.addStretch(1)
             cl.addLayout(sel_row)
 
-            target_label = QLabel("Target")
+            target_label = QLabel("Set")
             target_label.setStyleSheet(_ESI_PANEL_NAME)
-            target_value = QLabel("0.0 V")
+            target_value = QDoubleSpinBox()
+            target_value.setRange(0.0, _ESI_MAX_VOLTAGE)
+            target_value.setDecimals(1)
+            target_value.setSingleStep(10.0)
+            target_value.setSuffix(" V")
+            target_value.setValue(0.0)
             target_value.setStyleSheet(_ESI_PANEL_VALUE)
+            target_value.setFixedHeight(28)
+            target_value.valueChanged.connect(
+                lambda val, addr=address: self._panel_target_changed(addr, val)
+            )
             measured_label = QLabel("Measured")
             measured_label.setStyleSheet(_ESI_PANEL_NAME)
             measured_value = QLabel("n/a")
@@ -491,10 +501,11 @@ class ESIDevice(Device):
                 lambda gid, addr=address: self._panel_polarity_selected(addr, gid)
             )
         cards_layout.addStretch(0)
+        layout.addWidget(cards_row)
 
         heat_card = QFrame()
         heat_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        heat_card.setStyleSheet(_ESI_PANEL_CARD_HEAT)
+        heat_card.setStyleSheet(_ESI_PANEL_CARD_OFF)
         heat_cl = QVBoxLayout(heat_card)
         heat_cl.setContentsMargins(12, 12, 12, 12)
         heat_cl.setSpacing(8)
@@ -519,7 +530,7 @@ class ESIDevice(Device):
         heat_grid.setHorizontalSpacing(10)
         heat_grid.setVerticalSpacing(6)
         for row, (name, key) in enumerate((
-            ("Target", "heat_target"),
+            ("Set", "heat_target"),
             ("Measured", "heat_measured"),
             ("Power", "heat_power"),
             ("Sensor", "heat_sensor"),
@@ -533,9 +544,7 @@ class ESIDevice(Device):
             heat_grid.addWidget(vl, row, 1)
         heat_cl.addLayout(heat_grid)
 
-        cards_layout.addWidget(heat_card)
-        cards_layout.addStretch(1)
-        layout.addWidget(cards_row)
+        layout.addWidget(heat_card)
 
         self.esiPanel = panel
         self.esiHeatButton = heat_btn
@@ -551,6 +560,14 @@ class ESIDevice(Device):
         if self.tree is not None:
             self.tree.setVisible(False)
         self.addContentWidget(panel)
+        self._update_operator_panel()
+
+    def _panel_target_changed(self, address: int, value: float) -> None:
+        if getattr(self, "loading", False):
+            return
+        for channel in self.getChannels():
+            if channel.module_address() == address and not channel.is_heat_channel():
+                channel.getParameterByName(channel.VALUE).value = float(value)
         self._update_operator_panel()
 
     def _panel_polarity_selected(self, address: int, gid: int) -> None:
@@ -611,34 +628,39 @@ class ESIDevice(Device):
                 for btn in (btn_pos, btn_off, btn_neg):
                     btn.setEnabled(False)
                 for key in ("target", "measured", "current"):
-                    widgets[key].setText("n/a")
-                    widgets[key].setStyleSheet(_ESI_PANEL_OFF)
+                    w = widgets[key]
+                    w.setEnabled(False)
+                    if hasattr(w, "setText"):
+                        w.setText("n/a")
+                        w.setStyleSheet(_ESI_PANEL_OFF)
                 continue
 
             for btn in (btn_pos, btn_off, btn_neg):
                 btn.setEnabled(True)
+            widgets["target"].setEnabled(True)
             if active_sign == 0:
                 card.setStyleSheet(_ESI_PANEL_CARD_OFF)
-                sel_group.setId(btn_off, 0)
                 btn_off.setChecked(True)
                 btn_pos.setStyleSheet(_ESI_BTN_POS_OFF)
                 btn_off.setStyleSheet(_ESI_BTN_OFF_ACTIVE)
                 btn_neg.setStyleSheet(_ESI_BTN_NEG_OFF)
-                widgets["target"].setText("0.0 V")
             elif active_sign > 0:
                 card.setStyleSheet(_ESI_PANEL_CARD_ON)
                 btn_pos.setChecked(True)
                 btn_pos.setStyleSheet(_ESI_BTN_POS_ACTIVE)
                 btn_off.setStyleSheet(_ESI_BTN_OFF_INACTIVE)
                 btn_neg.setStyleSheet(_ESI_BTN_NEG_OFF)
-                widgets["target"].setText(f"{active_value:.1f} V")
             else:
                 card.setStyleSheet(_ESI_PANEL_CARD_ON)
                 btn_neg.setChecked(True)
                 btn_pos.setStyleSheet(_ESI_BTN_POS_OFF)
                 btn_off.setStyleSheet(_ESI_BTN_OFF_INACTIVE)
                 btn_neg.setStyleSheet(_ESI_BTN_NEG_ACTIVE)
-                widgets["target"].setText(f"-{active_value:.1f} V")
+            # Update spinbox without triggering valueChanged
+            spin = widgets["target"]
+            spin.blockSignals(True)
+            spin.setValue(active_value if active_sign != 0 else 0.0)
+            spin.blockSignals(False)
             measured = values.get(address, np.nan)
             current = currents.get(address, np.nan)
             widgets["measured"].setText(
@@ -1069,11 +1091,13 @@ class ESIController(DeviceController):
         if not channel.enabled:
             try:
                 if not channel.is_heat_channel():
-                    self.device.set_target_voltage(
-                        channel.module_address(),
-                        0.0,
-                        timeout_s=float(self.controllerParent.poll_timeout_s),
-                    )
+                    # Only zero the module target if no other polarity is active.
+                    if self._active_polarity_sign(channel.module_address()) == 0:
+                        self.device.set_target_voltage(
+                            channel.module_address(),
+                            0.0,
+                            timeout_s=float(self.controllerParent.poll_timeout_s),
+                        )
                 self.device.set_output_active(
                     channel.module_address(),
                     False,
@@ -1173,10 +1197,13 @@ class ESIController(DeviceController):
                 for address in _ESI_HV_MODULES:
                     self.device.set_target_voltage(address, 0.0, timeout_s=timeout)
                 for channel in self.controllerParent.getChannels():
-                    self.applyValue(channel)
+                    if channel.is_heat_channel() or channel.enabled:
+                        self.applyValue(channel)
                 self.startAcquisition()
             else:
                 self.device.force_safe_off(timeout_s=timeout)
+                self.main_state = "Outputs OFF"
+                self._sync_status()
         except Exception as exc:
             self.errorCount += 1
             rollback_confirmed, rollback = self._force_safe_off_after_failure()

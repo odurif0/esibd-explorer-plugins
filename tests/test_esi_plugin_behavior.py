@@ -434,7 +434,6 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
         ("target", 1, 0.0),
         ("target", 2, 0.0),
         ("apply", 1, 1200.0),
-        ("apply", 2, 0.0),
     ]
     assert controller.acquiring is True
 
@@ -655,7 +654,11 @@ def test_disabling_hv_zeros_target_before_deactivation():
         def set_output_active(self, address, active, timeout_s):
             calls.append(("active", address, active, timeout_s))
 
-    parent = types.SimpleNamespace(poll_timeout_s=2.0, isOn=lambda: True)
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        isOn=lambda: True,
+        getChannels=lambda: [],
+    )
     channel = types.SimpleNamespace(
         module_address=lambda: 2,
         is_heat_channel=lambda: False,
@@ -801,7 +804,11 @@ def test_failed_hv_zero_still_attempts_deactivation():
         enabled=False,
         value=1000.0,
     )
-    parent = types.SimpleNamespace(poll_timeout_s=2.0, isOn=lambda: True)
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        isOn=lambda: True,
+        getChannels=lambda: [],
+    )
     controller = module.ESIController(parent)
     controller.device = FakeDevice()
     controller.initialized = True
