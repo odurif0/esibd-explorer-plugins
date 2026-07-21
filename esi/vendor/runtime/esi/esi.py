@@ -705,7 +705,7 @@ class ESI(ProcessIsolatedClientMixin):
         thread_lock: Optional[threading.Lock] = None,
         dll_path: Optional[str] = None,
         log_dir: Optional[Path] = None,
-        allow_negative: bool = False,
+        allow_negative: bool = True,
         process_backend: bool = False,
     ):
         backend_kwargs = {

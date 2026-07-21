@@ -181,17 +181,32 @@ def test_fixed_channel_layout_is_safe_and_stable():
 
     items = module._fixed_channel_items("ESI")
 
-    assert [item["Module"] for item in items] == [1, 2, 0]
-    assert [item["Name"] for item in items] == ["ESI_HV1", "ESI_HV2", "ESI_HEAT"]
+    assert [item["Module"] for item in items] == [1, 1, 2, 2, 0]
+    assert [item["Name"] for item in items] == [
+        "ESI_HV1+",
+        "ESI_HV1-",
+        "ESI_HV2+",
+        "ESI_HV2-",
+        "ESI_HEAT",
+    ]
     assert all(item["Enabled"] is False for item in items)
-    assert [item["Value"] for item in items] == [0.0, 0.0, 20.0]
+    assert [item["Value"] for item in items] == [0.0, 0.0, 0.0, 0.0, 20.0]
     assert all(item["Min"] == 0.0 for item in items)
-    assert [item["Max"] for item in items] == [3000.0, 3000.0, 175.0]
+    assert [item["Max"] for item in items] == [
+        3000.0,
+        3000.0,
+        3000.0,
+        3000.0,
+        175.0,
+    ]
     assert [item["Function"] for item in items] == [
-        "HVPS-3kB",
-        "HVPS-3kB",
+        "HVPS-3kB (+)",
+        "HVPS-3kB (-)",
+        "HVPS-3kB (+)",
+        "HVPS-3kB (-)",
         "HEAT-CTRL-2410",
     ]
+    assert [item["Polarity"] for item in items if "Polarity" in item] == ["+", "-", "+", "-"]
     assert all("Unit" not in item for item in items)
 
 
@@ -229,8 +244,14 @@ def test_missing_config_creates_only_three_fixed_channels(tmp_path):
 
     device.loadConfiguration(useDefaultFile=True)
 
-    assert [item["Module"] for item in applied] == [1, 2, 0]
-    assert [item["Name"] for item in applied] == ["ESI_HV1", "ESI_HV2", "ESI_HEAT"]
+    assert [item["Module"] for item in applied] == [1, 1, 2, 2, 0]
+    assert [item["Name"] for item in applied] == [
+        "ESI_HV1+",
+        "ESI_HV1-",
+        "ESI_HV2+",
+        "ESI_HV2-",
+        "ESI_HEAT",
+    ]
     assert exported == [{"useDefaultFile": True}]
 
 
@@ -257,8 +278,8 @@ def test_generic_nine_channel_config_is_migrated_to_fixed_layout(tmp_path):
 
     device.ensureFixedChannels(persist=True)
 
-    assert [item["Module"] for item in applied] == [1, 2, 0]
-    assert len(applied) == 3
+    assert [item["Module"] for item in applied] == [1, 1, 2, 2, 0]
+    assert len(applied) == 5
     assert exported == [{"useDefaultFile": True}]
 
 
@@ -350,7 +371,10 @@ def test_channel_defaults_enforce_3kv_positive_range():
 def test_enabled_change_forces_hardware_apply():
     module = _load_plugin()
     channel = module.ESIChannel(
-        channelParent=types.SimpleNamespace(loading=False),
+        channelParent=types.SimpleNamespace(
+            loading=False,
+            enforceExclusivePolarity=lambda _selected: None,
+        ),
         tree=None,
     )
 
@@ -409,8 +433,6 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
         ("global", True),
         ("target", 1, 0.0),
         ("target", 2, 0.0),
-        ("module", 1, True),
-        ("module", 2, False),
         ("apply", 1, 1200.0),
         ("apply", 2, 0.0),
     ]
@@ -733,6 +755,9 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     channel = types.SimpleNamespace(
         module_address=lambda: 2,
         is_heat_channel=lambda: False,
+        polarity_sign=lambda: 1,
+        signed_target=lambda: 1000.0,
+        name="ESI_HV2+",
         enabled=True,
         value=1000.0,
     )
@@ -751,7 +776,6 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     controller.applyValue(channel)
 
     assert calls == [
-        ("active", 2, True),
         ("target", 2, 1000.0),
         ("target", 2, 0.0),
         ("active", 2, False),
@@ -773,6 +797,7 @@ def test_failed_hv_zero_still_attempts_deactivation():
     channel = types.SimpleNamespace(
         module_address=lambda: 2,
         is_heat_channel=lambda: False,
+        name="ESI_HV2+",
         enabled=False,
         value=1000.0,
     )
@@ -785,11 +810,7 @@ def test_failed_hv_zero_still_attempts_deactivation():
 
     controller.applyValue(channel)
 
-    assert calls == [
-        ("target", 2, 0.0),
-        ("target", 2, 0.0),
-        ("active", 2, False),
-    ]
+    assert calls == [("target", 2, 0.0)]
 
 
 def test_dispose_disconnects_before_closing_backend():
