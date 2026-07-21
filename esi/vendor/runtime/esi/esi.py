@@ -52,6 +52,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._transport_error = None
         self._module_inventory: dict[int, dict] = {}
         self._hv_measurement_requests: dict[int, tuple[bool, bool, bool]] = {}
+        self._hv_activation_ack_warned: set[int] = set()
         self.thread_lock = thread_lock or threading.Lock()
         self.logger = build_device_logger(
             instrument_name=self._INSTRUMENT_NAME,
@@ -113,6 +114,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         if self.connected:
             return True
         self._hv_measurement_requests.clear()
+        self._hv_activation_ack_warned.clear()
         self._claim_single_instance()
         opened = False
         try:
@@ -184,6 +186,26 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 if status != self.NO_ERR:
                     failures.append(
                         f"module {address} zero target: {self.format_status(status)}"
+                    )
+                activation_status, read_status, active = (
+                    self._set_hv_module_active_unlocked(address, False)
+                )
+                if activation_status not in (
+                    self.NO_ERR,
+                    self.ERR_COMMAND_RECEIVE,
+                ):
+                    failures.append(
+                        f"module {address} deactivate: "
+                        f"{self.format_status(activation_status)}"
+                    )
+                elif read_status != self.NO_ERR:
+                    failures.append(
+                        f"module {address} verify deactivation: "
+                        f"{self.format_status(read_status)}"
+                    )
+                elif active:
+                    failures.append(
+                        f"module {address} remained active after deactivation"
                     )
             status = ESIBase.set_enable(self, False)
             if status != self.NO_ERR:
@@ -443,21 +465,98 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
         return enabled
 
+    def get_hv_module_active(
+        self, address: int, timeout_s: Optional[float] = None
+    ) -> bool:
+        """Read the HV converter activation bit from the working PWM status API."""
+        self._require_connected()
+        address = self._validate_hv_address(address)
+        timeout = self._resolve_timeout(timeout_s)
+        result = self._call_locked_with_timeout(
+            ESIBase.get_hv_supply_params_pwm,
+            timeout,
+            f"get_hv_module_active[{address}]",
+            self,
+            address,
+        )
+        self._raise_on_status(result[0], f"get_hv_module_active({address})")
+        return bool(result[7])
+
+    def set_hv_module_active(
+        self,
+        address: int,
+        active: bool,
+        timeout_s: Optional[float] = None,
+    ) -> bool:
+        """Set the module HVC toggle and verify it through PWM status.
+
+        Firmware 0x0100 can execute the module command without returning its
+        direct acknowledgement. Only that known -10 status is tolerated, and
+        only when the independent PWM status reports the requested state.
+        """
+        self._require_connected()
+        address = self._validate_hv_address(address)
+        requested = bool(active)
+        timeout = self._resolve_timeout(timeout_s)
+
+        status, read_status, observed = self._call_locked_with_timeout(
+            self._set_hv_module_active_unlocked,
+            timeout * 4.0,
+            f"set_hv_module_active[{address}]",
+            address,
+            requested,
+        )
+        if status not in (self.NO_ERR, self.ERR_COMMAND_RECEIVE):
+            self._raise_on_status(status, f"set_hv_module_active({address})")
+        self._raise_on_status(
+            read_status,
+            f"verify_hv_module_active({address})",
+        )
+        if observed != requested:
+            raise RuntimeError(
+                f"ESI module {address} activation verification failed: "
+                f"requested {requested}, PWM status reports {observed}"
+            )
+        if (
+            status == self.ERR_COMMAND_RECEIVE
+            and address not in self._hv_activation_ack_warned
+        ):
+            self._hv_activation_ack_warned.add(address)
+            self.logger.warning(
+                "HV module %d did not acknowledge its activation command; "
+                "PWM status independently confirmed the requested state",
+                address,
+            )
+        return observed
+
+    def _set_hv_module_active_unlocked(
+        self, address: int, requested: bool
+    ) -> tuple[int, int, bool]:
+        status = ESIBase.set_module_activation_state(
+            self, address, requested
+        )
+        if status not in (self.NO_ERR, self.ERR_COMMAND_RECEIVE):
+            return status, self.NO_ERR, not requested
+        pwm = ESIBase.get_hv_supply_params_pwm(self, address)
+        if pwm[0] != self.NO_ERR:
+            pwm = ESIBase.get_hv_supply_params_pwm(self, address)
+        return status, pwm[0], bool(pwm[7])
+
     def set_output_active(
         self, address: int, active: bool, timeout_s: Optional[float] = None
     ) -> bool:
-        """Gate output generation or zero one module's software target.
+        """Control one module's HVC toggle and the controller-wide gate.
 
-        The vendor API only provides a controller-wide enable. Callers must
-        program disabled module targets to zero before enabling that gate.
+        HV disable always zeros the target before requesting module standby.
+        HV enable verifies the module toggle before opening the global gate.
         """
         self._require_connected()
         address = self._validate_controlled_address(address)
         timeout = self._resolve_timeout(timeout_s)
-        if active:
-            self.set_global_active(True, timeout_s=timeout)
-            return True
         if address == self.HEAT_MODULE_ADDRESS:
+            if active:
+                self.set_global_active(True, timeout_s=timeout)
+                return True
             result = self._call_locked_with_timeout(
                 ESIBase.set_heat_ctrl_heater_temperature,
                 timeout,
@@ -467,7 +566,12 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
             self._raise_on_status(result[0], "disable_heat_output")
             return False
+        if active:
+            self.set_hv_module_active(address, True, timeout_s=timeout)
+            self.set_global_active(True, timeout_s=timeout)
+            return True
         self.set_hv_module_target(address, 0.0, timeout_s=timeout)
+        self.set_hv_module_active(address, False, timeout_s=timeout)
         return False
 
     def get_heat_configuration(self, timeout_s: Optional[float] = None) -> dict:
@@ -623,13 +727,30 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     ESIBase.get_hv_supply_output_current(self, address),
                     f"get_current({address})",
                 )
+                pwm = checked(
+                    ESIBase.get_hv_supply_params_pwm(self, address),
+                    f"get_pwm({address})",
+                )
+                module_active = bool(pwm[6])
                 modules[address] = {
-                    "active": bool(enabled and float(target) != 0.0),
+                    "active": bool(
+                        enabled and module_active and float(target) != 0.0
+                    ),
+                    "module_active": module_active,
                     "target_v": float(target),
                     "voltage_valid": bool(valid_v),
                     "measured_v": float(measured_v),
                     "current_valid": bool(valid_i),
                     "measured_a": float(measured_a),
+                    "pwm": {
+                        "period_us": float(pwm[0]),
+                        "width_us": float(pwm[1]),
+                        "phase_measured_us": float(pwm[2]),
+                        "phase_set_us": float(pwm[3]),
+                        "voltage_set_v": float(pwm[4]),
+                        "voltage_measured_v": float(pwm[5]),
+                        "data_ready_flags": int(pwm[7]),
+                    },
                 }
             heat_valid, heat_vout, heat_vmon, heat_imon, heat_tmon = checked(
                 ESIBase.get_heat_ctrl_monitoring(self), "get_heat_ctrl_monitoring"
