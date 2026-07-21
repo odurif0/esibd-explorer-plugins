@@ -53,6 +53,7 @@ def _controller(driver_module):
     controller._transport_error = None
     controller._module_inventory = {}
     controller._hv_measurement_requests = {}
+    controller._hv_activation_ack_warned = set()
     controller.thread_lock = threading.Lock()
     controller.logger = logging.getLogger("test_esi_driver")
     controller.err_dict = {"-15": "Wrong argument"}
@@ -66,6 +67,7 @@ def test_connect_validates_identity_and_forces_known_off_state(
     _runtime, driver_module, base_module = driver_modules
     controller = _controller(driver_module)
     calls = []
+    module_active = {1: True, 2: True}
 
     monkeypatch.setattr(base_module.ESIBase, "open_port", lambda self, com: calls.append(("open", com)) or 0)
     monkeypatch.setattr(base_module.ESIBase, "set_comspeed", lambda self, baud: calls.append(("baud", baud)) or (0, baud))
@@ -80,8 +82,25 @@ def test_connect_validates_identity_and_forces_known_off_state(
     monkeypatch.setattr(
         base_module.ESIBase,
         "set_module_activation_state",
-        lambda self, address, state: (_ for _ in ()).throw(
-            AssertionError("Unsupported module activation API must not be used")
+        lambda self, address, state: (
+            calls.append(("module", address, state)),
+            module_active.__setitem__(address, state),
+            self.ERR_COMMAND_RECEIVE,
+        )[-1],
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_params_pwm",
+        lambda self, address: (
+            calls.append(("pwm", address)) or 0,
+            1.0,
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            module_active[address],
+            0,
         ),
     )
     monkeypatch.setattr(base_module.ESIBase, "update_module_presence", lambda self: 0)
@@ -101,12 +120,16 @@ def test_connect_validates_identity_and_forces_known_off_state(
 
     assert controller.connect(timeout_s=0.5) is True
     assert calls[:3] == [("open", 14), ("baud", 230400), ("device_type",)]
-    assert calls[3:14] == [
+    assert calls[3:] == [
         ("enable", False),
         ("enable", True),
         ("heat_target", 0.0),
         ("target", 1, 0.0),
+        ("module", 1, False),
+        ("pwm", 1),
         ("target", 2, 0.0),
+        ("module", 2, False),
+        ("pwm", 2),
         ("enable", False),
     ]
 
@@ -487,7 +510,7 @@ def test_heat_output_disable_uses_zero_target_not_module_activation(
     ]
 
 
-def test_hv_output_state_uses_zero_target_not_module_activation(
+def test_hv_output_state_uses_module_toggle_and_global_gate(
     driver_modules,
     monkeypatch,
 ):
@@ -495,6 +518,7 @@ def test_hv_output_state_uses_zero_target_not_module_activation(
     controller = _controller(driver_module)
     controller.connected = True
     calls = []
+    module_state = {1: False}
     monkeypatch.setattr(
         base_module.ESIBase,
         "set_enable",
@@ -518,19 +542,117 @@ def test_hv_output_state_uses_zero_target_not_module_activation(
     monkeypatch.setattr(
         base_module.ESIBase,
         "set_module_activation_state",
-        lambda self, address, active: (_ for _ in ()).throw(
-            AssertionError("Unsupported module activation API must not be used")
+        lambda _self, address, active: (
+            calls.append(("module", address, active)),
+            module_state.__setitem__(address, active),
+            0,
+        )[-1],
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_params_pwm",
+        lambda _self, address: (
+            calls.append(("pwm", address)) or 0,
+            1.0,
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            module_state[address],
+            0,
         ),
     )
 
     assert controller.set_output_active(1, True, timeout_s=0.5) is True
     assert controller.set_output_active(1, False, timeout_s=0.5) is False
     assert calls == [
+        ("module", 1, True),
+        ("pwm", 1),
         ("enable", True),
         ("get_enable",),
         ("target", 1, 0.0),
         ("get_target", 1),
+        ("module", 1, False),
+        ("pwm", 1),
     ]
+
+
+def test_module_activation_accepts_missing_ack_only_when_pwm_confirms(
+    driver_modules,
+    monkeypatch,
+    caplog,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_module_activation_state",
+        lambda _self, address, active: calls.append(
+            ("module", address, active)
+        ) or controller.ERR_COMMAND_RECEIVE,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_params_pwm",
+        lambda _self, address: (
+            calls.append(("pwm", address)) or 0,
+            1.0,
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            True,
+            0,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="test_esi_driver"):
+        assert controller.set_hv_module_active(1, True, timeout_s=0.5) is True
+        assert controller.set_hv_module_active(1, True, timeout_s=0.5) is True
+
+    assert calls == [
+        ("module", 1, True),
+        ("pwm", 1),
+        ("module", 1, True),
+        ("pwm", 1),
+    ]
+    assert caplog.text.count("PWM status independently confirmed") == 1
+
+
+def test_module_activation_rejects_unconfirmed_missing_ack(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_module_activation_state",
+        lambda _self, _address, _active: controller.ERR_COMMAND_RECEIVE,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_params_pwm",
+        lambda _self, _address: (
+            0,
+            1.0,
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            False,
+            0,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="activation verification failed"):
+        controller.set_hv_module_active(1, True, timeout_s=0.5)
 
 
 def test_discovery_rejects_wrong_heat_controller_type(driver_modules, monkeypatch):

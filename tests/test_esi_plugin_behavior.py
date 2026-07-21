@@ -514,8 +514,8 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
     controller.toggleOn()
 
     assert calls == [
-        ("target", 1, 0.0),
-        ("target", 2, 0.0),
+        ("module", 1, False),
+        ("module", 2, False),
         ("global", True),
         ("apply", 1, 1200.0),
     ]
@@ -560,8 +560,8 @@ def test_on_sequence_programs_heat_target_before_activation():
     controller.toggleOn()
 
     assert calls == [
-        ("hv_target", 1, 0.0),
-        ("hv_target", 2, 0.0),
+        ("module", 1, False),
+        ("module", 2, False),
         ("global", True),
         ("heat_target", 90.0),
         ("module", 0, True),
@@ -697,6 +697,7 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
         "enabled": True,
         "modules": {
             1: {
+                "module_active": True,
                 "target_v": 10.0,
                 "voltage_valid": True,
                 "measured_v": 0.0,
@@ -704,6 +705,7 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
                 "measured_a": 0.0,
             },
             2: {
+                "module_active": False,
                 "target_v": 0.0,
                 "voltage_valid": True,
                 "measured_v": 0.0,
@@ -726,6 +728,7 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
     assert controller.heat_readback_valid is False
     assert module.np.isnan(controller.values[0])
     assert controller.targets == {1: 10.0, 2: 0.0}
+    assert controller.module_active == {1: True, 2: False}
     assert controller.global_enabled is True
     assert parent.heat_status == (
         "INVALID T=522.0 degC; check temperature sensor"
@@ -804,8 +807,8 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     calls = []
 
     class FakeDevice:
-        def set_hv_module_target(self, address, value, timeout_s):
-            calls.append(("target", address, value))
+        def set_output_active(self, address, active, timeout_s):
+            calls.append(("module", address, active))
 
         def set_global_active(self, active, timeout_s):
             calls.append(("global", active))
@@ -830,8 +833,8 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     controller.toggleOn()
 
     assert calls == [
-        ("target", 1, 0.0),
-        ("target", 2, 0.0),
+        ("module", 1, False),
+        ("module", 2, False),
         ("global", True),
         ("safe_off", 5.0),
     ]

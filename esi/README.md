@@ -31,7 +31,8 @@ header, and 64-bit Windows DLL.
 Initialization validates controller type `0x8ED6`, requires HV modules 1 and 2
 to report type `0x0A0D`, requires the heater at address 0 to report type
 `0xDB1C`, writes zero targets, and closes the module gate with
-`SetEnable(False)` after initialization. The operator-facing names
+`SetModuleActivationState(False)` before closing the controller-wide gate with
+`SetEnable(False)`. The operator-facing names
 are `ESI_HV1` (address 1), `ESI_HV2` (address 2), and `ESI_HEAT` (address 0).
 Turning the device or an output ON is always an explicit operator action.
 
@@ -47,10 +48,6 @@ Heating is blocked when the temperature readback is missing, non-finite, below
 0 degC, or above the hardware maximum. A disconnected sensor can report a high
 out-of-range value even while heater power is zero.
 
-The module-activation read and write functions return vendor status `-10` on
-the validated controller firmware and are therefore not used. Effective output
-state is controlled by the module gate and zero/nonzero targets.
-
 ## Voltage Safety
 
 The HVPS-3kB software target range is 0 to 3000 V. Each module has one shared
@@ -64,11 +61,15 @@ values are never passed to the vendor target function. The displayed voltage
 is the raw ADC readback currently supplied by the firmware; verify both
 physical connectors independently during commissioning.
 
-Output generation also requires the controller-wide `SetEnable(true)` gate.
-The plugin first writes and reads back the selected module target, then enables
-that shared gate and confirms it with `GetEnable`. Disabled module targets are
-kept at zero before the gate is opened. A command is treated as failed if either
-the target or enable readback does not match the request.
+Output generation requires two independent gates: the controller-wide
+`SetEnable(true)` state and each HV module's
+`SetModuleActivationState(address, true)` HVC toggle. The plugin verifies the
+target with `GetHVsupplyTargetOutputVoltage`, the global gate with `GetEnable`,
+and the module toggle with the `ActivationState` returned by
+`GetHVsupplyParamsPWM`. Firmware `0x0100` may execute the module toggle while
+returning `-10`; that status is accepted only when the independent PWM readback
+confirms the exact requested state. Disabled module targets are set to zero
+before their HVC toggle is deactivated.
 
 If a DLL call times out or shutdown cannot be confirmed, treat the HV state as
 unknown and use the physical interlock or front panel before approaching the
