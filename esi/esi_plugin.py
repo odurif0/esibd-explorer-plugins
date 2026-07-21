@@ -42,6 +42,9 @@ _ESI_COMMUNICATION_LOST = "Communication lost"
 _PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
 _ESI_POWER_ON_ICON = "switch-medium_on.png"
 _ESI_POWER_OFF_ICON = "switch-medium_off.png"
+_ESI_HV_CARD_WIDTH = 300
+_ESI_CARD_SPACING = 12
+_ESI_HEAT_CARD_WIDTH = 2 * _ESI_HV_CARD_WIDTH + _ESI_CARD_SPACING
 
 _ESI_PANEL_CARD_ON = "QFrame { background-color: #162433; border: 1px solid #3182ce; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_CARD_OFF = "QFrame { background-color: #202938; border: 1px solid #64748b; border-radius: 8px; color: #f7fafc; }"
@@ -63,19 +66,6 @@ _ESI_BTN_OFF_ACTIVE = "QPushButton { background-color: #4b5563; color: #e2e8f0; 
 _ESI_BTN_OFF_INACTIVE = "QPushButton { background-color: #374151; color: #94a3b8; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
 _ESI_BTN_HEAT_ACTIVE = "QPushButton { background-color: #d97706; color: #1a1a2e; font-weight: 700; border-radius: 4px; }"
 _ESI_BTN_HEAT_OFF = "QPushButton { background-color: #374151; color: #fbbf24; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
-
-
-def _coerce_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-        return default
-    return default if value is None else bool(value)
 
 
 def _runtime_module_name(plugin_dir: Path) -> str:
@@ -181,7 +171,6 @@ class ESIDevice(Device):
     CONNECT_TIMEOUT = "Connect timeout (s)"
     POLL_TIMEOUT = "Poll timeout (s)"
     RAMP_RATE = "Ramp rate (V/s)"
-    ALLOW_NEGATIVE = "Allow negative voltage"
     HEAT_VOLTAGE_LIMIT = "Heat voltage limit (V)"
     HEAT_CURRENT_LIMIT = "Heat current limit (A)"
     HEAT_POWER_LIMIT = "Heat power limit (W)"
@@ -411,15 +400,14 @@ class ESIDevice(Device):
         cards_row = QWidget()
         cards_layout = QHBoxLayout(cards_row)
         cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(12)
+        cards_layout.setSpacing(_ESI_CARD_SPACING)
 
         self.esiHVCards: dict[int, dict[str, Any]] = {}
         cards_layout.addStretch(1)
         for module_number, address in ((1, 1), (2, 2)):
             card = QFrame()
-            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            card.setMinimumWidth(260)
-            card.setMaximumWidth(320)
+            card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            card.setFixedWidth(_ESI_HV_CARD_WIDTH)
             cl = QVBoxLayout(card)
             cl.setContentsMargins(12, 12, 12, 12)
             cl.setSpacing(8)
@@ -500,11 +488,12 @@ class ESIDevice(Device):
             sel_group.idClicked.connect(
                 lambda gid, addr=address: self._panel_polarity_selected(addr, gid)
             )
-        cards_layout.addStretch(0)
+        cards_layout.addStretch(1)
         layout.addWidget(cards_row)
 
         heat_card = QFrame()
-        heat_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        heat_card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        heat_card.setFixedWidth(_ESI_HEAT_CARD_WIDTH)
         heat_card.setStyleSheet(_ESI_PANEL_CARD_OFF)
         heat_cl = QVBoxLayout(heat_card)
         heat_cl.setContentsMargins(12, 12, 12, 12)
@@ -544,7 +533,13 @@ class ESIDevice(Device):
             heat_grid.addWidget(vl, row, 1)
         heat_cl.addLayout(heat_grid)
 
-        layout.addWidget(heat_card)
+        heat_row = QWidget()
+        heat_layout = QHBoxLayout(heat_row)
+        heat_layout.setContentsMargins(0, 0, 0, 0)
+        heat_layout.addStretch(1)
+        heat_layout.addWidget(heat_card)
+        heat_layout.addStretch(1)
+        layout.addWidget(heat_row)
 
         self.esiPanel = panel
         self.esiHeatButton = heat_btn
@@ -761,16 +756,6 @@ class ESIDevice(Device):
             parameterType=PARAMETERTYPE.FLOAT,
             attr="ramp_rate_v_s",
         )
-        settings[f"{self.name}/{self.ALLOW_NEGATIVE}"] = parameterDict(
-            value=False,
-            toolTip=(
-                "Expert setting. Permit negative targets down to -3000 V only after "
-                "confirming the installed HVPS-3kB polarity."
-            ),
-            parameterType=PARAMETERTYPE.BOOL,
-            attr="allow_negative",
-            advanced=True,
-        )
         for label, attr, tooltip in (
             (
                 self.HEAT_VOLTAGE_LIMIT,
@@ -945,9 +930,6 @@ class ESIChannel(Channel):
             return 0
         return -1 if str(getattr(self, "polarity", "+")) == "-" else 1
 
-    def signed_target(self) -> float:
-        return self.polarity_sign() * abs(float(self.value)) if self.enabled else 0.0
-
     @property
     def unit(self) -> str:
         """Return the physical unit for this mixed-function ESI channel."""
@@ -993,7 +975,6 @@ class ESIController(DeviceController):
                 device_id=f"esi_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
-                allow_negative=_coerce_bool(self.controllerParent.allow_negative),
                 process_backend=False,
             )
             backend_reason = str(
@@ -1089,15 +1070,18 @@ class ESIController(DeviceController):
         if self.device is None or not self.initialized or not self.controllerParent.isOn():
             return
         if not channel.enabled:
+            if (
+                not channel.is_heat_channel()
+                and self._active_polarity_sign(channel.module_address()) != 0
+            ):
+                return
             try:
                 if not channel.is_heat_channel():
-                    # Only zero the module target if no other polarity is active.
-                    if self._active_polarity_sign(channel.module_address()) == 0:
-                        self.device.set_target_voltage(
-                            channel.module_address(),
-                            0.0,
-                            timeout_s=float(self.controllerParent.poll_timeout_s),
-                        )
+                    self.device.set_target_voltage(
+                        channel.module_address(),
+                        0.0,
+                        timeout_s=float(self.controllerParent.poll_timeout_s),
+                    )
                 self.device.set_output_active(
                     channel.module_address(),
                     False,
@@ -1131,9 +1115,16 @@ class ESIController(DeviceController):
                     flag=PRINT.ERROR,
                 )
             return
-        # HV polarity channel: sign the magnitude for the shared module target.
-        target = channel.signed_target()
+        # The vendor target is an unsigned magnitude. The measurement selector
+        # chooses the physical positive or negative output readback.
+        target = abs(float(channel.value))
         try:
+            self.device.select_hv_measurement(
+                channel.module_address(),
+                negative=channel.polarity_sign() < 0,
+                high_current=False,
+                timeout_s=float(self.controllerParent.poll_timeout_s),
+            )
             self.device.set_target_voltage(
                 channel.module_address(),
                 target,
@@ -1163,8 +1154,8 @@ class ESIController(DeviceController):
             if channel.is_heat_channel():
                 channel.monitor = self.values.get(channel.module_address(), np.nan)
             else:
-                # Each HV module reports one signed readback; show it on the
-                # active polarity channel only.
+                # Each HV module reports the selected physical output; show it
+                # on the active polarity channel only.
                 active_sign = self._active_polarity_sign(channel.module_address())
                 channel.monitor = (
                     self.values.get(channel.module_address(), np.nan)

@@ -305,7 +305,6 @@ def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypat
     parent = types.SimpleNamespace(
         com=16,
         baudrate=230400,
-        allow_negative=False,
         connect_timeout_s=5.0,
     )
     controller = module.ESIController(parent)
@@ -317,6 +316,7 @@ def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypat
 
     assert constructor_kwargs[0]["com"] == 16
     assert constructor_kwargs[0]["process_backend"] is False
+    assert "allow_negative" not in constructor_kwargs[0]
     assert any("initialization failed on COM16" in message for message in messages)
     assert controller.device is None
     assert controller.initializing is False
@@ -366,6 +366,15 @@ def test_channel_defaults_enforce_3kv_positive_range():
     channel.initGUI({"Module": 0})
     assert channel.getParameterByName(channel.VALUE).unit == "degC"
     assert channel.getParameterByName(channel.MONITOR).unit == "degC"
+
+
+def test_operator_panel_widths_are_fixed_and_aligned():
+    module = _load_plugin()
+
+    assert module._ESI_HV_CARD_WIDTH == 300
+    assert module._ESI_HEAT_CARD_WIDTH == (
+        2 * module._ESI_HV_CARD_WIDTH + module._ESI_CARD_SPACING
+    )
 
 
 def test_enabled_change_forces_hardware_apply():
@@ -677,6 +686,78 @@ def test_disabling_hv_zeros_target_before_deactivation():
     ]
 
 
+def test_disabled_polarity_cannot_zero_its_active_sibling():
+    module = _load_plugin()
+
+    active = types.SimpleNamespace(
+        module_address=lambda: 1,
+        is_heat_channel=lambda: False,
+        polarity_sign=lambda: 1,
+        enabled=True,
+    )
+    disabled = types.SimpleNamespace(
+        module_address=lambda: 1,
+        is_heat_channel=lambda: False,
+        enabled=False,
+    )
+
+    class FakeDevice:
+        def set_target_voltage(self, *args, **kwargs):
+            raise AssertionError("Disabled sibling must not zero the shared target")
+
+        def set_output_active(self, *args, **kwargs):
+            raise AssertionError("Disabled sibling must not deactivate the module")
+
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        isOn=lambda: True,
+        getChannels=lambda: [active, disabled],
+    )
+    controller = module.ESIController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+
+    controller.applyValue(disabled)
+
+
+def test_negative_output_selects_negative_readback_with_positive_magnitude():
+    module = _load_plugin()
+    calls = []
+
+    class FakeDevice:
+        def select_hv_measurement(
+            self, address, *, negative, high_current, timeout_s
+        ):
+            calls.append(("measurement", address, negative, high_current, timeout_s))
+
+        def set_target_voltage(self, address, value, timeout_s):
+            calls.append(("target", address, value, timeout_s))
+
+        def set_output_active(self, address, active, timeout_s):
+            calls.append(("active", address, active, timeout_s))
+
+    channel = types.SimpleNamespace(
+        module_address=lambda: 2,
+        is_heat_channel=lambda: False,
+        polarity_sign=lambda: -1,
+        name="ESI_HV2-",
+        enabled=True,
+        value=10.0,
+    )
+    parent = types.SimpleNamespace(poll_timeout_s=2.0, isOn=lambda: True)
+    controller = module.ESIController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+
+    controller.applyValue(channel)
+
+    assert calls == [
+        ("measurement", 2, True, False, 2.0),
+        ("target", 2, 10.0, 2.0),
+        ("active", 2, True, 2.0),
+    ]
+
+
 def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     module = _load_plugin()
     calls = []
@@ -747,6 +828,11 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     calls = []
 
     class FakeDevice:
+        def select_hv_measurement(
+            self, address, *, negative, high_current, timeout_s
+        ):
+            calls.append(("measurement", address, negative, high_current))
+
         def set_output_active(self, address, active, timeout_s):
             calls.append(("active", address, active))
 
@@ -759,7 +845,6 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
         module_address=lambda: 2,
         is_heat_channel=lambda: False,
         polarity_sign=lambda: 1,
-        signed_target=lambda: 1000.0,
         name="ESI_HV2+",
         enabled=True,
         value=1000.0,
@@ -779,6 +864,7 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     controller.applyValue(channel)
 
     assert calls == [
+        ("measurement", 2, False, False),
         ("target", 2, 1000.0),
         ("target", 2, 0.0),
         ("active", 2, False),

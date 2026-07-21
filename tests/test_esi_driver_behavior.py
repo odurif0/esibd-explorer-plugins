@@ -46,7 +46,6 @@ def _controller(driver_module):
     controller.device_id = "test_esi"
     controller.com = 14
     controller.baudrate = 230400
-    controller.allow_negative = False
     controller.connected = False
     controller._transport_poisoned = False
     controller._transport_error = None
@@ -149,22 +148,46 @@ def test_discovery_requires_both_expected_hv_modules(driver_modules, monkeypatch
         controller.discover_modules(timeout_s=0.5)
 
 
-def test_voltage_guard_enforces_3kv_and_explicit_negative_opt_in(driver_modules):
+def test_voltage_guard_enforces_unsigned_3kv_vendor_range(driver_modules):
     _runtime, driver_module, _base_module = driver_modules
     controller = _controller(driver_module)
 
     assert controller._validate_voltage(3000) == 3000
-    with pytest.raises(ValueError, match="3000 V hardware limit"):
+    with pytest.raises(ValueError, match="between 0 and 3000 V"):
         controller._validate_voltage(3000.1)
     with pytest.raises(ValueError, match="finite"):
         controller._validate_voltage(float("nan"))
     with pytest.raises(ValueError, match="finite"):
         controller._validate_voltage(float("inf"))
-    with pytest.raises(ValueError, match="Negative ESI voltages are disabled"):
+    with pytest.raises(ValueError, match="between 0 and 3000 V"):
         controller._validate_voltage(-1)
 
-    controller.allow_negative = True
-    assert controller._validate_voltage(-3000) == -3000
+
+def test_hv_measurement_selector_uses_physical_polarity_and_current_range(
+    driver_modules,
+    monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_meas_ranges",
+        lambda self, address, negative, high_current: calls.append(
+            (address, negative, high_current)
+        ) or 0,
+    )
+
+    selected = controller.select_hv_measurement(
+        2,
+        negative=True,
+        high_current=False,
+        timeout_s=0.5,
+    )
+
+    assert selected == (True, False)
+    assert calls == [(2, True, False)]
 
 
 def test_only_lab_hv_addresses_are_commandable(driver_modules):

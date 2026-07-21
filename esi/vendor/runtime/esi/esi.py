@@ -38,7 +38,6 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         thread_lock: Optional[threading.Lock] = None,
         dll_path: Optional[str] = None,
         log_dir: Optional[Path] = None,
-        allow_negative: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -48,7 +47,6 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self.device_id = device_id
         self.com = int(com)
         self.baudrate = int(baudrate)
-        self.allow_negative = bool(allow_negative)
         self.connected = False
         self._transport_poisoned = False
         self._transport_error = None
@@ -319,14 +317,10 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         value = float(voltage)
         if not math.isfinite(value):
             raise ValueError("ESI target voltage must be finite.")
-        if abs(value) > self.MAX_ABS_VOLTAGE_V:
+        if not 0.0 <= value <= self.MAX_ABS_VOLTAGE_V:
             raise ValueError(
-                f"ESI target {value:g} V exceeds the absolute 3000 V hardware limit."
-            )
-        if value < 0 and not self.allow_negative:
-            raise ValueError(
-                "Negative ESI voltages are disabled; enable the advanced polarity "
-                "setting only after confirming the installed module configuration."
+                "ESI target voltage must be between 0 and 3000 V; select the "
+                "physical positive or negative output separately."
             )
         return value
 
@@ -347,6 +341,30 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         )
         self._raise_on_status(status, f"set_target_voltage({address})")
         return value
+
+    def select_hv_measurement(
+        self,
+        address: int,
+        *,
+        negative: bool,
+        high_current: bool = False,
+        timeout_s: Optional[float] = None,
+    ) -> tuple[bool, bool]:
+        """Select the physical HV voltage output and current measurement range."""
+        self._require_connected()
+        address = self._validate_hv_address(address)
+        timeout = self._resolve_timeout(timeout_s)
+        status = self._call_locked_with_timeout(
+            ESIBase.set_hv_supply_meas_ranges,
+            timeout,
+            f"select_hv_measurement[{address}]",
+            self,
+            address,
+            bool(negative),
+            bool(high_current),
+        )
+        self._raise_on_status(status, f"select_hv_measurement({address})")
+        return bool(negative), bool(high_current)
 
     def set_global_active(self, active: bool, timeout_s: Optional[float] = None) -> bool:
         self._require_connected()
@@ -705,7 +723,6 @@ class ESI(ProcessIsolatedClientMixin):
         thread_lock: Optional[threading.Lock] = None,
         dll_path: Optional[str] = None,
         log_dir: Optional[Path] = None,
-        allow_negative: bool = True,
         process_backend: bool = False,
     ):
         backend_kwargs = {
@@ -716,7 +733,6 @@ class ESI(ProcessIsolatedClientMixin):
             "thread_lock": thread_lock,
             "dll_path": dll_path,
             "log_dir": log_dir,
-            "allow_negative": allow_negative,
         }
         self._initialize_process_backend(
             backend_kwargs=backend_kwargs,
