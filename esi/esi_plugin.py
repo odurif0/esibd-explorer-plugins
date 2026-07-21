@@ -43,6 +43,19 @@ _PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
 _ESI_POWER_ON_ICON = "switch-medium_on.png"
 _ESI_POWER_OFF_ICON = "switch-medium_off.png"
 
+_ESI_PANEL_CARD_ON = "QFrame { background-color: #162433; border: 1px solid #3182ce; border-radius: 8px; color: #f7fafc; }"
+_ESI_PANEL_CARD_OFF = "QFrame { background-color: #202938; border: 1px solid #64748b; border-radius: 8px; color: #f7fafc; }"
+_ESI_PANEL_CARD_DISC = "QFrame { background-color: #151b26; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; }"
+_ESI_PANEL_CARD_HEAT = "QFrame { background-color: #2d1b0e; border: 1px solid #d97706; border-radius: 8px; color: #f7fafc; }"
+_ESI_PANEL_TITLE = "color: #f8fafc; font-weight: 700; font-size: 14px;"
+_ESI_PANEL_NAME = "color: #cbd5e1; font-weight: 600;"
+_ESI_PANEL_VALUE = "color: #f8fafc; font-weight: 600;"
+_ESI_PANEL_POS = "color: #fbbf24; font-weight: 700;"
+_ESI_PANEL_NEG = "color: #60a5fa; font-weight: 700;"
+_ESI_PANEL_OFF = "color: #94a3b8; font-weight: 600;"
+_ESI_PANEL_OK = "color: #4ade80; font-weight: 600;"
+_ESI_PANEL_ERR = "color: #f87171; font-weight: 700;"
+
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
@@ -183,6 +196,7 @@ class ESIDevice(Device):
         super().finalizeInit()
         self._ensure_local_on_action()
         self._ensure_status_widgets()
+        self._ensure_operator_panel()
         self._update_channel_column_visibility()
 
     def _ensure_local_on_action(self) -> None:
@@ -296,6 +310,7 @@ class ESIDevice(Device):
             summary.setText(summary_text)
         if hasattr(summary, "setToolTip"):
             summary.setToolTip(tooltip)
+        self._update_operator_panel()
 
     def _update_channel_column_visibility(self) -> None:
         """Hide framework columns not useful for the ESI UI."""
@@ -358,6 +373,236 @@ class ESIDevice(Device):
                 setter(False)
             else:
                 channel.enabled = False
+
+    def _ensure_operator_panel(self) -> None:
+        """Build a compact operator panel above the channel table."""
+        if hasattr(self, "esiPanel"):
+            self._update_operator_panel()
+            return
+        try:
+            from PyQt6.QtWidgets import (
+                QFrame,
+                QGridLayout,
+                QHBoxLayout,
+                QLabel,
+                QPushButton,
+                QSizePolicy,
+                QVBoxLayout,
+                QWidget,
+            )
+        except ImportError:
+            return
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        cards_row = QWidget()
+        cards_layout = QHBoxLayout(cards_row)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(12)
+
+        self.esiHVCards: dict[int, dict[str, Any]] = {}
+        cards_layout.addStretch(1)
+        for module_number, address in ((1, 1), (2, 2)):
+            card = QFrame()
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            card.setMinimumWidth(240)
+            card.setMaximumWidth(300)
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(12, 12, 12, 12)
+            cl.setSpacing(8)
+
+            title = QLabel(f"HVPS-3kB · HV{module_number}")
+            title.setStyleSheet(_ESI_PANEL_TITLE)
+            cl.addWidget(title)
+
+            polarity_label = QLabel("Output")
+            polarity_label.setStyleSheet(_ESI_PANEL_NAME)
+            polarity_value = QLabel("OFF")
+            polarity_value.setStyleSheet(_ESI_PANEL_OFF)
+            target_label = QLabel("Target")
+            target_label.setStyleSheet(_ESI_PANEL_NAME)
+            target_value = QLabel("0.0 V")
+            target_value.setStyleSheet(_ESI_PANEL_VALUE)
+            measured_label = QLabel("Measured")
+            measured_label.setStyleSheet(_ESI_PANEL_NAME)
+            measured_value = QLabel("n/a")
+            measured_value.setStyleSheet(_ESI_PANEL_VALUE)
+            current_label = QLabel("Current")
+            current_label.setStyleSheet(_ESI_PANEL_NAME)
+            current_value = QLabel("n/a")
+            current_value.setStyleSheet(_ESI_PANEL_VALUE)
+
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(6)
+            grid.addWidget(polarity_label, 0, 0)
+            grid.addWidget(polarity_value, 0, 1)
+            grid.addWidget(target_label, 1, 0)
+            grid.addWidget(target_value, 1, 1)
+            grid.addWidget(measured_label, 2, 0)
+            grid.addWidget(measured_value, 2, 1)
+            grid.addWidget(current_label, 3, 0)
+            grid.addWidget(current_value, 3, 1)
+            cl.addLayout(grid)
+
+            cards_layout.addWidget(card)
+            self.esiHVCards[address] = {
+                "card": card,
+                "polarity": polarity_value,
+                "target": target_value,
+                "measured": measured_value,
+                "current": current_value,
+            }
+        cards_layout.addStretch(0)
+
+        heat_card = QFrame()
+        heat_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        heat_card.setStyleSheet(_ESI_PANEL_CARD_HEAT)
+        heat_cl = QVBoxLayout(heat_card)
+        heat_cl.setContentsMargins(12, 12, 12, 12)
+        heat_cl.setSpacing(8)
+
+        heat_title = QLabel("HEAT-CTRL-2410")
+        heat_title.setStyleSheet(_ESI_PANEL_TITLE)
+        heat_cl.addWidget(heat_title)
+
+        heat_grid = QGridLayout()
+        heat_grid.setContentsMargins(0, 0, 0, 0)
+        heat_grid.setHorizontalSpacing(10)
+        heat_grid.setVerticalSpacing(6)
+        for row, (name, key) in enumerate((
+            ("Target", "heat_target"),
+            ("Measured", "heat_measured"),
+            ("Power", "heat_power"),
+            ("Sensor", "heat_sensor"),
+            ("Interlock", "heat_interlock"),
+        )):
+            nl = QLabel(name)
+            nl.setStyleSheet(_ESI_PANEL_NAME)
+            vl = QLabel("n/a")
+            vl.setStyleSheet(_ESI_PANEL_VALUE)
+            heat_grid.addWidget(nl, row, 0)
+            heat_grid.addWidget(vl, row, 1)
+        heat_cl.addLayout(heat_grid)
+
+        cards_layout.addWidget(heat_card)
+        cards_layout.addStretch(1)
+        layout.addWidget(cards_row)
+
+        force_off = QPushButton("FORCE ALL OUTPUTS OFF")
+        force_off.setStyleSheet(
+            "QPushButton { background-color: #c53030; color: white; "
+            "font-weight: 700; border-radius: 4px; padding: 6px 16px; }"
+            "QPushButton:hover { background-color: #e53e3e; }"
+        )
+        force_off.clicked.connect(self._force_all_off)
+        layout.addWidget(force_off)
+        self.esiForceOffButton = force_off
+
+        self.esiPanel = panel
+        self.esiHeatWidgets = {
+            "heat_target": heat_grid.itemAtPosition(0, 1).widget(),
+            "heat_measured": heat_grid.itemAtPosition(1, 1).widget(),
+            "heat_power": heat_grid.itemAtPosition(2, 1).widget(),
+            "heat_sensor": heat_grid.itemAtPosition(3, 1).widget(),
+            "heat_interlock": heat_grid.itemAtPosition(4, 1).widget(),
+        }
+        self.addContentWidget(panel)
+        self._update_operator_panel()
+
+    def _force_all_off(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None or controller.device is None:
+            return
+        try:
+            controller.device.force_safe_off(
+                timeout_s=float(getattr(self, "connect_timeout_s", 5.0))
+            )
+            self.print("All ESI outputs forced OFF.", flag=PRINT.WARNING)
+        except Exception as exc:
+            self.print(f"Force OFF failed: {exc}", flag=PRINT.ERROR)
+        self._update_operator_panel()
+
+    def _update_operator_panel(self) -> None:
+        cards = getattr(self, "esiHVCards", None)
+        if not isinstance(cards, dict):
+            return
+        controller = getattr(self, "controller", None)
+        connected = controller is not None and getattr(controller, "initialized", False)
+        values = getattr(controller, "values", {}) or {}
+        currents = getattr(controller, "currents", {}) or {}
+
+        for address, widgets in cards.items():
+            card = widgets["card"]
+            if not connected:
+                card.setStyleSheet(_ESI_PANEL_CARD_DISC)
+                for key in ("polarity", "target", "measured", "current"):
+                    widgets[key].setText("n/a")
+                    widgets[key].setStyleSheet(_ESI_PANEL_OFF)
+                continue
+            active_sign = 0
+            active_value = 0.0
+            for channel in self.getChannels():
+                if (
+                    channel.module_address() == address
+                    and not channel.is_heat_channel()
+                    and channel.enabled
+                ):
+                    active_sign = channel.polarity_sign()
+                    active_value = abs(float(channel.value))
+                    break
+            if active_sign == 0:
+                card.setStyleSheet(_ESI_PANEL_CARD_OFF)
+                widgets["polarity"].setText("OFF")
+                widgets["polarity"].setStyleSheet(_ESI_PANEL_OFF)
+                widgets["target"].setText("0.0 V")
+            elif active_sign > 0:
+                card.setStyleSheet(_ESI_PANEL_CARD_ON)
+                widgets["polarity"].setText("+")
+                widgets["polarity"].setStyleSheet(_ESI_PANEL_POS)
+                widgets["target"].setText(f"{active_value:.1f} V")
+            else:
+                card.setStyleSheet(_ESI_PANEL_CARD_ON)
+                widgets["polarity"].setText("-")
+                widgets["polarity"].setStyleSheet(_ESI_PANEL_NEG)
+                widgets["target"].setText(f"-{active_value:.1f} V")
+            measured = values.get(address, np.nan)
+            current = currents.get(address, np.nan)
+            widgets["measured"].setText(
+                f"{measured:.1f} V" if np.isfinite(measured) else "n/a"
+            )
+            widgets["current"].setText(
+                f"{current * 1e9:.2f} nA" if np.isfinite(current) else "n/a"
+            )
+
+        heat = getattr(self, "esiHeatWidgets", None)
+        if isinstance(heat, dict) and connected:
+            heat_valid = getattr(controller, "heat_readback_valid", False)
+            heat_temp = values.get(_ESI_HEAT_MODULE, np.nan)
+            heat_target = float(getattr(controller, "heat_max_temperature_c", 175.0))
+            heat["heat_target"].setText(
+                f"{heat_temp:.1f} °C" if np.isfinite(heat_temp) else "n/a"
+            )
+            heat["heat_measured"].setText(
+                f"{heat_temp:.1f} °C" if heat_valid else "INVALID"
+            )
+            heat["heat_sensor"].setStyleSheet(
+                _ESI_PANEL_OK if heat_valid else _ESI_PANEL_ERR
+            )
+            heat["heat_sensor"].setText("OK" if heat_valid else "Disconnected")
+            interlock = str(getattr(self, "interlock_state", "n/a") or "n/a")
+            heat["heat_interlock"].setText(interlock)
+            heat["heat_interlock"].setStyleSheet(
+                _ESI_PANEL_OK if interlock == "OK" else _ESI_PANEL_ERR
+            )
+        elif isinstance(heat, dict):
+            for widget in heat.values():
+                widget.setText("n/a")
+                widget.setStyleSheet(_ESI_PANEL_OFF)
 
     def getChannels(self) -> "list[ESIChannel]":
         return cast("list[ESIChannel]", super().getChannels())
