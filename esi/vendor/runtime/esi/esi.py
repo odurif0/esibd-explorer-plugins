@@ -180,12 +180,11 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             if status != self.NO_ERR:
                 failures.append(f"heat target zero: {self.format_status(status)}")
             for address in self.HV_MODULE_ADDRESSES:
-                for action, status in (
-                    ("zero target", ESIBase.set_hv_supply_target_output_voltage(self, address, 0.0)),
-                    ("deactivate", ESIBase.set_module_activation_state(self, address, False)),
-                ):
-                    if status != self.NO_ERR:
-                        failures.append(f"module {address} {action}: {self.format_status(status)}")
+                status = ESIBase.set_hv_supply_target_output_voltage(self, address, 0.0)
+                if status != self.NO_ERR:
+                    failures.append(
+                        f"module {address} zero target: {self.format_status(status)}"
+                    )
             status = ESIBase.set_enable(self, False)
             if status != self.NO_ERR:
                 failures.append(f"module disable: {self.format_status(status)}")
@@ -380,16 +379,10 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
             self._raise_on_status(result[0], "disable_heat_output")
             return False
-        status = self._call_locked_with_timeout(
-            ESIBase.set_module_activation_state,
-            timeout,
-            f"set_output_active[{address}]",
-            self,
-            address,
-            bool(active),
-        )
-        self._raise_on_status(status, f"set_output_active({address})")
-        return bool(active)
+        if active:
+            return True
+        self.set_target_voltage(address, 0.0, timeout_s=timeout)
+        return False
 
     def get_heat_configuration(self, timeout_s: Optional[float] = None) -> dict:
         """Read HEAT-CTRL-2410 hardware limits and configured setpoints."""

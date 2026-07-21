@@ -175,7 +175,7 @@ class ESIDevice(Device):
     def getDefaultSettings(self) -> dict[str, dict]:
         settings = super().getDefaultSettings()
         settings[f"{self.name}/{self.COM}"] = parameterDict(
-            value=14,
+            value=1,
             minimum=1,
             maximum=255,
             toolTip="Windows COM port number used by the ESI controller.",
@@ -276,8 +276,8 @@ class ESIDevice(Device):
         settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
         return settings
 
-    def ensureFixedChannels(self) -> None:
-        """Replace only the generic bootstrap layout with HV1, HV2, and HEAT."""
+    def ensureFixedChannels(self, *, persist: bool = False) -> None:
+        """Replace the generic bootstrap layout with HV1, HV2, and HEAT."""
         channels = self.getChannels()
         existing_modules = [getattr(channel, "module", None) for channel in channels]
         expected_modules = [address for _number, address in _ESI_HV_CHANNELS]
@@ -299,6 +299,35 @@ class ESIDevice(Device):
         if not callable(update) or not callable(custom_file):
             return
         update(_fixed_channel_items(self.name), custom_file(self.confINI))
+        if persist:
+            export = getattr(self, "exportConfiguration", None)
+            if callable(export):
+                export(useDefaultFile=True)
+
+    def loadConfiguration(
+        self,
+        file: "Path | None" = None,
+        useDefaultFile: bool = False,
+        append: bool = False,
+    ) -> None:
+        """Create the fixed three-channel ESI layout instead of nine generic channels."""
+        if useDefaultFile:
+            file = self.customConfigFile(self.confINI)
+
+        if (
+            useDefaultFile
+            and file not in {None, Path()}
+            and cast(Path, file).suffix.lower() == ".ini"
+            and not cast(Path, file).exists()
+            and not self.channels
+        ):
+            self.print(f"Creating fixed ESI channel config {file}")
+            self.ensureFixedChannels(persist=True)
+            return
+
+        super().loadConfiguration(file=file, useDefaultFile=False, append=append)
+        if useDefaultFile:
+            self.ensureFixedChannels(persist=True)
 
     def closeCommunication(self) -> None:
         controller = getattr(self, "controller", None)
@@ -400,8 +429,13 @@ class ESIController(DeviceController):
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
                 allow_negative=_coerce_bool(self.controllerParent.allow_negative),
-                process_backend=True,
+                process_backend=False,
             )
+            backend_reason = str(
+                getattr(self.device, "_process_backend_disabled_reason", "")
+            ).strip()
+            if backend_reason:
+                self.print(backend_reason, flag=PRINT.WARNING)
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
             self.device.set_global_active(
                 True,
@@ -432,13 +466,19 @@ class ESIController(DeviceController):
             self._apply_snapshot(snapshot)
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:
-            self.print(f"ESI initialization failed: {exc}", flag=PRINT.ERROR)
+            self._restore_off_ui_state()
+            self.print(
+                f"ESI initialization failed on COM{int(self.controllerParent.com)}: {exc}\n"
+                "Confirm the configured COM port, power the controller, and close "
+                "the hardware probe and vendor control application before retrying.",
+                flag=PRINT.ERROR,
+            )
             self._dispose_device()
         finally:
             self.initializing = False
 
     def initComplete(self) -> None:
-        self.controllerParent.ensureFixedChannels()
+        self.controllerParent.ensureFixedChannels(persist=True)
         self.initializeValues(reset=True)
         self.initialized = self.device is not None
         with contextlib.suppress(AttributeError):
@@ -539,6 +579,9 @@ class ESIController(DeviceController):
         super().toggleOn()
         if self.device is None:
             return
+        if getattr(self, "acquiring", False):
+            self.stopAcquisition()
+            self.acquiring = False
         timeout = float(self.controllerParent.connect_timeout_s)
         try:
             if self.controllerParent.isOn():
@@ -564,6 +607,7 @@ class ESIController(DeviceController):
                 for channel in self.controllerParent.getChannels():
                     if not channel.is_heat_channel():
                         self.applyValue(channel)
+                self.startAcquisition()
             else:
                 for channel in self.controllerParent.getChannels():
                     address = channel.module_address()

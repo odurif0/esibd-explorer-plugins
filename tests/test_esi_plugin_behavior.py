@@ -92,12 +92,31 @@ def _install_esibd_stubs():
     class DeviceController:
         def __init__(self, controllerParent=None):
             self.controllerParent = controllerParent
+            self.acquiring = False
 
         def toggleOn(self):
             self.super_toggle_called = True
 
+        def startAcquisition(self):
+            self.acquiring = True
+
+        def stopAcquisition(self):
+            self.acquiring = False
+
+        def initComplete(self):
+            self.initialized = True
+            self.startAcquisition()
+            if self.controllerParent.isOn():
+                self.toggleOnFromThread(parallel=True)
+
     class Device:
         MAXDATAPOINTS = "Max data points"
+
+        def getDefaultSettings(self):
+            return {
+                f"{self.name}/Interval": {Parameter.VALUE: 0},
+                f"{self.name}/{self.MAXDATAPOINTS}": {Parameter.VALUE: 0},
+            }
 
     class Plugin:
         pass
@@ -174,6 +193,135 @@ def test_fixed_channel_layout_is_safe_and_stable():
         "HEAT-CTRL-2410",
     ]
     assert all("Unit" not in item for item in items)
+
+
+def test_default_com_is_generic_and_operator_configurable():
+    module = _load_plugin()
+    device = module.ESIDevice()
+
+    settings = device.getDefaultSettings()
+
+    assert settings["ESI/COM"][module.Parameter.VALUE] == 1
+
+
+def test_missing_config_creates_only_three_fixed_channels(tmp_path):
+    module = _load_plugin()
+    device = object.__new__(module.ESIDevice)
+    config_file = tmp_path / "ESI.ini"
+    applied = []
+    exported = []
+    device.channels = []
+    device.confINI = "ESI.ini"
+    device.getChannels = lambda: device.channels
+    device.customConfigFile = lambda _name: config_file
+    device.print = lambda *args, **kwargs: None
+
+    def update(items, file):
+        applied.extend(items)
+        assert file == config_file
+        device.channels = [
+            types.SimpleNamespace(module=item["Module"], name=item["Name"])
+            for item in items
+        ]
+
+    device.updateChannelConfig = update
+    device.exportConfiguration = lambda **kwargs: exported.append(kwargs)
+
+    device.loadConfiguration(useDefaultFile=True)
+
+    assert [item["Module"] for item in applied] == [1, 2, 0]
+    assert [item["Name"] for item in applied] == ["ESI_HV1", "ESI_HV2", "ESI_HEAT"]
+    assert exported == [{"useDefaultFile": True}]
+
+
+def test_generic_nine_channel_config_is_migrated_to_fixed_layout(tmp_path):
+    module = _load_plugin()
+    device = object.__new__(module.ESIDevice)
+    config_file = tmp_path / "ESI.ini"
+    applied = []
+    exported = []
+    device.channels = [
+        types.SimpleNamespace(module=2, name=f"ESI{index}")
+        for index in range(1, 10)
+    ]
+    device.confINI = "ESI.ini"
+    device.getChannels = lambda: device.channels
+    device.customConfigFile = lambda _name: config_file
+
+    def update(items, file):
+        applied.extend(items)
+        assert file == config_file
+
+    device.updateChannelConfig = update
+    device.exportConfiguration = lambda **kwargs: exported.append(kwargs)
+
+    device.ensureFixedChannels(persist=True)
+
+    assert [item["Module"] for item in applied] == [1, 2, 0]
+    assert len(applied) == 3
+    assert exported == [{"useDefaultFile": True}]
+
+
+def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypatch):
+    module = _load_plugin()
+    constructor_kwargs = []
+    messages = []
+
+    class FakeDriver:
+        def __init__(self, **kwargs):
+            constructor_kwargs.append(kwargs)
+            self._process_backend_disabled_reason = "inline backend selected"
+
+        def connect(self, timeout_s):
+            raise RuntimeError("open failed")
+
+        def disconnect(self, timeout_s):
+            return True
+
+        def close(self):
+            return None
+
+    parent = types.SimpleNamespace(
+        com=16,
+        baudrate=230400,
+        allow_negative=False,
+        connect_timeout_s=5.0,
+    )
+    controller = module.ESIController(parent)
+    controller.print = lambda message, **kwargs: messages.append(message)
+    controller.initializing = True
+    monkeypatch.setattr(module, "_get_esi_driver_class", lambda: FakeDriver)
+
+    controller.runInitialization()
+
+    assert constructor_kwargs[0]["com"] == 16
+    assert constructor_kwargs[0]["process_backend"] is False
+    assert any("initialization failed on COM16" in message for message in messages)
+    assert controller.device is None
+    assert controller.initializing is False
+
+
+def test_init_complete_resumes_pending_on_toggle():
+    module = _load_plugin()
+    calls = []
+    parent = types.SimpleNamespace(
+        ensureFixedChannels=lambda **kwargs: calls.append(("channels", kwargs)),
+        isOn=lambda: True,
+    )
+    controller = module.ESIController(parent)
+    controller.device = object()
+    controller.print = lambda *args, **kwargs: None
+    controller.toggleOnFromThread = (
+        lambda parallel=True: calls.append(("toggle", parallel))
+    )
+
+    controller.initComplete()
+
+    assert controller.initialized is True
+    assert calls == [
+        ("channels", {"persist": True}),
+        ("toggle", True),
+    ]
 
 
 def test_channel_defaults_enforce_3kv_positive_range():
@@ -266,6 +414,7 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
         ("apply", 1, 1200.0),
         ("apply", 2, 0.0),
     ]
+    assert controller.acquiring is True
 
 
 def test_on_sequence_programs_heat_target_before_activation():
