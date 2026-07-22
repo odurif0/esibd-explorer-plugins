@@ -56,6 +56,21 @@ _AMX_NUMERIC_DEBOUNCE_MS = 250
 _AMX_MAX_CONSECUTIVE_POLL_ERRORS = 10
 _AMX_SLOW_OPERATION_LOG_THRESHOLD_S = 1.0
 _AMX_STARTUP_PROGRESS_LOG_INTERVAL_S = 1.0
+_AMX_PANEL_GRID_COLUMNS = 2
+_AMX_PANEL_CARD_MIN_WIDTH = 280
+_AMX_PANEL_CARD_MAX_WIDTH = 340
+_AMX_PANEL_TITLE_STYLE = "color: #f8fafc; font-size: 14px; font-weight: 700;"
+_AMX_PANEL_NAME_STYLE = "color: #94a3b8; font-weight: 600;"
+_AMX_PANEL_VALUE_STYLE = "color: #e2e8f0; font-weight: 600;"
+_AMX_PANEL_NOTICE_STYLE = "color: #94a3b8; font-style: italic;"
+_AMX_PANEL_ENABLE_ACTIVE_STYLE = (
+    "QPushButton { background-color: #2f855a; color: white; border: 1px solid #68d391; "
+    "border-radius: 4px; padding: 4px 8px; font-weight: 700; }"
+)
+_AMX_PANEL_ENABLE_OFF_STYLE = (
+    "QPushButton { background-color: #334155; color: #cbd5e1; border: 1px solid #64748b; "
+    "border-radius: 4px; padding: 4px 8px; font-weight: 600; }"
+)
 
 
 def _amx_transport_failure_is_fatal(exc: Exception) -> bool:
@@ -181,6 +196,95 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
             return False
         return default
     return bool(value)
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    """Return a non-negative register value, or None for unavailable readback."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _expected_oscillator_period(
+    frequency_khz: float,
+    *,
+    clock_hz: float = 100e6,
+    oscillator_offset: int = 2,
+) -> int | None:
+    """Return the period register written by the bundled AMX driver."""
+    frequency_hz = float(frequency_khz) * 1000.0
+    if not np.isfinite(frequency_hz) or frequency_hz <= 0.0:
+        return None
+    period = round((float(clock_hz) / frequency_hz) - int(oscillator_offset))
+    return period if 1 <= period <= 0xFFFFFFFF else None
+
+
+def _expected_width_register(
+    enabled: bool,
+    width_us: float,
+    *,
+    clock_hz: float = 100e6,
+    width_offset: int = 2,
+) -> int:
+    """Return the width register written by the existing channel apply path."""
+    width = float(width_us)
+    if not enabled or not np.isfinite(width) or width <= 0.0:
+        return 0
+    ticks_per_us = float(clock_hz) / 1e6
+    return max(round(width * ticks_per_us) - int(width_offset), 1)
+
+
+def _width_register_us(
+    width_register: int,
+    *,
+    clock_hz: float = 100e6,
+    width_offset: int = 2,
+) -> float:
+    """Convert one nonzero width register to controller timing in microseconds."""
+    width = max(int(width_register), 0)
+    if width == 0:
+        return 0.0
+    return (width + int(width_offset)) / (float(clock_hz) / 1e6)
+
+
+def _amx_panel_badge_style(kind: str) -> str:
+    colors = {
+        "active": "#2f855a",
+        "warning": "#b7791f",
+        "error": "#c53030",
+        "off": "#4a5568",
+        "disconnected": "#718096",
+    }
+    background = colors.get(kind, colors["disconnected"])
+    return (
+        "QLabel {"
+        f" background-color: {background};"
+        " color: white;"
+        " border-radius: 3px;"
+        " padding: 2px 6px;"
+        " font-weight: 700;"
+        " }"
+    )
+
+
+def _amx_panel_card_style(kind: str) -> str:
+    colors = {
+        "active": ("#102a24", "#38a169", 2),
+        "warning": ("#302616", "#d69e2e", 2),
+        "error": ("#321b1b", "#e53e3e", 2),
+        "off": ("#172033", "#64748b", 1),
+        "disconnected": ("#111827", "#475569", 1),
+    }
+    background, border, width = colors.get(kind, colors["disconnected"])
+    return (
+        "QFrame#AMXPulserCard {"
+        f" background-color: {background};"
+        f" border: {width}px solid {border};"
+        " border-radius: 8px;"
+        " }"
+    )
 
 
 def _safe_device_attr(device: Any, name: str, default: Any) -> Any:
@@ -708,16 +812,18 @@ class AMXDevice(Device):
         super().finalizeInit()
         if hasattr(self, "advancedAction"):
             self.advancedAction.toolTipFalse = (
-                f"Show expert columns and channel layout actions for {self.name}."
+                f"Show the advanced channel table, equations, and layout actions for {self.name}."
             )
             self.advancedAction.toolTipTrue = (
-                f"Hide expert columns and channel layout actions for {self.name}."
+                f"Hide the advanced channel table and return to the {self.name} operator panel."
             )
             self.advancedAction.setToolTip(self.advancedAction.toolTipFalse)
         self._ensure_local_on_action()
         self._ensure_status_widgets()
         self._ensure_config_controls()
+        self._ensure_operator_panel()
         self._update_channel_column_visibility()
+        self._update_channel_table_visibility()
         self._sync_acquisition_controls()
 
     def getChannels(self) -> "list[AMXChannel]":
@@ -1323,6 +1429,7 @@ class AMXDevice(Device):
         summary = getattr(self, "statusSummaryLabel", None)
         self._sync_acquisition_controls()
         if badge is None or summary is None:
+            self._update_operator_panel()
             return
 
         badge_text = self._display_main_state()
@@ -1340,6 +1447,698 @@ class AMXDevice(Device):
             summary.setText(summary_text)
         if hasattr(summary, "setToolTip"):
             summary.setToolTip(tooltip)
+        self._update_operator_panel()
+
+    def _channel_by_pulser(self, pulser: int) -> "AMXChannel | None":
+        for channel in self.getChannels():
+            if channel.real and channel.pulser_number() == int(pulser):
+                return channel
+        return None
+
+    def _channel_parameter_value(
+        self,
+        channel: Any,
+        parameter_name: str,
+        attr_name: str,
+        default: Any,
+    ) -> Any:
+        getter = getattr(channel, "getParameterByName", None)
+        if callable(getter):
+            with contextlib.suppress(Exception):
+                parameter = getter(parameter_name)
+                if parameter is not None:
+                    return getattr(
+                        parameter,
+                        "value",
+                        getattr(channel, attr_name, default),
+                    )
+        return getattr(channel, attr_name, default)
+
+    def _set_channel_parameter(
+        self,
+        channel: Any,
+        parameter_name: str,
+        attr_name: str,
+        value: Any,
+        event_name: str,
+    ) -> None:
+        getter = getattr(channel, "getParameterByName", None)
+        parameter = None
+        if callable(getter):
+            with contextlib.suppress(Exception):
+                parameter = getter(parameter_name)
+        if parameter is not None:
+            setter = getattr(parameter, "setValueWithoutEvents", None)
+            if callable(setter):
+                setter(value)
+            else:
+                parameter.value = value
+        setattr(channel, attr_name, value)
+        event = getattr(channel, event_name, None)
+        if callable(event):
+            event()
+
+    def _maximum_width_us(self) -> float:
+        frequency_khz = _coerce_float(getattr(self, "frequency_khz", 2.0), 2.0)
+        if frequency_khz <= 0.0:
+            return 0.0
+        controller = getattr(self, "controller", None)
+        device = getattr(controller, "device", None) if controller is not None else None
+        clock_hz = _coerce_float(_safe_device_attr(device, "CLOCK", 100e6), 100e6)
+        width_offset = _coerce_int(
+            _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2),
+            2,
+        )
+        return max(
+            (1000.0 / frequency_khz) - width_offset / (clock_hz / 1e6),
+            0.0,
+        )
+
+    def _pulser_panel_snapshot(self, pulser: int) -> dict[str, Any]:
+        """Return one operator-card snapshot without touching hardware or Qt."""
+        channel = self._channel_by_pulser(pulser)
+        controller = getattr(self, "controller", None)
+        device = getattr(controller, "device", None) if controller is not None else None
+        connected = bool(
+            controller is not None
+            and device is not None
+            and getattr(controller, "initialized", False)
+        )
+        busy = bool(
+            getattr(self, "loading", False)
+            or getattr(controller, "initializing", False)
+            or getattr(controller, "transitioning", False)
+        )
+
+        requested_enabled = bool(
+            self._channel_parameter_value(
+                channel,
+                getattr(channel, "ENABLED", "Enabled"),
+                "enabled",
+                False,
+            )
+        ) if channel is not None else False
+        manual = bool(
+            self._channel_parameter_value(
+                channel,
+                getattr(channel, "ACTIVE", "Active"),
+                "active",
+                True,
+            )
+        ) if channel is not None else True
+        display = bool(
+            self._channel_parameter_value(
+                channel,
+                getattr(channel, "DISPLAY", "Display"),
+                "display",
+                False,
+            )
+        ) if channel is not None else False
+        requested_width_us = _coerce_float(
+            self._channel_parameter_value(
+                channel,
+                getattr(channel, "VALUE", "Value"),
+                "value",
+                0.0,
+            ) if channel is not None else 0.0,
+            0.0,
+        )
+
+        clock_hz = _coerce_float(_safe_device_attr(device, "CLOCK", 100e6), 100e6)
+        oscillator_offset = _coerce_int(
+            _safe_device_attr(device, "OSC_OFFSET", 2),
+            2,
+        )
+        width_offset = _coerce_int(
+            _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2),
+            2,
+        )
+        frequency_khz = _coerce_float(getattr(self, "frequency_khz", 2.0), 2.0)
+        expected_period = _expected_oscillator_period(
+            frequency_khz,
+            clock_hz=clock_hz,
+            oscillator_offset=oscillator_offset,
+        )
+        expected_width = _expected_width_register(
+            requested_enabled,
+            requested_width_us,
+            clock_hz=clock_hz,
+            width_offset=width_offset,
+        )
+        minimum_width_clamped = bool(
+            requested_enabled
+            and requested_width_us > 0.0
+            and round(requested_width_us * clock_hz / 1e6) - width_offset < 1
+        )
+
+        observed_period = (
+            _optional_nonnegative_int(getattr(controller, "oscillator_period", None))
+            if connected
+            else None
+        )
+        width_values = getattr(controller, "width_values", {}) or {}
+        observed_width = (
+            _optional_nonnegative_int(width_values.get(pulser))
+            if connected
+            else None
+        )
+        duty_values = getattr(controller, "values", {}) or {}
+        observed_duty = _coerce_float(duty_values.get(pulser, np.nan), np.nan)
+        delay_values = getattr(controller, "delay_values", {}) or {}
+        burst_values = getattr(controller, "burst_values", {}) or {}
+
+        hardware_on = bool(
+            connected
+            and _state_is_on(getattr(controller, "main_state", ""))
+            and str(getattr(controller, "device_enabled_state", "")).upper() == "ON"
+        )
+        display_state = self._display_main_state()
+        if channel is None:
+            status_text = "UNAVAILABLE"
+            status_kind = "error"
+        elif not connected:
+            status_text = "DISCONNECTED"
+            status_kind = "disconnected"
+        elif busy:
+            status_text = "BUSY"
+            status_kind = "warning"
+        elif _status_requires_operator_attention(display_state):
+            status_text = "DEVICE FAULT"
+            status_kind = "error"
+        elif not hardware_on:
+            normalized_state = display_state.lower()
+            status_text = (
+                "STANDBY"
+                if "standby" in normalized_state or "stby" in normalized_state
+                else "OFF"
+            )
+            status_kind = "warning" if status_text == "STANDBY" else "off"
+        elif observed_width is None:
+            status_text = "WAITING READBACK"
+            status_kind = "warning"
+        elif expected_width == 0:
+            if observed_width != 0:
+                status_text = "REGISTER MISMATCH"
+                status_kind = "warning"
+            elif requested_enabled:
+                status_text = "ZERO WIDTH"
+                status_kind = "warning"
+            else:
+                status_text = "OFF CONFIRMED"
+                status_kind = "off"
+        elif observed_period is None:
+            status_text = "WAITING READBACK"
+            status_kind = "warning"
+        elif observed_width == expected_width and observed_period == expected_period:
+            if minimum_width_clamped:
+                status_text = "MINIMUM WIDTH"
+                status_kind = "warning"
+            else:
+                status_text = "REGISTERS APPLIED"
+                status_kind = "active"
+        else:
+            status_text = "REGISTER MISMATCH"
+            status_kind = "warning"
+
+        period_us = 1000.0 / frequency_khz if frequency_khz > 0.0 else 0.0
+        requested_duty = (
+            requested_width_us / period_us * 100.0
+            if period_us > 0.0 and requested_width_us > 0.0
+            else 0.0
+        )
+        if observed_width is None:
+            width_register_text = "n/a"
+            duty_register_text = "n/a"
+        elif observed_width == 0:
+            width_register_text = "0 ticks (stopped)"
+            duty_register_text = "0.000 % (stopped)"
+        else:
+            observed_width_us = _width_register_us(
+                observed_width,
+                clock_hz=clock_hz,
+                width_offset=width_offset,
+            )
+            width_register_text = f"{observed_width_us:.3f} us ({observed_width} ticks)"
+            duty_register_text = (
+                f"{observed_duty:.3f} %"
+                if np.isfinite(observed_duty)
+                else "n/a"
+            )
+
+        delay = str(delay_values.get(pulser, "n/a") or "n/a") if connected else "n/a"
+        delay_text = f"{delay} us" if delay != "n/a" else delay
+        burst_text = str(burst_values.get(pulser, "n/a") or "n/a") if connected else "n/a"
+        expected_period_text = "n/a" if expected_period is None else str(expected_period)
+        observed_period_text = "n/a" if observed_period is None else str(observed_period)
+        observed_width_text = "n/a" if observed_width is None else str(observed_width)
+        channel_name = str(getattr(channel, "name", f"P{pulser}") or f"P{pulser}")
+        tooltip = "\n".join(
+            (
+                f"{channel_name} register verification",
+                f"Requested: {'enabled' if requested_enabled else 'disabled'}, "
+                f"width {requested_width_us:.3f} us",
+                f"Expected / observed width register: {expected_width} / {observed_width_text}",
+                f"Expected / observed oscillator period: {expected_period_text} / {observed_period_text}",
+                "Readbacks come from AMX controller registers; they do not prove the physical waveform.",
+            )
+        )
+        controls_enabled = channel is not None and not busy
+        return {
+            "title": f"Pulser P{pulser}",
+            "status_text": status_text,
+            "status_style": _amx_panel_badge_style(status_kind),
+            "card_style": _amx_panel_card_style(status_kind),
+            "requested_enabled": requested_enabled,
+            "enable_text": "ENABLED" if requested_enabled else "DISABLED",
+            "enable_style": (
+                _AMX_PANEL_ENABLE_ACTIVE_STYLE
+                if requested_enabled
+                else _AMX_PANEL_ENABLE_OFF_STYLE
+            ),
+            "requested_width_us": requested_width_us,
+            "maximum_width_us": self._maximum_width_us(),
+            "requested_duty_text": f"{requested_duty:.3f} %",
+            "mode_text": "MANUAL" if manual else "EQUATION",
+            "display_checked": display,
+            "controls_enabled": controls_enabled,
+            "width_enabled": controls_enabled and manual,
+            "display_enabled": channel is not None,
+            "width_register_text": width_register_text,
+            "duty_register_text": duty_register_text,
+            "delay_register_text": delay_text,
+            "burst_register_text": burst_text,
+            "tooltip": tooltip,
+        }
+
+    def _ensure_operator_panel(self) -> None:
+        """Add a fixed four-pulser panel while retaining the advanced table."""
+        if hasattr(self, "amxPanel"):
+            self._update_operator_panel()
+            return
+        if not callable(getattr(self, "addContentWidget", None)):
+            return
+        try:
+            from PyQt6.QtWidgets import (
+                QAbstractSpinBox,
+                QCheckBox,
+                QDoubleSpinBox,
+                QFrame,
+                QGridLayout,
+                QHBoxLayout,
+                QLabel,
+                QPushButton,
+                QSizePolicy,
+                QVBoxLayout,
+                QWidget,
+            )
+        except ImportError:
+            return
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(12)
+        title = QLabel("AMX pulser timing")
+        title.setStyleSheet(_AMX_PANEL_TITLE_STYLE)
+        self.amxPanelSignalValue = QLabel("Signal: n/a")
+        self.amxPanelSignalValue.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+        self.amxPanelFrequencyValue = QLabel("Frequency request / register: n/a")
+        self.amxPanelFrequencyValue.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.amxPanelSignalValue)
+        header.addWidget(self.amxPanelFrequencyValue)
+        layout.addLayout(header)
+
+        notice = QLabel(
+            "Controller-register verification only; this panel does not measure the physical waveform. "
+            "Use Advanced for equations and channel metadata."
+        )
+        notice.setWordWrap(True)
+        notice.setStyleSheet(_AMX_PANEL_NOTICE_STYLE)
+        layout.addWidget(notice)
+
+        cards_row = QWidget()
+        cards_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        cards_row_layout = QHBoxLayout(cards_row)
+        cards_row_layout.setContentsMargins(0, 0, 0, 0)
+        cards_row_layout.addStretch(1)
+        cards_host = QWidget()
+        cards_grid = QGridLayout(cards_host)
+        cards_grid.setContentsMargins(0, 0, 0, 0)
+        cards_grid.setHorizontalSpacing(12)
+        cards_grid.setVerticalSpacing(12)
+        cards_row_layout.addWidget(cards_host)
+        cards_row_layout.addStretch(1)
+        layout.addWidget(cards_row)
+        layout.addStretch(1)
+
+        self.amxPanelCards: dict[int, dict[str, Any]] = {}
+        for index, pulser in enumerate(_AMX_PULSER_IDS):
+            card = QFrame()
+            card.setObjectName("AMXPulserCard")
+            card.setMinimumWidth(_AMX_PANEL_CARD_MIN_WIDTH)
+            card.setMaximumWidth(_AMX_PANEL_CARD_MAX_WIDTH)
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 12, 12, 12)
+            card_layout.setSpacing(8)
+
+            card_header = QHBoxLayout()
+            card_header.setContentsMargins(0, 0, 0, 0)
+            card_title = QLabel(f"Pulser P{pulser}")
+            card_title.setStyleSheet(_AMX_PANEL_TITLE_STYLE)
+            status_badge = QLabel("n/a")
+            card_header.addWidget(card_title)
+            card_header.addStretch(1)
+            card_header.addWidget(status_badge)
+            card_layout.addLayout(card_header)
+
+            requested_header = QLabel("REQUESTED")
+            requested_header.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            card_layout.addWidget(requested_header)
+            requested_grid = QGridLayout()
+            requested_grid.setContentsMargins(0, 0, 0, 0)
+            requested_grid.setHorizontalSpacing(10)
+            requested_grid.setVerticalSpacing(6)
+
+            enable_name = QLabel("On when AMX active")
+            enable_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            enable_button = QPushButton("DISABLED")
+            enable_button.setCheckable(True)
+            enable_button.setMinimumWidth(90)
+            width_name = QLabel("Width")
+            width_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            width_widget = QDoubleSpinBox()
+            width_widget.setRange(0.0, 1_000_000.0)
+            width_widget.setDecimals(3)
+            width_widget.setSingleStep(0.01)
+            width_widget.setSuffix(" us")
+            width_widget.setAccelerated(True)
+            width_widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.PlusMinus)
+            width_widget.setStyleSheet(_AMX_FREQUENCY_SPINBOX_STYLE)
+            _disable_spinbox_wheel(width_widget)
+            duty_name = QLabel("Duty request")
+            duty_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            duty_value = QLabel("n/a")
+            duty_value.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+            mode_name = QLabel("Width source")
+            mode_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            mode_value = QLabel("n/a")
+            mode_value.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+            display_box = QCheckBox("Display in plots")
+
+            requested_grid.addWidget(enable_name, 0, 0)
+            requested_grid.addWidget(enable_button, 0, 1)
+            requested_grid.addWidget(width_name, 1, 0)
+            requested_grid.addWidget(width_widget, 1, 1)
+            requested_grid.addWidget(duty_name, 2, 0)
+            requested_grid.addWidget(duty_value, 2, 1)
+            requested_grid.addWidget(mode_name, 3, 0)
+            requested_grid.addWidget(mode_value, 3, 1)
+            requested_grid.addWidget(display_box, 4, 0, 1, 2)
+            card_layout.addLayout(requested_grid)
+
+            register_header = QLabel("CONTROLLER REGISTERS")
+            register_header.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            card_layout.addWidget(register_header)
+            register_grid = QGridLayout()
+            register_grid.setContentsMargins(0, 0, 0, 0)
+            register_grid.setHorizontalSpacing(10)
+            register_grid.setVerticalSpacing(6)
+            register_values: dict[str, Any] = {}
+            for row, (label, key) in enumerate(
+                (
+                    ("Width", "width_register"),
+                    ("Duty", "duty_register"),
+                    ("Delay", "delay_register"),
+                    ("Burst", "burst_register"),
+                )
+            ):
+                name_label = QLabel(label)
+                name_label.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+                value_label = QLabel("n/a")
+                value_label.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+                register_grid.addWidget(name_label, row, 0)
+                register_grid.addWidget(value_label, row, 1)
+                register_values[key] = value_label
+            card_layout.addLayout(register_grid)
+
+            row = index // _AMX_PANEL_GRID_COLUMNS
+            column = index % _AMX_PANEL_GRID_COLUMNS
+            cards_grid.addWidget(card, row, column)
+            self.amxPanelCards[pulser] = {
+                "card": card,
+                "title": card_title,
+                "status": status_badge,
+                "enable": enable_button,
+                "width": width_widget,
+                "duty_request": duty_value,
+                "mode": mode_value,
+                "display": display_box,
+                **register_values,
+            }
+            enable_button.toggled.connect(
+                lambda checked, pulser=pulser: self._panel_enabled_toggled(
+                    pulser,
+                    checked,
+                )
+            )
+            width_widget.valueChanged.connect(
+                lambda value, pulser=pulser: self._panel_width_changed(
+                    pulser,
+                    value,
+                )
+            )
+            display_box.toggled.connect(
+                lambda checked, pulser=pulser: self._panel_display_toggled(
+                    pulser,
+                    checked,
+                )
+            )
+
+        self.amxPanel = panel
+        self.addContentWidget(panel)
+        self._update_channel_table_visibility()
+        self._update_operator_panel()
+
+    def _panel_enabled_toggled(self, pulser: int, checked: bool) -> None:
+        if getattr(self, "loading", False):
+            return
+        channel = self._channel_by_pulser(pulser)
+        controller = getattr(self, "controller", None)
+        if channel is None or bool(
+            getattr(controller, "initializing", False)
+            or getattr(controller, "transitioning", False)
+        ):
+            self._update_operator_panel()
+            return
+        self._set_channel_parameter(
+            channel,
+            getattr(channel, "ENABLED", "Enabled"),
+            "enabled",
+            bool(checked),
+            "enabledChanged",
+        )
+        self._update_operator_panel()
+
+    def _panel_width_changed(self, pulser: int, value: float) -> None:
+        if getattr(self, "loading", False):
+            return
+        channel = self._channel_by_pulser(pulser)
+        controller = getattr(self, "controller", None)
+        if (
+            channel is None
+            or not bool(
+                self._channel_parameter_value(
+                    channel,
+                    getattr(channel, "ACTIVE", "Active"),
+                    "active",
+                    True,
+                )
+            )
+            or bool(
+                getattr(controller, "initializing", False)
+                or getattr(controller, "transitioning", False)
+            )
+        ):
+            self._update_operator_panel()
+            return
+        self._set_channel_parameter(
+            channel,
+            getattr(channel, "VALUE", "Value"),
+            "value",
+            float(value),
+            "valueChanged",
+        )
+        self._update_operator_panel()
+
+    def _panel_display_toggled(self, pulser: int, checked: bool) -> None:
+        channel = self._channel_by_pulser(pulser)
+        if channel is None:
+            self._update_operator_panel()
+            return
+        self._set_channel_parameter(
+            channel,
+            getattr(channel, "DISPLAY", "Display"),
+            "display",
+            bool(checked),
+            "displayChanged",
+        )
+        self._update_operator_panel()
+
+    def _set_panel_checked(
+        self,
+        widget: Any,
+        *,
+        checked: bool,
+        enabled: bool,
+    ) -> None:
+        if widget is None:
+            return
+        blocker = getattr(widget, "blockSignals", None)
+        if callable(blocker):
+            blocker(True)
+        try:
+            setter = getattr(widget, "setChecked", None)
+            if callable(setter):
+                setter(bool(checked))
+            if hasattr(widget, "setEnabled"):
+                widget.setEnabled(bool(enabled))
+        finally:
+            if callable(blocker):
+                blocker(False)
+
+    def _set_panel_width(
+        self,
+        widget: Any,
+        *,
+        value: float,
+        maximum: float,
+        enabled: bool,
+    ) -> None:
+        if widget is None:
+            return
+        blocker = getattr(widget, "blockSignals", None)
+        if callable(blocker):
+            blocker(True)
+        try:
+            if hasattr(widget, "setMaximum"):
+                widget.setMaximum(max(float(maximum), 0.0))
+            if hasattr(widget, "setValue"):
+                widget.setValue(max(float(value), 0.0))
+            if hasattr(widget, "setEnabled"):
+                widget.setEnabled(bool(enabled))
+        finally:
+            if callable(blocker):
+                blocker(False)
+
+    def _update_operator_panel(self) -> None:
+        cards = getattr(self, "amxPanelCards", None)
+        if not isinstance(cards, dict):
+            return
+        controller = getattr(self, "controller", None)
+        connected = bool(
+            controller is not None
+            and getattr(controller, "device", None) is not None
+            and getattr(controller, "initialized", False)
+        )
+        loaded_config = str(getattr(self, "loaded_config_text", "") or "n/a")
+        signal_label = getattr(self, "amxPanelSignalValue", None)
+        if signal_label is not None:
+            signal_label.setText(f"Signal: {_compact_status_text(loaded_config)}")
+            signal_label.setToolTip(f"Controller config: {loaded_config}")
+
+        frequency_request = _coerce_float(getattr(self, "frequency_khz", 2.0), 2.0)
+        frequency_readback = _coerce_float(
+            getattr(controller, "frequency_readback_khz", np.nan),
+            np.nan,
+        )
+        frequency_label = getattr(self, "amxPanelFrequencyValue", None)
+        if frequency_label is not None:
+            frequency_label.setText(
+                f"Frequency request / register: {frequency_request:.3f} / "
+                + (
+                    f"{frequency_readback:.3f} kHz"
+                    if connected and np.isfinite(frequency_readback)
+                    else "n/a"
+                )
+            )
+            frequency_label.setToolTip(
+                "Requested oscillator frequency and frequency calculated from the "
+                "controller period register."
+            )
+
+        for pulser, widgets in cards.items():
+            snapshot = self._pulser_panel_snapshot(pulser)
+            for key, text in (
+                ("title", snapshot["title"]),
+                ("status", snapshot["status_text"]),
+                ("duty_request", snapshot["requested_duty_text"]),
+                ("mode", snapshot["mode_text"]),
+                ("width_register", snapshot["width_register_text"]),
+                ("duty_register", snapshot["duty_register_text"]),
+                ("delay_register", snapshot["delay_register_text"]),
+                ("burst_register", snapshot["burst_register_text"]),
+            ):
+                widget = widgets.get(key)
+                if widget is not None and hasattr(widget, "setText"):
+                    widget.setText(str(text))
+            card = widgets.get("card")
+            if card is not None:
+                card.setStyleSheet(snapshot["card_style"])
+                card.setToolTip(snapshot["tooltip"])
+            status = widgets.get("status")
+            if status is not None:
+                status.setStyleSheet(snapshot["status_style"])
+            enable = widgets.get("enable")
+            self._set_panel_checked(
+                enable,
+                checked=bool(snapshot["requested_enabled"]),
+                enabled=bool(snapshot["controls_enabled"]),
+            )
+            if enable is not None:
+                enable.setText(snapshot["enable_text"])
+                enable.setStyleSheet(snapshot["enable_style"])
+                enable.setToolTip(
+                    "Stage whether this pulser width is applied when the AMX global state is ON."
+                )
+            self._set_panel_width(
+                widgets.get("width"),
+                value=float(snapshot["requested_width_us"]),
+                maximum=float(snapshot["maximum_width_us"]),
+                enabled=bool(snapshot["width_enabled"]),
+            )
+            width_widget = widgets.get("width")
+            if width_widget is not None:
+                width_widget.setToolTip(
+                    "Requested pulse width. In EQUATION mode this value is controlled "
+                    "by the advanced channel equation."
+                )
+            self._set_panel_checked(
+                widgets.get("display"),
+                checked=bool(snapshot["display_checked"]),
+                enabled=bool(snapshot["display_enabled"]),
+            )
+            for widget in widgets.values():
+                if widget is not None and hasattr(widget, "setToolTip") and widget is not enable:
+                    if widget is not width_widget:
+                        widget.setToolTip(snapshot["tooltip"])
+
+    def _update_channel_table_visibility(self) -> None:
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+        advanced_action = getattr(self, "advancedAction", None)
+        advanced = bool(getattr(advanced_action, "state", False))
+        show_table = not hasattr(self, "amxPanel") or advanced
+        setter = getattr(tree, "setVisible", None)
+        if callable(setter):
+            setter(show_table)
 
     def _apply_channel_items(self, items: list[dict[str, Any]]) -> None:
         update_channel_config = getattr(self, "updateChannelConfig", None)
@@ -1396,6 +2195,7 @@ class AMXDevice(Device):
             self.loading = False
         if callable(export_config):
             export_config(useDefaultFile=True)
+        self._update_operator_panel()
 
     def _set_channel_headers_from_template(self) -> None:
         if self.tree is None:
@@ -1498,9 +2298,13 @@ class AMXDevice(Device):
                 if self.tree is not None:
                     self.tree.setUpdatesEnabled(True)
                 self.loading = False
+            self._update_operator_panel()
+            self._update_channel_table_visibility()
             return
 
         super().loadConfiguration(file=file, useDefaultFile=False, append=append)
+        self._update_operator_panel()
+        self._update_channel_table_visibility()
 
     def toggleAdvanced(self, advanced: "bool | None" = False) -> None:
         if self.channels:
@@ -1508,6 +2312,8 @@ class AMXDevice(Device):
             for channel in self.getChannels():
                 channel.setHidden(False)
             self._update_channel_column_visibility()
+            self._update_channel_table_visibility()
+            self._update_operator_panel()
             return
 
         if advanced is not None:
@@ -1528,6 +2334,7 @@ class AMXDevice(Device):
         for index, item in enumerate(self._default_channel_template().values()):
             if item.get(_PARAMETER_ADVANCED_KEY, False):
                 self.tree.setColumnHidden(index, not self.advancedAction.state)
+        self._update_channel_table_visibility()
 
     def estimateStorage(self) -> None:
         if self.channels:
@@ -1654,6 +2461,7 @@ class AMXDevice(Device):
 
     def frequencyChanged(self, *, debounce: bool = False) -> None:
         self._update_width_bounds()
+        self._update_operator_panel()
         controller = getattr(self, "controller", None)
         if (
             controller is None
@@ -1735,6 +2543,9 @@ class AMXDevice(Device):
             setattr(param, _PARAMETER_MAX_KEY, max_width_us)
             current = _coerce_float(getattr(channel, "value", 0.0), 0.0)
             if current > max_width_us:
+                setter = getattr(param, "setValueWithoutEvents", None)
+                if callable(setter):
+                    setter(max_width_us)
                 channel.value = max_width_us
             channel._update_duty_label()
 
@@ -2211,6 +3022,13 @@ class AMXChannel(Channel):
         update_display = getattr(super(), "updateDisplay", None)
         if callable(update_display):
             update_display()
+        self._refresh_operator_panel()
+
+    def activeChanged(self) -> None:
+        base_handler = getattr(super(), "activeChanged", None)
+        if callable(base_handler):
+            base_handler()
+        self._refresh_operator_panel()
 
     def updateColor(self):
         """Keep the Display checkbox centered in its column."""
@@ -2262,6 +3080,7 @@ class AMXChannel(Channel):
         self._sync_monitor_feedback()
         if not getattr(self.channelParent, "loading", False):
             self._schedule_value_apply()
+        self._refresh_operator_panel()
 
     def enabledChanged(self) -> None:
         base_handler = getattr(super(), "enabledChanged", None)
@@ -2273,12 +3092,26 @@ class AMXChannel(Channel):
         self._sync_monitor_feedback()
         self._cancel_value_apply()
         self._apply_value_now()
+        self._refresh_operator_panel()
+
+    def _refresh_operator_panel(self) -> None:
+        refresh = getattr(self.channelParent, "_update_operator_panel", None)
+        if callable(refresh):
+            refresh()
 
     def _apply_value_now(self) -> None:
         apply_value = getattr(self, "applyValue", None)
         if not callable(apply_value) or getattr(self.channelParent, "loading", False):
             return
         controller = getattr(getattr(self, "channelParent", None), "controller", None)
+        is_on = getattr(getattr(self, "channelParent", None), "isOn", None)
+        if (
+            controller is None
+            or not getattr(controller, "initialized", False)
+            or not callable(is_on)
+            or not bool(is_on())
+        ):
+            return
         apply_thread = getattr(controller, "applyValueFromThread", None)
         if callable(apply_thread):
             apply_thread(self, parallel=True)
@@ -2423,6 +3256,8 @@ class AMXController(DeviceController):
         self.width_values: dict[int, str] = {}
         self.delay_values: dict[int, str] = {}
         self.burst_values: dict[int, str] = {}
+        self.oscillator_period: int | None = None
+        self.frequency_readback_khz = np.nan
 
     def initializeValues(self, reset: bool = False) -> None:
         if getattr(self, "values", None) is None or reset:
@@ -2446,6 +3281,8 @@ class AMXController(DeviceController):
                 for channel in self.controllerParent.getChannels()
                 if channel.real
             }
+            self.oscillator_period = None
+            self.frequency_readback_khz = np.nan
 
     def runInitialization(self) -> None:
         self.initialized = False
@@ -3228,7 +4065,20 @@ class AMXController(DeviceController):
         width_offset = _coerce_int(_safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2), 2)
         delay_offset = _coerce_int(_safe_device_attr(device, "PULSER_DELAY_OFFSET", 3), 3)
         total_ticks = oscillator_period + osc_offset
-        ticks_per_us = _safe_device_attr(device, "CLOCK", 100e6) / 1e6
+        clock_hz = _coerce_float(_safe_device_attr(device, "CLOCK", 100e6), 100e6)
+        ticks_per_us = clock_hz / 1e6
+        self.oscillator_period = oscillator_period
+        snapshot_frequency_hz = _coerce_float(
+            snapshot.get("oscillator", {}).get("frequency_hz"),
+            np.nan,
+        )
+        self.frequency_readback_khz = (
+            snapshot_frequency_hz / 1000.0
+            if np.isfinite(snapshot_frequency_hz)
+            else clock_hz / total_ticks / 1000.0
+            if total_ticks > 0
+            else np.nan
+        )
 
         new_values: dict[int, float] = {}
         new_width_ticks: dict[int, str] = {}

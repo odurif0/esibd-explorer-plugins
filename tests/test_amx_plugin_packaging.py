@@ -610,14 +610,15 @@ def test_finalize_init_relabels_advanced_action_for_amx():
             module.Device.finalizeInit = original_finalize_init
 
     assert device.advancedAction.toolTipFalse == (
-        "Show expert columns and channel layout actions for AMX."
+        "Show the advanced channel table, equations, and layout actions for AMX."
     )
     assert device.advancedAction.toolTipTrue == (
-        "Hide expert columns and channel layout actions for AMX."
+        "Hide the advanced channel table and return to the AMX operator panel."
     )
     assert device.advancedAction.tooltips == [
-        "Show expert columns and channel layout actions for AMX."
+        "Show the advanced channel table, equations, and layout actions for AMX."
     ]
+    assert not hasattr(device, "amxPanel")
 
 
 def test_finalize_init_adds_local_on_action_and_set_on_keeps_it_synced():

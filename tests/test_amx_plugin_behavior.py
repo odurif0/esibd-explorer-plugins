@@ -307,6 +307,405 @@ def test_controller_read_numbers_maps_pulser_snapshot():
     assert controller.burst_values == {0: "3", 1: "n/a"}
     assert parent.main_state == "ST_ON"
     assert parent.device_enabled_state == "ON"
+    assert controller.oscillator_period == 99998
+    assert controller.frequency_readback_khz == pytest.approx(1.0)
+
+
+def test_operator_panel_register_helpers_match_driver_encoding():
+    module = _load_module()
+
+    assert module._expected_oscillator_period(1.0) == 99998
+    assert module._expected_width_register(True, 500.0) == 49998
+    assert module._expected_width_register(False, 500.0) == 0
+    assert module._expected_width_register(True, 0.0) == 0
+    assert module._width_register_us(49998) == pytest.approx(500.0)
+    assert module._width_register_us(0) == 0.0
+
+
+def test_operator_panel_expected_registers_match_real_write_paths():
+    module = _load_module()
+    width_writes = []
+
+    class FakeDevice:
+        CLOCK = 100e6
+        OSC_OFFSET = 2
+        PULSER_WIDTH_OFFSET = 2
+
+        def set_pulser_width_ticks(self, pulser, width, timeout_s):
+            width_writes.append((pulser, width, timeout_s))
+
+    controller = module.AMXController(types.SimpleNamespace())
+    controller.device = FakeDevice()
+    controller.print = lambda *args, **kwargs: None
+    for index, width_us in enumerate((0.001, 0.005, 0.025, 0.03, 0.035, 1.2345, 500.0)):
+        channel = types.SimpleNamespace(
+            real=True,
+            enabled=True,
+            value=width_us,
+            pulser_number=lambda index=index: index,
+        )
+        controller._apply_channel_timing(channel, timeout_s=2.0)
+        assert width_writes[-1] == (
+            index,
+            module._expected_width_register(True, width_us),
+            2.0,
+        )
+
+    driver_class = module._get_amx_driver_class()
+    driver = object.__new__(driver_class._PROCESS_CONTROLLER_CLASS)
+    period_writes = []
+    driver._require_connected = lambda: None
+    driver._resolve_io_timeout = lambda timeout_s: timeout_s
+    driver._raise_on_status = lambda *args, **kwargs: None
+    driver._call_locked_with_timeout = (
+        lambda *_args, **_kwargs: period_writes.append(_args[-1]) or 0
+    )
+    for frequency_khz in (0.5, 1.0, 1.2345, 1000.0):
+        driver.set_frequency_khz(frequency_khz, timeout_s=2.0)
+        assert period_writes[-1] == module._expected_oscillator_period(frequency_khz)
+
+
+def _operator_panel_fixture(
+    module,
+    *,
+    connected=True,
+    main_state="ST_ON",
+    device_enabled_state="ON",
+    requested_enabled=True,
+    requested_width_us=500.0,
+    observed_width=49998,
+    observed_period=99998,
+    manual=True,
+):
+    class FakeParameter:
+        def __init__(self, value):
+            self.value = value
+
+    parameters = {
+        "Enabled": FakeParameter(requested_enabled),
+        "Value": FakeParameter(requested_width_us),
+        "Active": FakeParameter(manual),
+        "Display": FakeParameter(True),
+    }
+    channel = types.SimpleNamespace(
+        id=0,
+        name="AMX_P0",
+        real=True,
+        enabled=requested_enabled,
+        value=requested_width_us,
+        active=manual,
+        display=True,
+        ENABLED="Enabled",
+        VALUE="Value",
+        ACTIVE="Active",
+        DISPLAY="Display",
+        pulser_number=lambda: 0,
+        getParameterByName=lambda name: parameters.get(name),
+    )
+    controller = types.SimpleNamespace(
+        device=(
+            types.SimpleNamespace(
+                CLOCK=100e6,
+                OSC_OFFSET=2,
+                PULSER_WIDTH_OFFSET=2,
+            )
+            if connected
+            else None
+        ),
+        initialized=connected,
+        initializing=False,
+        transitioning=False,
+        main_state=main_state,
+        device_enabled_state=device_enabled_state,
+        oscillator_period=observed_period,
+        width_values={0: str(observed_width)} if observed_width is not None else {},
+        values={0: 50.0},
+        delay_values={0: "0.03"},
+        burst_values={0: "3"},
+        device_state_summary="OK",
+    )
+    device = object.__new__(module.AMXDevice)
+    device.channels = [channel]
+    device.getChannels = lambda: device.channels
+    device.controller = controller
+    device.frequency_khz = 1.0
+    device.loading = False
+    device.main_state = main_state if connected else "Disconnected"
+    device.device_enabled_state = device_enabled_state if connected else "OFF"
+    device.isOn = lambda: connected and main_state == "ST_ON"
+    return device, channel, parameters
+
+
+def test_operator_panel_snapshot_separates_request_from_register_readback():
+    module = _load_module()
+    device, _channel, _parameters = _operator_panel_fixture(module)
+
+    snapshot = module.AMXDevice._pulser_panel_snapshot(device, 0)
+
+    assert snapshot["status_text"] == "REGISTERS APPLIED"
+    assert snapshot["requested_enabled"] is True
+    assert snapshot["requested_width_us"] == 500.0
+    assert snapshot["requested_duty_text"] == "50.000 %"
+    assert snapshot["width_register_text"] == "500.000 us (49998 ticks)"
+    assert snapshot["duty_register_text"] == "50.000 %"
+    assert snapshot["delay_register_text"] == "0.03 us"
+    assert snapshot["burst_register_text"] == "3"
+    assert "do not prove the physical waveform" in snapshot["tooltip"]
+
+
+def test_operator_panel_snapshot_does_not_claim_active_while_standby_or_disconnected():
+    module = _load_module()
+    standby, _channel, _parameters = _operator_panel_fixture(
+        module,
+        main_state="ST_STBY",
+        device_enabled_state="OFF",
+    )
+    standby.isOn = lambda: False
+
+    standby_snapshot = module.AMXDevice._pulser_panel_snapshot(standby, 0)
+
+    assert standby_snapshot["status_text"] == "STANDBY"
+    assert standby_snapshot["requested_enabled"] is True
+    assert standby_snapshot["width_register_text"] == "500.000 us (49998 ticks)"
+
+    disconnected, _channel, _parameters = _operator_panel_fixture(
+        module,
+        connected=False,
+        observed_width=None,
+        observed_period=None,
+    )
+    disconnected_snapshot = module.AMXDevice._pulser_panel_snapshot(disconnected, 0)
+
+    assert disconnected_snapshot["status_text"] == "DISCONNECTED"
+    assert disconnected_snapshot["requested_enabled"] is True
+    assert disconnected_snapshot["width_register_text"] == "n/a"
+    assert disconnected_snapshot["controls_enabled"] is True
+
+
+def test_operator_panel_snapshot_reports_zero_width_off_and_register_mismatch():
+    module = _load_module()
+    zero_width, _channel, _parameters = _operator_panel_fixture(
+        module,
+        requested_enabled=True,
+        requested_width_us=0.0,
+        observed_width=0,
+    )
+    assert (
+        module.AMXDevice._pulser_panel_snapshot(zero_width, 0)["status_text"]
+        == "ZERO WIDTH"
+    )
+
+    disabled, _channel, _parameters = _operator_panel_fixture(
+        module,
+        requested_enabled=False,
+        observed_width=0,
+    )
+    assert (
+        module.AMXDevice._pulser_panel_snapshot(disabled, 0)["status_text"]
+        == "OFF CONFIRMED"
+    )
+
+    mismatch, _channel, _parameters = _operator_panel_fixture(
+        module,
+        observed_width=24998,
+    )
+    assert (
+        module.AMXDevice._pulser_panel_snapshot(mismatch, 0)["status_text"]
+        == "REGISTER MISMATCH"
+    )
+
+    minimum, _channel, _parameters = _operator_panel_fixture(
+        module,
+        requested_enabled=True,
+        requested_width_us=0.005,
+        observed_width=1,
+    )
+    minimum_snapshot = module.AMXDevice._pulser_panel_snapshot(minimum, 0)
+    assert minimum_snapshot["status_text"] == "MINIMUM WIDTH"
+    assert "#b7791f" in minimum_snapshot["status_style"]
+
+
+def test_operator_panel_green_requires_global_enable_and_complete_readback():
+    module = _load_module()
+    disabled, _channel, _parameters = _operator_panel_fixture(
+        module,
+        main_state="ST_ON",
+        device_enabled_state="OFF",
+    )
+    assert module.AMXDevice._pulser_panel_snapshot(disabled, 0)["status_text"] == "OFF"
+
+    waiting, _channel, _parameters = _operator_panel_fixture(
+        module,
+        observed_width=None,
+    )
+    assert (
+        module.AMXDevice._pulser_panel_snapshot(waiting, 0)["status_text"]
+        == "WAITING READBACK"
+    )
+
+    busy, _channel, _parameters = _operator_panel_fixture(module)
+    busy.controller.transitioning = True
+    busy_snapshot = module.AMXDevice._pulser_panel_snapshot(busy, 0)
+    assert busy_snapshot["status_text"] == "BUSY"
+    assert busy_snapshot["controls_enabled"] is False
+
+
+def test_operator_panel_routes_edits_through_existing_channel_events():
+    module = _load_module()
+    device, channel, parameters = _operator_panel_fixture(module)
+    calls = []
+
+    class EventParameter:
+        def __init__(self, value):
+            self.value = value
+
+        def setValueWithoutEvents(self, value):
+            self.value = value
+            calls.append(("parameter", value))
+
+    parameters.update(
+        {
+            "Enabled": EventParameter(True),
+            "Value": EventParameter(500.0),
+            "Display": EventParameter(True),
+        }
+    )
+    channel.enabledChanged = lambda: calls.append("enabled")
+    channel.valueChanged = lambda: calls.append("value")
+    channel.displayChanged = lambda: calls.append("display")
+    device._update_operator_panel = lambda: calls.append("panel")
+
+    module.AMXDevice._panel_enabled_toggled(device, 0, False)
+    module.AMXDevice._panel_width_changed(device, 0, 250.0)
+    module.AMXDevice._panel_display_toggled(device, 0, False)
+
+    assert channel.enabled is False
+    assert channel.value == 250.0
+    assert channel.display is False
+    assert calls == [
+        ("parameter", False),
+        "enabled",
+        "panel",
+        ("parameter", 250.0),
+        "value",
+        "panel",
+        ("parameter", False),
+        "display",
+        "panel",
+    ]
+
+
+def test_operator_panel_refresh_blocks_control_signals():
+    module = _load_module()
+
+    class FakeWidget:
+        def __init__(self):
+            self.blocked = False
+            self.emissions = 0
+
+        def blockSignals(self, blocked):
+            self.blocked = blocked
+
+        def setChecked(self, _checked):
+            if not self.blocked:
+                self.emissions += 1
+
+        def setValue(self, _value):
+            if not self.blocked:
+                self.emissions += 1
+
+        def setMaximum(self, _maximum):
+            pass
+
+        def setEnabled(self, _enabled):
+            pass
+
+        def setText(self, _text):
+            pass
+
+        def setStyleSheet(self, _style):
+            pass
+
+        def setToolTip(self, _tooltip):
+            pass
+
+    widgets = {
+        key: FakeWidget()
+        for key in (
+            "card",
+            "title",
+            "status",
+            "enable",
+            "width",
+            "duty_request",
+            "mode",
+            "display",
+            "width_register",
+            "duty_register",
+            "delay_register",
+            "burst_register",
+        )
+    }
+    snapshot = {
+        "title": "Pulser P0",
+        "status_text": "REGISTERS APPLIED",
+        "status_style": "status",
+        "card_style": "card",
+        "requested_enabled": True,
+        "enable_text": "ENABLED",
+        "enable_style": "enable",
+        "requested_width_us": 500.0,
+        "maximum_width_us": 999.98,
+        "requested_duty_text": "50.000 %",
+        "mode_text": "MANUAL",
+        "display_checked": True,
+        "controls_enabled": True,
+        "width_enabled": True,
+        "display_enabled": True,
+        "width_register_text": "500.000 us (49998 ticks)",
+        "duty_register_text": "50.000 %",
+        "delay_register_text": "0.03 us",
+        "burst_register_text": "3",
+        "tooltip": "register tooltip",
+    }
+    device = object.__new__(module.AMXDevice)
+    device.amxPanelCards = {0: widgets}
+    device.amxPanelSignalValue = FakeWidget()
+    device.amxPanelFrequencyValue = FakeWidget()
+    device.loaded_config_text = "9:Operate"
+    device.frequency_khz = 1.0
+    device.controller = types.SimpleNamespace(
+        device=object(),
+        initialized=True,
+        frequency_readback_khz=1.0,
+    )
+    device._pulser_panel_snapshot = lambda _pulser: snapshot
+
+    module.AMXDevice._update_operator_panel(device)
+
+    assert widgets["enable"].emissions == 0
+    assert widgets["width"].emissions == 0
+    assert widgets["display"].emissions == 0
+
+
+def test_operator_panel_keeps_equation_width_read_only_and_table_available():
+    module = _load_module()
+    device, channel, _parameters = _operator_panel_fixture(module, manual=False)
+    snapshot = module.AMXDevice._pulser_panel_snapshot(device, 0)
+
+    assert snapshot["mode_text"] == "EQUATION"
+    assert snapshot["width_enabled"] is False
+
+    visibility = []
+    device.tree = types.SimpleNamespace(setVisible=visibility.append)
+    device.amxPanel = object()
+    device.advancedAction = types.SimpleNamespace(state=False)
+    module.AMXDevice._update_channel_table_visibility(device)
+    device.advancedAction.state = True
+    module.AMXDevice._update_channel_table_visibility(device)
+
+    assert visibility == [False, True]
+    assert channel.active is False
 
 
 def test_controller_exposes_available_amx_configs_in_gui_state():
@@ -1421,6 +1820,39 @@ def test_frequency_widget_change_is_debounced_until_timer_fires():
     assert calls == ["status", ("apply_global", True)]
 
 
+def test_frequency_change_clamps_channel_and_parameter_width_together():
+    module = _load_module()
+    duty_updates = []
+
+    class FakeParameter:
+        def __init__(self):
+            self.value = 500.0
+
+        def setValueWithoutEvents(self, value):
+            self.value = value
+
+    parameter = FakeParameter()
+    channel = types.SimpleNamespace(
+        VALUE="Value",
+        value=500.0,
+        getParameterByName=lambda _name: parameter,
+        _update_duty_label=lambda: duty_updates.append(True),
+    )
+    device = object.__new__(module.AMXDevice)
+    device.frequency_khz = 4.0
+    device.controller = types.SimpleNamespace(
+        device=types.SimpleNamespace(CLOCK=100e6, PULSER_WIDTH_OFFSET=2)
+    )
+    device.getChannels = lambda: [channel]
+
+    module.AMXDevice._update_width_bounds(device)
+
+    assert channel.value == pytest.approx(249.98)
+    assert parameter.value == pytest.approx(249.98)
+    assert getattr(parameter, module._PARAMETER_MAX_KEY) == pytest.approx(249.98)
+    assert duty_updates == [True]
+
+
 def test_amx_channel_value_change_is_debounced_until_timer_fires():
     module = _load_module()
     calls = []
@@ -1439,10 +1871,12 @@ def test_amx_channel_value_change_is_debounced_until_timer_fires():
     channel.channelParent = types.SimpleNamespace(
         loading=False,
         controller=types.SimpleNamespace(
+            initialized=True,
             applyValueFromThread=lambda channel, parallel=True: calls.append(
                 ("apply_value", channel.pulser_number(), parallel)
             )
         ),
+        isOn=lambda: True,
     )
     channel.id = 2
     channel._valueApplyTimer = FakeTimer()
@@ -1458,6 +1892,25 @@ def test_amx_channel_value_change_is_debounced_until_timer_fires():
     module.AMXChannel._apply_value_now(channel)
 
     assert calls == ["duty", "feedback", ("apply_value", 2, True)]
+
+
+def test_amx_channel_staging_while_off_does_not_start_apply_worker():
+    module = _load_module()
+    calls = []
+    channel = object.__new__(module.AMXChannel)
+    channel.channelParent = types.SimpleNamespace(
+        loading=False,
+        controller=types.SimpleNamespace(
+            initialized=True,
+            applyValueFromThread=lambda *_args, **_kwargs: calls.append("apply"),
+        ),
+        isOn=lambda: False,
+    )
+    channel.applyValue = lambda apply=True: calls.append("legacy")
+
+    module.AMXChannel._apply_value_now(channel)
+
+    assert calls == []
 
 
 def test_amx_global_settings_queue_keeps_latest_pending_request(monkeypatch):
