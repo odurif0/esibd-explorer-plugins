@@ -28,6 +28,7 @@ from esibd.plugins import Device, Plugin
 _RUNTIME_PREFIX = "_esibd_bundled_esi_runtime"
 _ESI_DRIVER_CLASS: type[Any] | None = None
 _ESI_MAX_VOLTAGE = 3000.0
+_ESI_HV_MAX_VOLTAGE_STEP = 10.008
 _ESI_MAX_TEMPERATURE = 175.0
 _ESI_HEAT_MODULE = 0
 _ESI_HV_CHANNELS = ((1, 1), (2, 2))
@@ -51,6 +52,7 @@ _ESI_PANEL_NAME = "color: #cbd5e1; font-weight: 600;"
 _ESI_PANEL_VALUE = "color: #f8fafc; font-weight: 600;"
 _ESI_PANEL_OFF = "color: #94a3b8; font-weight: 600;"
 _ESI_PANEL_OK = "color: #4ade80; font-weight: 600;"
+_ESI_PANEL_STANDBY = "color: #d69e2e; font-weight: 600;"
 _ESI_PANEL_ERR = "color: #f87171; font-weight: 700;"
 _ESI_BTN_HV_ACTIVE = "QPushButton { background-color: #3182ce; color: #f8fafc; font-weight: 700; border-radius: 4px; }"
 _ESI_BTN_HV_OFF = "QPushButton { background-color: #374151; color: #bfdbfe; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
@@ -443,6 +445,18 @@ class ESIDevice(Device):
             current_label.setStyleSheet(_ESI_PANEL_NAME)
             current_value = QLabel("n/a")
             current_value.setStyleSheet(_ESI_PANEL_VALUE)
+            control_label = QLabel("HV control")
+            control_label.setStyleSheet(_ESI_PANEL_NAME)
+            control_value = QLabel("n/a")
+            control_value.setStyleSheet(_ESI_PANEL_VALUE)
+            pwm_label = QLabel("PWM set / measured")
+            pwm_label.setStyleSheet(_ESI_PANEL_NAME)
+            pwm_value = QLabel("n/a")
+            pwm_value.setStyleSheet(_ESI_PANEL_VALUE)
+            led_label = QLabel("Module LED")
+            led_label.setStyleSheet(_ESI_PANEL_NAME)
+            led_value = QLabel("n/a")
+            led_value.setStyleSheet(_ESI_PANEL_VALUE)
 
             grid = QGridLayout()
             grid.setContentsMargins(0, 0, 0, 0)
@@ -456,10 +470,16 @@ class ESIDevice(Device):
             grid.addWidget(module_gate_value, 2, 1)
             grid.addWidget(gate_label, 3, 0)
             grid.addWidget(gate_value, 3, 1)
-            grid.addWidget(measured_label, 4, 0)
-            grid.addWidget(measured_value, 4, 1)
-            grid.addWidget(current_label, 5, 0)
-            grid.addWidget(current_value, 5, 1)
+            grid.addWidget(control_label, 4, 0)
+            grid.addWidget(control_value, 4, 1)
+            grid.addWidget(pwm_label, 5, 0)
+            grid.addWidget(pwm_value, 5, 1)
+            grid.addWidget(led_label, 6, 0)
+            grid.addWidget(led_value, 6, 1)
+            grid.addWidget(measured_label, 7, 0)
+            grid.addWidget(measured_value, 7, 1)
+            grid.addWidget(current_label, 8, 0)
+            grid.addWidget(current_value, 8, 1)
             cl.addLayout(grid)
 
             cards_layout.addWidget(card)
@@ -472,6 +492,9 @@ class ESIDevice(Device):
                 "hardware_target": hardware_target_value,
                 "module_gate": module_gate_value,
                 "gate": gate_value,
+                "control": control_value,
+                "pwm": pwm_value,
+                "led": led_value,
                 "measured": measured_value,
                 "current": current_value,
             }
@@ -585,6 +608,11 @@ class ESIDevice(Device):
         currents = getattr(controller, "currents", {}) or {}
         targets = getattr(controller, "targets", {}) or {}
         module_active = getattr(controller, "module_active", {}) or {}
+        module_control_active = getattr(controller, "module_control_active", {}) or {}
+        module_led_rgb = getattr(controller, "module_led_rgb", {}) or {}
+        pwm_voltage_set = getattr(controller, "pwm_voltage_set", {}) or {}
+        pwm_voltage_measured = getattr(controller, "pwm_voltage_measured", {}) or {}
+        measurement_polarity = getattr(controller, "measurement_polarity", {}) or {}
         global_enabled = getattr(controller, "global_enabled", None)
 
         for address, widgets in cards.items():
@@ -612,6 +640,9 @@ class ESIDevice(Device):
                     "hardware_target",
                     "module_gate",
                     "gate",
+                    "control",
+                    "pwm",
+                    "led",
                     "measured",
                     "current",
                 ):
@@ -637,11 +668,15 @@ class ESIDevice(Device):
                 )
             )
             module_enabled = module_active.get(address)
+            control_active = module_control_active.get(address)
+            control_required = output_enabled and target_value != 0.0
+            control_confirmed = not control_required or control_active is True
             output_confirmed = (
                 output_enabled
                 and module_enabled is True
                 and global_enabled is True
                 and target_confirmed
+                and control_confirmed
             )
             if output_confirmed:
                 card.setStyleSheet(_ESI_PANEL_CARD_ON)
@@ -678,7 +713,9 @@ class ESIDevice(Device):
             )
             widgets["module_gate"].setStyleSheet(
                 _ESI_PANEL_OK
-                if module_enabled is output_enabled
+                if module_enabled is True and output_enabled
+                else _ESI_PANEL_STANDBY
+                if module_enabled is False and not output_enabled
                 else _ESI_PANEL_ERR
             )
             widgets["gate"].setText(
@@ -687,10 +724,51 @@ class ESIDevice(Device):
             widgets["gate"].setStyleSheet(
                 _ESI_PANEL_OK if global_enabled is True else _ESI_PANEL_ERR
             )
+            widgets["control"].setText(
+                "ACTIVE"
+                if control_active is True
+                else "IDLE"
+                if control_active is False
+                else "n/a"
+            )
+            widgets["control"].setStyleSheet(
+                _ESI_PANEL_OK if control_confirmed else _ESI_PANEL_ERR
+            )
+            pwm_set = pwm_voltage_set.get(address, np.nan)
+            pwm_measured = pwm_voltage_measured.get(address, np.nan)
+            polarity = measurement_polarity.get(address)
+            polarity_code = (
+                "NEG"
+                if polarity == "negative"
+                else "POS"
+                if polarity == "positive"
+                else "?"
+            )
+            widgets["pwm"].setText(
+                f"{pwm_set:.1f} / {pwm_measured:.1f} V ({polarity_code} ADC)"
+                if np.isfinite(pwm_set) and np.isfinite(pwm_measured)
+                else "n/a"
+            )
+            led_rgb = module_led_rgb.get(address)
+            led_colors = {
+                (False, False, False): "OFF",
+                (True, False, False): "RED",
+                (False, True, False): "GREEN",
+                (False, False, True): "BLUE",
+                (True, True, False): "YELLOW",
+                (False, True, True): "CYAN",
+                (True, False, True): "MAGENTA",
+                (True, True, True): "WHITE",
+            }
+            led_text = led_colors.get(tuple(led_rgb), "n/a") if led_rgb is not None else "n/a"
+            widgets["led"].setText(led_text)
+            widgets["led"].setStyleSheet(_ESI_PANEL_VALUE)
             measured = values.get(address, np.nan)
             current = currents.get(address, np.nan)
             widgets["measured"].setText(
-                f"{measured:.1f} V" if np.isfinite(measured) else "n/a"
+                f"{polarity_code} {measured:.1f} V"
+                if np.isfinite(measured)
+                else "n/a"
             )
             widgets["current"].setText(
                 f"{current * 1e9:.2f} nA" if np.isfinite(current) else "n/a"
@@ -996,6 +1074,11 @@ class ESIController(DeviceController):
         self.currents: dict[int, float] = {}
         self.targets: dict[int, float] = {}
         self.module_active: dict[int, bool | None] = {}
+        self.module_control_active: dict[int, bool | None] = {}
+        self.module_led_rgb: dict[int, tuple[bool, bool, bool] | None] = {}
+        self.pwm_voltage_set: dict[int, float] = {}
+        self.pwm_voltage_measured: dict[int, float] = {}
+        self.measurement_polarity: dict[int, str | None] = {}
         self.global_enabled: bool | None = None
         self.initialized = False
         self.main_state = "Disconnected"
@@ -1040,11 +1123,15 @@ class ESIController(DeviceController):
             self.identity = self.device.collect_identity(
                 timeout_s=float(self.controllerParent.poll_timeout_s)
             )
-            snapshot = self.device.collect_diagnostics(
-                timeout_s=float(self.controllerParent.poll_timeout_s)
-            )
             self.device.force_safe_off(
                 timeout_s=float(self.controllerParent.connect_timeout_s)
+            )
+            self.device.configure_hv_max_voltage_steps(
+                _ESI_HV_MAX_VOLTAGE_STEP,
+                timeout_s=float(self.controllerParent.connect_timeout_s),
+            )
+            snapshot = self.device.collect_diagnostics(
+                timeout_s=float(self.controllerParent.poll_timeout_s)
             )
             self._apply_snapshot(snapshot)
             self.signalComm.initCompleteSignal.emit()
@@ -1078,6 +1165,17 @@ class ESIController(DeviceController):
             self.currents = {address: np.nan for address in _ESI_MODULES}
             self.targets = {address: np.nan for address in _ESI_HV_MODULES}
             self.module_active = {address: None for address in _ESI_HV_MODULES}
+            self.module_control_active = {
+                address: None for address in _ESI_HV_MODULES
+            }
+            self.module_led_rgb = {address: None for address in _ESI_HV_MODULES}
+            self.pwm_voltage_set = {address: np.nan for address in _ESI_HV_MODULES}
+            self.pwm_voltage_measured = {
+                address: np.nan for address in _ESI_HV_MODULES
+            }
+            self.measurement_polarity = {
+                address: None for address in _ESI_HV_MODULES
+            }
             self.global_enabled = None
 
     def readNumbers(self) -> None:
@@ -1150,26 +1248,36 @@ class ESIController(DeviceController):
             return
         # The C API exposes one unsigned target for the module's +/- output pair.
         target = abs(float(channel.value))
+        address = channel.module_address()
         try:
-            applied = self.device.set_hv_module_target(
-                channel.module_address(),
-                target,
-                timeout_s=float(self.controllerParent.poll_timeout_s),
-            )
+            previous = self.targets.get(address, np.nan)
+            if (
+                self.module_active.get(address) is True
+                and self.global_enabled is True
+                and np.isfinite(previous)
+            ):
+                self._ramp_target(address, float(previous), target)
+                applied = target
+            else:
+                applied = self.device.set_hv_module_target(
+                    address,
+                    target,
+                    timeout_s=float(self.controllerParent.poll_timeout_s),
+                )
             enabled = self.device.set_output_active(
-                channel.module_address(),
+                address,
                 True,
                 timeout_s=float(self.controllerParent.poll_timeout_s),
             )
-            self.targets[channel.module_address()] = float(applied)
-            self.module_active[channel.module_address()] = bool(enabled)
+            self.targets[address] = float(applied)
+            self.module_active[address] = bool(enabled)
             self.global_enabled = bool(enabled)
         except Exception as exc:
             self.errorCount += 1
             rollback = self._disable_failed_channel(channel)
             self.print(
                 f"ESI rejected target {target:g} V for module "
-                f"{channel.module_address()}: {exc}.{rollback}",
+                f"{address}: {exc}.{rollback}",
                 flag=PRINT.ERROR,
             )
 
@@ -1350,11 +1458,35 @@ class ESIController(DeviceController):
         self.currents = {}
         self.targets = {}
         self.module_active = {}
+        self.module_control_active = {}
+        self.module_led_rgb = {}
+        self.pwm_voltage_set = {}
+        self.pwm_voltage_measured = {}
+        self.measurement_polarity = {}
         self.global_enabled = bool(snapshot.get("enabled", False))
         for address, module in snapshot["modules"].items():
             address = int(address)
             self.targets[address] = float(module.get("target_v", np.nan))
             self.module_active[address] = module.get("module_active")
+            self.module_control_active[address] = module.get("control_active")
+            led = module.get("led", {})
+            self.module_led_rgb[address] = (
+                bool(led.get("red")),
+                bool(led.get("green")),
+                bool(led.get("blue")),
+            ) if isinstance(led, dict) else None
+            pwm = module.get("pwm", {})
+            self.pwm_voltage_set[address] = float(
+                pwm.get("voltage_set_v", np.nan)
+            )
+            self.pwm_voltage_measured[address] = float(
+                pwm.get("voltage_measured_v", np.nan)
+            )
+            measurement = module.get("measurement", {})
+            polarity = measurement.get("voltage_polarity")
+            self.measurement_polarity[address] = (
+                polarity if polarity in ("positive", "negative") else None
+            )
             self.values[address] = (
                 float(module["measured_v"]) if module["voltage_valid"] else np.nan
             )

@@ -44,10 +44,6 @@ class ESIBase:
     ERR_NOT_CONNECTED = -100
     ERR_NOT_READY = -101
     ERR_READY = -102
-    ERR_BUFF_FULL = -200
-    NO_DATA = 1
-    AUTO_MEAS_CUR = 2
-
     # Expected device / module type IDs
     DEVICE_TYPE = 0x8ED6
     MODULE_BASE_TYPE = 0x1C34
@@ -69,6 +65,7 @@ class ESIBase:
     # Controller main state values
     MAIN_STATE = {
         0x0000: 'STATE_ON',
+        0x0001: 'STATE_STANDBY',
         0x0010: 'STATE_ERROR',
         0x0011: 'STATE_ERR_MODULE',
         0x0012: 'STATE_ERR_VSUP',
@@ -98,6 +95,9 @@ class ESIBase:
     # Fan state bit flags
     FAN_STATE = {
         (1 << 0): 'FS_FAN_OK',
+        (1 << 1): 'FS_FAN_SW_CURR',
+        (1 << 2): 'FS_FAN_SW_LAST',
+        (1 << 3): 'FS_FAN_ENB',
     }
 
     # Temperature state bit flags
@@ -131,11 +131,15 @@ class ESIBase:
     FAN_OFL = 1 << 3
 
     # Module state bits
-    MS_ACTIVE = 1 << 0xF
+    MS_CTRL_ACT = 1 << 0x8
+    MS_MOD_ACT = 1 << 0xE
+    MS_DEV_ACT = 1 << 0xF
+    MS_ACTIVE = MS_CTRL_ACT | MS_MOD_ACT | MS_DEV_ACT
 
     # String sizes
     DATA_STRING_SIZE = 12
     PRODUCT_ID_SIZE = 81
+    CONFIG_DATA_SIZE = 53
 
     def __init__(
         self,
@@ -190,6 +194,8 @@ class ESIBase:
         bool_ptr = ctypes.POINTER(ctypes.c_bool)
         double_ptr = ctypes.POINTER(ctypes.c_double)
         byte_ptr = ctypes.POINTER(ctypes.c_ubyte)
+        word_ptr = ctypes.POINTER(ctypes.c_uint16)
+        uint_ptr = ctypes.POINTER(ctypes.c_uint)
         signatures = {
             "COM_ESI_CTRL_SetEnable": ([ctypes.c_bool], ctypes.c_int),
             "COM_ESI_CTRL_GetEnable": ([bool_ptr], ctypes.c_int),
@@ -203,6 +209,14 @@ class ESIBase:
             ),
             "COM_ESI_CTRL_GetModuleLEDData": (
                 [ctypes.c_uint, bool_ptr, bool_ptr, bool_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetBaseHousekeeping": (
+                [bool_ptr, double_ptr, double_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetHVsupplyMeasRanges": (
+                [ctypes.c_uint, bool_ptr, bool_ptr],
                 ctypes.c_int,
             ),
             "COM_ESI_CTRL_SetHVsupplyMeasRanges": (
@@ -243,6 +257,26 @@ class ESIBase:
                 ],
                 ctypes.c_int,
             ),
+            "COM_ESI_CTRL_GetCompleteState": (
+                [
+                    byte_ptr,
+                    byte_ptr,
+                    byte_ptr,
+                    byte_ptr,
+                    byte_ptr,
+                    word_ptr,
+                    word_ptr,
+                    byte_ptr,
+                    word_ptr,
+                ],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetConfigValues": (
+                [uint_ptr, uint_ptr, uint_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetCurrentConfig": ([byte_ptr], ctypes.c_int),
+            "COM_ESI_CTRL_SetCurrentConfig": ([byte_ptr], ctypes.c_int),
         }
         for name, (argtypes, restype) in signatures.items():
             function = getattr(self.esi_dll, name)
@@ -297,18 +331,6 @@ class ESIBase:
         empty = ctypes.c_bool()
         status = self.esi_dll.COM_ESI_CTRL_DevicePurge(ctypes.byref(empty))
         return status, empty.value
-
-    def get_auto_mask(self):
-        """Get mask of the last automatic notification data."""
-        mask = ctypes.c_uint()
-        status = self.esi_dll.COM_ESI_CTRL_GetAutoMask(ctypes.byref(mask))
-        return status, mask.value
-
-    def check_auto_input(self):
-        """Check for new automatic notification data."""
-        mask = ctypes.c_uint()
-        status = self.esi_dll.COM_ESI_CTRL_CheckAutoInput(ctypes.byref(mask))
-        return status, mask.value
 
     # =========================================================================
     #     General
@@ -415,18 +437,6 @@ class ESIBase:
     # =========================================================================
     #     ESI controller
     # =========================================================================
-
-    def set_activation_state(self, activation_state):
-        """Set device activation state."""
-        return self.esi_dll.COM_ESI_CTRL_SetActivationState(
-            ctypes.c_bool(activation_state)
-        )
-
-    def get_activation_state(self):
-        """Get device activation state."""
-        st = ctypes.c_bool()
-        status = self.esi_dll.COM_ESI_CTRL_GetActivationState(ctypes.byref(st))
-        return status, st.value
 
     def get_data_ready_flags(self):
         """Get data-ready flags."""
@@ -680,13 +690,17 @@ class ESIBase:
         return status, st.value
 
     def get_base_housekeeping(self):
-        """Get base-module housekeeping. Returns (status, volt_3v3, temp_cpu)."""
+        """Get base-module housekeeping.
+
+        Returns (status, valid, volt_3v3, temp_cpu).
+        """
+        valid = ctypes.c_bool()
         v3 = ctypes.c_double()
         tcpu = ctypes.c_double()
         status = self.esi_dll.COM_ESI_CTRL_GetBaseHousekeeping(
-            ctypes.byref(v3), ctypes.byref(tcpu)
+            ctypes.byref(valid), ctypes.byref(v3), ctypes.byref(tcpu)
         )
-        return status, v3.value, tcpu.value
+        return status, valid.value, v3.value, tcpu.value
 
     def get_heat_ctrl_housekeeping(self):
         """Get heat-controller housekeeping.
@@ -738,6 +752,17 @@ class ESIBase:
         )
 
     # -- HV supply control --
+
+    def get_hv_supply_meas_ranges(self, address):
+        """Get selected HV-PSU measurement channels."""
+        volt_neg = ctypes.c_bool()
+        curr_high = ctypes.c_bool()
+        status = self.esi_dll.COM_ESI_CTRL_GetHVsupplyMeasRanges(
+            ctypes.c_uint(address),
+            ctypes.byref(volt_neg),
+            ctypes.byref(curr_high),
+        )
+        return status, volt_neg.value, curr_high.value
 
     def set_hv_supply_meas_ranges(self, address, volt_neg, curr_high):
         """Set HV-PSU measurement channels."""
@@ -911,7 +936,7 @@ class ESIBase:
 
         Returns (status, data_flags, device_state, voltage_state,
         temperature_state, fan_state, interlock_state, state,
-        module_data_flags_list, module_state_list, heat_ctrl_interlock_state).
+        module_data_flags_list, module_state_list).
         """
         data_flags = ctypes.c_ubyte()
         dev_state = ctypes.c_ubyte()
@@ -922,19 +947,50 @@ class ESIBase:
         state = ctypes.c_uint16()
         mod_data_flags = (ctypes.c_ubyte * (self.MODULE_NUM + 1))()
         mod_state = (ctypes.c_uint16 * (self.MODULE_NUM + 1))()
-        heat_ilock = ctypes.c_ubyte()
         status = self.esi_dll.COM_ESI_CTRL_GetCompleteState(
             ctypes.byref(data_flags), ctypes.byref(dev_state),
             ctypes.byref(volt_state), ctypes.byref(temp_state),
             ctypes.byref(fan_state), ctypes.byref(ilock_state),
             ctypes.byref(state), mod_data_flags, mod_state,
-            ctypes.byref(heat_ilock),
         )
         return (
             status, data_flags.value, dev_state.value, volt_state.value,
             temp_state.value, fan_state.value, ilock_state.value,
-            state.value, list(mod_data_flags), list(mod_state), heat_ilock.value,
+            state.value, list(mod_data_flags), list(mod_state),
         )
+
+    # =========================================================================
+    #     Configuration diagnostics
+    # =========================================================================
+
+    def get_config_values(self):
+        """Get configuration count and fixed data/name sizes."""
+        max_config = ctypes.c_uint()
+        data_size = ctypes.c_uint()
+        name_size = ctypes.c_uint()
+        status = self.esi_dll.COM_ESI_CTRL_GetConfigValues(
+            ctypes.byref(max_config),
+            ctypes.byref(data_size),
+            ctypes.byref(name_size),
+        )
+        return status, max_config.value, data_size.value, name_size.value
+
+    def get_current_config(self):
+        """Get the opaque current configuration bytes without changing state."""
+        config = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE)()
+        status = self.esi_dll.COM_ESI_CTRL_GetCurrentConfig(config)
+        return status, list(config)
+
+    def set_current_config(self, config_data):
+        """Apply one complete current configuration byte array."""
+        raw = bytes(config_data)
+        if len(raw) != self.CONFIG_DATA_SIZE:
+            raise ValueError(
+                f"ESI current configuration must contain "
+                f"{self.CONFIG_DATA_SIZE} bytes, got {len(raw)}."
+            )
+        config = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE).from_buffer_copy(raw)
+        return self.esi_dll.COM_ESI_CTRL_SetCurrentConfig(config)
 
     # =========================================================================
     #     Error handling

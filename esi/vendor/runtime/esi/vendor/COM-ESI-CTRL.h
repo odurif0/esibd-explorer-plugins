@@ -16,10 +16,12 @@ extern "C" {
 #endif
 
 /*
-	The communication channel must be opened before the first usage.
+	The communication stream must be opened before the first usage. The Open routine assigns a specified COMx port to the stream.
+	The ComNumber specifies the number of the port - 1 stands for COM1, 2 for COM2, etc.
+	The maximum allowable ComNumber is 255 corresponding to COM255.
 
-	If necessary, the channel may be closed and reopened again.
-	The channel is closed automatically at the end of the program, the main program does not need to take care about it.
+	If necessary, the stream may be closed and assigned by the Open routine to a new COMx port.
+	The stream is closed automatically at the end of the program, the main program does not need to take care about it.
 
 	The return values of the routines are the following defines COM_ESI_CTRL_ERR_XXX
 		 0: routine finished without any error (COM_ESI_CTRL_NOERR)
@@ -38,7 +40,6 @@ extern "C" {
 /****************
 // Error codes //
 ****************/
-
 #define COM_ESI_CTRL_NO_ERR              (   0) // No error occurred
 #define COM_ESI_CTRL_ERR_OPEN            (  -2) // Error opening the port
 #define COM_ESI_CTRL_ERR_CLOSE           (  -3) // Error closing the port
@@ -60,29 +61,21 @@ extern "C" {
 #define COM_ESI_CTRL_ERR_NOT_READY       (-101) // Device not ready
 #define COM_ESI_CTRL_ERR_READY           (-102) // Device state could not be set to not ready
 
-#define COM_ESI_CTRL_ERR_BUFF_FULL       (-200) // Buffer for automatic notification data full
-
-#define COM_ESI_CTRL_NO_DATA             (   1) // No new data is available
-#define COM_ESI_CTRL_AUTO_MEAS_CUR       (   2) // Automatic current data received
-
-WORD _export COM_ESI_CTRL_GetSWVersion(); // Get the COM-VOLTCONTROL12 software version
+WORD _export COM_ESI_CTRL_GetSWVersion(); // Get the COM-ESI-CTRL software version
 
 
 /******************
 // Communication //
 ******************/
 
-int _export COM_ESI_CTRL_Open (BYTE COMNumber); // Open communication port
-int _export COM_ESI_CTRL_Close();               // Close communication port
+int _export COM_ESI_CTRL_Open (BYTE ComNumber); // Open the stream
+int _export COM_ESI_CTRL_Close();               // Close the stream
 
 int _export COM_ESI_CTRL_SetBaudRate (unsigned & BaudRate); // Set baud rate and return set value
 
-int _export COM_ESI_CTRL_Purge();                       // Clear data buffers for the communication port
+int _export COM_ESI_CTRL_Purge();                       // Restore the communication - should be used when a communication error has occurred and the device is no longer responding
 int _export COM_ESI_CTRL_GetBufferState (bool & Empty); // Return true if the input data buffer of the device is empty
 int _export COM_ESI_CTRL_DevicePurge    (bool & Empty); // Clear output data buffer of the device, return value as COM_ESI_CTRL_Buffer_State
-
-int _export COM_ESI_CTRL_GetAutoMask    (unsigned & CommandMask); // Get the mask of the last automatic notification data, can be used to check whether new data has been read during the last communication(s)
-int _export COM_ESI_CTRL_CheckAutoInput (unsigned & CommandMask); // Check for new automatic notification data
 
 
 /************
@@ -107,17 +100,12 @@ int _export COM_ESI_CTRL_GetUptime    (double & Seconds,                     dou
 int _export COM_ESI_CTRL_GetOptime    (double & Seconds,                     double & TotalSeconds                         ); // Get current and total device operation times
 int _export COM_ESI_CTRL_GetCPUdata   (double & Load, double & Frequency);                                                    // Get CPU load (0-1 = 0-100%) and frequency (Hz)
 
-int _export COM_ESI_CTRL_GetHousekeeping (double & Volt24V, double & Volt5V0, double & Volt3V3, double & TempCPU, double & TempPSU); // Get housekeeping data
-
 int _export COM_ESI_CTRL_Restart(); // Restart the controller
 
 
 /*******************
 // ESI controller //
 *******************/
-
-int _export COM_ESI_CTRL_SetActivationState (bool   ActivationState); // Set device activation state
-int _export COM_ESI_CTRL_GetActivationState (bool & ActivationState); // Get device activation state
 
 // Controller's data-ready flags
 #define COM_ESI_CTRL_HK_RDY  (1 << 0) // housekeeping data ready
@@ -126,10 +114,13 @@ int _export COM_ESI_CTRL_GetActivationState (bool & ActivationState); // Get dev
 #define COM_ESI_CTRL_FAN_OFL (1 << 3) // fan data overflow
 int _export COM_ESI_CTRL_GetDataReadyFlags (BYTE & DataReadyFlags); // Get data-ready flags
 
+int _export COM_ESI_CTRL_GetHousekeeping (double & Volt24V, double & Volt5V0, double & Volt3V3, double & TempCPU, double & TempPSU); // Get housekeeping data
+
 // Controller status values:
 #define COM_ESI_CTRL_ST_ON             (   0)                      // Modules are on
+#define COM_ESI_CTRL_ST_STBY           (   1)                      // Device is stand-by
 #define COM_ESI_CTRL_ST_ERROR          (1<<4)                      // General error
-#define COM_ESI_CTRL_ST_ERR_MODULE     (COM_ESI_CTRL_ST_ERROR + 1) // DPA-1F-module error
+#define COM_ESI_CTRL_ST_ERR_MODULE     (COM_ESI_CTRL_ST_ERROR + 1) // Module error
 #define COM_ESI_CTRL_ST_ERR_VSUP       (COM_ESI_CTRL_ST_ERROR + 2) // Supply-voltage error
 #define COM_ESI_CTRL_ST_ERR_TEMP_LOW   (COM_ESI_CTRL_ST_ERROR + 3) // Low-temperature error
 #define COM_ESI_CTRL_ST_ERR_TEMP_HIGH  (COM_ESI_CTRL_ST_ERROR + 4) // Overheating error
@@ -143,8 +134,8 @@ int _export COM_ESI_CTRL_GetState (WORD & State); // Get device state
 #define COM_ESI_CTRL_DS_FAN_FAIL        (1<<3)                // Fan failure
 #define COM_ESI_CTRL_DS_MODULE_FAIL     (1<<4)                // Module configuration failure
 int _export COM_ESI_CTRL_GetDeviceState (BYTE & DeviceState); // Get device state
-int _export COM_ESI_CTRL_SetEnable      (bool   Enable);      // Enable/disable modules
-int _export COM_ESI_CTRL_GetEnable      (bool & Enable);      // Get module enable state
+int _export COM_ESI_CTRL_SetEnable      (bool   Enable);      // Enable/disable device
+int _export COM_ESI_CTRL_GetEnable      (bool & Enable);      // Get device enable state
 
 // Controller's voltage state bits:
 #define COM_ESI_CTRL_VS_3V3_OK   (1<<0) // +3V3 rail voltage OK
@@ -156,17 +147,21 @@ int _export COM_ESI_CTRL_GetEnable      (bool & Enable);      // Get module enab
 #define COM_ESI_CTRL_VS_OK       (COM_ESI_CTRL_VS_SUP_OK | COM_ESI_CTRL_VS_LINE_OK | COM_ESI_CTRL_VS_PSU_OK) // All supply voltages OK
 int _export COM_ESI_CTRL_GetVoltageState (BYTE & VoltageState); // Get voltage state
 
-#define COM_ESI_CTRL_FS_FAN_OK  (1<<0)                  // Fan OK
+// bits of the fan status
+#define COM_ESI_CTRL_FS_FAN_OK       (1<<0) // Fan OK
+#define COM_ESI_CTRL_FS_FAN_SW_CURR  (1<<1) // Current state of the slide switch "Fan"
+#define COM_ESI_CTRL_FS_FAN_SW_LAST  (1<<2) // Last state of the slide switch "Fan"
+#define COM_ESI_CTRL_FS_FAN_ENB      (1<<3) // Fan enabled
 int _export COM_ESI_CTRL_GetFanState (BYTE & FanState); // Get fan state
 
 // Controller's temperature state bits:
-#define COM_ESI_CTRL_TS_TCPU_HIGH    (1<<0x0) //     CPU overheated
-#define COM_ESI_CTRL_TS_TPSU_HIGH    (1<<0x1) //     PSU overheated
-#define COM_ESI_CTRL_TS_TCPU_LOW     (1<<0x2) //     CPU too cold
-#define COM_ESI_CTRL_TS_TPSU_LOW     (1<<0x3) //     PSU too cold
+#define COM_ESI_CTRL_TS_TCPU_HIGH    (1<<0x0) // CPU overheated
+#define COM_ESI_CTRL_TS_TPSU_HIGH    (1<<0x1) // PSU overheated
+#define COM_ESI_CTRL_TS_TCPU_LOW     (1<<0x2) // CPU too cold
+#define COM_ESI_CTRL_TS_TPSU_LOW     (1<<0x3) // PSU too cold
 int _export COM_ESI_CTRL_GetTemperatureState (BYTE & TemperatureState); // Get temperature state
 
-// Heat controller interlock bits
+// Heat controller interlock bits:
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK1_CURR  (1<<0x8)
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK2_CURR  (1<<0x9)
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK1_LAST  (1<<0xA)
@@ -175,7 +170,7 @@ int _export COM_ESI_CTRL_GetTemperatureState (BYTE & TemperatureState); // Get t
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK2_ACT   (IS_HTCTRL_ILOCK2_CURR | IS_HTCTRL_ILOCK2_LAST)
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK_MASK   (IS_HTCTRL_ILOCK1_ACT  | IS_HTCTRL_ILOCK2_ACT )
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK_ACT    (IS_HTCTRL_ILOCK_MASK)
-// Controller interlock bits
+// Controller interlock bits:
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_FP_CURR  (1<<0xC)
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_RP_CURR  (1<<0xD)
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_FP_LAST  (1<<0xE)
@@ -184,7 +179,7 @@ int _export COM_ESI_CTRL_GetTemperatureState (BYTE & TemperatureState); // Get t
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_RP_ACT   (IS_CTRL_ILOCK_RP_CURR | IS_CTRL_ILOCK_RP_LAST)
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_MASK     (IS_CTRL_ILOCK_FP_ACT  | IS_CTRL_ILOCK_RP_ACT )
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_ACT      (IS_CTRL_ILOCK_MASK)
-// Main interlock bits
+// Main interlock bits:
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK1       (1<<0x0)
 #define COM_ESI_CTRL_IS_HTCTRL_ILOCK2       (1<<0x1)
 #define COM_ESI_CTRL_IS_CTRL_ILOCK_FP       (1<<0x2)
@@ -192,7 +187,7 @@ int _export COM_ESI_CTRL_GetTemperatureState (BYTE & TemperatureState); // Get t
 #define COM_ESI_CTRL_IS_ILOCK_MASK          (IS_HTCTRL_ILOCK1 | IS_HTCTRL_ILOCK2 | IS_CTRL_ILOCK_FP | IS_CTRL_ILOCK_RP)
 int _export COM_ESI_CTRL_GetInterlockState (WORD & InterlockState); // Get interlock state
 
-// Interlock enable bits
+// Interlock enable bits:
 #define COM_ESI_CTRL_IE_HTCTRL_ILOCK1  (COM_ESI_CTRL_IS_HTCTRL_ILOCK1)
 #define COM_ESI_CTRL_IE_HTCTRL_ILOCK2  (COM_ESI_CTRL_IS_HTCTRL_ILOCK2)
 #define COM_ESI_CTRL_IE_CTRL_ILOCK_FP  (COM_ESI_CTRL_IS_CTRL_ILOCK_FP)
@@ -200,6 +195,11 @@ int _export COM_ESI_CTRL_GetInterlockState (WORD & InterlockState); // Get inter
 #define COM_ESI_CTRL_IE_ILOCK_MASK     (IE_HTCTRL_ILOCK1 | IE_HTCTRL_ILOCK2 | IE_CTRL_ILOCK_FP | IE_CTRL_ILOCK_RP)
 int _export COM_ESI_CTRL_GetInterlockEnable (BYTE & InterlockEnable); // Get interlock enable mask
 int _export COM_ESI_CTRL_SetInterlockEnable (BYTE   InterlockEnable); // Set interlock enable mask
+
+#define COM_ESI_CTRL_FS_OVERRIDE  (1<<0) // Override the slide switch 'Fan'
+#define COM_ESI_CTRL_FS_ON        (1<<1) // Software control of the slide switch 'Fan'
+int _export COM_ESI_CTRL_GetFanSwitchOverride (BYTE & FanSwitchOverride); // Get function of the slide switch 'Fan'
+int _export COM_ESI_CTRL_SetFanSwitchOverride (BYTE   FanSwitchOverride); // Set function of the slide switch 'Fan'
 
 int _export COM_ESI_CTRL_GetInputs        (bool & InterlockFront, bool & InterlockRear, bool & FanEnable); // Get device input levels
 int _export COM_ESI_CTRL_GetPowerMonitors (bool & ACin_OK,        bool & DCout_OK);                        // Get power monitor state
@@ -263,17 +263,15 @@ int _export COM_ESI_CTRL_GetModuleCPUdata   (unsigned Address, double & Load);  
 
 int _export COM_ESI_CTRL_GetModuleLEDData (unsigned Address, bool & Red, bool & Green, bool & Blue); // Get module LED data
 
-// Data-ready flags of the modules
-#define COM_ESI_CTRL_MODULE_HK_RDY  (1 << 2) // Housekeeping data ready
-#define COM_ESI_CTRL_MODULE_HK_OFL  (1 << 3) // Housekeeping data overflow
-
-// Data-ready flags of the heat controller
-#define COM_ESI_CTRL_HTCTRL_MON_RDY (1 << 0)                     // Monitoring data ready
-#define COM_ESI_CTRL_HTCTRL_MON_OFL (1 << 1)                     // Monitoring data overflow
-#define COM_ESI_CTRL_HTCTRL_HK_RDY  (COM_ESI_CTRL_MODULE_HK_RDY) // Housekeeping data ready
-#define COM_ESI_CTRL_HTCTRL_HK_OFL  (COM_ESI_CTRL_MODULE_HK_OFL) // Housekeeping data overflow
-
-// Data-ready flags of the HV-PSU
+// Data-ready flags of the modules:
+#define COM_ESI_CTRL_MODULE_HK_RDY   (1 << 2)                     // Housekeeping data ready
+#define COM_ESI_CTRL_MODULE_HK_OFL   (1 << 3)                     // Housekeeping data overflow
+// Data-ready flags of the heat controller:
+#define COM_ESI_CTRL_HTCTRL_MON_RDY  (1 << 0)                     // Monitoring data ready
+#define COM_ESI_CTRL_HTCTRL_MON_OFL  (1 << 1)                     // Monitoring data overflow
+#define COM_ESI_CTRL_HTCTRL_HK_RDY   (COM_ESI_CTRL_MODULE_HK_RDY) // Housekeeping data ready
+#define COM_ESI_CTRL_HTCTRL_HK_OFL   (COM_ESI_CTRL_MODULE_HK_OFL) // Housekeeping data overflow
+// Data-ready flags of the HV-PSU:
 #define COM_ESI_CTRL_HVCTRL_PHS_RDY  (1 << 0)                     // Phase data ready
 #define COM_ESI_CTRL_HVCTRL_PHS_OFL  (1 << 1)                     // Phase data overflow
 #define COM_ESI_CTRL_HVCTRL_HK_RDY   (COM_ESI_CTRL_MODULE_HK_RDY) // Housekeeping data ready
@@ -282,11 +280,9 @@ int _export COM_ESI_CTRL_GetModuleLEDData (unsigned Address, bool & Red, bool & 
 #define COM_ESI_CTRL_HVCTRL_ADCV_OFL (1 << 5)                     // Voltage data overflow
 #define COM_ESI_CTRL_HVCTRL_ADCI_RDY (1 << 6)                     // Current data ready
 #define COM_ESI_CTRL_HVCTRL_ADCI_OFL (1 << 7)                     // Current data overflow
-
-// Data-ready flags of the base module
-#define COM_ESI_CTRL_BASE_HK_RDY  (COM_ESI_CTRL_MODULE_HK_RDY) // Housekeeping data ready
-#define COM_ESI_CTRL_BASE_HK_OFL  (COM_ESI_CTRL_MODULE_HK_OFL) // Housekeeping data overflow
-
+// Data-ready flags of the base module:
+#define COM_ESI_CTRL_BASE_HK_RDY     (COM_ESI_CTRL_MODULE_HK_RDY) // Housekeeping data ready
+#define COM_ESI_CTRL_BASE_HK_OFL     (COM_ESI_CTRL_MODULE_HK_OFL) // Housekeeping data overflow
 int _export COM_ESI_CTRL_GetModuleDataReadyFlags (unsigned Address, BYTE & DataReadyFlags); // Get data-ready flags of a module
 
 int _export COM_ESI_CTRL_GetHeatCtrlHousekeeping (bool & Valid, double & Volt3V3, double & TempCPU, double & Volt5V0, double & Volt24V, double & TempPSU);                      // Get heat-controller housekeeping data
@@ -294,12 +290,14 @@ int _export COM_ESI_CTRL_GetHeatCtrlHousekeeping (bool & Valid, double & Volt3V3
 int _export COM_ESI_CTRL_GetHVsupplyHousekeeping (unsigned Address, bool & Valid, double & Volt3V3,  double & TempCPU,  double & Volt5V0, double & Volt24Vp, double & Volt22Vn, // Get HV-PSU housekeeping data
 /*       */                                                                       double & Volt18Vp, double & Volt18Vn, double & Volt1V5, double & VoltAGnd);
 
-int _export COM_ESI_CTRL_GetBaseHousekeeping (double & Volt3V3, double & TempCPU); // Get housekeeping data of base device
+int _export COM_ESI_CTRL_GetBaseHousekeeping (bool & Valid, double & Volt3V3, double & TempCPU); // Get housekeeping data of base device
 
 int _export COM_ESI_CTRL_GetHeatCtrlOutputVoltage (double & Voltage); // Get target heat-controller output voltage
 int _export COM_ESI_CTRL_GetHeatCtrlHeaterPower   (double & Power);   // Get target heat-controller heater power
 
-int _export COM_ESI_CTRL_SetHVsupplyMeasRanges    (unsigned Address, bool VoltNeg, bool CurrHigh); // Set HV-PSU measurement channels
+int _export COM_ESI_CTRL_GetHVsupplyMeasRanges    (unsigned Address, bool & VoltNeg, bool & CurrHigh); // Get HV-PSU measurement channels
+int _export COM_ESI_CTRL_SetHVsupplyMeasRanges    (unsigned Address, bool   VoltNeg, bool   CurrHigh); // Set HV-PSU measurement channels
+
 int _export COM_ESI_CTRL_GetHVsupplyOutputVoltage (unsigned Address, bool & Valid, double & Voltage); // Get HV-PSU output voltage
 int _export COM_ESI_CTRL_GetHVsupplyOutputCurrent (unsigned Address, bool & Valid, double & Current); // Get HV-PSU output current
 int _export COM_ESI_CTRL_GetHVsupplyPhase         (unsigned Address, bool & Valid, double & Phase  ); // Get HV-PSU phase
@@ -323,7 +321,7 @@ int _export COM_ESI_CTRL_SetHeatCtrlPowerLimit    (double & MaxPower  );        
 int _export COM_ESI_CTRL_GetHeatCtrlHeaterTemperature (double & HeaterTemp); // Get target heat-controller heater temperature
 int _export COM_ESI_CTRL_SetHeatCtrlHeaterTemperature (double & HeaterTemp); // Set target heat-controller heater temperature, return the set value
 
-int _export COM_ESI_CTRL_GetHeatCtrlMonitoring (bool & Valid, double & VoltOut, double & VoltMon, double & CurrMon, double & TempMon); // Get heat-controller monitoring data
+int _export COM_ESI_CTRL_GetHeatCtrlMonitoring (bool & Valid, double & VoltOut, double & VoltHeat, double & CurrOut, double & TempHeat); // Get heat-controller monitoring data
 
 #define COM_ESI_CTRL_HTCTRL_IS_ILOCK1_CURR  (1 << 0)         // Interlock 1, current state
 #define COM_ESI_CTRL_HTCTRL_IS_ILOCK2_CURR  (1 << 1)         // Interlock 2, current state
@@ -334,20 +332,59 @@ int _export COM_ESI_CTRL_GetHeatCtrlMonitoring (bool & Valid, double & VoltOut, 
 #define COM_ESI_CTRL_HTCTRL_IS_ILOCK_ACT    (COM_ESI_CTRL_HTCTRL_IS_ILOCK1_ACT  | COM_ESI_CTRL_HTCTRL_IS_ILOCK2_ACT )
 int _export COM_ESI_CTRL_GetHeatCtrlIlockState (BYTE & IlockState); // Get interlock state of heat controller
 
-// Module state bits:
-#define COM_ESI_CTRL_MS_ACTIVE   (1<<0xF) // Device is active, i.e. output voltages can be nonzero
+#define COM_ESI_CTRL_MS_CTRL_ACT  (1<<0x8) // Temperature/voltage control active
+#define COM_ESI_CTRL_MS_MOD_ACT   (1<<0xE) // Module is active
+#define COM_ESI_CTRL_MS_DEV_ACT   (1<<0xF) // Device is active
+#define COM_ESI_CTRL_MS_ACTIVE    (COM_ESI_CTRL_MS_VOLT_ACT | COM_ESI_CTRL_MS_MOD_ACT | COM_ESI_CTRL_MS_DEV_ACT)
 int _export COM_ESI_CTRL_GetModuleState (unsigned Address, WORD & ModuleState); // Get module state
 
-int _export COM_ESI_CTRL_SetModuleActivationState (unsigned Address, bool   ActivationState); // Set module activation state
-int _export COM_ESI_CTRL_GetModuleActivationState (unsigned Address, bool & ActivationState); // Get module activation state
+int _export COM_ESI_CTRL_SetModuleActivationState (unsigned Address, bool   ActivationState); // Set module activation state, note: not available for the base device
+int _export COM_ESI_CTRL_GetModuleActivationState (unsigned Address, bool & ActivationState); // Get module activation state, note: not available for the base device
 
 
 /**********************
 // Special functions //
 **********************/
 
-int _export COM_ESI_CTRL_GetCompleteState (BYTE & DataFlags, BYTE & DeviceState, BYTE & VoltageState, BYTE & TemperatureState, BYTE & FanState, WORD & InterlockState, WORD & State,  // Get complete device state
-/**/                                       BYTE ModuleDataFlags [COM_ESI_CTRL_MODULE_NUM+1], WORD ModuleState [COM_ESI_CTRL_MODULE_NUM+1], BYTE & HeatCtrlInterlockState);
+// Get complete device state
+//   For the variable values, see the following functions and constants:
+//     DataFlags:        COM_ESI_CTRL_GetDataReadyFlags       (       data-ready flags COM_ESI_CTRL_HK_XXX, COM_ESI_CTRL_FAN_XXX)
+//     DeviceState:      COM_ESI_CTRL_GetDeviceState          (           device state COM_ESI_CTRL_DS_XXX)
+//     VoltageState:     COM_ESI_CTRL_GetVoltageState         (          voltage state COM_ESI_CTRL_VS_XXX)
+//     TemperatureState: COM_ESI_CTRL_GetTemperatureState     (      temperature state COM_ESI_CTRL_TS_XXX)
+//     FanState:         COM_ESI_CTRL_GetFanState             (              fan state COM_ESI_CTRL_FS_XXX)
+//     InterlockState:   COM_ESI_CTRL_GetInterlockState       (        interlock state COM_ESI_CTRL_IS_XXX)
+//     State:            COM_ESI_CTRL_GetState                (           device state COM_ESI_CTRL_ST_XXX)
+//     ModuleDataFlags:  COM_ESI_CTRL_GetModuleDataReadyFlags (module data-ready flags COM_ESI_CTRL_MODULE_HK_XXX)
+//     ModuleState:      COM_ESI_CTRL_GetModuleState          (           module state COM_ESI_CTRL_MS_XXX)
+int _export COM_ESI_CTRL_GetCompleteState (BYTE & DataFlags, BYTE & DeviceState, BYTE & VoltageState, BYTE & TemperatureState, BYTE & FanState, WORD & InterlockState, WORD & State,
+/**/                                       BYTE ModuleDataFlags [COM_ESI_CTRL_MODULE_NUM+1], WORD ModuleState [COM_ESI_CTRL_MODULE_NUM+1]);
+
+
+/*****************************
+// Configuration management //
+*****************************/
+
+int _export COM_ESI_CTRL_GetConfigValues (unsigned & MaxConfigNumber, unsigned & ConfigDataSize, unsigned & ConfigNameSize); // Get configuration parameters
+
+#define COM_ESI_CTRL_CONFIG_DATA_SIZE   53                                                     // Configuration data size, see also value ConfigDataSize of COM_ESI_CTRL_GetConfigValues
+int _export COM_ESI_CTRL_GetCurrentConfig (      BYTE Config [COM_ESI_CTRL_CONFIG_DATA_SIZE]); // Get current configuration
+int _export COM_ESI_CTRL_SetCurrentConfig (const BYTE Config [COM_ESI_CTRL_CONFIG_DATA_SIZE]); // Set current configuration
+
+#define COM_ESI_CTRL_MAX_CONFIG       1023                                                                            // Number of configurations, see also value MaxConfigNumber of COM_ESI_CTRL_GetConfigValues
+int _export COM_ESI_CTRL_GetConfigList (bool Active [COM_ESI_CTRL_MAX_CONFIG], bool Valid [COM_ESI_CTRL_MAX_CONFIG]); // Get configuration list
+int _export COM_ESI_CTRL_SaveCurrentConfig (WORD ConfigNumber);                                                       // Save current configuration to NVM
+int _export COM_ESI_CTRL_LoadCurrentConfig (WORD ConfigNumber);                                                       // Load current configuration from NVM
+
+#define COM_ESI_CTRL_CONFIG_NAME_SIZE  202                                                                    // Allowed size of the configuration name, see also value ConfigNameSize of COM_ESI_CTRL_GetConfigValues
+int _export COM_ESI_CTRL_GetConfigName  (WORD ConfigNumber,       char Name [COM_ESI_CTRL_CONFIG_NAME_SIZE]); // Get configuration name
+int _export COM_ESI_CTRL_SetConfigName  (WORD ConfigNumber, const char Name [COM_ESI_CTRL_CONFIG_NAME_SIZE]); // Set configuration name
+
+int _export COM_ESI_CTRL_GetConfigData  (WORD ConfigNumber,       BYTE Config [COM_ESI_CTRL_CONFIG_DATA_SIZE]); // Get configuration data
+int _export COM_ESI_CTRL_SetConfigData  (WORD ConfigNumber, const BYTE Config [COM_ESI_CTRL_CONFIG_DATA_SIZE]); // Set configuration data
+
+int _export COM_ESI_CTRL_GetConfigFlags (WORD ConfigNumber, bool & Active, bool & Valid); // Get configuration flags
+int _export COM_ESI_CTRL_SetConfigFlags (WORD ConfigNumber, bool   Active, bool   Valid); // Set configuration flags
 
 
 /*******************
