@@ -400,6 +400,72 @@ def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypat
     assert controller.initializing is False
 
 
+def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
+    monkeypatch,
+):
+    module = _load_plugin()
+    calls = []
+
+    class FakeDriver:
+        _process_backend_disabled_reason = ""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def connect(self, timeout_s):
+            calls.append(("connect", timeout_s))
+
+        def set_global_active(self, active, timeout_s):
+            calls.append(("global", active, timeout_s))
+
+        def collect_identity(self, timeout_s):
+            calls.append(("identity", timeout_s))
+            return {"modules": {}}
+
+        def force_safe_off(self, timeout_s):
+            calls.append(("safe_off", timeout_s))
+
+        def configure_hv_max_voltage_steps(self, value, timeout_s):
+            calls.append(("max_steps", value, timeout_s))
+            return {1: value, 2: value}
+
+        def collect_diagnostics(self, timeout_s):
+            calls.append(("diagnostics", timeout_s))
+            return {"verified": True}
+
+    emitted = []
+    parent = types.SimpleNamespace(
+        com=16,
+        baudrate=230400,
+        connect_timeout_s=5.0,
+        poll_timeout_s=2.0,
+        heat_voltage_limit_v=0.0,
+        heat_current_limit_a=0.0,
+        heat_power_limit_w=0.0,
+    )
+    controller = module.ESIController(parent)
+    controller.signalComm = types.SimpleNamespace(
+        initCompleteSignal=types.SimpleNamespace(emit=lambda: emitted.append(True))
+    )
+    controller._apply_snapshot = lambda snapshot: calls.append(("snapshot", snapshot))
+    controller.initializing = True
+    monkeypatch.setattr(module, "_get_esi_driver_class", lambda: FakeDriver)
+
+    controller.runInitialization()
+
+    assert calls == [
+        ("connect", 5.0),
+        ("global", True, 5.0),
+        ("identity", 2.0),
+        ("safe_off", 5.0),
+        ("max_steps", 10.008, 5.0),
+        ("diagnostics", 2.0),
+        ("snapshot", {"verified": True}),
+    ]
+    assert emitted == [True]
+    assert controller.initializing is False
+
+
 def test_init_complete_resumes_pending_on_toggle():
     module = _load_plugin()
     calls = []
@@ -448,11 +514,19 @@ def test_channel_defaults_enforce_3kv_positive_range():
 
 def test_operator_panel_widths_are_fixed_and_aligned():
     module = _load_plugin()
+    source = PLUGIN_PATH.read_text(encoding="utf-8")
 
     assert module._ESI_HV_CARD_WIDTH == 300
     assert module._ESI_HEAT_CARD_WIDTH == (
         2 * module._ESI_HV_CARD_WIDTH + module._ESI_CARD_SPACING
     )
+    assert module._ESI_PANEL_STANDBY == "color: #d69e2e; font-weight: 600;"
+    assert "else _ESI_PANEL_STANDBY" in source
+    assert "polarity = measurement_polarity.get(address)" in source
+    assert 'if polarity == "negative"' in source
+    assert 'if polarity == "positive"' in source
+    assert "({polarity_code} ADC)" in source
+    assert "{polarity_code} {measured:.1f} V" in source
 
 
 def test_enabled_change_forces_hardware_apply():
@@ -604,13 +678,56 @@ def test_normal_target_change_is_ramped_in_bounded_steps(monkeypatch):
     controller.device = FakeDevice()
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
 
-    controller._ramp_target(3, 0.0, 250.0)
+    controller._ramp_target(1, 0.0, 250.0)
 
     assert calls == [
-        (3, 250.0 / 3.0, 2.0),
-        (3, 500.0 / 3.0, 2.0),
-        (3, 250.0, 2.0),
+        (1, 250.0 / 3.0, 2.0),
+        (1, 500.0 / 3.0, 2.0),
+        (1, 250.0, 2.0),
     ]
+
+
+def test_active_hv_target_change_uses_configured_ramp(monkeypatch):
+    module = _load_plugin()
+    calls = []
+
+    class FakeDevice:
+        def set_hv_module_target(self, address, value, timeout_s):
+            calls.append(("target", address, value, timeout_s))
+            return value
+
+        def set_output_active(self, address, active, timeout_s):
+            calls.append(("active", address, active, timeout_s))
+            return active
+
+    parent = types.SimpleNamespace(
+        poll_timeout_s=2.0,
+        ramp_rate_v_s=100.0,
+        isOn=lambda: True,
+    )
+    channel = types.SimpleNamespace(
+        module_address=lambda: 1,
+        is_heat_channel=lambda: False,
+        enabled=True,
+        name="ESI_HV1",
+        value=30.0,
+    )
+    controller = module.ESIController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.targets = {1: 10.0}
+    controller.module_active = {1: True}
+    controller.global_enabled = True
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    controller.applyValue(channel)
+
+    assert calls == [
+        ("target", 1, 20.0, 2.0),
+        ("target", 1, 30.0, 2.0),
+        ("active", 1, True, 2.0),
+    ]
+    assert controller.targets[1] == 30.0
 
 
 def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
@@ -698,19 +815,27 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
         "modules": {
             1: {
                 "module_active": True,
+                "control_active": True,
+                "measurement": {"voltage_polarity": "positive"},
                 "target_v": 10.0,
                 "voltage_valid": True,
                 "measured_v": 0.0,
                 "current_valid": True,
                 "measured_a": 0.0,
+                "led": {"red": True, "green": False, "blue": False},
+                "pwm": {"voltage_set_v": 10.0, "voltage_measured_v": 0.0},
             },
             2: {
                 "module_active": False,
+                "control_active": False,
+                "measurement": {"voltage_polarity": "negative"},
                 "target_v": 0.0,
                 "voltage_valid": True,
                 "measured_v": 0.0,
                 "current_valid": True,
                 "measured_a": 0.0,
+                "led": {"red": True, "green": True, "blue": False},
+                "pwm": {"voltage_set_v": 0.0, "voltage_measured_v": 0.0},
             },
         },
         "heat": {
@@ -729,6 +854,14 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
     assert module.np.isnan(controller.values[0])
     assert controller.targets == {1: 10.0, 2: 0.0}
     assert controller.module_active == {1: True, 2: False}
+    assert controller.module_control_active == {1: True, 2: False}
+    assert controller.module_led_rgb == {
+        1: (True, False, False),
+        2: (True, True, False),
+    }
+    assert controller.pwm_voltage_set == {1: 10.0, 2: 0.0}
+    assert controller.pwm_voltage_measured == {1: 0.0, 2: 0.0}
+    assert controller.measurement_polarity == {1: "positive", 2: "negative"}
     assert controller.global_enabled is True
     assert parent.heat_status == (
         "INVALID T=522.0 degC; check temperature sensor"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import struct
 import threading
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,11 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     HV_MODULE_ADDRESSES = (1, 2)
     CONTROLLED_MODULE_ADDRESSES = (HEAT_MODULE_ADDRESS, *HV_MODULE_ADDRESSES)
     MAX_ABS_VOLTAGE_V = 3000.0
+    HV_CONFIG_BASE_OFFSET = 17
+    HV_CONFIG_STRIDE = 12
+    HV_CONFIG_MAX_STEP_OFFSET = 4
+    HV_CONFIG_ENABLE_OFFSET = 10
+    DEFAULT_HV_MAX_VOLTAGE_STEP_V = 10.008
     _instance_lock = threading.Lock()
     _connected_instance: Optional["_ESIController"] = None
 
@@ -52,7 +58,6 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._transport_error = None
         self._module_inventory: dict[int, dict] = {}
         self._hv_measurement_requests: dict[int, tuple[bool, bool, bool]] = {}
-        self._hv_activation_ack_warned: set[int] = set()
         self.thread_lock = thread_lock or threading.Lock()
         self.logger = build_device_logger(
             instrument_name=self._INSTRUMENT_NAME,
@@ -114,7 +119,6 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         if self.connected:
             return True
         self._hv_measurement_requests.clear()
-        self._hv_activation_ack_warned.clear()
         self._claim_single_instance()
         opened = False
         try:
@@ -190,10 +194,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 activation_status, read_status, active = (
                     self._set_hv_module_active_unlocked(address, False)
                 )
-                if activation_status not in (
-                    self.NO_ERR,
-                    self.ERR_COMMAND_RECEIVE,
-                ):
+                if activation_status != self.NO_ERR:
                     failures.append(
                         f"module {address} deactivate: "
                         f"{self.format_status(activation_status)}"
@@ -343,10 +344,123 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             raise ValueError("ESI target voltage must be finite.")
         if not 0.0 <= value <= self.MAX_ABS_VOLTAGE_V:
             raise ValueError(
-                "ESI target voltage must be between 0 and 3000 V; select the "
-                "physical positive or negative output separately."
+                "ESI target voltage must be between 0 and 3000 V. Each HV module "
+                "drives both physical connectors from one unsigned magnitude."
             )
         return value
+
+    def configure_hv_max_voltage_steps(
+        self,
+        max_step_v: float = DEFAULT_HV_MAX_VOLTAGE_STEP_V,
+        timeout_s: Optional[float] = None,
+    ) -> dict[int, float]:
+        """Configure both volatile HV ramp steps while all outputs are OFF."""
+        self._require_connected()
+        value = float(max_step_v)
+        if not math.isfinite(value) or not 0.0 < value <= self.MAX_ABS_VOLTAGE_V:
+            raise ValueError(
+                "ESI HV maximum voltage step must be greater than 0 and no more "
+                "than 3000 V."
+            )
+        raw_value = round(value * 1000.0)
+        if not math.isclose(raw_value / 1000.0, value, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("ESI HV maximum voltage step must use millivolt precision.")
+        timeout = self._resolve_timeout(timeout_s)
+
+        def configure():
+            status, current = ESIBase.get_current_config(self)
+            self._raise_on_status(status, "get_current_config")
+            if len(current) != self.CONFIG_DATA_SIZE:
+                raise RuntimeError(
+                    "ESI current configuration has unexpected size "
+                    f"{len(current)}; expected {self.CONFIG_DATA_SIZE} bytes"
+                )
+
+            unsafe = []
+            if current[0]:
+                unsafe.append("global enable is ON")
+            for address in self.HV_MODULE_ADDRESSES:
+                offset = self.HV_CONFIG_BASE_OFFSET + (
+                    address - 1
+                ) * self.HV_CONFIG_STRIDE
+                target_mv = struct.unpack_from("<i", bytes(current), offset)[0]
+                if target_mv != 0:
+                    unsafe.append(f"module {address} target is {target_mv / 1000.0:g} V")
+                if current[offset + self.HV_CONFIG_ENABLE_OFFSET]:
+                    unsafe.append(f"module {address} gate is enabled")
+            if unsafe:
+                raise RuntimeError(
+                    "Refusing volatile HV configuration while outputs are not "
+                    "safely OFF: " + "; ".join(unsafe)
+                )
+
+            requested = bytearray(current)
+            for address in self.HV_MODULE_ADDRESSES:
+                offset = (
+                    self.HV_CONFIG_BASE_OFFSET
+                    + (address - 1) * self.HV_CONFIG_STRIDE
+                    + self.HV_CONFIG_MAX_STEP_OFFSET
+                )
+                struct.pack_into("<i", requested, offset, raw_value)
+
+            if requested != bytes(current):
+                status = ESIBase.set_current_config(self, requested)
+                self._raise_on_status(status, "set_current_config")
+
+            status, observed = ESIBase.get_current_config(self)
+            self._raise_on_status(status, "verify_current_config")
+            if len(observed) != self.CONFIG_DATA_SIZE:
+                raise RuntimeError(
+                    "ESI verified configuration has unexpected size "
+                    f"{len(observed)}; expected {self.CONFIG_DATA_SIZE} bytes"
+                )
+            if bytes(observed) != bytes(requested):
+                changed = [
+                    index
+                    for index, (expected, actual) in enumerate(
+                        zip(requested, observed, strict=True)
+                    )
+                    if expected != actual
+                ]
+                raise RuntimeError(
+                    "ESI volatile HV configuration verification failed at byte "
+                    f"offsets {changed}"
+                )
+
+            status, enabled = ESIBase.get_enable(self)
+            self._raise_on_status(status, "verify_global_off_after_config")
+            if enabled:
+                raise RuntimeError("ESI global gate opened during HV configuration")
+
+            applied = {}
+            for address in self.HV_MODULE_ADDRESSES:
+                status, target = ESIBase.get_hv_supply_target_output_voltage(
+                    self, address
+                )
+                self._raise_on_status(
+                    status, f"verify_hv_target_after_config({address})"
+                )
+                pwm = ESIBase.get_hv_supply_params_pwm(self, address)
+                self._raise_on_status(
+                    pwm[0], f"verify_hv_gate_after_config({address})"
+                )
+                if float(target) != 0.0 or bool(pwm[7]):
+                    raise RuntimeError(
+                        f"ESI module {address} left safe OFF during HV configuration"
+                    )
+                offset = (
+                    self.HV_CONFIG_BASE_OFFSET
+                    + (address - 1) * self.HV_CONFIG_STRIDE
+                    + self.HV_CONFIG_MAX_STEP_OFFSET
+                )
+                applied[address] = (
+                    struct.unpack_from("<i", bytes(observed), offset)[0] / 1000.0
+                )
+            return applied
+
+        return self._call_locked_with_timeout(
+            configure, timeout * 8.0, "configure_hv_max_voltage_steps"
+        )
 
     def set_hv_module_target(
         self, address: int, voltage: float, timeout_s: Optional[float] = None
@@ -396,7 +510,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         high_current: bool = False,
         timeout_s: Optional[float] = None,
     ) -> bool:
-        """Select the HV ADC channels and tolerate a verified missing acknowledgement."""
+        """Select and verify the HV ADC channels."""
         self._require_connected()
         address = self._validate_hv_address(address)
         requested = bool(negative), bool(high_current)
@@ -411,31 +525,31 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 address,
                 *requested,
             )
-            if status != self.ERR_COMMAND_RECEIVE:
-                return status, None
-            readback_status, _valid, _voltage = (
-                ESIBase.get_hv_supply_output_voltage(self, address)
+            if status != self.NO_ERR:
+                return status, self.NO_ERR, False, False
+            readback_status, negative, high_current = (
+                ESIBase.get_hv_supply_meas_ranges(self, address)
             )
-            return status, readback_status
+            return status, readback_status, bool(negative), bool(high_current)
 
-        status, readback_status = self._call_locked_with_timeout(
-            select_and_verify,
-            timeout * 2.0,
-            f"select_hv_measurement[{address}]",
+        status, readback_status, negative, high_current = (
+            self._call_locked_with_timeout(
+                select_and_verify,
+                timeout * 2.0,
+                f"select_hv_measurement[{address}]",
+            )
         )
-        if status == self.ERR_COMMAND_RECEIVE:
-            self._raise_on_status(
-                readback_status,
-                f"verify_hv_readback_after_selector_rejection({address})",
-            )
-            self._hv_measurement_requests[address] = (*requested, False)
-            self.logger.warning(
-                "HV module %d did not acknowledge measurement-channel "
-                "selection; serial readback remains responsive",
-                address,
-            )
-            return False
         self._raise_on_status(status, f"select_hv_measurement({address})")
+        self._raise_on_status(
+            readback_status,
+            f"verify_hv_measurement_selection({address})",
+        )
+        observed = negative, high_current
+        if observed != requested:
+            raise RuntimeError(
+                f"ESI module {address} measurement selection verification failed: "
+                f"requested {requested}, controller reports {observed}"
+            )
         self._hv_measurement_requests[address] = (*requested, True)
         return True
 
@@ -488,12 +602,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         active: bool,
         timeout_s: Optional[float] = None,
     ) -> bool:
-        """Set the module HVC toggle and verify it through PWM status.
-
-        Firmware 0x0100 can execute the module command without returning its
-        direct acknowledgement. Only that known -10 status is tolerated, and
-        only when the independent PWM status reports the requested state.
-        """
+        """Set the module HVC toggle and verify it through PWM status."""
         self._require_connected()
         address = self._validate_hv_address(address)
         requested = bool(active)
@@ -506,8 +615,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             address,
             requested,
         )
-        if status not in (self.NO_ERR, self.ERR_COMMAND_RECEIVE):
-            self._raise_on_status(status, f"set_hv_module_active({address})")
+        self._raise_on_status(status, f"set_hv_module_active({address})")
         self._raise_on_status(
             read_status,
             f"verify_hv_module_active({address})",
@@ -517,16 +625,6 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 f"ESI module {address} activation verification failed: "
                 f"requested {requested}, PWM status reports {observed}"
             )
-        if (
-            status == self.ERR_COMMAND_RECEIVE
-            and address not in self._hv_activation_ack_warned
-        ):
-            self._hv_activation_ack_warned.add(address)
-            self.logger.warning(
-                "HV module %d did not acknowledge its activation command; "
-                "PWM status independently confirmed the requested state",
-                address,
-            )
         return observed
 
     def _set_hv_module_active_unlocked(
@@ -535,7 +633,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         status = ESIBase.set_module_activation_state(
             self, address, requested
         )
-        if status not in (self.NO_ERR, self.ERR_COMMAND_RECEIVE):
+        if status != self.NO_ERR:
             return status, self.NO_ERR, not requested
         pwm = ESIBase.get_hv_supply_params_pwm(self, address)
         if pwm[0] != self.NO_ERR:
@@ -707,14 +805,60 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 self._raise_on_status(result[0], action)
                 return result[1:]
 
-            main_hex, main_name = checked(ESIBase.get_main_state(self), "get_main_state")
-            device_hex, device_flags = checked(ESIBase.get_device_state(self), "get_device_state")
-            voltage_hex, voltage_flags = checked(ESIBase.get_voltage_state(self), "get_voltage_state")
-            interlock_hex, interlock_flags = checked(ESIBase.get_interlock_state(self), "get_interlock_state")
+            (
+                data_flags,
+                device_state,
+                voltage_state,
+                temperature_state,
+                fan_state,
+                interlock_state,
+                main_state,
+                module_data_flags,
+                module_states,
+            ) = checked(ESIBase.get_complete_state(self), "get_complete_state")
+            main_hex = hex(int(main_state))
+            main_name = self.MAIN_STATE.get(
+                int(main_state), f"UNKNOWN_STATE_0x{int(main_state):04X}"
+            )
+            device_hex = hex(int(device_state))
+            device_flags = [
+                name
+                for flag, name in self.DEVICE_STATE.items()
+                if int(device_state) & flag
+            ] or ["DEVST_OK"]
+            voltage_hex = hex(int(voltage_state))
+            voltage_flags = [
+                name
+                for flag, name in self.VOLTAGE_STATE.items()
+                if int(voltage_state) & flag
+            ]
+            temperature_hex = hex(int(temperature_state))
+            temperature_flags = [
+                name
+                for flag, name in self.TEMPERATURE_STATE.items()
+                if int(temperature_state) & flag
+            ]
+            fan_hex = hex(int(fan_state))
+            fan_flags = [
+                name
+                for flag, name in self.FAN_STATE.items()
+                if int(fan_state) & flag
+            ]
+            interlock_hex = hex(int(interlock_state))
+            interlock_flags = [
+                name
+                for flag, name in self.INTERLOCK_STATE.items()
+                if int(interlock_state) & flag
+            ]
             enabled, = checked(ESIBase.get_enable(self), "get_enable")
             housekeeping = checked(ESIBase.get_housekeeping(self), "get_housekeeping")
             modules = {}
             for address in self.HV_MODULE_ADDRESSES:
+                module_state = int(module_states[address])
+                voltage_negative, current_high = checked(
+                    ESIBase.get_hv_supply_meas_ranges(self, address),
+                    f"get_measurement_ranges({address})",
+                )
                 target, = checked(
                     ESIBase.get_hv_supply_target_output_voltage(self, address),
                     f"get_target({address})",
@@ -731,22 +875,43 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     ESIBase.get_hv_supply_params_pwm(self, address),
                     f"get_pwm({address})",
                 )
+                led_red, led_green, led_blue = checked(
+                    ESIBase.get_module_led_data(self, address),
+                    f"get_module_led({address})",
+                )
                 module_active = bool(pwm[6])
                 modules[address] = {
                     "active": bool(
                         enabled and module_active and float(target) != 0.0
                     ),
                     "module_active": module_active,
+                    "module_state": module_state,
+                    "control_active": bool(module_state & self.MS_CTRL_ACT),
+                    "module_gate_active": bool(module_state & self.MS_MOD_ACT),
+                    "device_gate_active": bool(module_state & self.MS_DEV_ACT),
+                    "data_ready_flags": int(module_data_flags[address]),
+                    "measurement": {
+                        "voltage_polarity": (
+                            "negative" if voltage_negative else "positive"
+                        ),
+                        "negative_voltage": bool(voltage_negative),
+                        "high_current_range": bool(current_high),
+                    },
                     "target_v": float(target),
                     "voltage_valid": bool(valid_v),
                     "measured_v": float(measured_v),
                     "current_valid": bool(valid_i),
                     "measured_a": float(measured_a),
+                    "led": {
+                        "red": bool(led_red),
+                        "green": bool(led_green),
+                        "blue": bool(led_blue),
+                    },
                     "pwm": {
-                        "period_us": float(pwm[0]),
-                        "width_us": float(pwm[1]),
-                        "phase_measured_us": float(pwm[2]),
-                        "phase_set_us": float(pwm[3]),
+                        "period_s": float(pwm[0]),
+                        "width_s": float(pwm[1]),
+                        "phase_measured_s": float(pwm[2]),
+                        "phase_set_s": float(pwm[3]),
                         "voltage_set_v": float(pwm[4]),
                         "voltage_measured_v": float(pwm[5]),
                         "data_ready_flags": int(pwm[7]),
@@ -775,8 +940,14 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
             return {
                 "main_state": {"hex": main_hex, "name": main_name},
+                "data_ready_flags": int(data_flags),
                 "device_state": {"hex": device_hex, "flags": device_flags},
                 "voltage_state": {"hex": voltage_hex, "flags": voltage_flags},
+                "temperature_state": {
+                    "hex": temperature_hex,
+                    "flags": temperature_flags,
+                },
+                "fan_state": {"hex": fan_hex, "flags": fan_flags},
                 "interlock_state": {"hex": interlock_hex, "flags": interlock_flags},
                 "enabled": bool(enabled),
                 "global_active": bool(
@@ -891,6 +1062,7 @@ class ESI(ProcessIsolatedClientMixin):
         "collect_diagnostics": (15.0, 10.0, 60.0),
         "get_heat_configuration": (8.0, 10.0, 45.0),
         "configure_heat_limits": (8.0, 10.0, 45.0),
+        "configure_hv_max_voltage_steps": (8.0, 10.0, 45.0),
         "set_heater_temperature": (4.0, 10.0, 30.0),
         "force_safe_off": (8.0, 10.0, 45.0),
         "disconnect": (10.0, 10.0, 60.0),

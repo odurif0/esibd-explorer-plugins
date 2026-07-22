@@ -16,7 +16,7 @@ One plugin for one device.
 | `psu_d`  | Controls PSU_D power-supply modules |
 | `psu_e`  | Controls PSU_E power-supply modules |
 | `dmmr`   | Monitors DMMR picoammeter modules |
-| `esi`    | Controls ESI Heater and HVPS-3kB modules |
+| `esi`    | Controls ESI heater and paired +/- HVPS-3kB modules |
 | `amx`    | Controls AMX frequency and pulser modules |
 | `amx_a`  | Controls AMX_A frequency and pulser modules |
 | `amx_b`  | Controls AMX_B frequency and pulser modules |
