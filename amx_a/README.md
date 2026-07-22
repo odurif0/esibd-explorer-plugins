@@ -41,7 +41,29 @@ Toolbar notes:
 - `Load now`: immediately loads the selected signal while the AMX is ON.
 - `Freq`: oscillator frequency in kHz. Changes apply immediately while the AMX
   is ON and are reused on the next startup.
-- channel rows: choose which pulsers are ON and set their pulse width in us.
+- operator cards: stage each pulser enable request and pulse width in us.
+
+## Operator Panel
+
+The default view contains fixed cards for pulsers `P0` through `P3`. Each card
+separates the requested channel configuration from controller-register
+readbacks:
+
+- `On when AMX active` stages whether the width is applied after the global AMX
+  reaches its ON state; it is not an independent physical-output measurement
+- `Width` is the requested pulse width in microseconds
+- `Duty request` is calculated from the requested width and frequency
+- `Width`, `Duty`, `Delay`, and `Burst` below `CONTROLLER REGISTERS` are derived
+  from values read back through the vendor API
+
+`REGISTERS APPLIED` means the oscillator-period and pulser-width registers match
+what the existing write path should produce. It does not prove the waveform at
+a physical connector. A zero width register is shown as `stopped`, matching the
+vendor API sentinel. A positive request below the representable hardware minimum
+is driven at one tick and remains amber as `MINIMUM WIDTH`. Use `Advanced` to
+show the original channel table for equations, manual/equation mode changes, and
+channel metadata. Width editing in the operator card is disabled while a channel
+is controlled by an equation.
 
 Runtime timing notes:
 
@@ -106,11 +128,12 @@ Example observed on one AMX controller on April 14, 2026:
 The plugin keeps a fixed 4-channel pulser layout matching the AMX hardware.
 Each channel exposes:
 
-- duty-cycle setpoint in percent
+- requested pulse width in microseconds
+- duty request calculated from the width and oscillator frequency
 - pulser delay in ticks
-- channel ON/OFF state for whether the pulser is actively applied
-- measured duty-cycle monitor
-- width and burst readbacks
+- channel enable request used when the global AMX state is ON
+- duty calculated from controller period/width register readbacks
+- width, delay, and burst register readbacks
 
 Switch topology and routing remain managed by the saved AMX controller
 configurations. The plugin focuses on the runtime timing adjustments typically
