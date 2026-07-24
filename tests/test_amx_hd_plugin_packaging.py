@@ -15,7 +15,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_HD_PATH = ROOT / "amx_hd" / "amx_hd_plugin.py"
-PLUGIN_AMX_PATH = ROOT / "amx" / "amx_plugin.py"
+PLUGIN_AMX_PATH = ROOT / "amx_a" / "amx_plugin.py"
 ICON_HD_PATH = ROOT / "amx_hd" / "amx_hd.png"
 DLL_HD_PATH = ROOT / "amx_hd" / "vendor" / "runtime" / "amx_hd" / "vendor" / "x64" / "COM-HVAMX4EDH.dll"
 HEADER_HD_PATH = ROOT / "amx_hd" / "vendor" / "runtime" / "amx_hd" / "vendor" / "COM-HVAMX4EDH.h"
@@ -215,9 +215,9 @@ def test_amx_hd_bundled_runtime_namespace_is_disambiguated():
     module = _import_plugin_module_from_path("amx_hd_plugin_test", PLUGIN_HD_PATH)
 
     assert module._BUNDLED_RUNTIME_NAMESPACE_PREFIX == "_esibd_bundled_amx_hd_runtime"
-    # plugin_key is derived from the plugin directory name -> distinct from amx
+    # plugin_key is derived from the plugin directory name -> distinct from amx_a
     hd_module_name = module._bundled_runtime_module_name(PLUGIN_HD_PATH.parent)
-    amx_module_name_stub = "_esibd_bundled_amx_runtime_amx"
+    amx_module_name_stub = "_esibd_bundled_amx_runtime_amx_a"
     assert hd_module_name == "_esibd_bundled_amx_hd_runtime_amx_hd"
     assert hd_module_name != amx_module_name_stub
 
@@ -233,7 +233,7 @@ def test_amx_hd_driver_class_loads_from_private_runtime():
     assert driver_class.__name__ != "AMX"
 
 
-def test_amx_and_amx_hd_load_as_distinct_autonomous_plugins():
+def test_amx_a_and_amx_hd_load_as_distinct_autonomous_plugins():
     _clear_test_modules()
     _install_esibd_stubs()
 
@@ -241,7 +241,7 @@ def test_amx_and_amx_hd_load_as_distinct_autonomous_plugins():
     amx_hd_module = _import_plugin_module_from_path("amx_hd_plugin_test", PLUGIN_HD_PATH)
 
     # Distinct device identities
-    assert amx_module.AMXDevice.name == "AMX"
+    assert amx_module.AMXDevice.name == "AMX_A"
     assert amx_hd_module.AMXHDDevice.name == "AMX_HD"
     assert amx_module.AMXDevice is not amx_hd_module.AMXHDDevice
 

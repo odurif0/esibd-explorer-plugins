@@ -824,7 +824,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         channel: int,
         timeout_s: Optional[float] = None,
     ) -> float:
-        """Return one PSU channel output voltage in volts."""
+        """Return the configured target voltage of one PSU channel in volts."""
         self._require_connected()
         timeout_s = self._resolve_io_timeout(timeout_s)
         status, voltage = self._call_locked_with_timeout(
@@ -881,7 +881,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         channel: int,
         timeout_s: Optional[float] = None,
     ) -> float:
-        """Return one PSU channel output current in amperes."""
+        """Return the configured target current of one PSU channel in amperes."""
         self._require_connected()
         timeout_s = self._resolve_io_timeout(timeout_s)
         status, current = self._call_locked_with_timeout(

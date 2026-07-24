@@ -92,9 +92,11 @@ _PSU_PANEL_DIAGNOSTICS_STYLE = (
 _PSU_PANEL_DIAGNOSTICS_TITLE_STYLE = "color: #cbd5e1; font-weight: 700;"
 _PSU_PANEL_DIAGNOSTICS_TEXT_STYLE = "color: #e2e8f0;"
 _PSU_PANEL_SECTION_HEADER_STYLE = "color: #cbd5e1; font-weight: 700; font-size: 13px;"
-_PSU_PANEL_CARD_MIN_WIDTH = 220
-_PSU_PANEL_CARD_MAX_WIDTH = 280
-_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH = 400
+_PSU_PANEL_CARD_WIDTH = 280
+_PSU_PANEL_CARD_SPACING = 12
+_PSU_PANEL_DIAGNOSTICS_WIDTH = (
+    2 * _PSU_PANEL_CARD_WIDTH + _PSU_PANEL_CARD_SPACING
+)
 _PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
 _PSU_HOUSEKEEPING_REFRESH_PERIOD_S = 2.0
@@ -1775,7 +1777,7 @@ class PSUDevice(Device):
         cards_row = QWidget()
         cards_layout = QHBoxLayout(cards_row)
         cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(12)
+        cards_layout.setSpacing(_PSU_PANEL_CARD_SPACING)
 
         self.channelPanel = panel
         self.channelPanelCards: dict[int, dict[str, Any]] = {}
@@ -1784,11 +1786,10 @@ class PSUDevice(Device):
         for channel_index in _PSU_CHANNEL_IDS:
             card = QFrame()
             card.setSizePolicy(
-                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
                 QSizePolicy.Policy.Fixed,
             )
-            card.setMinimumWidth(_PSU_PANEL_CARD_MIN_WIDTH)
-            card.setMaximumWidth(_PSU_PANEL_CARD_MAX_WIDTH)
+            card.setFixedWidth(_PSU_PANEL_CARD_WIDTH)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(12, 12, 12, 12)
             card_layout.setSpacing(8)
@@ -1904,12 +1905,12 @@ class PSUDevice(Device):
                 "voltage": voltage_widget,
                 "current_limit": current_widget,
             }
-        cards_layout.addStretch(0)
+        cards_layout.addStretch(1)
         layout.addWidget(cards_row)
 
         diag_frame = QFrame()
         diag_frame.setStyleSheet(_PSU_PANEL_DIAGNOSTICS_STYLE)
-        diag_frame.setFixedWidth(_PSU_PANEL_DIAGNOSTICS_MAX_WIDTH)
+        diag_frame.setFixedWidth(_PSU_PANEL_DIAGNOSTICS_WIDTH)
         diag_frame.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
@@ -1975,8 +1976,13 @@ class PSUDevice(Device):
 
         self.channelPanelGlobalDiagnostics = diag_widgets
 
-        cards_layout.addWidget(diag_frame)
-        cards_layout.addStretch(1)
+        diagnostics_row = QWidget()
+        diagnostics_layout = QHBoxLayout(diagnostics_row)
+        diagnostics_layout.setContentsMargins(0, 0, 0, 0)
+        diagnostics_layout.addStretch(1)
+        diagnostics_layout.addWidget(diag_frame)
+        diagnostics_layout.addStretch(1)
+        layout.addWidget(diagnostics_row)
 
         advanced_section = QWidget()
         advanced_section_layout = QVBoxLayout(advanced_section)
@@ -3415,7 +3421,8 @@ class PSUChannel(Channel):
         if monitor_name in channel:
             channel[monitor_name][Parameter.HEADER] = "Vget"
             channel[monitor_name][_PARAMETER_TOOLTIP_KEY] = (
-                "Measured PSU output voltage read back from the controller."
+                "Internal PSU voltage measured by GetPSUData. This does not verify "
+                "the external connector, cable, or AMX output."
             )
         channel[self.ID] = parameterDict(
             value="0",
@@ -4661,14 +4668,14 @@ class PSUController(DeviceController):
         """
         import time
 
-        get_voltage = getattr(device, "get_channel_voltage", None)
-        if not callable(get_voltage):
+        get_measured_voltage = getattr(device, "get_channel_measured_voltage", None)
+        if not callable(get_measured_voltage):
             return
         deadline = time.monotonic() + _PSU_RANGE_SWITCH_SETTLE_S
         while time.monotonic() < deadline:
             try:
                 voltages = [
-                    get_voltage(channel_index, timeout_s=timeout_s)
+                    get_measured_voltage(channel_index, timeout_s=timeout_s)
                     for channel_index in _PSU_CHANNEL_IDS
                 ]
             except Exception:
@@ -5004,6 +5011,7 @@ class PSUController(DeviceController):
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             if target_on:
+                self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
                 self._restore_off_ui_state()
             self.print(
                 f"Failed to toggle PSU: {self._format_exception(exc)}",

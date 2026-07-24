@@ -44,17 +44,6 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "COM-AMPR-12.dll",
     ),
     PluginSpec(
-        "amx",
-        "AMX",
-        "AMX",
-        "amx_plugin.py",
-        "amx",
-        "amx",
-        "amx",
-        "COM-HVAMX4ED.h",
-        "COM-HVAMX4ED.dll",
-    ),
-    PluginSpec(
         "amx_a",
         "AMX_A",
         "AMX_A",

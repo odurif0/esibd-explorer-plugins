@@ -3,8 +3,8 @@
 Drives the **AMX HD** (CGC `HV-AMX-CTRL-4EDH`, High-Definition) oscillator and
 timer timing from ESIBD Explorer and monitors live timer readbacks.
 
-This is the HD sibling of the `amx/` plugin. The HD variant is a **different
-controller** than the normal AMX: it ships its own vendor DLL
+This is the HD sibling of the `amx_a/` and `amx_b/` plugins. The HD variant is
+a **different controller** than the normal AMX: it ships its own vendor DLL
 (`COM-HVAMX4EDH.dll`), uses a stream-based API, exposes **timers** instead of
 pulsers, has **500 configuration slots** (vs 126), an **8-value housekeeping**
 readback, and a distinct state encoding (`STATE_ON = 0x0001`, with a new

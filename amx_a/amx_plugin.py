@@ -3654,21 +3654,22 @@ class AMXController(DeviceController):
         if device is None:
             raise RuntimeError("AMX device disconnected.")
 
-        if load_config_first:
-            started_s = time.monotonic()
-            device.load_config(config_index, timeout_s=timeout_s)
-            self._print_if_slow(f"AMX load_config({config_index})", started_s)
-            self._loaded_config_index = config_index
-            started_s = time.monotonic()
-            self._refresh_loaded_config_status()
-            self._print_if_slow("AMX loaded-config refresh", started_s)
-        started_s = time.monotonic()
-        self._apply_runtime_settings(timeout_s)
-        self._print_if_slow("AMX runtime settings apply", started_s)
+        # DeviceEnable only allows a subsequent config load to restore Enb.
         started_s = time.monotonic()
         device.set_device_enabled(True, timeout_s=timeout_s)
         self._print_if_slow("AMX set_device_enabled(ON)", started_s)
         try:
+            if load_config_first:
+                started_s = time.monotonic()
+                device.load_config(config_index, timeout_s=timeout_s)
+                self._print_if_slow(f"AMX load_config({config_index})", started_s)
+                self._loaded_config_index = config_index
+                started_s = time.monotonic()
+                self._refresh_loaded_config_status()
+                self._print_if_slow("AMX loaded-config refresh", started_s)
+            started_s = time.monotonic()
+            self._apply_runtime_settings(timeout_s)
+            self._print_if_slow("AMX runtime settings apply", started_s)
             return self._wait_for_startup_ready_snapshot(
                 config_index=config_index,
                 settle_timeout_s=timeout_s,
