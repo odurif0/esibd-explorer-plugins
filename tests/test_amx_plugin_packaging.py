@@ -16,12 +16,12 @@ from PIL import Image
 
 PLUGIN_PATH = (
     Path(__file__).resolve().parents[1]
-    / "amx"
+    / "amx_a"
     / "amx_plugin.py"
 )
 ICON_PATH = (
     Path(__file__).resolve().parents[1]
-    / "amx"
+    / "amx_a"
     / "amx.png"
 )
 PLUGIN_A_PATH = (
@@ -210,7 +210,7 @@ def test_amx_plugin_exposes_expected_metadata():
 
     assert ICON_PATH.exists()
     assert module.providePlugins() == [module.AMXDevice]
-    assert module.AMXDevice.name == "AMX"
+    assert module.AMXDevice.name == "AMX_A"
     assert module.AMXDevice.supportedVersion == "1.0.1"
     assert module.AMXDevice.unit == "%"
     assert module.AMXDevice.useMonitors is True
@@ -246,12 +246,12 @@ def test_amx_plugin_exposes_simple_config_settings():
 
     module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
     device = object.__new__(module.AMXDevice)
-    device.name = "AMX"
+    device.name = "AMX_A"
     device.MAXDATAPOINTS = "Max data points"
     original_settings = getattr(module.Device, "getDefaultSettings", None)
     module.Device.getDefaultSettings = lambda self: {
-        "AMX/Interval": {module.Parameter.VALUE: 1000},
-        "AMX/Max data points": {module.Parameter.VALUE: 100000},
+        "AMX_A/Interval": {module.Parameter.VALUE: 1000},
+        "AMX_A/Max data points": {module.Parameter.VALUE: 100000},
     }
     try:
         settings = module.AMXDevice.getDefaultSettings(device)
@@ -261,12 +261,12 @@ def test_amx_plugin_exposes_simple_config_settings():
         else:
             module.Device.getDefaultSettings = original_settings
 
-    assert "AMX/Standby config" not in settings
-    assert settings["AMX/Operating config"][module.Parameter.VALUE] == -1
-    tooltip = settings["AMX/Operating config"][module.Parameter.TOOLTIP]
+    assert "AMX_A/Standby config" not in settings
+    assert settings["AMX_A/Operating config"][module.Parameter.VALUE] == -1
+    tooltip = settings["AMX_A/Operating config"][module.Parameter.TOOLTIP]
     assert "without enabling the AMX" in tooltip
-    assert settings["AMX/Available configs"][module.Parameter.VALUE] == "n/a"
-    available_tooltip = settings["AMX/Available configs"][module.Parameter.TOOLTIP]
+    assert settings["AMX_A/Available configs"][module.Parameter.VALUE] == "n/a"
+    available_tooltip = settings["AMX_A/Available configs"][module.Parameter.TOOLTIP]
     assert "reported by the controller after connect" in available_tooltip
     assert "Signal config" in available_tooltip
     assert "shutdown config" not in available_tooltip

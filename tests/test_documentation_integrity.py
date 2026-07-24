@@ -21,7 +21,6 @@ class ReadmeContract:
 README_CONTRACTS: tuple[ReadmeContract, ...] = (
     ReadmeContract("ampr_a", "AMPR_A", "AMPR_A"),
     ReadmeContract("ampr_b", "AMPR_B", "AMPR_B"),
-    ReadmeContract("amx", "AMX", "AMX"),
     ReadmeContract("amx_a", "AMX_A", "AMX_A"),
     ReadmeContract("amx_b", "AMX_B", "AMX_B"),
     ReadmeContract("amx_hd", "AMX_HD", "AMX HD"),

@@ -15,7 +15,7 @@ import pytest
 
 PLUGIN_PATH = (
     Path(__file__).resolve().parents[1]
-    / "amx"
+    / "amx_a"
     / "amx_plugin.py"
 )
 
@@ -848,6 +848,135 @@ def test_controller_toggle_on_refreshes_loaded_config_after_initialize():
     assert controller.main_state == "ST_ON"
     assert parent.main_state == "ST_ON"
     assert sync_calls
+
+
+def test_controller_toggle_on_enables_before_config_load_and_width_remains_writable():
+    module = _load_module()
+    calls = []
+
+    class FakeDevice:
+        CLOCK = 100e6
+        PULSER_WIDTH_OFFSET = 2
+
+        def __init__(self):
+            self.connected = True
+
+        def set_device_enabled(self, enabled, timeout_s=None):
+            calls.append(("enable", enabled, timeout_s))
+
+        def load_config(self, config_index, timeout_s=None):
+            calls.append(("load", config_index, timeout_s))
+
+        def get_status(self):
+            calls.append(("status",))
+            return {
+                "memory_config": 9,
+                "memory_config_name": "Operate",
+                "memory_config_source": "memory",
+            }
+
+        def set_frequency_khz(self, value, timeout_s=None):
+            calls.append(("frequency", value, timeout_s))
+
+        def set_pulser_width_ticks(self, pulser, width, timeout_s=None):
+            calls.append(("width", pulser, width, timeout_s))
+
+        def collect_housekeeping(self, timeout_s=None):
+            calls.append(("snapshot", timeout_s))
+            return {
+                "device_enabled": True,
+                "main_state": {"name": "STATE_ON"},
+                "device_state": {"flags": ["DEVST_OK"]},
+                "controller_state": {"flags": ["ENB", "ENB_OSC", "ENB_PULSER"]},
+                "oscillator": {"period": 49998},
+                "pulsers": [
+                    {
+                        "pulser": 2,
+                        "width_ticks": 1248,
+                        "delay_ticks": 0,
+                        "burst": None,
+                    }
+                ],
+            }
+
+    channel = types.SimpleNamespace(
+        real=True,
+        enabled=True,
+        value=12.5,
+        pulser_number=lambda: 2,
+    )
+    parent = types.SimpleNamespace(
+        name="AMX_A",
+        startup_timeout_s=7.5,
+        poll_timeout_s=2.5,
+        connect_timeout_s=5.0,
+        frequency_khz=2.0,
+        operating_config=9,
+        standby_config=-1,
+        getChannels=lambda: [channel],
+        isOn=lambda: True,
+        main_state="",
+        device_enabled_state="",
+        available_configs_text="",
+        loaded_config_text="",
+        _update_config_controls=lambda: None,
+        _update_status_widgets=lambda: None,
+    )
+
+    controller = module.AMXController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.available_configs = [
+        {"index": 9, "name": "Operate", "active": True, "valid": True},
+    ]
+    controller._restart_acquisition_after_transition = lambda: None
+
+    controller.toggleOn()
+
+    assert calls == [
+        ("enable", True, 7.5),
+        ("load", 9, 7.5),
+        ("status",),
+        ("frequency", 2.0, 7.5),
+        ("width", 2, 1248, 7.5),
+        ("snapshot", 2.5),
+    ]
+    assert controller.main_state == "STATE_ON"
+    assert controller.device_enabled_state == "ON"
+
+    channel.value = 25.0
+    controller.applyValue(channel)
+
+    assert calls[-1] == ("width", 2, 2498, 5.0)
+
+
+def test_controller_startup_disables_device_enable_after_config_load_failure():
+    module = _load_module()
+    calls = []
+
+    class FakeDevice:
+        def set_device_enabled(self, enabled, timeout_s=None):
+            calls.append(("enable", enabled, timeout_s))
+
+        def load_config(self, config_index, timeout_s=None):
+            calls.append(("load", config_index, timeout_s))
+            raise RuntimeError("load failed")
+
+    controller = module.AMXController(types.SimpleNamespace())
+    controller.device = FakeDevice()
+
+    with pytest.raises(RuntimeError, match="load failed"):
+        controller._load_operating_config_and_enable_device(
+            config_index=9,
+            timeout_s=7.5,
+            load_config_first=True,
+        )
+
+    assert calls == [
+        ("enable", True, 7.5),
+        ("load", 9, 7.5),
+        ("enable", False, 7.5),
+    ]
 
 
 def test_controller_toggle_on_waits_for_state_on_after_enable():

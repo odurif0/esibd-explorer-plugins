@@ -6,14 +6,13 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ERROR_CATALOG = Path("vendor/runtime/error_codes.json")
-CANONICAL_FOLDER = "amx"
-EXPECTED_CATALOG_COUNT = 13
+CANONICAL_FOLDER = "amx_a"
+EXPECTED_CATALOG_COUNT = 12
 EXPECTED_DEBUG_OUTPUT_MESSAGE = "Error opening the file for debugging output"
 
 PLUGIN_FOLDERS = (
     "ampr_a",
     "ampr_b",
-    "amx",
     "amx_a",
     "amx_b",
     "amx_hd",

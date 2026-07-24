@@ -15,7 +15,7 @@ from conftest import PluginSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PARITY_FAMILIES = ("ampr", "amx", "psu")
-EXPECTED_GROUP_SIZES = (2, 3, 5)
+EXPECTED_GROUP_SIZES = (2, 2, 5)
 NAME_SENTINEL = b'"<DEVICE_NAME>"'
 
 

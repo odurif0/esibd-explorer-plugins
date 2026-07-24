@@ -436,7 +436,7 @@ class PSUBase:
         return status, state.value
 
     def get_psu_output_voltage(self, channel: int):
-        """Get the output voltage of one PSU channel in volts."""
+        """Get the configured target voltage of one PSU channel in volts."""
         channel = self._validate_channel(channel)
         voltage = ctypes.c_double()
         status = self.psu_dll.COM_HVPSU2D_GetPSUOutputVoltage(
@@ -465,7 +465,7 @@ class PSUBase:
         return status, voltage_set.value, voltage_limit.value
 
     def get_psu_output_current(self, channel: int):
-        """Get the output current of one PSU channel in amperes."""
+        """Get the configured target current of one PSU channel in amperes."""
         channel = self._validate_channel(channel)
         current = ctypes.c_double()
         status = self.psu_dll.COM_HVPSU2D_GetPSUOutputCurrent(

@@ -566,7 +566,10 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
         enable: bool,
         timeout_s: Optional[float] = None,
     ) -> None:
-        """Set the AMX device enable flag."""
+        """Set whether subsequent startup/config loads may restore ``Enb``.
+
+        Setting this flag true does not enable an already-loaded configuration.
+        """
         self._require_connected()
         timeout_s = self._resolve_io_timeout(timeout_s)
         status = self._call_locked_with_timeout(
@@ -579,7 +582,7 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
         self._raise_on_status(status, f"set_device_enable({enable})")
 
     def get_device_enabled(self, timeout_s: Optional[float] = None) -> bool:
-        """Return the AMX device enable flag."""
+        """Return whether subsequent startup/config loads may restore ``Enb``."""
         self._require_connected()
         timeout_s = self._resolve_io_timeout(timeout_s)
         status, enabled = self._call_locked_with_timeout(

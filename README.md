@@ -17,14 +17,13 @@ One plugin for one device.
 | `psu_e`  | Controls PSU_E power-supply modules |
 | `dmmr`   | Monitors DMMR picoammeter modules |
 | `esi`    | Controls ESI heater and paired +/- HVPS-3kB modules |
-| `amx`    | Controls AMX frequency and pulser modules |
 | `amx_a`  | Controls AMX_A frequency and pulser modules |
 | `amx_b`  | Controls AMX_B frequency and pulser modules |
 | `amx_hd` | Controls AMX HD frequency and timer modules |
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.2.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.2.1.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -41,7 +40,6 @@ One plugin for one device.
    ├── psu_e/
    ├── dmmr/
    ├── esi/
-   ├── amx/
    ├── amx_a/
    ├── amx_b/
    └── amx_hd/
@@ -51,6 +49,11 @@ One plugin for one device.
 
 4. **Select the correct COM port** in the plugin settings for each device
    you want to control. That's it!
+
+When upgrading from a bundle that contained the legacy `amx/` plugin, remove
+that folder before extracting the new bundle. Extracting an archive does not
+delete old plugin folders; the supported standard-AMX identities are now
+`AMX_A` (`amx_a/`) and `AMX_B` (`amx_b/`).
 
 The ESI controller requires an additional read-only hardware inventory before
 the plugin is enabled. Follow [`esi/README.md`](esi/README.md) and run the

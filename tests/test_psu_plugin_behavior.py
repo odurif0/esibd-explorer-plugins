@@ -780,6 +780,20 @@ def test_channel_panel_diagnostics_snapshot_formats_compact_summary():
     assert "CH1 rails: 24Vp 24 V, 12Vp 12.1 V" in snapshot["tooltip"]
 
 
+def test_channel_panel_widths_are_fixed_and_diagnostics_span_both_channels():
+    module = _load_module()
+    source = PLUGIN_PATH.read_text(encoding="utf-8")
+
+    assert module._PSU_PANEL_CARD_WIDTH == 280
+    assert module._PSU_PANEL_DIAGNOSTICS_WIDTH == (
+        2 * module._PSU_PANEL_CARD_WIDTH + module._PSU_PANEL_CARD_SPACING
+    )
+    assert "card.setFixedWidth(_PSU_PANEL_CARD_WIDTH)" in source
+    assert "diag_frame.setFixedWidth(_PSU_PANEL_DIAGNOSTICS_WIDTH)" in source
+    assert "cards_layout.addWidget(diag_frame)" not in source
+    assert "diagnostics_layout.addWidget(diag_frame)" in source
+
+
 def test_format_current_text_handles_nan():
     module = _load_module()
 
@@ -1370,6 +1384,37 @@ def test_apply_manual_state_does_not_switch_range_when_range_is_unchanged(monkey
 
     assert ("await_discharge",) not in calls
     assert not any(call[0] == "set_output_full_range" for call in calls)
+
+
+def test_range_switch_wait_uses_measured_voltage(monkeypatch):
+    module = _load_module()
+    calls = []
+    readings = {0: [10.0, 0.0], 1: [0.0, 0.0]}
+
+    class FakeDevice:
+        def get_channel_measured_voltage(self, channel, timeout_s=None):
+            calls.append(("get_channel_measured_voltage", channel, timeout_s))
+            return readings[channel].pop(0)
+
+        def get_channel_voltage(self, _channel, timeout_s=None):
+            raise AssertionError("target voltage must not be used as a discharge readback")
+
+    controller = module.PSUController(types.SimpleNamespace())
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda duration: calls.append(("sleep", duration)),
+    )
+
+    controller._await_discharge_before_range_switch(FakeDevice(), timeout_s=3.0)
+
+    assert calls == [
+        ("get_channel_measured_voltage", 0, 3.0),
+        ("get_channel_measured_voltage", 1, 3.0),
+        ("sleep", 0.1),
+        ("get_channel_measured_voltage", 0, 3.0),
+        ("get_channel_measured_voltage", 1, 3.0),
+    ]
 
 
 def test_apply_manual_state_waits_before_switching_changed_range(monkeypatch):
