@@ -166,6 +166,25 @@ If a DLL call times out or shutdown cannot be confirmed, treat the HV state as
 unknown and use the physical interlock or front panel before approaching the
 source.
 
+## Configuration Management
+
+The ESI controller stores up to 1023 named configuration slots in NVM. After
+connecting, the plugin queries the controller and populates the `Operating
+config` setting with the available slots.
+
+- **Operating config**: select a slot index from the toolbar. Use `-1` to
+  connect without loading a saved configuration.
+- **Load now**: loads the selected slot into volatile memory while the device
+  is ON. The plugin then automatically re-applies the volatile
+  `HVPSxMaxVoltStep = 10.008` patch because a saved OFF configuration has
+  `MaxVoltStep = 0`, which blocks HV control.
+- **Available configs**: indicator listing the slots reported by the controller.
+- **Loaded config**: indicator showing the last loaded slot.
+
+Configurations can be saved to NVM slots via the vendor `ESI-Controller.exe`
+utility or the `ESI` driver's `save_config` method. The plugin itself only
+loads existing slots and never writes to NVM.
+
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `esi/` directory

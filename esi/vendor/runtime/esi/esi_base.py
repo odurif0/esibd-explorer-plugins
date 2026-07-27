@@ -140,6 +140,8 @@ class ESIBase:
     DATA_STRING_SIZE = 12
     PRODUCT_ID_SIZE = 81
     CONFIG_DATA_SIZE = 53
+    MAX_CONFIG = 1023
+    CONFIG_NAME_SIZE = 202
 
     def __init__(
         self,
@@ -277,6 +279,42 @@ class ESIBase:
             ),
             "COM_ESI_CTRL_GetCurrentConfig": ([byte_ptr], ctypes.c_int),
             "COM_ESI_CTRL_SetCurrentConfig": ([byte_ptr], ctypes.c_int),
+            "COM_ESI_CTRL_GetConfigList": (
+                [bool_ptr, bool_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_LoadCurrentConfig": (
+                [ctypes.c_uint16],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_SaveCurrentConfig": (
+                [ctypes.c_uint16],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetConfigName": (
+                [ctypes.c_uint16, ctypes.c_char_p],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_SetConfigName": (
+                [ctypes.c_uint16, ctypes.c_char_p],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetConfigData": (
+                [ctypes.c_uint16, byte_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_SetConfigData": (
+                [ctypes.c_uint16, byte_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_GetConfigFlags": (
+                [ctypes.c_uint16, bool_ptr, bool_ptr],
+                ctypes.c_int,
+            ),
+            "COM_ESI_CTRL_SetConfigFlags": (
+                [ctypes.c_uint16, ctypes.c_bool, ctypes.c_bool],
+                ctypes.c_int,
+            ),
         }
         for name, (argtypes, restype) in signatures.items():
             function = getattr(self.esi_dll, name)
@@ -991,6 +1029,79 @@ class ESIBase:
             )
         config = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE).from_buffer_copy(raw)
         return self.esi_dll.COM_ESI_CTRL_SetCurrentConfig(config)
+
+    def load_current_config(self, config_number: int) -> int:
+        """Load one configuration slot from NVM into the volatile config."""
+        return self.esi_dll.COM_ESI_CTRL_LoadCurrentConfig(ctypes.c_uint16(config_number))
+
+    def save_current_config_to_slot(self, config_number: int) -> int:
+        """Save the current volatile configuration into one NVM slot."""
+        return self.esi_dll.COM_ESI_CTRL_SaveCurrentConfig(ctypes.c_uint16(config_number))
+
+    def get_config_list(self):
+        """Return (status, active_flags, valid_flags) for all config slots."""
+        active = (ctypes.c_bool * self.MAX_CONFIG)()
+        valid = (ctypes.c_bool * self.MAX_CONFIG)()
+        status = self.esi_dll.COM_ESI_CTRL_GetConfigList(active, valid)
+        return (
+            status,
+            [bool(active[i]) for i in range(self.MAX_CONFIG)],
+            [bool(valid[i]) for i in range(self.MAX_CONFIG)],
+        )
+
+    def get_config_name(self, config_number: int):
+        """Return (status, name) for one configuration slot."""
+        buf = ctypes.create_string_buffer(self.CONFIG_NAME_SIZE)
+        status = self.esi_dll.COM_ESI_CTRL_GetConfigName(
+            ctypes.c_uint16(config_number), buf
+        )
+        return status, buf.value.decode(errors="replace")
+
+    def set_config_name(self, config_number: int, name: str) -> int:
+        """Set the name of one configuration slot."""
+        encoded = str(name or "").encode("ascii", errors="replace")
+        buf = ctypes.create_string_buffer(self.CONFIG_NAME_SIZE)
+        max_bytes = max(self.CONFIG_NAME_SIZE - 1, 0)
+        buf.value = encoded[:max_bytes]
+        return self.esi_dll.COM_ESI_CTRL_SetConfigName(
+            ctypes.c_uint16(config_number), buf
+        )
+
+    def get_config_data(self, config_number: int):
+        """Return (status, config_bytes) for one configuration slot."""
+        config = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE)()
+        status = self.esi_dll.COM_ESI_CTRL_GetConfigData(
+            ctypes.c_uint16(config_number), config
+        )
+        return status, list(config)
+
+    def set_config_data(self, config_number: int, config_data) -> int:
+        """Set the raw byte data of one configuration slot."""
+        raw = bytes(config_data)
+        if len(raw) != self.CONFIG_DATA_SIZE:
+            raise ValueError(
+                f"ESI config data must contain "
+                f"{self.CONFIG_DATA_SIZE} bytes, got {len(raw)}."
+            )
+        config = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE).from_buffer_copy(raw)
+        return self.esi_dll.COM_ESI_CTRL_SetConfigData(
+            ctypes.c_uint16(config_number), config
+        )
+
+    def get_config_flags(self, config_number: int):
+        """Return (status, active, valid) for one configuration slot."""
+        active = ctypes.c_bool()
+        valid = ctypes.c_bool()
+        status = self.esi_dll.COM_ESI_CTRL_GetConfigFlags(
+            ctypes.c_uint16(config_number), ctypes.byref(active), ctypes.byref(valid)
+        )
+        return status, active.value, valid.value
+
+    def set_config_flags(self, config_number: int, active: bool, valid: bool) -> int:
+        """Set the active/valid flags for one configuration slot."""
+        return self.esi_dll.COM_ESI_CTRL_SetConfigFlags(
+            ctypes.c_uint16(config_number), ctypes.c_bool(active), ctypes.c_bool(valid)
+        )
 
     # =========================================================================
     #     Error handling

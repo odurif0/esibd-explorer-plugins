@@ -62,6 +62,26 @@ _ESI_BTN_HEAT_ACTIVE = "QPushButton { background-color: #d97706; color: #1a1a2e;
 _ESI_BTN_HEAT_OFF = "QPushButton { background-color: #374151; color: #fbbf24; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    """Best-effort int conversion returning *default* on failure."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Best-effort bool conversion returning *default* on failure."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    try:
+        return bool(int(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def _runtime_module_name(plugin_dir: Path) -> str:
     digest = hashlib.sha256(str(plugin_dir.resolve()).encode()).hexdigest()[:12]
     return f"{_RUNTIME_PREFIX}_{digest}"
@@ -171,6 +191,9 @@ class ESIDevice(Device):
     INTERLOCK = "Interlock"
     MODULES = "Modules"
     HEAT_STATUS = "Heat status"
+    OPERATING_CONFIG = "Operating config"
+    AVAILABLE_CONFIGS = "Available configs"
+    LOADED_CONFIG = "Loaded config"
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -910,6 +933,38 @@ class ESIDevice(Device):
                 internal=True,
                 restore=False,
             )
+        settings[f"{self.name}/{self.OPERATING_CONFIG}"] = parameterDict(
+            value=-1,
+            minimum=-1,
+            maximum=255,
+            toolTip=(
+                "ESI config slot exposed in the plugin toolbar. Use -1 to "
+                "connect without loading a saved configuration."
+            ),
+            parameterType=PARAMETERTYPE.INT,
+            attr="operating_config",
+        )
+        settings[f"{self.name}/{self.AVAILABLE_CONFIGS}"] = parameterDict(
+            value="n/a",
+            toolTip=(
+                "ESI configuration slots reported by the controller after "
+                "connect. Use these indices for the operating config setting."
+            ),
+            parameterType=PARAMETERTYPE.LABEL,
+            attr="available_configs_text",
+            indicator=True,
+            internal=True,
+            restore=False,
+        )
+        settings[f"{self.name}/{self.LOADED_CONFIG}"] = parameterDict(
+            value="n/a",
+            toolTip="ESI configuration currently loaded in volatile memory.",
+            parameterType=PARAMETERTYPE.LABEL,
+            attr="loaded_config_text",
+            indicator=True,
+            internal=True,
+            restore=False,
+        )
         settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
         settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
         return settings
@@ -1085,6 +1140,9 @@ class ESIController(DeviceController):
         self.identity: dict[str, Any] = {}
         self.heat_readback_valid = False
         self.heat_max_temperature_c = _ESI_MAX_TEMPERATURE
+        self.available_configs: list[dict[str, Any]] = []
+        self.available_configs_text = "n/a"
+        self.loaded_config_text = "n/a"
 
     def runInitialization(self) -> None:
         self.initialized = False
@@ -1151,12 +1209,116 @@ class ESIController(DeviceController):
         self.controllerParent.ensureFixedChannels(persist=True)
         self.initializeValues(reset=True)
         self.initialized = self.device is not None
+        if self.initialized:
+            self._refresh_available_configs()
         with contextlib.suppress(AttributeError):
             super().initComplete()
         if self.initialized:
             self.print(
                 "ESI initialized with HV and heater outputs forced OFF. "
                 "Use the explicit output controls to energize HV1, HV2, or HEAT."
+            )
+
+    def _refresh_available_configs(self) -> None:
+        device = self.device
+        if device is None:
+            self.available_configs = []
+            self.available_configs_text = "n/a"
+            return
+        list_configs = getattr(device, "list_configs", None)
+        if not callable(list_configs):
+            self.available_configs = []
+            self.available_configs_text = "Unavailable"
+            return
+        try:
+            configs = list_configs(
+                timeout_s=float(self.controllerParent.connect_timeout_s)
+            )
+        except Exception as exc:
+            self.available_configs = []
+            self.available_configs_text = "Unavailable"
+            self.print(
+                f"Could not read ESI config list: {exc}",
+                flag=PRINT.WARNING,
+            )
+            return
+        self.available_configs = list(configs or [])
+        if self.available_configs:
+            parts = [
+                f"{_coerce_int(c.get('index'), -1)}: "
+                f"{str(c.get('name', '') or '').strip() or '<unnamed>'}"
+                for c in self.available_configs
+            ]
+            self.available_configs_text = ", ".join(parts)
+        else:
+            self.available_configs_text = "No saved configs"
+
+    def _config_entry_by_index(self, config_index: int) -> dict[str, Any] | None:
+        for entry in self.available_configs:
+            if _coerce_int(entry.get("index"), -1) == config_index:
+                return entry
+        return None
+
+    def _operating_config_ready(self) -> tuple[bool, str, int]:
+        config_index = _coerce_int(
+            getattr(self.controllerParent, "operating_config", -1), -1
+        )
+        if config_index < 0:
+            return False, "select an ESI config first", config_index
+        entry = self._config_entry_by_index(config_index)
+        if entry is not None:
+            if not _coerce_bool(entry.get("valid"), True):
+                return (
+                    False,
+                    f"config {config_index} is marked invalid on the controller",
+                    config_index,
+                )
+        return True, "", config_index
+
+    def loadOperatingConfigNowFromThread(self, parallel: bool = True) -> None:
+        from threading import Thread
+        if parallel:
+            Thread(
+                target=self.loadOperatingConfigNow,
+                name=f"{self.controllerParent.name} loadConfigThread",
+                daemon=True,
+            ).start()
+            return
+        self.loadOperatingConfigNow()
+
+    def loadOperatingConfigNow(self) -> None:
+        device = self.device
+        if device is None or not getattr(self, "initialized", False):
+            self.print(
+                f"Cannot load {self.controllerParent.name} config: "
+                "communication not initialized.",
+                flag=PRINT.WARNING,
+            )
+            return
+        is_on = getattr(self.controllerParent, "isOn", None)
+        if not callable(is_on) or not bool(is_on()):
+            self.print(
+                f"Cannot load {self.controllerParent.name} config while the ESI is OFF.",
+                flag=PRINT.WARNING,
+            )
+            return
+        ready, reason, config_index = self._operating_config_ready()
+        if not ready:
+            self.print(
+                f"Cannot load {self.controllerParent.name} config: {reason}.",
+                flag=PRINT.WARNING,
+            )
+            return
+        timeout_s = float(self.controllerParent.connect_timeout_s)
+        try:
+            device.load_config(config_index, timeout_s=timeout_s)
+            self.loaded_config_text = f"Config {config_index}"
+            self.print(f"Loaded ESI config {config_index}.")
+        except Exception as exc:
+            self.errorCount += 1
+            self.print(
+                f"Failed to load ESI config {config_index}: {exc}",
+                flag=PRINT.ERROR,
             )
 
     def initializeValues(self, reset: bool = False) -> None:
