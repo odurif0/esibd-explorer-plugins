@@ -462,6 +462,113 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             configure, timeout * 8.0, "configure_hv_max_voltage_steps"
         )
 
+    def _list_configs_unlocked(self, include_empty: bool = False) -> list:
+        status, active_flags, valid_flags = ESIBase.get_config_list(self)
+        self._raise_on_status(status, "get_config_list")
+        configs: list = []
+        for index in range(self.MAX_CONFIG):
+            if not include_empty and not active_flags[index]:
+                continue
+            name_status, name = ESIBase.get_config_name(self, index)
+            self._raise_on_status(name_status, f"get_config_name({index})")
+            flag_status, active, valid = ESIBase.get_config_flags(self, index)
+            self._raise_on_status(flag_status, f"get_config_flags({index})")
+            configs.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "active": active,
+                    "valid": valid,
+                }
+            )
+        return configs
+
+    def list_configs(
+        self, include_empty: bool = False, timeout_s: Optional[float] = None
+    ) -> list:
+        """Return ESI configuration slots with flags and names."""
+        self._require_connected()
+        timeout = self._resolve_timeout(timeout_s) * 3.0
+        return self._call_locked_with_timeout(
+            self._list_configs_unlocked, timeout, "list_configs", include_empty
+        )
+
+    def load_config(
+        self, config_number: int, timeout_s: Optional[float] = None
+    ) -> None:
+        """Load one ESI configuration from controller NVM.
+
+        Re-applies the volatile HV ramp-step patch afterwards because a
+        saved OFF configuration has MaxVoltStep=0, which blocks HV control.
+        """
+        self._require_connected()
+        if not isinstance(config_number, int) or not 0 <= config_number < self.MAX_CONFIG:
+            raise ValueError(
+                f"ESI config number must be 0..{self.MAX_CONFIG - 1}, "
+                f"got {config_number}."
+            )
+        timeout = self._resolve_timeout(timeout_s)
+        status = self._call_locked_with_timeout(
+            ESIBase.load_current_config,
+            timeout,
+            "load_current_config",
+            self,
+            config_number,
+        )
+        self._raise_on_status(status, f"load_current_config({config_number})")
+        self.configure_hv_max_voltage_steps(
+            self.DEFAULT_HV_MAX_VOLTAGE_STEP_V, timeout_s=timeout_s
+        )
+
+    def save_config(
+        self,
+        config_number: int,
+        *,
+        name: Optional[str] = None,
+        active: Optional[bool] = None,
+        valid: Optional[bool] = None,
+        timeout_s: Optional[float] = None,
+    ) -> None:
+        """Save the current ESI state into one NVM configuration slot."""
+        self._require_connected()
+        if not isinstance(config_number, int) or not 0 <= config_number < self.MAX_CONFIG:
+            raise ValueError(
+                f"ESI config number must be 0..{self.MAX_CONFIG - 1}, "
+                f"got {config_number}."
+            )
+        timeout = self._resolve_timeout(timeout_s)
+        status = self._call_locked_with_timeout(
+            ESIBase.save_current_config_to_slot,
+            timeout,
+            "save_current_config_to_slot",
+            self,
+            config_number,
+        )
+        self._raise_on_status(status, f"save_current_config_to_slot({config_number})")
+        if name is not None:
+            name_status = self._call_locked_with_timeout(
+                ESIBase.set_config_name,
+                timeout,
+                "set_config_name",
+                self,
+                config_number,
+                name,
+            )
+            self._raise_on_status(name_status, f"set_config_name({config_number})")
+        if active is not None or valid is not None:
+            active_value = True if active is None else bool(active)
+            valid_value = True if valid is None else bool(valid)
+            flag_status = self._call_locked_with_timeout(
+                ESIBase.set_config_flags,
+                timeout,
+                "set_config_flags",
+                self,
+                config_number,
+                active_value,
+                valid_value,
+            )
+            self._raise_on_status(flag_status, f"set_config_flags({config_number})")
+
     def set_hv_module_target(
         self, address: int, voltage: float, timeout_s: Optional[float] = None
     ) -> float:
@@ -1063,6 +1170,9 @@ class ESI(ProcessIsolatedClientMixin):
         "get_heat_configuration": (8.0, 10.0, 45.0),
         "configure_heat_limits": (8.0, 10.0, 45.0),
         "configure_hv_max_voltage_steps": (8.0, 10.0, 45.0),
+        "list_configs": (20.0, 10.0, 90.0),
+        "load_config": (15.0, 10.0, 60.0),
+        "save_config": (15.0, 10.0, 60.0),
         "set_heater_temperature": (4.0, 10.0, 30.0),
         "force_safe_off": (8.0, 10.0, 45.0),
         "disconnect": (10.0, 10.0, 60.0),

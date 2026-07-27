@@ -219,6 +219,15 @@ def test_hv_ctypes_signatures_match_vendor_header(driver_modules):
         "COM_ESI_CTRL_GetConfigValues",
         "COM_ESI_CTRL_GetCurrentConfig",
         "COM_ESI_CTRL_SetCurrentConfig",
+        "COM_ESI_CTRL_GetConfigList",
+        "COM_ESI_CTRL_LoadCurrentConfig",
+        "COM_ESI_CTRL_SaveCurrentConfig",
+        "COM_ESI_CTRL_GetConfigName",
+        "COM_ESI_CTRL_SetConfigName",
+        "COM_ESI_CTRL_GetConfigData",
+        "COM_ESI_CTRL_SetConfigData",
+        "COM_ESI_CTRL_GetConfigFlags",
+        "COM_ESI_CTRL_SetConfigFlags",
     )
     base = object.__new__(base_module.ESIBase)
     base.esi_dll = types.SimpleNamespace(
@@ -1333,3 +1342,137 @@ def test_process_rpc_budgets_cover_batched_dll_operations(driver_modules):
     assert driver._rpc_timeout_for("force_safe_off", {"timeout_s": 5.0}) == 50.0
     assert driver._rpc_timeout_for("disconnect", {"timeout_s": 5.0}) == 60.0
     assert driver._rpc_timeout_for("get_heat_configuration", {"timeout_s": 3.0}) == 45.0
+
+
+def test_list_configs_returns_slots_with_names_and_flags(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_config_list",
+        lambda self: (
+            0,
+            [False] * 10 + [True, False, True] + [False] * (self.MAX_CONFIG - 13),
+            [False] * 12 + [True] + [False] * (self.MAX_CONFIG - 13),
+        ),
+    )
+
+    def fake_get_config_name(self, index):
+        names = {10: "Spray-2kV", 12: "Test-100V"}
+        return 0, names.get(index, "")
+
+    monkeypatch.setattr(
+        base_module.ESIBase, "get_config_name", fake_get_config_name
+    )
+
+    def fake_get_config_flags(self, index):
+        active_map = {10: (True, True), 12: (False, True)}
+        return (0, *active_map.get(index, (False, False)))
+
+    monkeypatch.setattr(
+        base_module.ESIBase, "get_config_flags", fake_get_config_flags
+    )
+
+    configs = controller.list_configs(timeout_s=0.5)
+    assert len(configs) == 2
+    assert configs[0] == {
+        "index": 10,
+        "name": "Spray-2kV",
+        "active": True,
+        "valid": True,
+    }
+    assert configs[1] == {
+        "index": 12,
+        "name": "Test-100V",
+        "active": False,
+        "valid": True,
+    }
+
+
+def test_load_config_reapplies_hv_max_voltage_step_patch(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+
+    loaded = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "load_current_config",
+        lambda self, num: loaded.append(num) or 0,
+    )
+
+    patched = []
+    monkeypatch.setattr(
+        driver_module._ESIController,
+        "configure_hv_max_voltage_steps",
+        lambda self, step, timeout_s=None: patched.append(step),
+    )
+
+    controller.load_config(10, timeout_s=0.5)
+    assert loaded == [10]
+    assert patched == [driver_module._ESIController.DEFAULT_HV_MAX_VOLTAGE_STEP_V]
+
+
+def test_load_config_rejects_out_of_range_slot(driver_modules):
+    _runtime, driver_module, _base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+
+    with pytest.raises(ValueError, match="0..1022"):
+        controller.load_config(1023, timeout_s=0.5)
+    with pytest.raises(ValueError, match="0..1022"):
+        controller.load_config(-1, timeout_s=0.5)
+
+
+def test_load_config_raises_on_vendor_error(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+
+    monkeypatch.setattr(
+        base_module.ESIBase, "load_current_config", lambda self, num: -7
+    )
+    with pytest.raises(RuntimeError, match="load_current_config"):
+        controller.load_config(5, timeout_s=0.5)
+
+
+def test_save_config_writes_slot_name_and_flags(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+
+    saved = []
+    name_calls = []
+    flag_calls = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "save_current_config_to_slot",
+        lambda self, num: saved.append(num) or 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_config_name",
+        lambda self, num, name: name_calls.append((num, name)) or 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_config_flags",
+        lambda self, num, active, valid: flag_calls.append((num, active, valid)) or 0,
+    )
+
+    controller.save_config(
+        42, name="My-Config", active=True, valid=True, timeout_s=0.5
+    )
+    assert saved == [42]
+    assert name_calls == [(42, "My-Config")]
+    assert flag_calls == [(42, True, True)]
+
+
+def test_list_configs_requires_connection(driver_modules):
+    _runtime, driver_module, _base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = False
+    with pytest.raises(RuntimeError, match="not connected"):
+        controller.list_configs(timeout_s=0.5)

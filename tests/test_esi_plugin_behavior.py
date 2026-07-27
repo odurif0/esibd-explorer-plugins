@@ -1136,3 +1136,144 @@ def test_dispose_disconnects_before_closing_backend():
 
     assert calls == [("disconnect", 4.0), ("close",)]
     assert controller.device is None
+
+
+def test_default_settings_include_config_management_keys():
+    module = _load_plugin()
+    device = module.ESIDevice()
+
+    settings = device.getDefaultSettings()
+
+    assert "ESI/Operating config" in settings
+    assert settings["ESI/Operating config"][module.Parameter.VALUE] == -1
+    assert "ESI/Available configs" in settings
+    assert settings["ESI/Available configs"][module.Parameter.VALUE] == "n/a"
+    assert "ESI/Loaded config" in settings
+    assert settings["ESI/Loaded config"][module.Parameter.VALUE] == "n/a"
+
+
+def test_controller_has_config_state_attributes():
+    module = _load_plugin()
+    controller = module.ESIController(
+        types.SimpleNamespace(connect_timeout_s=5.0)
+    )
+    assert controller.available_configs == []
+    assert controller.available_configs_text == "n/a"
+    assert controller.loaded_config_text == "n/a"
+
+
+def test_refresh_available_configs_populates_list():
+    module = _load_plugin()
+
+    class FakeDevice:
+        def list_configs(self, timeout_s=5.0):
+            return [
+                {"index": 5, "name": "Spray", "active": True, "valid": True},
+                {"index": 10, "name": "Idle", "active": False, "valid": True},
+            ]
+
+    controller = module.ESIController(
+        types.SimpleNamespace(connect_timeout_s=5.0)
+    )
+    controller.device = FakeDevice()
+    controller._refresh_available_configs()
+    assert len(controller.available_configs) == 2
+    assert "5: Spray" in controller.available_configs_text
+    assert "10: Idle" in controller.available_configs_text
+
+
+def test_refresh_available_configs_handles_no_configs():
+    module = _load_plugin()
+
+    class FakeDevice:
+        def list_configs(self, timeout_s=5.0):
+            return []
+
+    controller = module.ESIController(
+        types.SimpleNamespace(connect_timeout_s=5.0)
+    )
+    controller.device = FakeDevice()
+    controller._refresh_available_configs()
+    assert controller.available_configs == []
+    assert controller.available_configs_text == "No saved configs"
+
+
+def test_refresh_available_configs_handles_error():
+    module = _load_plugin()
+
+    class FakeDevice:
+        def list_configs(self, timeout_s=5.0):
+            raise RuntimeError("timeout")
+
+    controller = module.ESIController(
+        types.SimpleNamespace(connect_timeout_s=5.0)
+    )
+    controller.device = FakeDevice()
+    controller.print = lambda *a, **k: None
+    controller._refresh_available_configs()
+    assert controller.available_configs == []
+    assert controller.available_configs_text == "Unavailable"
+
+
+def test_operating_config_ready_rejects_unselected():
+    module = _load_plugin()
+    controller = module.ESIController(
+        types.SimpleNamespace(connect_timeout_s=5.0, operating_config=-1)
+    )
+    ready, reason, idx = controller._operating_config_ready()
+    assert not ready
+    assert "select" in reason
+    assert idx == -1
+
+
+def test_operating_config_ready_rejects_invalid_slot():
+    module = _load_plugin()
+    parent = types.SimpleNamespace(connect_timeout_s=5.0, operating_config=3)
+    controller = module.ESIController(parent)
+    controller.available_configs = [
+        {"index": 3, "name": "Bad", "active": True, "valid": False}
+    ]
+    ready, reason, idx = controller._operating_config_ready()
+    assert not ready
+    assert "invalid" in reason
+    assert idx == 3
+
+
+def test_operating_config_ready_accepts_valid_slot():
+    module = _load_plugin()
+    parent = types.SimpleNamespace(connect_timeout_s=5.0, operating_config=7)
+    controller = module.ESIController(parent)
+    controller.available_configs = [
+        {"index": 7, "name": "Good", "active": True, "valid": True}
+    ]
+    ready, reason, idx = controller._operating_config_ready()
+    assert ready
+    assert idx == 7
+
+
+def test_load_config_now_requires_initialized_device():
+    module = _load_plugin()
+    parent = types.SimpleNamespace(connect_timeout_s=5.0, name="ESI")
+    controller = module.ESIController(parent)
+    controller.initialized = False
+    controller.print = lambda *a, **k: None
+    controller.loadOperatingConfigNow()
+    assert controller.device is None
+
+
+def test_load_config_now_requires_device_on():
+    module = _load_plugin()
+    parent = types.SimpleNamespace(
+        connect_timeout_s=5.0, name="ESI",
+        isOn=lambda: False, operating_config=5,
+    )
+    controller = module.ESIController(parent)
+    controller.initialized = True
+    controller.device = object()
+    controller.available_configs = [
+        {"index": 5, "name": "Test", "active": True, "valid": True}
+    ]
+    printed = []
+    controller.print = lambda msg, flag=None: printed.append(msg)
+    controller.loadOperatingConfigNow()
+    assert any("OFF" in msg for msg in printed)
