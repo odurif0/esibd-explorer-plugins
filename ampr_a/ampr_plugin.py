@@ -1808,12 +1808,28 @@ class AMPRController(DeviceController):
             if self._begin_transition(True):
                 self.toggleOnFromThread(parallel=True)
 
-    def readNumbers(self) -> None:
+    def runAcquisition(self) -> None:
+        """Poll AMPR readbacks while reusing the acquisition-loop lock."""
+        while self.acquiring:
+            try:
+                with self._controller_lock_section(
+                    "Could not acquire lock to acquire AMPR data.",
+                    timeout_s=1.0,
+                    log_timeout=False,
+                ):
+                    self.readNumbers(already_acquired=True)
+                    self.signalComm.updateValuesSignal.emit()
+            except TimeoutError:
+                continue
+            finally:
+                time.sleep(self.controllerParent.interval / 1000)
+
+    def readNumbers(self, *, already_acquired: bool = False) -> None:
         if self.device is None or not getattr(self, "initialized", False):
             self.initializeValues(reset=True)
             return
 
-        self._update_state()
+        self._update_state(already_acquired=already_acquired)
         if self.main_state == _AMPR_COMMUNICATION_LOST_STATE or self.device is None:
             self.initializeValues(reset=True)
             return
@@ -1837,7 +1853,8 @@ class AMPRController(DeviceController):
         for module in poll_modules:
             try:
                 with self._controller_lock_section(
-                    f"Could not acquire lock to read AMPR module {module}."
+                    f"Could not acquire lock to read AMPR module {module}.",
+                    already_acquired=already_acquired,
                 ):
                     device = self.device
                     if device is None:
@@ -2261,7 +2278,7 @@ class AMPRController(DeviceController):
                 flag=PRINT.WARNING,
             )
 
-    def _update_state(self) -> None:
+    def _update_state(self, *, already_acquired: bool = False) -> None:
         if self.device is None:
             self.main_state = "Disconnected"
             self.device_state_summary = "n/a"
@@ -2272,7 +2289,8 @@ class AMPRController(DeviceController):
 
         try:
             with self._controller_lock_section(
-                "Could not acquire lock to refresh the AMPR state."
+                "Could not acquire lock to refresh the AMPR state.",
+                already_acquired=already_acquired,
             ):
                 device = self.device
                 if device is None:
@@ -2523,6 +2541,7 @@ class AMPRController(DeviceController):
         with lock.acquire_timeout(
             float(timeout_s),
             timeoutMessage=timeout_message if log_timeout else "",
+            already_acquired=already_acquired,
         ) as lock_acquired:
             if not lock_acquired:
                 raise TimeoutError(timeout_message)

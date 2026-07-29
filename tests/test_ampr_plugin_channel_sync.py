@@ -536,7 +536,9 @@ def test_read_numbers_skips_acquisition_before_successful_initialization():
     controller.errorCount = 0
     controller.main_state = "Disconnected"
     controller.values = {(2, 3): 123.0}
-    controller._update_state = lambda: setattr(controller, "main_state", "ST_STBY")
+    controller._update_state = lambda *, already_acquired=False: setattr(
+        controller, "main_state", "ST_STBY"
+    )
 
     module.AMPRController.readNumbers(controller)
 
@@ -577,7 +579,9 @@ def test_read_numbers_blocks_channel_acquisition_until_st_on():
     controller.errorCount = 0
     controller.main_state = "Disconnected"
     controller.values = {(2, 3): 123.0}
-    controller._update_state = lambda: setattr(controller, "main_state", "ST_STBY")
+    controller._update_state = lambda *, already_acquired=False: setattr(
+        controller, "main_state", "ST_STBY"
+    )
 
     module.AMPRController.readNumbers(controller)
 
@@ -618,7 +622,9 @@ def test_read_numbers_reads_voltages_only_once_st_on_is_reached():
     controller.errorCount = 0
     controller.main_state = "Disconnected"
     controller.values = {(2, 3): 123.0}
-    controller._update_state = lambda: setattr(controller, "main_state", "ST_ON")
+    controller._update_state = lambda *, already_acquired=False: setattr(
+        controller, "main_state", "ST_ON"
+    )
 
     module.AMPRController.readNumbers(controller)
 
@@ -649,7 +655,12 @@ def test_read_numbers_acquires_lock_for_ampr_module_polling():
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        def acquire_timeout(self, timeout, timeoutMessage=""):
+        def acquire_timeout(
+            self,
+            timeout,
+            timeoutMessage="",
+            already_acquired=False,
+        ):
             return self._Section(self, timeout, timeoutMessage)
 
     class FakeChannel:
@@ -678,7 +689,9 @@ def test_read_numbers_acquires_lock_for_ampr_module_polling():
     controller.detected_module_ids = [2]
     controller.errorCount = 0
     controller.main_state = "Disconnected"
-    controller._update_state = lambda: setattr(controller, "main_state", "ST_ON")
+    controller._update_state = lambda *, already_acquired=False: setattr(
+        controller, "main_state", "ST_ON"
+    )
 
     module.AMPRController.readNumbers(controller)
 
@@ -686,6 +699,108 @@ def test_read_numbers_acquires_lock_for_ampr_module_polling():
         (1, "Could not acquire lock to read AMPR module 2.")
     ]
     assert controller.values == {(2, 1): 11.0}
+
+
+def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch):
+    module = _load_module()
+
+    class FakeFrameworkLock:
+        def __init__(self):
+            self.locked = False
+            self.acquisitions = 0
+            self.releases = 0
+
+        @module.contextlib.contextmanager
+        def acquire_timeout(
+            self,
+            timeout,
+            timeoutMessage="",
+            already_acquired=False,
+        ):
+            if already_acquired:
+                yield self.locked
+                return
+            if self.locked:
+                yield False
+                return
+            self.locked = True
+            self.acquisitions += 1
+            try:
+                yield True
+            finally:
+                self.locked = False
+                self.releases += 1
+
+    class FakeChannel:
+        real = True
+
+        def module_address(self):
+            return 2
+
+        def channel_number(self):
+            return 1
+
+    class FakeDevice:
+        def get_module_voltages(self, module_id):
+            assert module_id == 2
+            return {1: {"measured": 11.0}}
+
+    emitted = []
+    state_lock_flags = []
+
+    def framework_run_acquisition(self):
+        while self.acquiring:
+            with self.lock.acquire_timeout(
+                1,
+                timeoutMessage="Could not acquire lock to acquire data",
+            ) as lock_acquired:
+                if lock_acquired:
+                    self.readNumbers()
+                    self.signalComm.updateValuesSignal.emit()
+            module.time.sleep(self.controllerParent.interval / 1000)
+
+    # Given the ESIBD 1.0.1 acquisition loop already owns a non-reentrant lock.
+    monkeypatch.setattr(
+        module.DeviceController,
+        "runAcquisition",
+        framework_run_acquisition,
+        raising=False,
+    )
+    parent = types.SimpleNamespace(
+        interval=1000,
+        poll_timeout_s=2.5,
+        getChannels=lambda: [FakeChannel()],
+        getConfiguredModules=lambda: [2],
+    )
+    controller = module.AMPRController(parent)
+    controller.lock = FakeFrameworkLock()
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.detected_module_ids = [2]
+    controller.errorCount = 0
+    controller.main_state = "ST_ON"
+    controller._update_state = lambda *, already_acquired=False: state_lock_flags.append(
+        already_acquired
+    )
+    controller.signalComm = types.SimpleNamespace(
+        updateValuesSignal=types.SimpleNamespace(emit=lambda: emitted.append(True))
+    )
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda *_args: setattr(controller, "acquiring", False),
+    )
+
+    # When one acquisition tick reads state and module voltages.
+    controller.acquiring = True
+    controller.runAcquisition()
+
+    # Then nested reads reuse the outer lock instead of timing out on themselves.
+    assert controller.values == {(2, 1): 11.0}
+    assert state_lock_flags == [True]
+    assert emitted == [True]
+    assert controller.lock.acquisitions == 1
+    assert controller.lock.releases == 1
 
 
 def test_update_state_marks_communication_lost_after_repeated_generic_failures():
@@ -1783,7 +1898,9 @@ def test_read_numbers_clears_existing_values_when_state_leaves_st_on():
     controller.values = {(2, 1): 10.0, (2, 2): 20.0}
     controller.main_state = "ST_ON"
     controller.controllerParent = types.SimpleNamespace(getChannels=lambda: [FakeChannel()])
-    controller._update_state = lambda: setattr(controller, "main_state", "ST_STBY")
+    controller._update_state = lambda *, already_acquired=False: setattr(
+        controller, "main_state", "ST_STBY"
+    )
 
     module.AMPRController.readNumbers(controller)
 
