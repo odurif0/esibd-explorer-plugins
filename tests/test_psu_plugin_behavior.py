@@ -39,6 +39,7 @@ def _install_esibd_stubs() -> None:
         INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
 
     class PRINT(Enum):
+        INFO = "INFO"
         WARNING = "WARNING"
         ERROR = "ERROR"
 
@@ -2067,3 +2068,148 @@ def test_format_current_text_rounds_to_whole_milliamps():
     assert fmt(1.0) == "1000 mA"
     assert fmt(np.nan) == "n/a"
     assert fmt(None) == "n/a"
+
+
+def _new_psu_device(module, **attrs):
+    device = object.__new__(module.PSUDevice)
+    for name, value in attrs.items():
+        setattr(device, name, value)
+    return device
+
+
+def test_interlock_button_is_created_in_title_bar(monkeypatch):
+    module = _load_module()
+
+    class FakeClicked:
+        def __init__(self):
+            self.callbacks = []
+
+        def connect(self, callback):
+            self.callbacks.append(callback)
+
+    class FakeButton:
+        def __init__(self, text):
+            self.text = text
+            self.clicked = FakeClicked()
+            self.tooltip = ""
+            self.visible = None
+            self.enabled = None
+
+        def setToolTip(self, tooltip):
+            self.tooltip = tooltip
+
+        def setVisible(self, visible):
+            self.visible = visible
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+    qt_widgets = types.ModuleType("PyQt6.QtWidgets")
+    qt_widgets.QPushButton = FakeButton
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", qt_widgets)
+
+    inserted = []
+    title_bar = types.SimpleNamespace(
+        insertWidget=lambda before, widget: inserted.append((before, widget))
+    )
+    device = _new_psu_device(
+        module,
+        titleBar=title_bar,
+        stretchAction="stretch",
+        controller=None,
+        main_state="ST_ERR_ILOCK",
+    )
+    device._ensure_interlock_action()
+
+    assert inserted, "expected the interlock button to be inserted in the title bar"
+    before, button = inserted[0]
+    assert before == "stretch"
+    assert button.text == "Disable interlock"
+    assert button.clicked.callbacks, "expected the clicked signal to be wired"
+    assert button.visible is True
+
+
+def test_interlock_button_visibility_follows_main_state():
+    module = _load_module()
+
+    class FakeButton:
+        def __init__(self):
+            self.visible = None
+            self.enabled = None
+
+        def setVisible(self, visible):
+            self.visible = visible
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+    button = FakeButton()
+    device = _new_psu_device(
+        module,
+        clearInterlockButton=button,
+        main_state="ST_ERR_ILOCK",
+        controller=types.SimpleNamespace(initialized=True),
+    )
+    device._sync_interlock_action()
+    assert button.visible is True
+    assert button.enabled is True
+
+    device.main_state = "ST_ON"
+    device._sync_interlock_action()
+    assert button.visible is False
+
+    device.main_state = "ST_ERR_ILOCK"
+    device.controller = types.SimpleNamespace(initialized=False)
+    device._sync_interlock_action()
+    assert button.visible is True
+    assert button.enabled is False
+
+
+def test_clear_interlock_disables_monitoring_and_persists_setting():
+    module = _load_module()
+    calls = []
+
+    class FakeDevice:
+        def set_interlock_enabled(self, connector_output, connector_bnc, timeout_s=None):
+            calls.append((connector_output, connector_bnc, timeout_s))
+
+    setting_key = f"PSU_A/{module.PSUDevice.INTERLOCK_MONITORING}"
+    settings = {setting_key: types.SimpleNamespace(value=True)}
+    plugin_manager = types.SimpleNamespace(
+        Settings=types.SimpleNamespace(settings=settings)
+    )
+    state_updates = []
+    controller = types.SimpleNamespace(
+        device=FakeDevice(),
+        initialized=True,
+        _update_state=lambda: state_updates.append(True),
+    )
+    messages = []
+    device = _new_psu_device(
+        module,
+        name="PSU_A",
+        controller=controller,
+        pluginManager=plugin_manager,
+        connect_timeout_s=5.0,
+        interlock_monitoring=True,
+        print=lambda *args, **kwargs: messages.append(args),
+    )
+    device._clear_interlock()
+
+    assert calls == [(False, False, 5.0)]
+    assert settings[setting_key].value is False
+    assert device.interlock_monitoring is False
+    assert state_updates == [True]
+
+
+def test_clear_interlock_requires_initialized_communication():
+    module = _load_module()
+    messages = []
+    controller = types.SimpleNamespace(device=object(), initialized=False)
+    device = _new_psu_device(
+        module,
+        controller=controller,
+        print=lambda *args, **kwargs: messages.append(args),
+    )
+    device._clear_interlock()
+    assert messages, "expected a warning message"
