@@ -2116,7 +2116,7 @@ def test_interlock_button_is_created_in_title_bar(monkeypatch):
         module,
         titleBar=title_bar,
         stretchAction="stretch",
-        controller=None,
+        controller=types.SimpleNamespace(interlock_active=False, initialized=True),
         main_state="ST_ERR_ILOCK",
     )
     device._ensure_interlock_action()
@@ -2148,7 +2148,7 @@ def test_interlock_button_visibility_follows_main_state():
         module,
         clearInterlockButton=button,
         main_state="ST_ERR_ILOCK",
-        controller=types.SimpleNamespace(initialized=True),
+        controller=types.SimpleNamespace(interlock_active=False, initialized=True),
     )
     device._sync_interlock_action()
     assert button.visible is True
@@ -2159,10 +2159,19 @@ def test_interlock_button_visibility_follows_main_state():
     assert button.visible is False
 
     device.main_state = "ST_ERR_ILOCK"
-    device.controller = types.SimpleNamespace(initialized=False)
+    device.controller = types.SimpleNamespace(interlock_active=False, initialized=False)
     device._sync_interlock_action()
     assert button.visible is True
     assert button.enabled is False
+
+    # Interlock loop closed: the error is stale/latched, the button must not appear.
+    device.controller = types.SimpleNamespace(interlock_active=True, initialized=True)
+    device._sync_interlock_action()
+    assert button.visible is False
+
+    device.controller = types.SimpleNamespace(interlock_active=None, initialized=True)
+    device._sync_interlock_action()
+    assert button.visible is False
 
 
 def test_clear_interlock_disables_monitoring_and_persists_setting():

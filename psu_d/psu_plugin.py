@@ -1688,13 +1688,14 @@ class PSUDevice(Device):
         self._sync_interlock_action()
 
     def _sync_interlock_action(self) -> None:
-        """Show the interlock-clear button only while the PSU reports ST_ERR_ILOCK."""
+        """Show the interlock-clear button only while the PSU reports ST_ERR_ILOCK with the interlock loop genuinely open."""
         button = getattr(self, "clearInterlockButton", None)
         if button is None:
             return
-        state = _normalize_runtime_state(getattr(self, "main_state", "Disconnected"))
-        self._set_action_visible(button, state == "ST_ERR_ILOCK")
         controller = getattr(self, "controller", None)
+        state = _normalize_runtime_state(getattr(self, "main_state", "Disconnected"))
+        interlock_open = getattr(controller, "interlock_active", None) is False
+        self._set_action_visible(button, state == "ST_ERR_ILOCK" and interlock_open)
         initialized = bool(getattr(controller, "initialized", False))
         self._set_action_enabled(button, initialized)
 
