@@ -701,6 +701,105 @@ def test_read_numbers_acquires_lock_for_ampr_module_polling():
     assert controller.values == {(2, 1): 11.0}
 
 
+def test_update_values_clears_monitor_styles_when_device_turns_off():
+    module = _load_module()
+
+    class FakeWidget:
+        def __init__(self):
+            self.style = module._AMPR_MONITOR_OK_STYLE
+
+        def setStyleSheet(self, style):
+            self.style = style
+
+    class FakeParameter:
+        def __init__(self, widget):
+            self.widget = widget
+
+        def getWidget(self):
+            return self.widget
+
+    channel = object.__new__(module.AMPRChannel)
+    widget = FakeWidget()
+    channel.channelParent = types.SimpleNamespace(
+        controller=types.SimpleNamespace(acquiring=False),
+        isOn=lambda: False,
+    )
+    channel.enabled = True
+    channel.real = True
+    channel.waitToStabilize = False
+    channel.monitor = 12.0
+    channel.MONITOR = "Monitor"
+    channel.getParameterByName = lambda _name: FakeParameter(widget)
+
+    controller = object.__new__(module.AMPRController)
+    controller.values = {(2, 1): 11.0}
+    controller.main_state = "ST_ON"
+    controller.detected_modules_text = "2"
+    controller.device_state_summary = "OK"
+    controller.interlock_state_summary = "OK"
+    controller.voltage_state_summary = "OK"
+    controller.controllerParent = types.SimpleNamespace(
+        isOn=lambda: False,
+        getChannels=lambda: [channel],
+    )
+
+    module.AMPRController.updateValues(controller)
+
+    assert np.isnan(channel.monitor)
+    assert widget.style == module._AMPR_MONITOR_NEUTRAL_STYLE
+
+
+def test_update_values_reapplies_monitor_styles_while_device_is_on():
+    module = _load_module()
+
+    class FakeWidget:
+        def __init__(self):
+            self.style = module._AMPR_MONITOR_NEUTRAL_STYLE
+
+        def setStyleSheet(self, style):
+            self.style = style
+
+    class FakeParameter:
+        def __init__(self, widget):
+            self.widget = widget
+
+        def getWidget(self):
+            return self.widget
+
+    channel = object.__new__(module.AMPRChannel)
+    widget = FakeWidget()
+    channel.channelParent = types.SimpleNamespace(
+        controller=types.SimpleNamespace(acquiring=True),
+        isOn=lambda: True,
+    )
+    channel.enabled = True
+    channel.real = True
+    channel.waitToStabilize = False
+    channel.monitor = 11.0
+    channel.value = 10.0
+    channel.module = 2
+    channel.id = 1
+    channel.MONITOR = "Monitor"
+    channel.getParameterByName = lambda _name: FakeParameter(widget)
+
+    controller = object.__new__(module.AMPRController)
+    controller.values = {(2, 1): 11.0}
+    controller.main_state = "ST_ON"
+    controller.detected_modules_text = "2"
+    controller.device_state_summary = "OK"
+    controller.interlock_state_summary = "OK"
+    controller.voltage_state_summary = "OK"
+    controller.controllerParent = types.SimpleNamespace(
+        isOn=lambda: True,
+        getChannels=lambda: [channel],
+    )
+
+    module.AMPRController.updateValues(controller)
+
+    assert channel.monitor == 11.0
+    assert widget.style == module._AMPR_MONITOR_WARN_STYLE
+
+
 def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch):
     module = _load_module()
 
@@ -1996,3 +2095,26 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
         RuntimeError("AMPR open_port failed: -2 (Error opening port)")
     ) == ""
     assert controller._poisoned_com is None
+
+
+def test_update_state_ignores_device_state_read_before_disposal():
+    module = _load_module()
+
+    class FakeDevice:
+        NO_ERR = 0
+
+        def get_state(self):
+            controller.device = None
+            return self.NO_ERR, "0x00000002", "ST_ON"
+
+    controller = object.__new__(module.AMPRController)
+    controller.device = FakeDevice()
+    controller.initialized = False
+    controller.main_state = "Disconnected"
+    controller.errorCount = 0
+    controller._consecutive_transport_failures = 0
+    controller.print = lambda *_args, **_kwargs: None
+
+    module.AMPRController._update_state(controller)
+
+    assert controller.main_state == "Disconnected"

@@ -1850,6 +1850,7 @@ class AMPRController(DeviceController):
         else:
             poll_modules = sorted(configured_modules)
 
+        poll_device = self.device
         for module in poll_modules:
             try:
                 with self._controller_lock_section(
@@ -1879,7 +1880,8 @@ class AMPRController(DeviceController):
                     np.nan if measured is None else float(measured)
                 )
 
-        self.values = new_values
+        if self.device is poll_device:
+            self.values = new_values
 
     def fakeNumbers(self) -> None:
         self.initializeValues(reset=True)
@@ -1950,8 +1952,11 @@ class AMPRController(DeviceController):
                     (channel.module_address(), channel.channel_number()),
                     np.nan,
                 )
-                continue
-            channel.monitor = np.nan
+            else:
+                channel.monitor = np.nan
+            sync_feedback = getattr(channel, "_sync_monitor_feedback", None)
+            if callable(sync_feedback):
+                sync_feedback()
 
     def toggleOn(self) -> None:
         super().toggleOn()
@@ -2331,6 +2336,8 @@ class AMPRController(DeviceController):
             return
 
         self._clear_transport_failures()
+        if self.device is not device or not getattr(self, "initialized", False):
+            return
         if status == device.NO_ERR:
             self.main_state = state_name
         else:
