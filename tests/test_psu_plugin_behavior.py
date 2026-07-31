@@ -2087,6 +2087,17 @@ def test_interlock_button_is_created_in_title_bar(monkeypatch):
         def connect(self, callback):
             self.callbacks.append(callback)
 
+    class FakeAction:
+        def __init__(self):
+            self.visible = None
+            self.enabled = None
+
+        def setVisible(self, visible):
+            self.visible = visible
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
     class FakeButton:
         def __init__(self, text):
             self.text = text
@@ -2109,9 +2120,13 @@ def test_interlock_button_is_created_in_title_bar(monkeypatch):
     monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", qt_widgets)
 
     inserted = []
-    title_bar = types.SimpleNamespace(
-        insertWidget=lambda before, widget: inserted.append((before, widget))
-    )
+    fake_action = FakeAction()
+
+    def insert_widget(before, widget):
+        inserted.append((before, widget))
+        return fake_action
+
+    title_bar = types.SimpleNamespace(insertWidget=insert_widget)
     device = _new_psu_device(
         module,
         titleBar=title_bar,
@@ -2126,7 +2141,10 @@ def test_interlock_button_is_created_in_title_bar(monkeypatch):
     assert before == "stretch"
     assert button.text == "Disable interlock"
     assert button.clicked.callbacks, "expected the clicked signal to be wired"
+    assert device.clearInterlockAction is fake_action
     assert button.visible is True
+    assert fake_action.visible is True
+    assert fake_action.enabled is True
 
 
 def test_interlock_button_visibility_follows_main_state():
@@ -2143,20 +2161,36 @@ def test_interlock_button_visibility_follows_main_state():
         def setEnabled(self, enabled):
             self.enabled = enabled
 
+    class FakeAction:
+        def __init__(self):
+            self.visible = None
+            self.enabled = None
+
+        def setVisible(self, visible):
+            self.visible = visible
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
     button = FakeButton()
+    action = FakeAction()
     device = _new_psu_device(
         module,
         clearInterlockButton=button,
+        clearInterlockAction=action,
         main_state="ST_ERR_ILOCK",
         controller=types.SimpleNamespace(interlock_active=False, initialized=True),
     )
     device._sync_interlock_action()
     assert button.visible is True
     assert button.enabled is True
+    assert action.visible is True
+    assert action.enabled is True
 
     device.main_state = "ST_ON"
     device._sync_interlock_action()
     assert button.visible is False
+    assert action.visible is False
 
     device.main_state = "ST_ERR_ILOCK"
     device.controller = types.SimpleNamespace(interlock_active=False, initialized=False)

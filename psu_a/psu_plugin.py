@@ -1663,6 +1663,7 @@ class PSUDevice(Device):
         if getattr(self, "clearInterlockButton", None) is not None:
             return
         self.clearInterlockButton = None
+        self.clearInterlockAction = None
         title_bar = getattr(self, "titleBar", None)
         if title_bar is None:
             return
@@ -1677,14 +1678,15 @@ class PSUDevice(Device):
         )
         insert_before = getattr(self, "stretchAction", None)
         if insert_before is not None and hasattr(title_bar, "insertWidget"):
-            title_bar.insertWidget(insert_before, button)
+            action = title_bar.insertWidget(insert_before, button)
         elif hasattr(title_bar, "addWidget"):
-            title_bar.addWidget(button)
+            action = title_bar.addWidget(button)
         else:
             return
         if hasattr(button, "clicked") and hasattr(button.clicked, "connect"):
             button.clicked.connect(self._clear_interlock)
         self.clearInterlockButton = button
+        self.clearInterlockAction = action
         self._sync_interlock_action()
 
     def _sync_interlock_action(self) -> None:
@@ -1695,9 +1697,12 @@ class PSUDevice(Device):
         controller = getattr(self, "controller", None)
         state = _normalize_runtime_state(getattr(self, "main_state", "Disconnected"))
         interlock_open = getattr(controller, "interlock_active", None) is False
-        self._set_action_visible(button, state == "ST_ERR_ILOCK" and interlock_open)
+        visible = state == "ST_ERR_ILOCK" and interlock_open
+        self._set_action_visible(button, visible)
+        self._set_action_visible(getattr(self, "clearInterlockAction", None), visible)
         initialized = bool(getattr(controller, "initialized", False))
         self._set_action_enabled(button, initialized)
+        self._set_action_enabled(getattr(self, "clearInterlockAction", None), initialized)
 
     def _clear_interlock(self) -> None:
         """Disable interlock monitoring, clear ST_ERR_ILOCK, and persist the setting."""
