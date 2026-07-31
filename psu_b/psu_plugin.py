@@ -1029,6 +1029,7 @@ class PSUDevice(Device):
     def finalizeInit(self) -> None:
         super().finalizeInit()
         self._ensure_local_on_action()
+        self._ensure_interlock_action()
         self._ensure_status_widgets()
         self._ensure_config_selectors()
         self._hide_channel_table_actions()
@@ -1656,6 +1657,71 @@ class PSUDevice(Device):
             action.state = self.isOn()
         finally:
             action.blockSignals(False)
+
+    def _ensure_interlock_action(self) -> None:
+        """Expose a toolbar 'Disable interlock' button while the PSU reports ST_ERR_ILOCK."""
+        if getattr(self, "clearInterlockButton", None) is not None:
+            return
+        self.clearInterlockButton = None
+        title_bar = getattr(self, "titleBar", None)
+        if title_bar is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QPushButton
+        except ImportError:
+            return
+        button = QPushButton("Disable interlock")
+        button.setToolTip(
+            "Disable interlock monitoring to clear the ST_ERR_ILOCK error. "
+            "Use only when it is safe to operate without the physical interlock cable."
+        )
+        insert_before = getattr(self, "stretchAction", None)
+        if insert_before is not None and hasattr(title_bar, "insertWidget"):
+            title_bar.insertWidget(insert_before, button)
+        elif hasattr(title_bar, "addWidget"):
+            title_bar.addWidget(button)
+        else:
+            return
+        if hasattr(button, "clicked") and hasattr(button.clicked, "connect"):
+            button.clicked.connect(self._clear_interlock)
+        self.clearInterlockButton = button
+        self._sync_interlock_action()
+
+    def _sync_interlock_action(self) -> None:
+        """Show the interlock-clear button only while the PSU reports ST_ERR_ILOCK."""
+        button = getattr(self, "clearInterlockButton", None)
+        if button is None:
+            return
+        state = _normalize_runtime_state(getattr(self, "main_state", "Disconnected"))
+        self._set_action_visible(button, state == "ST_ERR_ILOCK")
+        controller = getattr(self, "controller", None)
+        initialized = bool(getattr(controller, "initialized", False))
+        self._set_action_enabled(button, initialized)
+
+    def _clear_interlock(self) -> None:
+        """Disable interlock monitoring, clear ST_ERR_ILOCK, and persist the setting."""
+        controller = getattr(self, "controller", None)
+        device = getattr(controller, "device", None) if controller is not None else None
+        if device is None or not getattr(controller, "initialized", False):
+            self.print(
+                "Cannot disable interlock monitoring: PSU communication is not initialized.",
+                flag=PRINT.WARNING,
+            )
+            return
+        setting = self._setting(self.INTERLOCK_MONITORING)
+        if setting is not None:
+            with contextlib.suppress(Exception):
+                setting.value = False
+        self.interlock_monitoring = False
+        try:
+            timeout_s = float(getattr(self, "connect_timeout_s", 5.0))
+            device.set_interlock_enabled(False, False, timeout_s=timeout_s)
+            self.print("Interlock monitoring disabled; ST_ERR_ILOCK cleared.", flag=PRINT.INFO)
+        except Exception as exc:  # noqa: BLE001
+            self.print(f"Could not disable interlock monitoring: {exc}", flag=PRINT.WARNING)
+            return
+        with contextlib.suppress(Exception):
+            controller._update_state()
 
     def _hide_channel_table(self) -> None:
         tree = getattr(self, "tree", None)
@@ -2766,6 +2832,7 @@ class PSUDevice(Device):
         summary = getattr(self, "statusSummaryLabel", None)
         diagnostics = getattr(self, "diagnosticsSummaryLabel", None)
         self._sync_acquisition_controls()
+        self._sync_interlock_action()
         if badge is None or summary is None:
             return
 
