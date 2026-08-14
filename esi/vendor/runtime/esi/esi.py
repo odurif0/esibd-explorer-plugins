@@ -211,6 +211,31 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             status = ESIBase.set_enable(self, False)
             if status != self.NO_ERR:
                 failures.append(f"module disable: {self.format_status(status)}")
+                return failures
+            # Read back the global enable gate; retry once when the DLL
+            # reports success but the controller is still enabled.
+            readback_status, still_enabled = ESIBase.get_enable(self)
+            if readback_status == self.NO_ERR and still_enabled:
+                status = ESIBase.set_enable(self, False)
+                if status != self.NO_ERR:
+                    failures.append(
+                        f"module disable retry: {self.format_status(status)}"
+                    )
+                else:
+                    readback_status, still_enabled = ESIBase.get_enable(self)
+                    if readback_status != self.NO_ERR:
+                        failures.append(
+                            "global enable readback: "
+                            f"{self.format_status(readback_status)}"
+                        )
+            elif readback_status != self.NO_ERR:
+                failures.append(
+                    f"global enable readback: {self.format_status(readback_status)}"
+                )
+            if still_enabled:
+                failures.append(
+                    "global enable remained ON after disable; outputs may be live"
+                )
             return failures
 
         failures = self._call_locked_with_timeout(

@@ -2163,3 +2163,31 @@ def test_channel_target_voltages_skips_invalid_channels():
     assert targets == {(2, 3): 250.0}
     assert len(printed) == 1
     assert "invalid module/channel" in printed[0]
+
+
+def test_safe_query_state_uses_setting_or_default():
+    """Without the poll_timeout_s setting the default 5.0 applies (no crash)."""
+    module = _load_module()
+    controller = object.__new__(module.AMPRController)
+    controller.controllerParent = types.SimpleNamespace()  # no poll_timeout_s
+
+    class FakeDevice:
+        NO_ERR = 0
+
+        def get_device_state(self, timeout_s=None):
+            return (0, "0x0", ["DEVST_OK"])
+
+    controller.device = FakeDevice()
+    assert controller._safe_query_state("get_device_state") == "DEVST_OK"
+
+    controller.controllerParent = types.SimpleNamespace(poll_timeout_s=2.5)
+    seen = []
+
+    class RecordingDevice(FakeDevice):
+        def get_device_state(self, timeout_s=None):
+            seen.append(timeout_s)
+            return (0, "0x0", ["DEVST_OK"])
+
+    controller.device = RecordingDevice()
+    controller._safe_query_state("get_device_state")
+    assert seen == [2.5]

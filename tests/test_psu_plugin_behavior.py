@@ -29,6 +29,7 @@ def _install_esibd_stubs() -> None:
     class PARAMETERTYPE(Enum):
         INT = "INT"
         FLOAT = "FLOAT"
+        BOOL = "BOOL"
         LABEL = "LABEL"
 
     class _PluginTypeValue:
@@ -2378,3 +2379,51 @@ def test_save_current_config_rechecks_slot_under_lock_after_race():
             module.PRINT.WARNING,
         )
     ]
+
+
+def test_config_settings_are_bounded_to_runtime_slot_range():
+    module = _load_module()
+    device = object.__new__(module.PSUDevice)
+    device.name = "PSU_A"
+    device.MAXDATAPOINTS = "Max data points"
+    original = getattr(module.Device, "getDefaultSettings", None)
+    module.Device.getDefaultSettings = lambda self: {}
+    try:
+        settings = device.getDefaultSettings()
+    finally:
+        if original is not None:
+            module.Device.getDefaultSettings = original
+        else:
+            del module.Device.getDefaultSettings
+
+    for key in (module.PSUDevice.OPERATING_CONFIG, module.PSUDevice.SHUTDOWN_CONFIG):
+        setting = settings[f"PSU_A/{key}"]
+        assert setting["maximum"] == module._PSU_MAX_CONFIG_INDEX
+        assert module._PSU_MAX_CONFIG_INDEX == 167
+
+
+def test_dispose_device_reports_failed_disconnect():
+    module = _load_module()
+    printed = []
+    parent = types.SimpleNamespace(getChannels=lambda: [])
+    controller = module.PSUController(parent)
+
+    class BrokenDevice:
+        def disconnect(self):
+            raise RuntimeError("port stuck")
+
+        def close(self):
+            closed.append(True)
+
+    closed = []
+    controller.device = BrokenDevice()
+    controller.initialized = True
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+    controller.errorCount = 0
+
+    controller._dispose_device()
+
+    assert controller.device is None
+    assert closed == [True]
+    assert controller.errorCount == 1
+    assert any("disconnect failed" in message for message, _flag in printed)

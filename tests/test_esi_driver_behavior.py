@@ -79,6 +79,11 @@ def test_connect_validates_identity_and_forces_known_off_state(
     monkeypatch.setattr(base_module.ESIBase, "set_enable", lambda self, state: calls.append(("enable", state)) or 0)
     monkeypatch.setattr(
         base_module.ESIBase,
+        "get_enable",
+        lambda self: calls.append(("enable_readback",)) or (0, False),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
         "set_heat_ctrl_heater_temperature",
         lambda self, value: calls.append(("heat_target", value)) or (0, value),
     )
@@ -135,6 +140,7 @@ def test_connect_validates_identity_and_forces_known_off_state(
         ("module", 2, False),
         ("pwm", 2),
         ("enable", False),
+        ("enable_readback",),
     ]
 
 
@@ -1489,3 +1495,67 @@ def test_list_configs_requires_connection(driver_modules):
     controller.connected = False
     with pytest.raises(RuntimeError, match="not connected"):
         controller.list_configs(timeout_s=0.5)
+
+
+def test_force_safe_off_retries_and_reports_stuck_global_enable(
+    driver_modules, monkeypatch
+):
+    """The global enable gate is read back after disable; one retry, then fail."""
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    controller.thread_lock = __import__("threading").Lock()
+
+    enable_states = []
+
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_heat_ctrl_heater_temperature",
+        lambda self, value: (0, value),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_hv_supply_target_output_voltage",
+        lambda self, address, value: 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_module_activation_state",
+        lambda self, address, state: 0,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_params_pwm",
+        lambda self, address: (0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0, False, 0),
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "set_enable",
+        lambda self, state: enable_states.append(("set", state)) or 0,
+    )
+
+    readbacks = []
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_enable",
+        lambda self: readbacks.append(True) or (0, True),  # stuck ON
+    )
+
+    with pytest.raises(RuntimeError, match="remained ON after disable"):
+        controller.force_safe_off(timeout_s=0.5)
+
+    # initial disable + one retry
+    assert enable_states == [("set", False), ("set", False)]
+    assert len(readbacks) == 2
+
+    # Now a healthy controller: first readback ON, second OFF -> no failure.
+    enable_states.clear()
+    readbacks.clear()
+    readback_values = iter([True, False])
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_enable",
+        lambda self: (0, next(readback_values)),
+    )
+    assert controller.force_safe_off(timeout_s=0.5) is True
+    assert enable_states == [("set", False), ("set", False)]

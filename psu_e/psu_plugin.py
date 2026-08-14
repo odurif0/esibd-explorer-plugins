@@ -162,6 +162,8 @@ _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V = 0.01
 _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A = 0.001
 _PSU_SETPOINT_VERIFY_REL_TOLERANCE = 0.01
 _PSU_FLOAT_SENTINEL = -1
+# Matches the vendor runtime config slot range (PSUBase.MAX_CONFIG = 168).
+_PSU_MAX_CONFIG_INDEX = 167
 _PSU_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
 _PSU_COMMUNICATION_LOST_STATE = "Communication lost"
 _PSU_TRANSPORT_FAILURE_THRESHOLD = 3
@@ -3108,7 +3110,7 @@ class PSUDevice(Device):
         settings[f"{self.name}/{self.OPERATING_CONFIG}"] = parameterDict(
             value=-1,
             minimum=_PSU_FLOAT_SENTINEL,
-            maximum=255,
+            maximum=_PSU_MAX_CONFIG_INDEX,
             toolTip=(
                 "PSU config exposed in the plugin toolbar. Use -1 to connect "
                 "without enabling outputs until manual values are applied."
@@ -3120,7 +3122,7 @@ class PSUDevice(Device):
         settings[f"{self.name}/{self.SHUTDOWN_CONFIG}"] = parameterDict(
             value=-1,
             minimum=_PSU_FLOAT_SENTINEL,
-            maximum=255,
+            maximum=_PSU_MAX_CONFIG_INDEX,
             toolTip="Optional shutdown config index. Use -1 to disable config-based shutdown.",
             parameterType=PARAMETERTYPE.INT,
             attr="shutdown_config",
@@ -5370,8 +5372,13 @@ class PSUController(DeviceController):
             return
         try:
             device.disconnect()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self.errorCount += 1
+            self.print(
+                "PSU disconnect failed during cleanup; the COM port may still be "
+                f"open: {self._format_exception(exc)}",
+                flag=PRINT.ERROR,
+            )
         finally:
             with contextlib.suppress(Exception):
                 device.close()
