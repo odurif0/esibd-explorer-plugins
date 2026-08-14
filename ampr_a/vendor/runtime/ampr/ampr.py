@@ -641,28 +641,32 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             self.logger.info(f"Modules present: {present_modules} (Max: {max_module}, Valid: {valid})")
         return status == self.NO_ERR
 
+    def _hk_batch(self):
+        """Run one housekeeping batch; called under the transport lock."""
+        self._hk_product_info()
+        self._hk_main_state()
+        self._hk_device_state()
+        self._hk_general_housekeeping()
+        self._hk_voltage_state()
+        self._hk_temperature_state()
+        self._hk_interlock_state()
+        self._hk_fan_data()
+        self._hk_led_data()
+        self._hk_cpu_data()
+        self._hk_module_presence()
+
     def hk_monitor(self):
         """
         Perform housekeeping monitoring of AMPR device data.
         This method executes all individual housekeeping functions.
         """
         try:
-            # Housekeeping holds the transport lock for the whole batch, so it must
-            # call the low-level AMPRBase methods directly and avoid the public
-            # wrappers that would try to reacquire the same lock.
-            with self.thread_lock:
-                self._hk_product_info()
-                self._hk_main_state()
-                self._hk_device_state()
-                self._hk_general_housekeeping()
-                self._hk_voltage_state()
-                self._hk_temperature_state()
-                self._hk_interlock_state()
-                self._hk_fan_data()
-                self._hk_led_data()
-                self._hk_cpu_data()
-                self._hk_module_presence()
-                
+            # Route the batch through the timeout-safe wrapper so a blocked
+            # DLL call poisons the transport with a loud HV warning instead
+            # of holding the lock forever.
+            self._call_locked_with_timeout(
+                self._hk_batch, 30.0, "housekeeping"
+            )
         except Exception as e:
             self.logger.error(f"Housekeeping monitoring failed: {e}")
 
