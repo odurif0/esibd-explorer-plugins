@@ -217,7 +217,7 @@ def test_dmmr_plugin_runtime_supports_explicit_process_backend_when_supported(mo
         def __init__(self, **kwargs):
             created["inline_kwargs"] = kwargs
 
-    monkeypatch.setattr(driver_common, "RUNTIME_IS_WINDOWS", True)
+    monkeypatch.setattr(driver_common, "supports_process_backend", lambda *_args: True)
     monkeypatch.setattr(driver_common, "ControllerProcessProxy", FakeProxy)
     monkeypatch.setattr(driver_class, "_PROCESS_CONTROLLER_CLASS", FakeController)
 
@@ -269,7 +269,7 @@ def test_dmmr_process_backend_calls_methods_with_rpc_timeout(monkeypatch):
         def connect(self, timeout_s=None):
             return True
 
-    monkeypatch.setattr(driver_common, "RUNTIME_IS_WINDOWS", True)
+    monkeypatch.setattr(driver_common, "supports_process_backend", lambda *_args: True)
     monkeypatch.setattr(driver_common, "ControllerProcessProxy", FakeProxy)
     monkeypatch.setattr(driver_class, "_PROCESS_CONTROLLER_CLASS", FakeController)
 

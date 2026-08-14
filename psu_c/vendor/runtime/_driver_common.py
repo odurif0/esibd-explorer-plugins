@@ -10,7 +10,7 @@ import threading
 import time
 import warnings
 import weakref
-from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -38,8 +38,7 @@ def build_device_logger(
     if logger is not None:
         return DeviceLoggerAdapter(logger, {"device_id": device_id})
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logger_name = f"{instrument_name}_{device_id}_{timestamp}"
+    logger_name = f"{instrument_name}_{device_id}"
     device_logger = logging.getLogger(logger_name)
 
     if not device_logger.handlers:
@@ -49,21 +48,33 @@ def build_device_logger(
             else Path(source_file).resolve().parents[3] / "logs"
         )
         root_log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = root_log_dir / f"{instrument_name.lower()}_{device_id}_{timestamp}.log"
-        handler = logging.FileHandler(log_file)
+        log_file = root_log_dir / f"{instrument_name.lower()}_{device_id}.log"
+        # Bounded rotation: a stable per-device log file with fixed-size
+        # backups instead of one new unbounded file per instance.
+        handler = RotatingFileHandler(
+            log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        )
         formatter = logging.Formatter(
             f"%(asctime)s - {device_id} - %(levelname)s - %(message)s"
         )
         handler.setFormatter(formatter)
         device_logger.addHandler(handler)
         device_logger.setLevel(logging.INFO)
+        device_logger.propagate = False
 
     return device_logger
 
 
 def supports_process_backend(*shared_objects) -> bool:
-    """Return True when the current runtime can isolate the controller process."""
-    return RUNTIME_IS_WINDOWS and all(value is None for value in shared_objects)
+    """Return False for this standalone plugin runtime.
+
+    Each plugin bundles its runtime privately under a dynamic
+    ``_esibd_bundled_*`` namespace that only exists in the host's
+    ``sys.modules``; a spawned worker process cannot resolve it, so the
+    process backend is permanently disabled here. Blocked vendor DLL calls
+    are detected at thread level by ``TimeoutSafeDllMixin`` instead.
+    """
+    return False
 
 
 class TimeoutSafeDllMixin:
@@ -309,25 +320,6 @@ class ProcessIsolatedClientMixin:
                     "_process_backend_disabled_reason",
                     reason,
                 )
-        elif RUNTIME_IS_WINDOWS and any(
-            value is not None for value in incompatible_objects.values()
-        ):
-            incompatible = [
-                name
-                for name, value in incompatible_objects.items()
-                if value is not None
-            ]
-            object.__setattr__(
-                self,
-                "_process_backend_disabled_reason",
-                f"{self._INSTRUMENT_NAME} process isolation is disabled because "
-                f"{', '.join(incompatible)} cannot be shared with the worker process.",
-            )
-            warnings.warn(
-                self._process_backend_disabled_reason,
-                RuntimeWarning,
-                stacklevel=2,
-            )
 
         object.__setattr__(self, "_backend_mode", "inline")
         object.__setattr__(self, "_backend", self._PROCESS_CONTROLLER_CLASS(**backend_kwargs))
