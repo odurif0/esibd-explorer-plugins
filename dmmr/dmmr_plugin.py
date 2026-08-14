@@ -2456,7 +2456,9 @@ class DMMRController(DeviceController):
                 channel.monitor = np.nan
             sync_monitor = getattr(channel, "_sync_monitor_widget", None)
             if callable(sync_monitor):
-                sync_monitor()
+                # updateValues() runs on the acquisition thread; route widget
+                # updates through the GUI dispatcher.
+                _invoke_gui_callback(sync_monitor)
 
     def toggleOn(self) -> None:
         base_toggle_on = getattr(super(), "toggleOn", None)

@@ -600,6 +600,7 @@ class AMPRDevice(Device):
     COM = "COM"
     BAUDRATE = "Baud rate"
     CONNECT_TIMEOUT = "Connect timeout (s)"
+    POLL_TIMEOUT = "Poll timeout (s)"
     STARTUP_TIMEOUT = "Startup timeout (s)"
     RAMP_RATE = "Ramp rate (V/s)"
     STATE = "State"
@@ -1035,6 +1036,14 @@ class AMPRDevice(Device):
             toolTip="Timeout in seconds used to connect and validate the controller.",
             parameterType=PARAMETERTYPE.FLOAT,
             attr="connect_timeout_s",
+        )
+        settings[f"{self.name}/{self.POLL_TIMEOUT}"] = parameterDict(
+            value=5.0,
+            minimum=0.5,
+            maximum=60.0,
+            toolTip="Timeout in seconds used to poll readbacks during monitoring.",
+            parameterType=PARAMETERTYPE.FLOAT,
+            attr="poll_timeout_s",
         )
         settings[f"{self.name}/{self.STARTUP_TIMEOUT}"] = parameterDict(
             value=20.0,
@@ -2529,7 +2538,11 @@ class AMPRController(DeviceController):
         if getter is None:
             return None
         try:
-            status, _state_hex, state = getter(timeout_s=float(self.controllerParent.poll_timeout_s))
+            status, _state_hex, state = getter(
+                timeout_s=float(
+                    getattr(self.controllerParent, "poll_timeout_s", 5.0)
+                )
+            )
         except Exception:  # noqa: BLE001
             return None
         if status != getattr(device, "NO_ERR", status):

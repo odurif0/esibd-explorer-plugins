@@ -1421,3 +1421,44 @@ def test_open_port_rejects_out_of_range_com():
         instance.open_port(256)
     with pytest.raises(ValueError, match="1..255"):
         instance.open_port(0)
+
+
+def test_update_values_marshals_monitor_widget_updates(monkeypatch):
+    """updateValues() runs on the acquisition thread; monitor widget syncs
+    must go through the GUI dispatcher, never run directly."""
+    module = _load_module()
+
+    dispatched = []
+
+    def fake_invoke(callback):
+        dispatched.append(callback)
+
+    monkeypatch.setattr(module, "_invoke_gui_callback", fake_invoke)
+
+    class FakeChannel:
+        def __init__(self):
+            self.enabled = True
+            self.real = True
+            self.monitor = None
+            self.address = 1
+
+        def module_address(self):
+            return self.address
+
+        def _sync_monitor_widget(self):
+            raise AssertionError("must not run directly from updateValues")
+
+    channels = [FakeChannel()]
+    controller = object.__new__(module.DMMRController)
+    controller.values = {1: 1.5e-12}
+    controller.controllerParent = types.SimpleNamespace(
+        isOn=lambda: True,
+        getChannels=lambda: channels,
+    )
+    controller._sync_status_to_gui = lambda: None
+
+    controller.updateValues()
+
+    assert len(dispatched) == 1
+    assert dispatched[0].__name__ == "_sync_monitor_widget"
+    assert channels[0].monitor == 1.5e-12
