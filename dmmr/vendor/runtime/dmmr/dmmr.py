@@ -1497,22 +1497,33 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
     ) -> bool:
         """Disable acquisition and disconnect from the DMMR."""
         timeout_s = self._resolve_io_timeout(timeout_s)
+        errors: list[str] = []
 
         if self.connected and disable_automatic_current:
             status = self.set_automatic_current(False, timeout_s=timeout_s)
             if status == self.ERR_NOT_CONNECTED:
                 self.connected = False
                 return self.disconnect()
-            self._raise_on_status(status, "set_automatic_current(False)")
+            if status != self.NO_ERR:
+                errors.append(
+                    f"set_automatic_current(False): {self.format_status(status)}"
+                )
 
         if self.connected and disable_device:
             status = self.set_enable(False, timeout_s=timeout_s)
             if status == self.ERR_NOT_CONNECTED:
                 self.connected = False
                 return self.disconnect()
-            self._raise_on_status(status, "set_enable(False)")
+            if status != self.NO_ERR:
+                errors.append(f"set_enable(False): {self.format_status(status)}")
 
-        return self.disconnect()
+        disconnected = self.disconnect()
+        if errors:
+            raise RuntimeError(
+                "DMMR shutdown incomplete (hardware disable may have failed): "
+                + "; ".join(errors)
+            )
+        return disconnected
 
 
 class DMMR(ProcessIsolatedClientMixin):

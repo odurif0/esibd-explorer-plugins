@@ -398,11 +398,11 @@ class AMXHDBase:
             (status, empty) where empty is True if buffer is empty.
 
         """
-        empty = ctypes.c_bool()
+        empty = self.WIN_BOOL()
         status = self.amx_hd_dll.COM_HVAMX4EDH_DevicePurge(
             self.stream, ctypes.byref(empty)
         )
-        return status, empty.value
+        return status, bool(empty.value)
 
     def get_buffer_state(self):
         """
@@ -414,11 +414,11 @@ class AMXHDBase:
             (status, empty).
 
         """
-        empty = ctypes.c_bool()
+        empty = self.WIN_BOOL()
         status = self.amx_hd_dll.COM_HVAMX4EDH_GetBufferState(
             self.stream, ctypes.byref(empty)
         )
-        return status, empty.value
+        return status, bool(empty.value)
 
     # =========================================================================
     #     Device Control
@@ -557,8 +557,8 @@ class AMXHDBase:
             (status, enabled, failed, set_rpm, measured_rpm, pwm).
 
         """
-        enabled = (ctypes.c_bool * self.FAN_COUNT)()
-        failed = (ctypes.c_bool * self.FAN_COUNT)()
+        enabled = (self.WIN_BOOL * self.FAN_COUNT)()
+        failed = (self.WIN_BOOL * self.FAN_COUNT)()
         set_rpm = (ctypes.c_uint16 * self.FAN_COUNT)()
         measured_rpm = (ctypes.c_uint16 * self.FAN_COUNT)()
         pwm = (ctypes.c_uint16 * self.FAN_COUNT)()
@@ -585,9 +585,9 @@ class AMXHDBase:
             (status, red, green, blue).
 
         """
-        red = ctypes.c_bool()
-        green = ctypes.c_bool()
-        blue = ctypes.c_bool()
+        red = self.WIN_BOOL()
+        green = self.WIN_BOOL()
+        blue = self.WIN_BOOL()
 
         status = self.amx_hd_dll.COM_HVAMX4EDH_GetLEDData(
             self.stream, ctypes.byref(red), ctypes.byref(green), ctypes.byref(blue)
@@ -2047,11 +2047,11 @@ class AMXHDBase:
             (status, enable).
 
         """
-        enable = ctypes.c_bool()
+        enable = self.WIN_BOOL()
         status = self.amx_hd_dll.COM_HVAMX4EDH_GetDeviceEnable(
             self.stream, ctypes.byref(enable)
         )
-        return status, enable.value
+        return status, bool(enable.value)
 
     def set_device_enable(self, enable):
         """
@@ -2069,7 +2069,7 @@ class AMXHDBase:
 
         """
         status = self.amx_hd_dll.COM_HVAMX4EDH_SetDeviceEnable(
-            self.stream, ctypes.c_bool(enable)
+            self.stream, self.WIN_BOOL(enable)
         )
         return status
 
@@ -2083,11 +2083,11 @@ class AMXHDBase:
             (status, interlock_funct).
 
         """
-        interlock_funct = ctypes.c_bool()
+        interlock_funct = self.WIN_BOOL()
         status = self.amx_hd_dll.COM_HVAMX4EDH_GetInterlockFunct(
             self.stream, ctypes.byref(interlock_funct)
         )
-        return status, interlock_funct.value
+        return status, bool(interlock_funct.value)
 
     def set_interlock_funct(self, interlock_funct):
         """
@@ -2105,7 +2105,7 @@ class AMXHDBase:
 
         """
         status = self.amx_hd_dll.COM_HVAMX4EDH_SetInterlockFunct(
-            self.stream, ctypes.c_bool(interlock_funct)
+            self.stream, self.WIN_BOOL(interlock_funct)
         )
         return status
 

@@ -1396,6 +1396,13 @@ def test_load_config_reapplies_hv_max_voltage_step_patch(driver_modules, monkeyp
     controller = _controller(driver_module)
     controller.connected = True
 
+    safe_off_calls = []
+    monkeypatch.setattr(
+        driver_module._ESIController,
+        "force_safe_off",
+        lambda self, timeout_s=None: safe_off_calls.append(timeout_s) or True,
+    )
+
     loaded = []
     monkeypatch.setattr(
         base_module.ESIBase,
@@ -1413,6 +1420,7 @@ def test_load_config_reapplies_hv_max_voltage_step_patch(driver_modules, monkeyp
     controller.load_config(10, timeout_s=0.5)
     assert loaded == [10]
     assert patched == [driver_module._ESIController.DEFAULT_HV_MAX_VOLTAGE_STEP_V]
+    assert len(safe_off_calls) == 2
 
 
 def test_load_config_rejects_out_of_range_slot(driver_modules):
@@ -1431,6 +1439,11 @@ def test_load_config_raises_on_vendor_error(driver_modules, monkeypatch):
     controller = _controller(driver_module)
     controller.connected = True
 
+    monkeypatch.setattr(
+        driver_module._ESIController,
+        "force_safe_off",
+        lambda self, timeout_s=None: True,
+    )
     monkeypatch.setattr(
         base_module.ESIBase, "load_current_config", lambda self, num: -7
     )

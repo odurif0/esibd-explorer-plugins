@@ -1714,18 +1714,18 @@ class PSUDevice(Device):
                 flag=PRINT.WARNING,
             )
             return
+        try:
+            timeout_s = float(getattr(self, "connect_timeout_s", 5.0))
+            device.set_interlock_enabled(False, False, timeout_s=timeout_s)
+        except Exception as exc:  # noqa: BLE001
+            self.print(f"Could not disable interlock monitoring: {exc}", flag=PRINT.WARNING)
+            return
         setting = self._setting(self.INTERLOCK_MONITORING)
         if setting is not None:
             with contextlib.suppress(Exception):
                 setting.value = False
         self.interlock_monitoring = False
-        try:
-            timeout_s = float(getattr(self, "connect_timeout_s", 5.0))
-            device.set_interlock_enabled(False, False, timeout_s=timeout_s)
-            self.print("Interlock monitoring disabled; ST_ERR_ILOCK cleared.", flag=PRINT.INFO)
-        except Exception as exc:  # noqa: BLE001
-            self.print(f"Could not disable interlock monitoring: {exc}", flag=PRINT.WARNING)
-            return
+        self.print("Interlock monitoring disabled; ST_ERR_ILOCK cleared.", flag=PRINT.INFO)
         with contextlib.suppress(Exception):
             controller._update_state()
 
@@ -3966,6 +3966,23 @@ class PSUController(DeviceController):
             self.print(f"Interlock monitoring {state}.", flag=PRINT.INFO)
         except Exception as exc:
             self.print(f"Could not change interlock monitoring: {exc}", flag=PRINT.WARNING)
+        get_interlock = getattr(device, "get_interlock_enabled", None)
+        if not callable(get_interlock):
+            return
+        try:
+            actual_output, actual_bnc = get_interlock(timeout_s=timeout_s)
+            actual = _coerce_bool(actual_output, default=enabled) and _coerce_bool(
+                actual_bnc, default=enabled
+            )
+        except Exception:
+            return
+        if actual != enabled:
+            actual_state = "enabled" if actual else "disabled"
+            self.print(
+                f"Interlock monitoring readback is {actual_state} while the setting "
+                f"says {'enabled' if enabled else 'disabled'}; hardware state prevails.",
+                flag=PRINT.ERROR,
+            )
 
     def runInitialization(self) -> None:
         self.initialized = False
@@ -4225,6 +4242,7 @@ class PSUController(DeviceController):
                 )
 
     def _safe_disable_outputs_after_failure(self, *, timeout_s: float) -> None:
+        failures: list[str] = []
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to recover PSU outputs after failure."
@@ -4232,12 +4250,29 @@ class PSUController(DeviceController):
                 device = self.device
                 if device is None:
                     return
-                with contextlib.suppress(Exception):
+                try:
                     device.set_output_enabled(False, False, timeout_s=timeout_s)
-                with contextlib.suppress(Exception):
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(
+                        f"set_output_enabled(False, False) failed: "
+                        f"{self._format_exception(exc)}"
+                    )
+                try:
                     device.set_device_enabled(False, timeout_s=timeout_s)
-        except Exception:
-            return
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(
+                        f"set_device_enabled(False) failed: "
+                        f"{self._format_exception(exc)}"
+                    )
+        except TimeoutError:
+            failures.append("could not acquire the controller lock")
+        if failures:
+            self.errorCount += 1
+            self.print(
+                "PSU safety recovery incomplete - outputs may still be live: "
+                + "; ".join(failures),
+                flag=PRINT.ERROR,
+            )
 
     def _perform_shutdown_sequence_unlocked(self, *, timeout_s: float) -> list[str]:
         device = self.device
@@ -4736,8 +4771,8 @@ class PSUController(DeviceController):
 
         Switching the Full/Half range relay while a channel still carries HV can
         arc or damage the relay. Poll measured voltages until they fall below the
-        safe threshold or the settle deadline elapses; warn (do not fail) if the
-        device does not discharge in time.
+        safe threshold; fail (raise) if the device does not discharge or the
+        voltages cannot be read, so the caller never switches under load.
         """
         import time
 
@@ -4751,15 +4786,17 @@ class PSUController(DeviceController):
                     get_measured_voltage(channel_index, timeout_s=timeout_s)
                     for channel_index in _PSU_CHANNEL_IDS
                 ]
-            except Exception:
-                return
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"Cannot verify PSU discharge before range switch: {exc}"
+                ) from exc
             if all(abs(v) < _PSU_RANGE_SWITCH_SAFE_V for v in voltages):
                 return
             time.sleep(0.1)
-        self.print(
-            "PSU outputs did not fully discharge before range switch; proceeding "
-            "after settle timeout - verify no arcing on the range relay.",
-            flag=PRINT.WARNING,
+        raise RuntimeError(
+            "PSU outputs did not discharge below "
+            f"{_PSU_RANGE_SWITCH_SAFE_V} V within {_PSU_RANGE_SWITCH_SETTLE_S} s; "
+            "range switch aborted to avoid relay arcing."
         )
 
     def _ramp_channel_voltage(

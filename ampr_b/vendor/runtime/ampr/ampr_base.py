@@ -1175,9 +1175,11 @@ class AMPRBase:
         """
         modules = {}
         status, valid, max_module, presence_list = self.get_module_presence()
-        
+
         if status != self.NO_ERR:
-            return modules
+            raise RuntimeError(
+                f"AMPR module presence scan failed with status {status}."
+            )
         
         # `presence_list` includes one extra entry at index 12 for the base module.
         # Only addresses 0..11 are pilotable amplifier modules.

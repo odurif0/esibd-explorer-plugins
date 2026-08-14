@@ -145,8 +145,8 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
 
             self.connected = True
             self._prepare_safe_inventory(timeout)
-            modules = self.discover_modules(timeout_s=timeout)
             self.force_safe_off(timeout_s=timeout)
+            modules = self.discover_modules(timeout_s=timeout)
             self.logger.info(
                 f"Connected on COM{self.com} at {actual_baud} baud; "
                 f"modules={sorted(modules)}; HV and heater outputs forced OFF"
@@ -271,6 +271,14 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     f"ESI module {address} type mismatch: expected "
                     f"0x{expected_type:04X}, got "
                     f"0x{int(info.get('device_type', 0)):04X}."
+                )
+        for address, info in modules.items():
+            if address not in self.CONTROLLED_MODULE_ADDRESSES and (
+                info.get("device_type") == self.MODULE_HVPS_TYPE
+            ):
+                raise RuntimeError(
+                    f"Unexpected HV module at address {address}; "
+                    "refusing to connect with uncontrolled HV outputs."
                 )
         self._module_inventory = modules
         return modules
@@ -508,6 +516,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 f"got {config_number}."
             )
         timeout = self._resolve_timeout(timeout_s)
+        self.force_safe_off(timeout_s=timeout)
         status = self._call_locked_with_timeout(
             ESIBase.load_current_config,
             timeout,
@@ -519,6 +528,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self.configure_hv_max_voltage_steps(
             self.DEFAULT_HV_MAX_VOLTAGE_STEP_V, timeout_s=timeout_s
         )
+        self.force_safe_off(timeout_s=timeout)
 
     def save_config(
         self,
