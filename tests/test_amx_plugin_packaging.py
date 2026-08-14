@@ -308,7 +308,7 @@ def test_amx_plugin_runtime_supports_explicit_process_backend_when_supported(mon
         def __init__(self, **kwargs):
             created["inline_kwargs"] = kwargs
 
-    monkeypatch.setattr(driver_common, "RUNTIME_IS_WINDOWS", True)
+    monkeypatch.setattr(driver_common, "supports_process_backend", lambda *_args: True)
     monkeypatch.setattr(driver_common, "ControllerProcessProxy", FakeProxy)
     monkeypatch.setattr(driver_class, "_PROCESS_CONTROLLER_CLASS", FakeController)
 
