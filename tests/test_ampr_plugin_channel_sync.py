@@ -2118,3 +2118,48 @@ def test_update_state_ignores_device_state_read_before_disposal():
     module.AMPRController._update_state(controller)
 
     assert controller.main_state == "Disconnected"
+
+
+def test_invalid_module_and_channel_never_fall_back_to_m0_ch1():
+    """A corrupt config must surface as skip (-1/0), not silent M0/CH1."""
+    module = _load_module()
+
+    for raw_module, expected in (("not-a-number", -1), (12, -1), (-3, -1), ("5", 5)):
+        channel = object.__new__(module.AMPRChannel)
+        channel.module = raw_module
+        assert channel.module_address() == expected, raw_module
+
+    for raw_id, expected in (("not-a-number", 0), (0, 0), (5, 0), ("3", 3)):
+        channel = object.__new__(module.AMPRChannel)
+        channel.id = raw_id
+        assert channel.channel_number() == expected, raw_id
+
+
+def test_channel_target_voltages_skips_invalid_channels():
+    module = _load_module()
+
+    def make_channel(raw_module, raw_id, value):
+        channel = object.__new__(module.AMPRChannel)
+        channel.real = True
+        channel.enabled = True
+        channel.module = raw_module
+        channel.id = raw_id
+        channel.value = value
+        return channel
+
+    printed = []
+    controller = object.__new__(module.AMPRController)
+    controller.controllerParent = types.SimpleNamespace(
+        isOn=lambda: True,
+        getChannels=lambda: [
+            make_channel("bogus", "1", 100.0),
+            make_channel(2, 3, 250.0),
+        ],
+    )
+    controller.print = lambda message, flag=None: printed.append(message)
+
+    targets = controller._channel_target_voltages(respect_device_state=True)
+
+    assert targets == {(2, 3): 250.0}
+    assert len(printed) == 1
+    assert "invalid module/channel" in printed[0]

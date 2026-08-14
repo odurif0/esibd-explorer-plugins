@@ -8,7 +8,7 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, cast
 
 import numpy as np
@@ -37,6 +37,8 @@ except ImportError:  # pragma: no cover - exercised by lightweight plugin stubs
 _BUNDLED_RUNTIME_DIRNAME = "runtime"
 _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_dmmr_runtime"
 _DMMR_DRIVER_CLASS: type[Any] | None = None
+# Serializes the private runtime load and driver-class publish across threads.
+_RUNTIME_LOAD_LOCK = RLock()
 _CHANNEL_NAME_KEY = getattr(Parameter, "NAME", getattr(Channel, "NAME", "Name"))
 _CHANNEL_ENABLED_KEY = getattr(Channel, "ENABLED", "Enabled")
 _CHANNEL_REAL_KEY = getattr(Channel, "REAL", "Real")
@@ -606,8 +608,13 @@ def _bundled_runtime_module_name(plugin_dir: Path | None = None) -> str:
 
 def _load_private_runtime_package(module_name: str, package_dir: Path) -> None:
     """Load a bundled runtime package from disk under a private module name."""
-    if module_name in sys.modules:
-        return
+    with _RUNTIME_LOAD_LOCK:
+        if module_name in sys.modules:
+            return
+        _load_private_runtime_package_unlocked(module_name, package_dir)
+
+
+def _load_private_runtime_package_unlocked(module_name: str, package_dir: Path) -> None:
 
     init_file = package_dir / "__init__.py"
     spec = importlib.util.spec_from_file_location(
@@ -634,21 +641,24 @@ def _get_dmmr_driver_class() -> type[Any]:
 
     if _DMMR_DRIVER_CLASS is not None:
         return _DMMR_DRIVER_CLASS
+    with _RUNTIME_LOAD_LOCK:
+        if _DMMR_DRIVER_CLASS is not None:
+            return _DMMR_DRIVER_CLASS
 
-    plugin_dir = Path(__file__).resolve().parent
-    bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
-    bundled_runtime_init = bundled_runtime_dir / "__init__.py"
-    if not bundled_runtime_init.exists():
-        raise ModuleNotFoundError(
-            "Bundled DMMR runtime not found in vendor/runtime; "
-            "plugin installation is incomplete."
-        )
+        plugin_dir = Path(__file__).resolve().parent
+        bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
+        bundled_runtime_init = bundled_runtime_dir / "__init__.py"
+        if not bundled_runtime_init.exists():
+            raise ModuleNotFoundError(
+                "Bundled DMMR runtime not found in vendor/runtime; "
+                "plugin installation is incomplete."
+            )
 
-    runtime_module_name = _bundled_runtime_module_name(plugin_dir)
-    _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
-    module = importlib.import_module(f"{runtime_module_name}.dmmr")
-    _DMMR_DRIVER_CLASS = cast(type[Any], module.DMMR)
-    return _DMMR_DRIVER_CLASS
+        runtime_module_name = _bundled_runtime_module_name(plugin_dir)
+        _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
+        module = importlib.import_module(f"{runtime_module_name}.dmmr")
+        _DMMR_DRIVER_CLASS = cast(type[Any], module.DMMR)
+        return _DMMR_DRIVER_CLASS
 
 
 def providePlugins() -> "list[type[Plugin]]":
@@ -2257,6 +2267,13 @@ class DMMRController(DeviceController):
                 else "None"
             )
             self._update_state()
+            if self.device is None:
+                # _update_state() destroyed the device after a fatal transport
+                # failure; do not emit initCompleteSignal, otherwise initComplete()
+                # would misreport this hard failure as simulated "Test mode".
+                raise RuntimeError(
+                    "DMMR became unavailable while confirming initialization."
+                )
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
             self._restore_off_ui_state()

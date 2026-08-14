@@ -10,6 +10,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from threading import Lock, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -28,6 +29,8 @@ from esibd.plugins import Device, Plugin
 
 _RUNTIME_PREFIX = "_esibd_bundled_esi_runtime"
 _ESI_DRIVER_CLASS: type[Any] | None = None
+# Serializes the private runtime load and driver-class publish across threads.
+_RUNTIME_LOAD_LOCK = RLock()
 _ESI_MAX_VOLTAGE = 3000.0
 _ESI_HV_MAX_VOLTAGE_STEP = 10.008
 _ESI_MAX_TEMPERATURE = 175.0
@@ -161,17 +164,20 @@ def _get_esi_driver_class() -> type[Any]:
     global _ESI_DRIVER_CLASS
     if _ESI_DRIVER_CLASS is not None:
         return _ESI_DRIVER_CLASS
-    plugin_dir = Path(__file__).resolve().parent
-    runtime_dir = plugin_dir / "vendor" / "runtime"
-    if not (runtime_dir / "__init__.py").is_file():
-        raise ModuleNotFoundError(
-            "Bundled ESI runtime not found in vendor/runtime; installation is incomplete."
-        )
-    runtime_name = _runtime_module_name(plugin_dir)
-    _load_runtime_package(runtime_name, runtime_dir)
-    module = importlib.import_module(f"{runtime_name}.esi")
-    _ESI_DRIVER_CLASS = cast(type[Any], module.ESI)
-    return _ESI_DRIVER_CLASS
+    with _RUNTIME_LOAD_LOCK:
+        if _ESI_DRIVER_CLASS is not None:
+            return _ESI_DRIVER_CLASS
+        plugin_dir = Path(__file__).resolve().parent
+        runtime_dir = plugin_dir / "vendor" / "runtime"
+        if not (runtime_dir / "__init__.py").is_file():
+            raise ModuleNotFoundError(
+                "Bundled ESI runtime not found in vendor/runtime; installation is incomplete."
+            )
+        runtime_name = _runtime_module_name(plugin_dir)
+        _load_runtime_package(runtime_name, runtime_dir)
+        module = importlib.import_module(f"{runtime_name}.esi")
+        _ESI_DRIVER_CLASS = cast(type[Any], module.ESI)
+        return _ESI_DRIVER_CLASS
 
 
 def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
@@ -259,8 +265,59 @@ class ESIDevice(Device):
         super().finalizeInit()
         self._ensure_local_on_action()
         self._ensure_status_widgets()
+        self._ensure_load_config_action()
         self._ensure_operator_panel()
         self._update_channel_column_visibility()
+
+    def _ensure_load_config_action(self) -> None:
+        """Expose a toolbar button that loads the selected operating config."""
+        if getattr(self, "loadConfigButton", None) is not None:
+            return
+        title_bar = getattr(self, "titleBar", None)
+        if title_bar is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QPushButton
+        except ImportError:
+            return
+        button = QPushButton("Load config")
+        button.setToolTip(
+            "Load the NVM configuration selected in 'Operating config' onto the "
+            "controller. The ESI is forced safe OFF around the load."
+        )
+        insert_before = getattr(self, "stretchAction", None)
+        if insert_before is not None and hasattr(title_bar, "insertWidget"):
+            action = title_bar.insertWidget(insert_before, button)
+        elif hasattr(title_bar, "addWidget"):
+            action = title_bar.addWidget(button)
+        else:
+            return
+        if hasattr(button, "clicked") and hasattr(button.clicked, "connect"):
+            button.clicked.connect(self._load_config_clicked)
+        self.loadConfigButton = button
+        self.loadConfigAction = action
+        self._sync_load_config_action()
+
+    def _sync_load_config_action(self) -> None:
+        button = getattr(self, "loadConfigButton", None)
+        if button is None:
+            return
+        controller = getattr(self, "controller", None)
+        button.setEnabled(
+            controller is not None
+            and getattr(controller, "initialized", False)
+            and getattr(controller, "device", None) is not None
+        )
+
+    def _load_config_clicked(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return
+        load_now = getattr(controller, "loadOperatingConfigNowFromThread", None)
+        if callable(load_now):
+            load_now(parallel=True)
+            return
+        controller.loadOperatingConfigNow()
 
     def _ensure_local_on_action(self) -> None:
         if (
@@ -373,6 +430,7 @@ class ESIDevice(Device):
             summary.setText(summary_text)
         if hasattr(summary, "setToolTip"):
             summary.setToolTip(tooltip)
+        self._sync_load_config_action()
         self._update_operator_panel()
 
     def _update_channel_column_visibility(self) -> None:
@@ -868,11 +926,18 @@ class ESIDevice(Device):
                     _ESI_BTN_HEAT_ACTIVE if heat_enabled else _ESI_BTN_OFF_ACTIVE
                 )
                 heat_btn.setEnabled(heat_valid)
+            heat_target = getattr(controller, "heat_target_temperature_c", np.nan)
             heat["heat_target"].setText(
-                f"{heat_temp:.1f} °C" if np.isfinite(heat_temp) else "n/a"
+                f"{heat_target:.1f} °C"
+                if np.isfinite(heat_target)
+                else "n/a"
             )
             heat["heat_measured"].setText(
                 f"{heat_temp:.1f} °C" if heat_valid else "INVALID"
+            )
+            heat_power = getattr(controller, "heat_power_w", np.nan)
+            heat["heat_power"].setText(
+                f"{heat_power:.1f} W" if np.isfinite(heat_power) else "n/a"
             )
             heat["heat_sensor"].setStyleSheet(
                 _ESI_PANEL_OK if heat_valid else _ESI_PANEL_ERR
@@ -1707,6 +1772,10 @@ class ESIController(DeviceController):
             )
         heat = snapshot["heat"]
         heat_temperature = float(heat["monitor_temperature_c"])
+        self.heat_target_temperature_c = float(
+            heat.get("target_temperature_c", np.nan)
+        )
+        self.heat_power_w = float(heat.get("heater_power_w", np.nan))
         self.heat_max_temperature_c = float(
             heat["hardware_limits"]["max_temperature_c"]
         )

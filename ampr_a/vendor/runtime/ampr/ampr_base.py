@@ -1078,6 +1078,8 @@ class AMPRBase:
         """
         if not 1 <= channel <= self.CHANNEL_NUM:
             return self.ERR_ARGUMENT
+        if not 0 <= address < self.MODULE_NUM:
+            return self.ERR_ARGUMENT
         try:
             voltage = float(voltage)
         except (TypeError, ValueError):
@@ -1108,6 +1110,8 @@ class AMPRBase:
         """
         if not 1 <= channel <= self.CHANNEL_NUM:
             return self.ERR_ARGUMENT, None
+        if not 0 <= address < self.MODULE_NUM:
+            return self.ERR_ARGUMENT, None
 
         voltage = ctypes.c_double()
         status = self.ampr_dll.COM_AMPR_12_GetModuleOutputVoltage(
@@ -1132,6 +1136,8 @@ class AMPRBase:
 
         """
         if not 1 <= channel <= self.CHANNEL_NUM:
+            return self.ERR_ARGUMENT, None
+        if not 0 <= address < self.MODULE_NUM:
             return self.ERR_ARGUMENT, None
 
         status, voltages = self.get_all_module_voltage_measured(address)
@@ -1283,7 +1289,10 @@ class AMPRBase:
 
         """
         results = {}
-        
+
+        if not 0 <= address < self.MODULE_NUM:
+            return {channel: self.ERR_ARGUMENT for channel in range(1, self.CHANNEL_NUM + 1)}
+
         if isinstance(voltages, list):
             # List format: [ch1, ch2, ch3, ch4]
             for i, voltage in enumerate(voltages[: self.CHANNEL_NUM]):

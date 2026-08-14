@@ -1606,3 +1606,21 @@ def test_config_controls_disable_load_now_when_amx_is_off():
     assert "Currently unavailable: AMX is OFF." in (
         device.loadOperatingConfigButton.tooltips[-1]
     )
+
+
+def test_driver_class_loading_is_thread_safe():
+    """Concurrent driver-class loads must serialize, not interleave."""
+    import concurrent.futures
+
+    _clear_test_modules()
+    _install_esibd_stubs()
+
+    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        classes = list(
+            pool.map(lambda _: module._get_amx_driver_class(), range(8))
+        )
+
+    assert len({id(cls) for cls in classes}) == 1
+    assert classes[0].__name__ == "AMX"
