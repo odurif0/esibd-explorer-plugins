@@ -2502,23 +2502,28 @@ class DMMRController(DeviceController):
                     device = self.device
                     if device is None:
                         return
+                    failures: list[str] = []
                     automatic_status = device.set_automatic_current(
                         False,
                         timeout_s=float(self.controllerParent.connect_timeout_s),
                     )
                     if automatic_status != device.NO_ERR:
-                        raise RuntimeError(
+                        failures.append(
                             "set_automatic_current(False) failed: "
                             f"{self._format_status(automatic_status, device=device)}"
                         )
+                    # Always attempt the hardware disable even if disabling the
+                    # automatic current mode failed.
                     enable_status = device.set_enable(
                         False,
                         timeout_s=float(self.controllerParent.connect_timeout_s),
                     )
                     if enable_status != device.NO_ERR:
-                        raise RuntimeError(
+                        failures.append(
                             f"set_enable(False) failed: {self._format_status(enable_status, device=device)}"
                         )
+                    if failures:
+                        raise RuntimeError("; ".join(failures))
                 self._update_state()
                 self.print("DMMR acquisition disabled.")
         except Exception as exc:  # noqa: BLE001
@@ -2601,7 +2606,10 @@ class DMMRController(DeviceController):
                 if device is None:
                     shutdown_confirmed = True
                 else:
-                    device.shutdown(timeout_s=float(self.controllerParent.connect_timeout_s))
+                    shutdown_result = device.shutdown(
+                        timeout_s=float(self.controllerParent.connect_timeout_s)
+                    )
+                    shutdown_confirmed = shutdown_result is not False
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             self._update_state()
@@ -2611,8 +2619,13 @@ class DMMRController(DeviceController):
                 flag=PRINT.ERROR,
             )
         else:
-            shutdown_confirmed = True
-            self.print("DMMR shutdown sequence completed.")
+            if shutdown_confirmed:
+                self.print("DMMR shutdown sequence completed.")
+            else:
+                self.print(
+                    "DMMR shutdown could not be confirmed before disconnect.",
+                    flag=PRINT.WARNING,
+                )
         finally:
             self.closeCommunication(
                 final_state=(

@@ -281,9 +281,14 @@ class AMXBase:
         if state_value == 0:
             active_states.append("DEVST_OK")
         else:
+            known_mask = 0
             for flag, name in self.DEVICE_STATE.items():
+                known_mask |= flag
                 if state_value & flag:
                     active_states.append(name)
+            residual = state_value & ~known_mask
+            if residual:
+                active_states.append(f"UNKNOWN_BITS_0x{residual:08X}")
         return status, hex(state_value), active_states
 
     def get_housekeeping(self):
@@ -483,14 +488,24 @@ class AMXBase:
         )
         state_value = state.value
         active_states = []
+        known_mask = 0
         for flag, name in self.CONTROLLER_STATE.items():
+            known_mask |= flag
             if state_value & flag:
                 active_states.append(name)
+        residual = state_value & ~known_mask
+        if residual:
+            active_states.append(f"UNKNOWN_BITS_0x{residual:04X}")
         return status, hex(state_value), active_states
 
     def set_controller_config(self, config: int) -> int:
         """Set the controller configuration bitfield (Enb, EnbOsc, EnbPulser, ...)."""
-        config = int(config) & 0xFFFF
+        config = int(config)
+        if not 0 <= config <= 0xFFFF:
+            raise ValueError(
+                f"Invalid AMX controller config: {config}. "
+                "Expected 0 <= config <= 65535."
+            )
         return self.amx_dll.COM_HVAMX4ED_SetControllerConfig(
             self.port, ctypes.c_uint16(config)
         )
