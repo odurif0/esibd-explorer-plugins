@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, cast
 
 import numpy as np
@@ -29,6 +29,8 @@ from esibd.plugins import Device, Plugin
 _BUNDLED_RUNTIME_DIRNAME = "runtime"
 _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_ampr_runtime"
 _AMPR_DRIVER_CLASS: type[Any] | None = None
+# Serializes the private runtime load and driver-class publish across threads.
+_RUNTIME_LOAD_LOCK = RLock()
 _CHANNEL_NAME_KEY = getattr(Parameter, "NAME", getattr(Channel, "NAME", "Name"))
 _CHANNEL_ENABLED_KEY = getattr(Channel, "ENABLED", "Enabled")
 _CHANNEL_REAL_KEY = getattr(Channel, "REAL", "Real")
@@ -520,8 +522,13 @@ def _bundled_runtime_module_name(plugin_dir: Path | None = None) -> str:
 
 def _load_private_runtime_package(module_name: str, package_dir: Path) -> None:
     """Load a bundled runtime package from disk under a private module name."""
-    if module_name in sys.modules:
-        return
+    with _RUNTIME_LOAD_LOCK:
+        if module_name in sys.modules:
+            return
+        _load_private_runtime_package_unlocked(module_name, package_dir)
+
+
+def _load_private_runtime_package_unlocked(module_name: str, package_dir: Path) -> None:
 
     init_file = package_dir / "__init__.py"
     spec = importlib.util.spec_from_file_location(
@@ -548,21 +555,24 @@ def _get_ampr_driver_class() -> type[Any]:
 
     if _AMPR_DRIVER_CLASS is not None:
         return _AMPR_DRIVER_CLASS
+    with _RUNTIME_LOAD_LOCK:
+        if _AMPR_DRIVER_CLASS is not None:
+            return _AMPR_DRIVER_CLASS
 
-    plugin_dir = Path(__file__).resolve().parent
-    bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
-    bundled_runtime_init = bundled_runtime_dir / "__init__.py"
-    if not bundled_runtime_init.exists():
-        raise ModuleNotFoundError(
-            "Bundled AMPR runtime not found in vendor/runtime; "
-            "plugin installation is incomplete."
-        )
+        plugin_dir = Path(__file__).resolve().parent
+        bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
+        bundled_runtime_init = bundled_runtime_dir / "__init__.py"
+        if not bundled_runtime_init.exists():
+            raise ModuleNotFoundError(
+                "Bundled AMPR runtime not found in vendor/runtime; "
+                "plugin installation is incomplete."
+            )
 
-    runtime_module_name = _bundled_runtime_module_name(plugin_dir)
-    _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
-    module = importlib.import_module(f"{runtime_module_name}.ampr")
-    _AMPR_DRIVER_CLASS = cast(type[Any], module.AMPR)
-    return _AMPR_DRIVER_CLASS
+        runtime_module_name = _bundled_runtime_module_name(plugin_dir)
+        _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
+        module = importlib.import_module(f"{runtime_module_name}.ampr")
+        _AMPR_DRIVER_CLASS = cast(type[Any], module.AMPR)
+        return _AMPR_DRIVER_CLASS
 
 
 def providePlugins() -> "list[type[Plugin]]":
@@ -649,7 +659,13 @@ class AMPRDevice(Device):
     def getConfiguredModules(self) -> list[int]:
         """Return sorted module addresses referenced by real channels."""
         return sorted(
-            {channel.module_address() for channel in self.getChannels() if channel.real}
+            {
+                module
+                for module in (
+                    channel.module_address() for channel in self.getChannels() if channel.real
+                )
+                if module >= 0
+            }
         )
 
     def module_voltage_limit(self, module: int) -> float:
@@ -1607,13 +1623,46 @@ class AMPRChannel(Channel):
         super().updateMax()
         self._log_channel_event(f"Maximum changed to {float(self.max):.3f} V.")
 
+    _MODULE_ADDRESS_MIN = 0
+    _MODULE_ADDRESS_MAX = 11
+    _CHANNEL_NUMBER_MIN = 1
+    _CHANNEL_NUMBER_MAX = 4
+
+    def _module_address_raw(self) -> int | None:
+        """Return the configured module address, or None when unparseable."""
+        try:
+            return int(self.module)
+        except (TypeError, ValueError):
+            return None
+
     def module_address(self) -> int:
-        """Return the configured AMPR module address as an integer."""
-        return _coerce_int(self.module, 0)
+        """Return the configured AMPR module address as an integer.
+
+        An invalid or out-of-range address must never silently fall back to
+        module 0: return -1 so callers skip the channel instead of driving
+        the wrong hardware.
+        """
+        address = self._module_address_raw()
+        if address is None or not (
+            self._MODULE_ADDRESS_MIN <= address <= self._MODULE_ADDRESS_MAX
+        ):
+            return -1
+        return address
 
     def channel_number(self) -> int:
-        """Return the configured AMPR channel number as an integer."""
-        return _coerce_int(self.id, 1)
+        """Return the configured AMPR channel number as an integer.
+
+        An invalid or out-of-range channel must never silently fall back to
+        CH1: return 0 so callers skip the channel instead of driving the
+        wrong output.
+        """
+        try:
+            number = int(self.id)
+        except (TypeError, ValueError):
+            return 0
+        if not (self._CHANNEL_NUMBER_MIN <= number <= self._CHANNEL_NUMBER_MAX):
+            return 0
+        return number
 
     def _set_parameter_value_without_events(self, parameter_name: str, value: Any) -> bool:
         """Set one parameter value silently and report whether it changed."""
@@ -1909,6 +1958,15 @@ class AMPRController(DeviceController):
         target_voltage = float(channel.value if channel.enabled else 0.0)
         module = channel.module_address()
         channel_id = channel.channel_number()
+        if module < 0 or channel_id <= 0:
+            self.errorCount += 1
+            self.print(
+                f"Skipping channel with invalid module/channel configuration "
+                f"(module {channel.module!r} CH{channel.id!r}); fix the channel "
+                "configuration.",
+                flag=PRINT.ERROR,
+            )
+            return
         voltage_limit = self._module_voltage_limit(module)
         if abs(target_voltage) > voltage_limit:
             self.errorCount += 1
@@ -2588,10 +2646,20 @@ class AMPRController(DeviceController):
         for channel in get_channels():
             if not channel.real:
                 continue
+            module = channel.module_address()
+            channel_id = channel.channel_number()
+            if module < 0 or channel_id <= 0:
+                self.print(
+                    f"Skipping channel with invalid module/channel configuration "
+                    f"(module {channel.module!r} CH{channel.id!r}); fix the channel "
+                    "configuration.",
+                    flag=PRINT.ERROR,
+                )
+                continue
             target_voltage = 0.0
             if channel.enabled and (device_is_on or not respect_device_state):
                 target_voltage = float(channel.value)
-            targets[(channel.module_address(), channel.channel_number())] = target_voltage
+            targets[(module, channel_id)] = target_voltage
         return targets
 
     @staticmethod

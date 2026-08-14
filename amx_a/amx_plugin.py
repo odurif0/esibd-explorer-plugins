@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -29,6 +29,8 @@ from esibd.plugins import Device, Plugin
 _BUNDLED_RUNTIME_DIRNAME = "runtime"
 _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_amx_runtime"
 _AMX_DRIVER_CLASS: type[Any] | None = None
+# Serializes the private runtime load and driver-class publish across threads.
+_RUNTIME_LOAD_LOCK = RLock()
 _CHANNEL_NAME_KEY = getattr(Parameter, "NAME", getattr(Channel, "NAME", "Name"))
 _CHANNEL_ENABLED_KEY = getattr(Channel, "ENABLED", "Enabled")
 _CHANNEL_REAL_KEY = getattr(Channel, "REAL", "Real")
@@ -717,8 +719,13 @@ def _bundled_runtime_module_name(plugin_dir: Path | None = None) -> str:
 
 
 def _load_private_runtime_package(module_name: str, package_dir: Path) -> None:
-    if module_name in sys.modules:
-        return
+    with _RUNTIME_LOAD_LOCK:
+        if module_name in sys.modules:
+            return
+        _load_private_runtime_package_unlocked(module_name, package_dir)
+
+
+def _load_private_runtime_package_unlocked(module_name: str, package_dir: Path) -> None:
 
     init_file = package_dir / "__init__.py"
     spec = importlib.util.spec_from_file_location(
@@ -744,21 +751,24 @@ def _get_amx_driver_class() -> type[Any]:
 
     if _AMX_DRIVER_CLASS is not None:
         return _AMX_DRIVER_CLASS
+    with _RUNTIME_LOAD_LOCK:
+        if _AMX_DRIVER_CLASS is not None:
+            return _AMX_DRIVER_CLASS
 
-    plugin_dir = Path(__file__).resolve().parent
-    bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
-    bundled_runtime_init = bundled_runtime_dir / "__init__.py"
-    if not bundled_runtime_init.exists():
-        raise ModuleNotFoundError(
-            "Bundled AMX runtime not found in vendor/runtime; "
-            "plugin installation is incomplete."
-        )
+        plugin_dir = Path(__file__).resolve().parent
+        bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
+        bundled_runtime_init = bundled_runtime_dir / "__init__.py"
+        if not bundled_runtime_init.exists():
+            raise ModuleNotFoundError(
+                "Bundled AMX runtime not found in vendor/runtime; "
+                "plugin installation is incomplete."
+            )
 
-    runtime_module_name = _bundled_runtime_module_name(plugin_dir)
-    _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
-    module = importlib.import_module(f"{runtime_module_name}.amx")
-    _AMX_DRIVER_CLASS = cast(type[Any], module.AMX)
-    return _AMX_DRIVER_CLASS
+        runtime_module_name = _bundled_runtime_module_name(plugin_dir)
+        _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
+        module = importlib.import_module(f"{runtime_module_name}.amx")
+        _AMX_DRIVER_CLASS = cast(type[Any], module.AMX)
+        return _AMX_DRIVER_CLASS
 
 
 def providePlugins() -> "list[type[Plugin]]":

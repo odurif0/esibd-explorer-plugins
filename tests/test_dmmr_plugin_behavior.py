@@ -1339,3 +1339,85 @@ def test_safe_disable_after_toggle_failure_never_raises():
     controller.device = BrokenDevice()
     controller._safe_disable_after_toggle_failure()  # must not raise
     assert any("cleanup encountered issues" in m for m in logs)
+
+
+def test_run_initialization_does_not_emit_success_after_fatal_state_update():
+    """A device destroyed by _update_state() must not look like 'Test mode'."""
+    module = _load_module()
+    emitted = []
+
+    class FakeDevice:
+        def __init__(self):
+            self.NO_ERR = 0
+
+        def initialize(self, timeout_s=None):
+            return {1: {}}
+
+        def disconnect(self, timeout_s=None):
+            return True
+
+        def close(self):
+            return None
+
+    parent = types.SimpleNamespace(
+        name="DMMR",
+        com=10,
+        baudrate=230400,
+        connect_timeout_s=5.0,
+        getChannels=lambda: [],
+        main_state="",
+        detected_modules="",
+        device_state_summary="",
+        voltage_state_summary="",
+        temperature_state_summary="",
+        _update_status_widgets=lambda: None,
+    )
+
+    controller = module.DMMRController(parent)
+
+    class _Signal:
+        def emit(self):
+            emitted.append(1)
+
+    class _SignalComm:
+        initCompleteSignal = _Signal()
+
+    controller.signalComm = _SignalComm()
+    controller.print = lambda message, flag=None: None
+    controller._dispose_device = lambda: None
+    controller._restore_off_ui_state = lambda: None
+
+    class _FakeDriverClass:
+        def __new__(cls, **kwargs):
+            return FakeDevice()
+
+    original_getter = module._get_dmmr_driver_class
+    module._get_dmmr_driver_class = lambda: _FakeDriverClass
+
+    def fatal_update_state(*args, **kwargs):
+        controller.device = None  # simulate fatal transport loss during update
+
+    controller._update_state = fatal_update_state
+
+    try:
+        controller.runInitialization()
+    finally:
+        module._get_dmmr_driver_class = original_getter
+
+    assert emitted == []
+    assert controller.initializing is False
+
+
+def test_open_port_rejects_out_of_range_com():
+    module = _load_module()
+    runtime_name = module._bundled_runtime_module_name(
+        Path(__file__).resolve().parents[1] / "dmmr"
+    )
+    module._get_dmmr_driver_class()
+    base = sys.modules[f"{runtime_name}.dmmr.dmmr_base"].DMMRBase
+
+    instance = object.__new__(base)
+    with pytest.raises(ValueError, match="1..255"):
+        instance.open_port(256)
+    with pytest.raises(ValueError, match="1..255"):
+        instance.open_port(0)

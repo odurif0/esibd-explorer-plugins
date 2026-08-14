@@ -10,7 +10,7 @@ import math
 import sys
 import time
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -30,6 +30,8 @@ from PyQt6.QtCore import pyqtSignal
 _BUNDLED_RUNTIME_DIRNAME = "runtime"
 _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_psu_runtime"
 _PSU_DRIVER_CLASS: type[Any] | None = None
+# Serializes the private runtime load and driver-class publish across threads.
+_RUNTIME_LOAD_LOCK = RLock()
 _CHANNEL_NAME_KEY = getattr(Parameter, "NAME", getattr(Channel, "NAME", "Name"))
 _CHANNEL_ENABLED_KEY = getattr(Channel, "ENABLED", "Enabled")
 _CHANNEL_REAL_KEY = getattr(Channel, "REAL", "Real")
@@ -925,7 +927,13 @@ def _bundled_runtime_module_name(plugin_dir: Path | None = None) -> str:
 def _load_private_runtime_package(module_name: str, package_dir: Path) -> None:
     if module_name in sys.modules:
         return
+    with _RUNTIME_LOAD_LOCK:
+        if module_name in sys.modules:
+            return
+        _load_private_runtime_package_unlocked(module_name, package_dir)
 
+
+def _load_private_runtime_package_unlocked(module_name: str, package_dir: Path) -> None:
     init_file = package_dir / "__init__.py"
     spec = importlib.util.spec_from_file_location(
         module_name,
@@ -951,20 +959,24 @@ def _get_psu_driver_class() -> type[Any]:
     if _PSU_DRIVER_CLASS is not None:
         return _PSU_DRIVER_CLASS
 
-    plugin_dir = Path(__file__).resolve().parent
-    bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
-    bundled_runtime_init = bundled_runtime_dir / "__init__.py"
-    if not bundled_runtime_init.exists():
-        raise ModuleNotFoundError(
-            "Bundled PSU runtime not found in vendor/runtime; "
-            "plugin installation is incomplete."
-        )
+    with _RUNTIME_LOAD_LOCK:
+        if _PSU_DRIVER_CLASS is not None:
+            return _PSU_DRIVER_CLASS
 
-    runtime_module_name = _bundled_runtime_module_name(plugin_dir)
-    _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
-    module = importlib.import_module(f"{runtime_module_name}.psu")
-    _PSU_DRIVER_CLASS = cast(type[Any], module.PSU)
-    return _PSU_DRIVER_CLASS
+        plugin_dir = Path(__file__).resolve().parent
+        bundled_runtime_dir = plugin_dir / "vendor" / _BUNDLED_RUNTIME_DIRNAME
+        bundled_runtime_init = bundled_runtime_dir / "__init__.py"
+        if not bundled_runtime_init.exists():
+            raise ModuleNotFoundError(
+                "Bundled PSU runtime not found in vendor/runtime; "
+                "plugin installation is incomplete."
+            )
+
+        runtime_module_name = _bundled_runtime_module_name(plugin_dir)
+        _load_private_runtime_package(runtime_module_name, bundled_runtime_dir)
+        module = importlib.import_module(f"{runtime_module_name}.psu")
+        _PSU_DRIVER_CLASS = cast(type[Any], module.PSU)
+        return _PSU_DRIVER_CLASS
 
 
 def providePlugins() -> "list[type[Plugin]]":

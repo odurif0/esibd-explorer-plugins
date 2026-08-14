@@ -295,6 +295,11 @@ class DMMRBase:
             Status code.
 
         """
+        com_number = int(com_number)
+        if not 1 <= com_number <= 255:
+            raise ValueError(
+                f"DMMR COM port number must be 1..255, got {com_number}."
+            )
         status = self.dll.COM_DMMR_8_Open(ctypes.c_ubyte(com_number))
         return status
 
