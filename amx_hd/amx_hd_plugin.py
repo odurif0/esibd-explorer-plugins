@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import importlib.util
+import logging
 import sys
 import time
 from pathlib import Path
@@ -277,7 +278,11 @@ def _invoke_gui_callback(callback: Any) -> None:
             setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
         dispatcher.callbackRequested.emit(callback)
     except Exception:
-        callback()
+        # Never run a GUI callback directly from a worker thread when the
+        # dispatcher fails; drop the update and log instead.
+        logging.getLogger(__name__).exception(
+            "Failed to queue a GUI update on the Qt thread; update dropped."
+        )
 
 
 def _disable_spinbox_wheel(widget: Any) -> None:

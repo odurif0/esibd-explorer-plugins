@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import importlib
 import importlib.util
+import logging
 import sys
 import time
 from pathlib import Path
@@ -85,6 +86,55 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 def _runtime_module_name(plugin_dir: Path) -> str:
     digest = hashlib.sha256(str(plugin_dir.resolve()).encode()).hexdigest()[:12]
     return f"{_RUNTIME_PREFIX}_{digest}"
+
+
+def _invoke_gui_callback(callback: Any) -> None:
+    """Run GUI updates directly in tests and queue them on the Qt GUI thread."""
+    if not callable(callback):
+        return
+    try:
+        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        callback()
+        return
+
+    app = QApplication.instance()
+    if app is None:
+        callback()
+        return
+
+    try:
+        if QThread.currentThread() == app.thread():
+            callback()
+            return
+
+        dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
+        if dispatcher is None:
+            class _CallbackDispatcher(QObject):
+                callbackRequested = pyqtSignal(object)
+
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.callbackRequested.connect(
+                        self._run,
+                        Qt.ConnectionType.QueuedConnection,
+                    )
+
+                def _run(self, queued_callback: Any) -> None:
+                    if callable(queued_callback):
+                        queued_callback()
+
+            dispatcher = _CallbackDispatcher()
+            dispatcher.moveToThread(app.thread())
+            setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
+        dispatcher.callbackRequested.emit(callback)
+    except Exception:
+        # Never run a GUI callback directly from a worker thread when the
+        # dispatcher fails; drop the update and log instead.
+        logging.getLogger(__name__).exception(
+            "Failed to queue a GUI update on the Qt thread; update dropped."
+        )
 
 
 def _load_runtime_package(name: str, runtime_dir: Path) -> None:
@@ -1699,7 +1749,7 @@ class ESIController(DeviceController):
         self.controllerParent.main_state = self.main_state
         update = getattr(self.controllerParent, "_update_status_widgets", None)
         if callable(update):
-            update()
+            _invoke_gui_callback(update)
 
     def _dispose_device(self) -> None:
         device = self.device

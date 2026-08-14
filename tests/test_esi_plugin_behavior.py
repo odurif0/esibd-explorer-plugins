@@ -1277,3 +1277,65 @@ def test_load_config_now_requires_device_on():
     controller.print = lambda msg, flag=None: printed.append(msg)
     controller.loadOperatingConfigNow()
     assert any("OFF" in msg for msg in printed)
+
+
+def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
+    """A failed Qt emit must never run the GUI callback on the worker thread."""
+    import pytest
+
+    module = _load_plugin()
+
+    pyqt = types.ModuleType("PyQt6")
+    pyqt.__path__ = []
+    qtcore = types.ModuleType("PyQt6.QtCore")
+    qtcore.QObject = object
+    qtcore.pyqtSignal = lambda *a, **k: None
+
+    class _FakeQt:
+        class ConnectionType:
+            QueuedConnection = "queued"
+
+    qtcore.Qt = _FakeQt
+
+    class _FakeQThread:
+        @staticmethod
+        def currentThread():
+            return "worker-thread"
+
+    qtcore.QThread = _FakeQThread
+    pyqt.QtCore = qtcore
+
+    qtwidgets = types.ModuleType("PyQt6.QtWidgets")
+
+    class _FakeApp:
+        @staticmethod
+        def thread():
+            return "gui-thread"
+
+    class _FakeQApplication:
+        @staticmethod
+        def instance():
+            return _FakeApp()
+
+    qtwidgets.QApplication = _FakeQApplication
+    pyqt.QtWidgets = qtwidgets
+
+    monkeypatch.setitem(sys.modules, "PyQt6", pyqt)
+    monkeypatch.setitem(sys.modules, "PyQt6.QtCore", qtcore)
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", qtwidgets)
+
+    class _ExplodingDispatcher:
+        def emit(self, callback):
+            raise RuntimeError("dispatch failed")
+
+    previous = getattr(module._invoke_gui_callback, "_dispatcher", None)
+    module._invoke_gui_callback._dispatcher = _ExplodingDispatcher()
+    try:
+        called = []
+        module._invoke_gui_callback(lambda: called.append(1))
+        assert called == []
+    finally:
+        if previous is None:
+            del module._invoke_gui_callback._dispatcher
+        else:
+            module._invoke_gui_callback._dispatcher = previous

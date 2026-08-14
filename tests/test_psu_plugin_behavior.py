@@ -1795,6 +1795,7 @@ def test_save_current_config_refreshes_available_list_and_loaded_state():
 
     assert calls == [
         ("list_configs", 2.5),
+        ("list_configs", 2.5),
         ("save_config", 7, "Manual 10 V / 1 A", True, True, 9.0),
         ("list_configs", 2.5),
     ]
@@ -1855,7 +1856,7 @@ def test_save_current_config_refuses_existing_config_slot():
         valid=True,
     )
 
-    assert calls == [("list_configs", 2.5)]
+    assert calls == [("list_configs", 2.5), ("list_configs", 2.5)]
     assert parent.available_configs_text == "7:Existing"
     assert printed == [
         (
@@ -2256,3 +2257,124 @@ def test_clear_interlock_requires_initialized_communication():
     )
     device._clear_interlock()
     assert messages, "expected a warning message"
+
+
+def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
+    """A failed Qt emit must never run the GUI callback on the worker thread."""
+    pyqt = types.ModuleType("PyQt6")
+    pyqt.__path__ = []
+    qtcore = types.ModuleType("PyQt6.QtCore")
+    qtcore.QObject = object
+    qtcore.pyqtSignal = lambda *a, **k: None
+
+    class _FakeQt:
+        class ConnectionType:
+            QueuedConnection = "queued"
+
+    qtcore.Qt = _FakeQt
+
+    class _FakeQThread:
+        @staticmethod
+        def currentThread():
+            return "worker-thread"
+
+    qtcore.QThread = _FakeQThread
+    pyqt.QtCore = qtcore
+
+    qtwidgets = types.ModuleType("PyQt6.QtWidgets")
+
+    class _FakeApp:
+        @staticmethod
+        def thread():
+            return "gui-thread"
+
+    class _FakeQApplication:
+        @staticmethod
+        def instance():
+            return _FakeApp()
+
+    qtwidgets.QApplication = _FakeQApplication
+    pyqt.QtWidgets = qtwidgets
+
+    monkeypatch.setitem(sys.modules, "PyQt6", pyqt)
+    monkeypatch.setitem(sys.modules, "PyQt6.QtCore", qtcore)
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", qtwidgets)
+
+    module = _load_module()
+
+    class _ExplodingDispatcher:
+        def emit(self, callback):
+            raise RuntimeError("dispatch failed")
+
+    previous = getattr(module._invoke_gui_callback, "_dispatcher", None)
+    module._invoke_gui_callback._dispatcher = _ExplodingDispatcher()
+    try:
+        called = []
+        module._invoke_gui_callback(lambda: called.append(1))
+        assert called == []
+    finally:
+        if previous is None:
+            del module._invoke_gui_callback._dispatcher
+        else:
+            module._invoke_gui_callback._dispatcher = previous
+
+
+def test_save_current_config_rechecks_slot_under_lock_after_race():
+    """A slot filled by a concurrent save must be refused, not overwritten."""
+    module = _load_module()
+    calls = []
+    printed = []
+
+    class FakeDevice:
+        def __init__(self):
+            self.saved = False
+
+        def save_config(
+            self,
+            config_number,
+            *,
+            name=None,
+            active=None,
+            valid=None,
+            timeout_s=None,
+        ):
+            calls.append(("save_config", config_number))
+
+        def list_configs(self, timeout_s=None):
+            calls.append(("list_configs", timeout_s))
+            # The outer refresh sees an empty slot; the under-lock refresh sees
+            # the slot filled by a concurrent save that raced this thread.
+            return [
+                {"index": 7, "name": "Won the race", "active": True, "valid": True},
+            ] if len(calls) > 1 else []
+
+    parent = types.SimpleNamespace(
+        name="PSU",
+        startup_timeout_s=9.0,
+        connect_timeout_s=2.5,
+        getChannels=lambda: [],
+        main_state="",
+        output_summary="",
+        available_configs_text="",
+        loaded_state_text="",
+    )
+
+    controller = module.PSUController(parent)
+    controller.device = FakeDevice()
+    controller.initialized = True
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+
+    controller.saveCurrentConfig(
+        config_index=7,
+        config_name="Overwrite attempt",
+        active=True,
+        valid=True,
+    )
+
+    assert calls == [("list_configs", 2.5), ("list_configs", 2.5)]
+    assert printed == [
+        (
+            "Cannot save PSU config 7: this slot already exists. Choose an empty slot.",
+            module.PRINT.WARNING,
+        )
+    ]

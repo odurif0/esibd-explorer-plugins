@@ -297,9 +297,14 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
 
         return True
 
-    def _warn_if_unexpected_product_id(self):
+    def _warn_if_unexpected_product_id(self, timeout_s: Optional[float] = None):
         try:
-            status, product_id = self._call_locked(DMMRBase.get_product_id, self)
+            status, product_id = self._call_locked_with_timeout(
+                DMMRBase.get_product_id,
+                self._resolve_io_timeout(timeout_s),
+                "identity probe",
+                self,
+            )
         except Exception as exc:
             self.logger.debug(f"Skipping DMMR identity probe after connect: {exc}")
             return
@@ -393,7 +398,7 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
                 self._set_port_claimed(not released)
                 raise RuntimeError(str(exc)) from exc
 
-            self._warn_if_unexpected_product_id()
+            self._warn_if_unexpected_product_id(timeout_s)
             self.logger.info(
                 f"Successfully connected to DMMR device {self.device_id} "
                 f"(baud rate: {actual_baud})"
@@ -555,7 +560,11 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
                 return True
 
             self.logger.info(f"Disconnecting DMMR device {self.device_id}")
-            status = self._call_locked(super().close_port)
+            status = self._call_locked_with_timeout(
+                super().close_port,
+                self._resolve_io_timeout(),
+                "close_port",
+            )
             if status == self.NO_ERR:
                 self.connected = False
                 self._set_port_claimed(False)
@@ -685,25 +694,30 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             )
         return status == self.NO_ERR
 
+    def _hk_batch(self):
+        """Run one housekeeping batch; called under the transport lock."""
+        self._hk_product_info()
+        self._hk_main_state()
+        self._hk_device_state()
+        self._hk_general_housekeeping()
+        self._hk_voltage_state()
+        self._hk_temperature_state()
+        self._hk_base_state()
+        self._hk_base_temp()
+        self._hk_fan_data()
+        self._hk_led_data()
+        self._hk_cpu_data()
+        self._hk_module_presence()
+
     def hk_monitor(self):
         """Run one DMMR housekeeping batch under the shared transport lock."""
         try:
-            # Housekeeping holds the transport lock for the whole batch, so it must
-            # call the low-level DMMRBase methods directly and avoid wrappers that
-            # would try to reacquire the same lock.
-            with self.thread_lock:
-                self._hk_product_info()
-                self._hk_main_state()
-                self._hk_device_state()
-                self._hk_general_housekeeping()
-                self._hk_voltage_state()
-                self._hk_temperature_state()
-                self._hk_base_state()
-                self._hk_base_temp()
-                self._hk_fan_data()
-                self._hk_led_data()
-                self._hk_cpu_data()
-                self._hk_module_presence()
+            # Route the batch through the timeout-safe wrapper so a blocked
+            # DLL call poisons the transport with a loud HV warning instead
+            # of holding the lock forever.
+            self._call_locked_with_timeout(
+                self._hk_batch, 30.0, "housekeeping"
+            )
         except Exception as exc:
             self.logger.error(f"Housekeeping monitoring failed: {exc}")
 

@@ -397,7 +397,11 @@ def _invoke_gui_callback(callback: Any) -> None:
             setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
         dispatcher.callbackRequested.emit(callback)
     except Exception:
-        callback()
+        # Never run a GUI callback directly from a worker thread when the
+        # dispatcher fails; drop the update and log instead.
+        logging.getLogger(__name__).exception(
+            "Failed to queue a GUI update on the Qt thread; update dropped."
+        )
 
 
 def _disable_spinbox_wheel(widget: Any) -> None:
@@ -5023,14 +5027,6 @@ class PSUController(DeviceController):
                 flag=PRINT.WARNING,
             )
             return
-        if self._config_slot_exists(config_index):
-            self.print(
-                f"Cannot save {self.controllerParent.name} config {config_index}: "
-                "this slot already exists. Choose an empty slot.",
-                flag=PRINT.WARNING,
-            )
-            self._sync_status_to_gui()
-            return
 
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
@@ -5039,6 +5035,17 @@ class PSUController(DeviceController):
             ):
                 device = self.device
                 if device is None:
+                    return
+                # Re-check under the lock: a concurrent save could have filled
+                # this slot between the outer refresh and here.
+                self._refresh_available_configs()
+                if self._config_slot_exists(config_index):
+                    self.print(
+                        f"Cannot save {self.controllerParent.name} config {config_index}: "
+                        "this slot already exists. Choose an empty slot.",
+                        flag=PRINT.WARNING,
+                    )
+                    self._sync_status_to_gui()
                     return
                 save_config(
                     config_index,
