@@ -10,7 +10,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock, RLock, Thread
+from threading import Event, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -31,6 +31,7 @@ _RUNTIME_PREFIX = "_esibd_bundled_esi_runtime"
 _ESI_DRIVER_CLASS: type[Any] | None = None
 # Serializes the private runtime load and driver-class publish across threads.
 _RUNTIME_LOAD_LOCK = RLock()
+_GUI_DISPATCH_LOCK = RLock()
 _ESI_MAX_VOLTAGE = 3000.0
 _ESI_HV_MAX_VOLTAGE_STEP = 10.008
 _ESI_MAX_TEMPERATURE = 175.0
@@ -92,11 +93,11 @@ def _runtime_module_name(plugin_dir: Path) -> str:
 
 
 def _invoke_gui_callback(callback: Any) -> None:
-    """Run GUI updates directly in tests and queue them on the Qt GUI thread."""
+    """Run on the GUI thread; use a direct fallback only without a Qt app."""
     if not callable(callback):
         return
     try:
-        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
         from PyQt6.QtWidgets import QApplication
     except ImportError:
         callback()
@@ -112,25 +113,32 @@ def _invoke_gui_callback(callback: Any) -> None:
             callback()
             return
 
-        dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
-        if dispatcher is None:
-            class _CallbackDispatcher(QObject):
-                callbackRequested = pyqtSignal(object)
+        with _GUI_DISPATCH_LOCK:
+            dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
+            if dispatcher is None:
+                class _CallbackDispatcher(QObject):
+                    callbackRequested = pyqtSignal(object)
 
-                def __init__(self) -> None:
-                    super().__init__()
-                    self.callbackRequested.connect(
-                        self._run,
-                        Qt.ConnectionType.QueuedConnection,
-                    )
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self.callbackRequested.connect(
+                            self._run,
+                            Qt.ConnectionType.QueuedConnection,
+                        )
 
-                def _run(self, queued_callback: Any) -> None:
-                    if callable(queued_callback):
-                        queued_callback()
+                    # A real Qt slot follows QObject affinity after moveToThread;
+                    # a Python callable proxy may remain on the creating thread.
+                    @pyqtSlot(object)
+                    def _run(self, queued_callback: Any) -> None:
+                        try:
+                            if callable(queued_callback):
+                                queued_callback()
+                        except Exception:
+                            logging.getLogger(__name__).exception("GUI update failed.")
 
-            dispatcher = _CallbackDispatcher()
-            dispatcher.moveToThread(app.thread())
-            setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
+                dispatcher = _CallbackDispatcher()
+                dispatcher.moveToThread(app.thread())
+                setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
         dispatcher.callbackRequested.emit(callback)
     except Exception:
         # Never run a GUI callback directly from a worker thread when the
@@ -443,18 +451,21 @@ class ESIDevice(Device):
                 self.tree.setColumnHidden(parameter_names.index(hidden_name), True)
 
     def _set_on_ui_state(self, on: bool) -> None:
-        state = bool(on)
-        for action_name in ("onAction", "deviceOnAction"):
-            action = getattr(self, action_name, None)
-            if action is None:
-                continue
-            signal_comm = getattr(action, "signalComm", None)
-            thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
-            if thread_signal is not None:
-                thread_signal.emit(state)
-            else:
-                action.state = state
-        self._sync_local_on_action()
+        def _update_gui() -> None:
+            state = bool(on)
+            for action_name in ("onAction", "deviceOnAction"):
+                action = getattr(self, action_name, None)
+                if action is None:
+                    continue
+                signal_comm = getattr(action, "signalComm", None)
+                thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
+                if thread_signal is not None:
+                    thread_signal.emit(state)
+                else:
+                    action.state = state
+            self._sync_local_on_action()
+
+        _invoke_gui_callback(_update_gui)
 
     def setOn(self, on: "bool | None" = None) -> None:
         if on is not None and hasattr(self, "onAction") and self.onAction.state is not on:
@@ -1240,6 +1251,10 @@ class ESIController(DeviceController):
     def __init__(self, controllerParent) -> None:
         super().__init__(controllerParent=controllerParent)
         self.device: Any | None = None
+        # Serialize output sequences, not just individual DLL calls. OFF cancels
+        # the current generation before waiting for an in-flight command.
+        self._output_lock = RLock()
+        self._output_cancel = Event()
         self.values: dict[int, float] | None = None
         self.currents: dict[int, float] = {}
         self.targets: dict[int, float] = {}
@@ -1252,6 +1267,9 @@ class ESIController(DeviceController):
         self.global_enabled: bool | None = None
         self.initialized = False
         self.main_state = "Disconnected"
+        self.interlock_state = "n/a"
+        self.detected_modules = "n/a"
+        self.heat_status = "n/a"
         self.identity: dict[str, Any] = {}
         self.heat_readback_valid = False
         self.heat_max_temperature_c = _ESI_MAX_TEMPERATURE
@@ -1391,7 +1409,6 @@ class ESIController(DeviceController):
         return True, "", config_index
 
     def loadOperatingConfigNowFromThread(self, parallel: bool = True) -> None:
-        from threading import Thread
         if parallel:
             Thread(
                 target=self.loadOperatingConfigNow,
@@ -1402,6 +1419,12 @@ class ESIController(DeviceController):
         self.loadOperatingConfigNow()
 
     def loadOperatingConfigNow(self) -> None:
+        cancel = self._output_cancel
+        with self._output_lock:
+            if not cancel.is_set():
+                self._load_operating_config_unlocked()
+
+    def _load_operating_config_unlocked(self) -> None:
         device = self.device
         if device is None or not getattr(self, "initialized", False):
             self.print(
@@ -1482,6 +1505,12 @@ class ESIController(DeviceController):
         self.initializeValues(reset=True)
 
     def applyValue(self, channel: ESIChannel) -> None:
+        cancel = self._output_cancel
+        with self._output_lock:
+            if not cancel.is_set():
+                self._apply_value_unlocked(channel, cancel)
+
+    def _apply_value_unlocked(self, channel: ESIChannel, cancel: Event) -> None:
         if self.device is None or not self.initialized or not self.controllerParent.isOn():
             return
         if not channel.enabled:
@@ -1509,6 +1538,8 @@ class ESIController(DeviceController):
                     target,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
+                if cancel.is_set():
+                    return
                 enabled = self.device.set_output_active(
                     channel.module_address(),
                     True,
@@ -1533,7 +1564,8 @@ class ESIController(DeviceController):
                 and self.global_enabled is True
                 and np.isfinite(previous)
             ):
-                self._ramp_target(address, float(previous), target)
+                if not self._ramp_target(address, float(previous), target, cancel=cancel):
+                    return
                 applied = target
             else:
                 applied = self.device.set_hv_module_target(
@@ -1541,6 +1573,8 @@ class ESIController(DeviceController):
                     target,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
                 )
+            if cancel.is_set():
+                return
             enabled = self.device.set_output_active(
                 address,
                 True,
@@ -1571,6 +1605,19 @@ class ESIController(DeviceController):
                 channel.monitor = self.values.get(channel.module_address(), np.nan)
 
     def toggleOn(self) -> None:
+        target_on = bool(self.controllerParent.isOn())
+        if not target_on:
+            self._output_cancel.set()
+        with self._output_lock:
+            # A newer OFF request takes precedence over a queued ON request.
+            if target_on and not self.controllerParent.isOn():
+                return
+            if target_on:
+                self._output_cancel = Event()
+            self._toggle_on_unlocked(target_on)
+
+    def _toggle_on_unlocked(self, target_on: bool) -> None:
+        cancel = self._output_cancel
         super().toggleOn()
         if self.device is None:
             return
@@ -1579,19 +1626,22 @@ class ESIController(DeviceController):
             self.acquiring = False
         timeout = float(self.controllerParent.connect_timeout_s)
         try:
-            if self.controllerParent.isOn():
+            if target_on:
                 # Clear every stored HV target before opening the shared gate.
                 for address in _ESI_HV_MODULES:
                     self.device.set_output_active(address, False, timeout_s=timeout)
                     self.targets[address] = 0.0
                     self.module_active[address] = False
+                if cancel.is_set():
+                    return
                 self.global_enabled = bool(
                     self.device.set_global_active(True, timeout_s=timeout)
                 )
                 for channel in self.controllerParent.getChannels():
                     if channel.is_heat_channel() or channel.enabled:
                         self.applyValue(channel)
-                self.startAcquisition()
+                if not cancel.is_set():
+                    self.startAcquisition()
             else:
                 self.device.force_safe_off(timeout_s=timeout)
                 self.main_state = "Outputs OFF"
@@ -1658,29 +1708,38 @@ class ESIController(DeviceController):
 
     def _restore_off_ui_state(self) -> None:
         """Keep the UI from claiming ON after a failed transition."""
-        sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
-        if callable(sync_state):
-            sync_state(False)
-            return
-        action = getattr(self.controllerParent, "onAction", None)
-        if action is not None:
-            action.state = False
+        def _update_gui() -> None:
+            sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+            if callable(sync_state):
+                sync_state(False)
+                return
+            action = getattr(self.controllerParent, "onAction", None)
+            if action is not None:
+                action.state = False
+
+        _invoke_gui_callback(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
         """Keep OFF reachable while the physical output state is uncertain."""
-        sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
-        if callable(sync_state):
-            sync_state(True)
-            return
-        action = getattr(self.controllerParent, "onAction", None)
-        if action is not None:
-            action.state = True
+        def _update_gui() -> None:
+            sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+            if callable(sync_state):
+                sync_state(True)
+                return
+            action = getattr(self.controllerParent, "onAction", None)
+            if action is not None:
+                action.state = True
 
-    def _ramp_target(self, address: int, start: float, target: float) -> None:
-        """Apply one normal setpoint transition in bounded 100 ms steps."""
+        _invoke_gui_callback(_update_gui)
+
+    def _ramp_target(
+        self, address: int, start: float, target: float, *, cancel: Event | None = None
+    ) -> bool:
+        """Apply bounded steps; yield to OFF within one step plus DLL latency."""
+        cancel = self._output_cancel if cancel is None else cancel
         device = self.device
-        if device is None:
-            return
+        if device is None or cancel.is_set():
+            return False
         rate = max(0.0, float(getattr(self.controllerParent, "ramp_rate_v_s", 0.0)))
         delta = float(target) - float(start)
         if rate == 0.0 or delta == 0.0:
@@ -1689,11 +1748,13 @@ class ESIController(DeviceController):
                 float(target),
                 timeout_s=float(self.controllerParent.poll_timeout_s),
             )
-            return
+            return not cancel.is_set()
 
         step_interval_s = 0.1
         steps = max(1, int(np.ceil(abs(delta) / (rate * step_interval_s))))
         for step in range(1, steps + 1):
+            if cancel.is_set():
+                return False
             value = float(start) + delta * step / steps
             device.set_hv_module_target(
                 address,
@@ -1702,14 +1763,22 @@ class ESIController(DeviceController):
             )
             if step < steps:
                 time.sleep(step_interval_s)
+        return not cancel.is_set()
 
     def shutdownCommunication(self) -> bool:
+        self._output_cancel.set()
+        with self._output_lock:
+            return self._shutdown_communication_unlocked()
+
+    def _shutdown_communication_unlocked(self) -> bool:
         device = self.device
         if device is None:
-            return True
+            return self.main_state != "Shutdown unconfirmed"
         confirmed = False
         try:
-            device.disconnect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            result = device.disconnect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            if result is not True:
+                raise RuntimeError("ESI driver did not confirm safe shutdown")
             confirmed = True
         except Exception as exc:
             self.print(
@@ -1790,9 +1859,8 @@ class ESIController(DeviceController):
         self.currents[_ESI_HEAT_MODULE] = (
             float(heat["monitor_current_a"]) if heat["valid"] else np.nan
         )
-        self.controllerParent.main_state = self.main_state
         flags = snapshot["interlock_state"]["flags"]
-        self.controllerParent.interlock_state = ", ".join(flags) if flags else "OK"
+        self.interlock_state = ", ".join(flags) if flags else "OK"
         module_identity = self.identity.get("modules", {})
         labels = []
         for address in _ESI_MODULES:
@@ -1801,26 +1869,38 @@ class ESIController(DeviceController):
             fallback = "HEAT-CTRL-2410" if address == _ESI_HEAT_MODULE else "HVPS-3kB"
             label = product_id if isinstance(product_id, str) and product_id else fallback
             labels.append(f"{address}: {label}")
-        self.controllerParent.detected_modules = ", ".join(labels)
+        self.detected_modules = ", ".join(labels)
         if self.heat_readback_valid:
-            self.controllerParent.heat_status = (
+            self.heat_status = (
                 f"T={heat_temperature:.1f} degC, "
                 f"P={float(heat['heater_power_w']):.2f} W, "
                 f"Ilock=0x{int(heat['interlock_state']):02X}"
             )
         else:
-            self.controllerParent.heat_status = (
+            self.heat_status = (
                 f"INVALID T={heat_temperature:.1f} degC; check temperature sensor"
             )
         self._sync_status()
 
     def _sync_status(self) -> None:
-        self.controllerParent.main_state = self.main_state
-        update = getattr(self.controllerParent, "_update_status_widgets", None)
-        if callable(update):
-            _invoke_gui_callback(update)
+        # ESIBD setting attributes call widget setters, including LABEL fields.
+        def update() -> None:
+            self.controllerParent.main_state = self.main_state
+            self.controllerParent.interlock_state = self.interlock_state
+            self.controllerParent.detected_modules = self.detected_modules
+            self.controllerParent.heat_status = self.heat_status
+            refresh = getattr(self.controllerParent, "_update_status_widgets", None)
+            if callable(refresh):
+                refresh()
+
+        _invoke_gui_callback(update)
 
     def _dispose_device(self) -> None:
+        self._output_cancel.set()
+        with self._output_lock:
+            self._dispose_device_unlocked()
+
+    def _dispose_device_unlocked(self) -> None:
         device = self.device
         self.device = None
         if device is not None:

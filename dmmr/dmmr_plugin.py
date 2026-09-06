@@ -39,6 +39,7 @@ _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_dmmr_runtime"
 _DMMR_DRIVER_CLASS: type[Any] | None = None
 # Serializes the private runtime load and driver-class publish across threads.
 _RUNTIME_LOAD_LOCK = RLock()
+_GUI_DISPATCH_LOCK = RLock()
 _CHANNEL_NAME_KEY = getattr(Parameter, "NAME", getattr(Channel, "NAME", "Name"))
 _CHANNEL_ENABLED_KEY = getattr(Channel, "ENABLED", "Enabled")
 _CHANNEL_REAL_KEY = getattr(Channel, "REAL", "Real")
@@ -245,11 +246,11 @@ def _dmmr_poisoned_port_guidance(
 
 
 def _invoke_gui_callback(callback: Any) -> None:
-    """Run GUI updates directly in tests and queue them on the Qt GUI thread."""
+    """Run on the GUI thread; use a direct fallback only without a Qt app."""
     if not callable(callback):
         return
     try:
-        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
         from PyQt6.QtWidgets import QApplication
     except ImportError:
         callback()
@@ -265,25 +266,32 @@ def _invoke_gui_callback(callback: Any) -> None:
             callback()
             return
 
-        dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
-        if dispatcher is None:
-            class _CallbackDispatcher(QObject):
-                callbackRequested = pyqtSignal(object)
+        with _GUI_DISPATCH_LOCK:
+            dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
+            if dispatcher is None:
+                class _CallbackDispatcher(QObject):
+                    callbackRequested = pyqtSignal(object)
 
-                def __init__(self) -> None:
-                    super().__init__()
-                    self.callbackRequested.connect(
-                        self._run,
-                        Qt.ConnectionType.QueuedConnection,
-                    )
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self.callbackRequested.connect(
+                            self._run,
+                            Qt.ConnectionType.QueuedConnection,
+                        )
 
-                def _run(self, queued_callback: Any) -> None:
-                    if callable(queued_callback):
-                        queued_callback()
+                    # A real Qt slot follows QObject affinity after moveToThread;
+                    # a Python callable proxy may remain on the creating thread.
+                    @pyqtSlot(object)
+                    def _run(self, queued_callback: Any) -> None:
+                        try:
+                            if callable(queued_callback):
+                                queued_callback()
+                        except Exception:
+                            logging.getLogger(__name__).exception("GUI update failed.")
 
-            dispatcher = _CallbackDispatcher()
-            dispatcher.moveToThread(app.thread())
-            setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
+                dispatcher = _CallbackDispatcher()
+                dispatcher.moveToThread(app.thread())
+                setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
         dispatcher.callbackRequested.emit(callback)
     except Exception:
         # Never run a GUI callback directly from a worker thread when the
@@ -1791,20 +1799,23 @@ class DMMRDevice(Device):
 
     def _set_on_ui_state(self, on: bool) -> None:
         """Synchronize the ESIBD and local DMMR ON/OFF actions."""
-        state = bool(on)
-        for action_name in ("onAction", "deviceOnAction"):
-            action = getattr(self, action_name, None)
-            if action is None:
-                continue
-            signal_comm = getattr(action, "signalComm", None)
-            thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
-            if thread_signal is not None:
-                thread_signal.emit(state)
-            else:
-                action.state = state
-        self._sync_local_on_action()
-        self._sync_toolbar_communication_controls()
-        self._update_status_widgets()
+        def _update_gui() -> None:
+            state = bool(on)
+            for action_name in ("onAction", "deviceOnAction"):
+                action = getattr(self, action_name, None)
+                if action is None:
+                    continue
+                signal_comm = getattr(action, "signalComm", None)
+                thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
+                if thread_signal is not None:
+                    thread_signal.emit(state)
+                else:
+                    action.state = state
+            self._sync_local_on_action()
+            self._sync_toolbar_communication_controls()
+            self._update_status_widgets()
+
+        _invoke_gui_callback(_update_gui)
 
     def setOn(self, on: "bool | None" = None) -> None:
         """Toggle the DMMR without relying on a channel apply path."""
@@ -2762,12 +2773,13 @@ class DMMRController(DeviceController):
             emit()
 
     def _sync_status_to_gui(self) -> None:
-        self.controllerParent.main_state = self.main_state
-        self.controllerParent.detected_modules = self.detected_modules_text
-        self.controllerParent.device_state_summary = self.device_state_summary
-        self.controllerParent.voltage_state_summary = self.voltage_state_summary
-        self.controllerParent.temperature_state_summary = self.temperature_state_summary
+        # ESIBD setting attributes are widget-backed properties, not plain data.
         def _refresh_gui() -> None:
+            self.controllerParent.main_state = self.main_state
+            self.controllerParent.detected_modules = self.detected_modules_text
+            self.controllerParent.device_state_summary = self.device_state_summary
+            self.controllerParent.voltage_state_summary = self.voltage_state_summary
+            self.controllerParent.temperature_state_summary = self.temperature_state_summary
             sync_acquisition_controls = getattr(
                 self.controllerParent,
                 "_sync_acquisition_controls",
@@ -2887,27 +2899,33 @@ class DMMRController(DeviceController):
 
     def _restore_off_ui_state(self) -> None:
         """Reset toolbar ON/OFF widgets back to OFF after a failed startup."""
-        sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
-        if callable(sync_on_state):
-            sync_on_state(False)
-            return
-        if hasattr(self.controllerParent, "onAction"):
-            self.controllerParent.onAction.state = False
-        sync_local = getattr(self.controllerParent, "_sync_local_on_action", None)
-        if callable(sync_local):
-            sync_local()
+        def _update_gui() -> None:
+            sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+            if callable(sync_on_state):
+                sync_on_state(False)
+                return
+            if hasattr(self.controllerParent, "onAction"):
+                self.controllerParent.onAction.state = False
+            sync_local = getattr(self.controllerParent, "_sync_local_on_action", None)
+            if callable(sync_local):
+                sync_local()
+
+        _invoke_gui_callback(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
         """Restore toolbar ON/OFF widgets back to ON after a failed shutdown."""
-        sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
-        if callable(sync_on_state):
-            sync_on_state(True)
-            return
-        if hasattr(self.controllerParent, "onAction"):
-            self.controllerParent.onAction.state = True
-        sync_local = getattr(self.controllerParent, "_sync_local_on_action", None)
-        if callable(sync_local):
-            sync_local()
+        def _update_gui() -> None:
+            sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+            if callable(sync_on_state):
+                sync_on_state(True)
+                return
+            if hasattr(self.controllerParent, "onAction"):
+                self.controllerParent.onAction.state = True
+            sync_local = getattr(self.controllerParent, "_sync_local_on_action", None)
+            if callable(sync_local):
+                sync_local()
+
+        _invoke_gui_callback(_update_gui)
 
     def _safe_disable_after_toggle_failure(self) -> None:
         """Best-effort cleanup after a failed DMMR acquisition startup.

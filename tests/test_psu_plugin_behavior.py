@@ -2267,6 +2267,7 @@ def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
     qtcore = types.ModuleType("PyQt6.QtCore")
     qtcore.QObject = object
     qtcore.pyqtSignal = lambda *a, **k: None
+    qtcore.pyqtSlot = lambda *a, **k: lambda function: function
 
     class _FakeQt:
         class ConnectionType:
