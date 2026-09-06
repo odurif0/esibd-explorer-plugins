@@ -31,6 +31,7 @@ _BUNDLED_RUNTIME_NAMESPACE_PREFIX = "_esibd_bundled_amx_hd_runtime"
 _AMX_DRIVER_CLASS: type[Any] | None = None
 # Serializes the private runtime load and driver-class publish across threads.
 _RUNTIME_LOAD_LOCK = RLock()
+_GUI_DISPATCH_LOCK = RLock()
 _CHANNEL_NAME_KEY = getattr(Parameter, "NAME", getattr(Channel, "NAME", "Name"))
 _CHANNEL_ENABLED_KEY = getattr(Channel, "ENABLED", "Enabled")
 _CHANNEL_REAL_KEY = getattr(Channel, "REAL", "Real")
@@ -239,11 +240,11 @@ def _status_requires_operator_attention(state: Any) -> bool:
 
 
 def _invoke_gui_callback(callback: Any) -> None:
-    """Run GUI updates directly in tests and queue them on the Qt GUI thread."""
+    """Run on the GUI thread; use a direct fallback only without a Qt app."""
     if not callable(callback):
         return
     try:
-        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+        from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
         from PyQt6.QtWidgets import QApplication
     except ImportError:
         callback()
@@ -259,25 +260,32 @@ def _invoke_gui_callback(callback: Any) -> None:
             callback()
             return
 
-        dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
-        if dispatcher is None:
-            class _CallbackDispatcher(QObject):
-                callbackRequested = pyqtSignal(object)
+        with _GUI_DISPATCH_LOCK:
+            dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
+            if dispatcher is None:
+                class _CallbackDispatcher(QObject):
+                    callbackRequested = pyqtSignal(object)
 
-                def __init__(self) -> None:
-                    super().__init__()
-                    self.callbackRequested.connect(
-                        self._run,
-                        Qt.ConnectionType.QueuedConnection,
-                    )
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self.callbackRequested.connect(
+                            self._run,
+                            Qt.ConnectionType.QueuedConnection,
+                        )
 
-                def _run(self, queued_callback: Any) -> None:
-                    if callable(queued_callback):
-                        queued_callback()
+                    # A real Qt slot follows QObject affinity after moveToThread;
+                    # a Python callable proxy may remain on the creating thread.
+                    @pyqtSlot(object)
+                    def _run(self, queued_callback: Any) -> None:
+                        try:
+                            if callable(queued_callback):
+                                queued_callback()
+                        except Exception:
+                            logging.getLogger(__name__).exception("GUI update failed.")
 
-            dispatcher = _CallbackDispatcher()
-            dispatcher.moveToThread(app.thread())
-            setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
+                dispatcher = _CallbackDispatcher()
+                dispatcher.moveToThread(app.thread())
+                setattr(_invoke_gui_callback, "_dispatcher", dispatcher)
         dispatcher.callbackRequested.emit(callback)
     except Exception:
         # Never run a GUI callback directly from a worker thread when the
@@ -1755,20 +1763,23 @@ class AMXHDDevice(Device):
             channel._update_duty_label()
 
     def _set_on_ui_state(self, on: bool) -> None:
-        state = bool(on)
-        for action_name in ("onAction", "deviceOnAction"):
-            action = getattr(self, action_name, None)
-            if action is None:
-                continue
-            signal_comm = getattr(action, "signalComm", None)
-            thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
-            if thread_signal is not None:
-                thread_signal.emit(state)
-            else:
-                action.state = state
-        self._sync_local_on_action()
-        self._sync_toolbar_communication_controls()
-        self._update_status_widgets()
+        def _update_gui() -> None:
+            state = bool(on)
+            for action_name in ("onAction", "deviceOnAction"):
+                action = getattr(self, action_name, None)
+                if action is None:
+                    continue
+                signal_comm = getattr(action, "signalComm", None)
+                thread_signal = getattr(signal_comm, "setValueFromThreadSignal", None)
+                if thread_signal is not None:
+                    thread_signal.emit(state)
+                else:
+                    action.state = state
+            self._sync_local_on_action()
+            self._sync_toolbar_communication_controls()
+            self._update_status_widgets()
+
+        _invoke_gui_callback(_update_gui)
 
     def _acquisition_readiness(self) -> tuple[bool, str]:
         """Return whether manual recording can start and, if not, why."""
@@ -3589,12 +3600,13 @@ class AMXHDController(DeviceController):
 
 
     def _sync_status_to_gui(self) -> None:
-        self.controllerParent.main_state = self.main_state
-        self.controllerParent.device_enabled_state = self.device_enabled_state
-        self.controllerParent.available_configs = list(self.available_configs)
-        self.controllerParent.available_configs_text = self.available_configs_text
-        self.controllerParent.loaded_config_text = self.loaded_config_text
+        # ESIBD setting attributes are widget-backed properties, not plain data.
         def _refresh_gui() -> None:
+            self.controllerParent.main_state = self.main_state
+            self.controllerParent.device_enabled_state = self.device_enabled_state
+            self.controllerParent.available_configs = list(self.available_configs)
+            self.controllerParent.available_configs_text = self.available_configs_text
+            self.controllerParent.loaded_config_text = self.loaded_config_text
             sync_acquisition_controls = getattr(
                 self.controllerParent,
                 "_sync_acquisition_controls",
@@ -3633,20 +3645,26 @@ class AMXHDController(DeviceController):
                 device.close()
 
     def _restore_off_ui_state(self) -> None:
-        sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
-        if callable(sync_on_state):
-            sync_on_state(False)
-            return
-        if hasattr(self.controllerParent, "onAction"):
-            self.controllerParent.onAction.state = False
+        def _update_gui() -> None:
+            sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+            if callable(sync_on_state):
+                sync_on_state(False)
+                return
+            if hasattr(self.controllerParent, "onAction"):
+                self.controllerParent.onAction.state = False
+
+        _invoke_gui_callback(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
-        sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
-        if callable(sync_on_state):
-            sync_on_state(True)
-            return
-        if hasattr(self.controllerParent, "onAction"):
-            self.controllerParent.onAction.state = True
+        def _update_gui() -> None:
+            sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
+            if callable(sync_on_state):
+                sync_on_state(True)
+                return
+            if hasattr(self.controllerParent, "onAction"):
+                self.controllerParent.onAction.state = True
+
+        _invoke_gui_callback(_update_gui)
 
     def _restore_ui_state_for_device(self) -> None:
         """Restore the ON/OFF button to the device's real state after a

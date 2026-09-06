@@ -1169,9 +1169,11 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         }
 
     def disconnect(self, timeout_s: Optional[float] = None) -> bool:
+        # A timeout also sets connected=False, but says nothing about the
+        # physical outputs. Never report a confirmed shutdown in that case.
+        self._raise_if_transport_poisoned()
         if not self.connected:
-            if not self._transport_poisoned:
-                self._release_single_instance()
+            self._release_single_instance()
             return True
         timeout = self._resolve_timeout(timeout_s)
         safe = False

@@ -798,7 +798,7 @@ def test_invalid_heat_readback_blocks_nonzero_target_and_forces_off():
     assert controller.errorCount == 1
 
 
-def test_snapshot_rejects_disconnected_heat_sensor_readback():
+def test_snapshot_rejects_disconnected_heat_sensor_readback(monkeypatch):
     module = _load_plugin()
     parent = types.SimpleNamespace(
         main_state="",
@@ -848,7 +848,15 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback():
         },
     }
 
+    queued = []
+    monkeypatch.setattr(module, "_invoke_gui_callback", queued.append)
     controller._apply_snapshot(snapshot)
+    # All four ESIBD settings are widget-backed: no writes before dispatch.
+    assert vars(parent) == dict.fromkeys(
+        ("main_state", "interlock_state", "detected_modules", "heat_status"), ""
+    )
+    assert len(queued) == 1
+    queued[0]()
 
     assert controller.heat_readback_valid is False
     assert module.np.isnan(controller.values[0])
@@ -1290,6 +1298,7 @@ def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
     qtcore = types.ModuleType("PyQt6.QtCore")
     qtcore.QObject = object
     qtcore.pyqtSignal = lambda *a, **k: None
+    qtcore.pyqtSlot = lambda *a, **k: lambda function: function
 
     class _FakeQt:
         class ConnectionType:
