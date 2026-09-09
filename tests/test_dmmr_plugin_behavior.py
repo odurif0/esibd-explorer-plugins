@@ -923,9 +923,8 @@ def test_controller_read_numbers_keeps_partial_results_on_timeout():
 
     # A TimeoutError here means transient controller-lock contention (in
     # production a real device-call timeout raises RuntimeError and is handled
-    # by except-Exception). It is not a fault: skip this module silently,
-    # keep its last-good value (NaN here on the first poll), and still read
-    # the remaining modules.
+    # by except-Exception). Skip this module silently with NaN for the missing
+    # sample, and still read the remaining modules.
     assert controller.device.calls == [(1, 2.5), (2, 2.5), (3, 2.5)]
     assert controller.values[1] == 1e-12
     assert np.isnan(controller.values[2])
@@ -1091,7 +1090,7 @@ def test_controller_shutdown_success_marks_state_disconnected():
 
     class FakeDevice:
         def shutdown(self, timeout_s=None):
-            return None
+            return True
 
     parent = types.SimpleNamespace(
         connect_timeout_s=7.0,

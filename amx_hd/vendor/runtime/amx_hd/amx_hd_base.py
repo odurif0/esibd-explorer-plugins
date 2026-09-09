@@ -34,6 +34,19 @@ def _decode_vendor_text(value: bytes) -> str:
     return value.decode(errors="replace")
 
 
+def _checked_byte_buffer(data, size):
+    """Reject malformed binary configuration instead of padding/wrapping it."""
+    if len(data) != size:
+        raise ValueError(f"Configuration requires exactly {size} bytes.")
+    try:
+        packed = bytes(iter(data))  # Validate each integer before ctypes conversion.
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Configuration values must be integers from 0 to 255.") from exc
+    if len(packed) != size:
+        raise ValueError(f"Configuration requires exactly {size} bytes.")
+    return (ctypes.c_ubyte * size).from_buffer_copy(packed)
+
+
 class AMXHDBase:
     """Low-level CGC AMX HD driver backed by the vendor DLL (COM-HVAMX4EDH)."""
 
@@ -282,6 +295,7 @@ class AMXHDBase:
                 f"{_format_dll_load_hint(self.amx_hd_dll_path)}"
             ) from exc
 
+        self._configure_dll_signatures()
         err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
         )
@@ -292,6 +306,136 @@ class AMXHDBase:
         self.stream = int(stream)
         self.log = log
         self.idn = idn
+
+    def _configure_dll_signatures(self) -> None:
+        """Declare the used exports as specified in COM-HVAMX4EDH.h."""
+        byte, word, dword = ctypes.c_ubyte, ctypes.c_uint16, ctypes.c_uint32
+        ptr = ctypes.POINTER
+        signatures = {
+            "COM_HVAMX4EDH_GetSWVersion": ([], word),
+            "COM_HVAMX4EDH_Open": ([word, word], ctypes.c_int),
+            "COM_HVAMX4EDH_Close": ([word], ctypes.c_int),
+            "COM_HVAMX4EDH_SetBaudRate": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_Purge": ([word], ctypes.c_int),
+            "COM_HVAMX4EDH_DevicePurge": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetBufferState": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDeviceState": ([word] + [ptr(word)] * 3, ctypes.c_int),
+            "COM_HVAMX4EDH_GetHousekeeping": ([word] + [ptr(ctypes.c_double)] * 8, ctypes.c_int),
+            "COM_HVAMX4EDH_GetSensorData": ([word, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetFanSpeed": ([word, word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetFanData": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)] + [ptr(word)] * 3, ctypes.c_int),
+            "COM_HVAMX4EDH_GetLEDData": ([word] + [ptr(self.WIN_BOOL)] * 3, ctypes.c_int),
+            "COM_HVAMX4EDH_GetClockCount": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetClockSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetClockSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllCount": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllRefDiv": ([word, ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllRefDiv": ([word, ctypes.c_uint, word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllFdbkDiv": ([word, ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllFdbkDiv": ([word, ctypes.c_uint, word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllPostDiv1": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllPostDiv1": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllPostDiv2": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllPostDiv2": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllPostDiv3": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllPostDiv3": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllPowerDown": ([word, ctypes.c_uint, ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllPowerDown": ([word, ctypes.c_uint, ctypes.c_bool], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllCpCurrent": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllCpCurrent": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllLfResistor": ([word, ctypes.c_uint, ptr(ctypes.c_int)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllLfResistor": ([word, ctypes.c_uint, ctypes.c_int], ctypes.c_int),
+            "COM_HVAMX4EDH_GetPllLfCapacitor": ([word, ctypes.c_uint, ptr(ctypes.c_int)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetPllLfCapacitor": ([word, ctypes.c_uint, ctypes.c_int], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDividerCount": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDividerPeriod": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetDividerPeriod": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetCounterCount": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetCounterPeriod": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetCounterPeriod": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetOscillatorCount": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetOscillatorPeriod": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetOscillatorPeriod": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTimerCount": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTimerDelay": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetTimerDelay": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTimerWidth": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetTimerWidth": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTimerTriggerSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetTimerTriggerSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTimerBurst": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetTimerBurst": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTimerStopSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetTimerStopSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetMappingEngineInputSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetMappingEngineInputSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetMappingEngineOutputValue": ([word, ctypes.c_uint, ptr(ctypes.c_bool), ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetMappingEngineOutputValue": ([word, ctypes.c_uint, ctypes.c_bool, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSwitchTriggerSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetSwitchTriggerSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSwitchEnableSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetSwitchEnableSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSwitchDelay": ([word, ctypes.c_uint, ptr(byte), ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetSwitchDelay": ([word, ctypes.c_uint, byte, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSwitchRiseDelayFine": ([word, ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSwitchFallDelayFine": ([word, ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetSwitchRiseDelayFine": ([word, ctypes.c_uint, word], ctypes.c_int),
+            "COM_HVAMX4EDH_SetSwitchFallDelayFine": ([word, ctypes.c_uint, word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDigitalIOConfig": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetDigitalIOConfig": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDigitalIOSignalSource": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetDigitalIOSignalSource": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSignalValues": ([word, ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetSignals": ([word, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetState": ([word, ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetConfig": ([word, word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDeviceEnable": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetDeviceEnable": ([word, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVAMX4EDH_GetInterlockFunct": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetInterlockFunct": ([word, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVAMX4EDH_GetCurrentConfig": ([word, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetCurrentConfig": ([word, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDefaults": ([word, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetDefaults": ([word, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetConfigList": ([word, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4EDH_SaveCurrentConfig": ([word, ctypes.c_uint], ctypes.c_int),
+            "COM_HVAMX4EDH_LoadCurrentConfig": ([word, ctypes.c_uint], ctypes.c_int),
+            "COM_HVAMX4EDH_SaveDefaults": ([word], ctypes.c_int),
+            "COM_HVAMX4EDH_LoadDefaults": ([word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetConfigName": ([word, ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4EDH_SetConfigName": ([word, ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4EDH_GetConfigData": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetConfigData": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetConfigFlags": ([word, ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4EDH_SetConfigFlags": ([word, ctypes.c_uint, ctypes.c_bool, ctypes.c_bool], ctypes.c_int),
+            "COM_HVAMX4EDH_Restart": ([word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetCPUData": ([word, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetUptime": ([word, ptr(dword), ptr(word), ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetTotalTime": ([word, ptr(dword), ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetFwVersion": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetFwDate": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4EDH_GetProductID": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4EDH_GetProductNo": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetManufDate": ([word, ptr(word), ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetCPU_ID": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetDevType": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetHwType": ([word, ptr(dword)] + [ptr(word)] * 8, ctypes.c_int),
+            "COM_HVAMX4EDH_GetHwVersion": ([word, ptr(word), ptr(word)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetInterfaceState": ([word], ctypes.c_int),
+            "COM_HVAMX4EDH_GetErrorMessage": ([word], ctypes.c_char_p),
+            "COM_HVAMX4EDH_GetIOErrorMessage": ([word], ctypes.c_char_p),
+            "COM_HVAMX4EDH_GetIOState": ([word, ptr(ctypes.c_int)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetIOStateMessage": ([ctypes.c_int], ctypes.c_char_p),
+            "COM_HVAMX4EDH_GetCommError": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4EDH_GetCommErrorMessage": ([dword], ctypes.c_char_p),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(self.amx_hd_dll, name, None)
+            if function is not None:  # Optional exports depend on the DLL version.
+                function.argtypes = argtypes
+                function.restype = restype
 
     def describe_error(self, status: int) -> str:
         """Return the vendor message for a driver status code."""
@@ -2138,9 +2282,7 @@ class AMXHDBase:
             Status code.
 
         """
-        data_arr = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE)(
-            *data[:self.CONFIG_DATA_SIZE]
-        )
+        data_arr = _checked_byte_buffer(data, self.CONFIG_DATA_SIZE)
         status = self.amx_hd_dll.COM_HVAMX4EDH_SetCurrentConfig(self.stream, data_arr)
         return status
 
@@ -2173,9 +2315,7 @@ class AMXHDBase:
             Status code.
 
         """
-        data_arr = (ctypes.c_ubyte * self.DEFAULT_DATA_SIZE)(
-            *data[:self.DEFAULT_DATA_SIZE]
-        )
+        data_arr = _checked_byte_buffer(data, self.DEFAULT_DATA_SIZE)
         status = self.amx_hd_dll.COM_HVAMX4EDH_SetDefaults(self.stream, data_arr)
         return status
 
@@ -2349,9 +2489,7 @@ class AMXHDBase:
             Status code.
 
         """
-        data_arr = (ctypes.c_ubyte * self.CONFIG_DATA_SIZE)(
-            *data[:self.CONFIG_DATA_SIZE]
-        )
+        data_arr = _checked_byte_buffer(data, self.CONFIG_DATA_SIZE)
         status = self.amx_hd_dll.COM_HVAMX4EDH_SetConfigData(
             self.stream, config_number, data_arr
         )

@@ -179,7 +179,7 @@ class ESIBase:
             raise ESIDllLoadError(
                 f"Unable to load CGC ESI DLL from '{self.esi_dll_path}'."
             ) from exc
-        self._configure_hv_dll_signatures()
+        self._configure_dll_signatures()
 
         self.err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
@@ -191,135 +191,111 @@ class ESIBase:
         self.log = log
         self.idn = idn
 
-    def _configure_hv_dll_signatures(self) -> None:
-        """Declare the HV ABI exactly as published in COM-ESI-CTRL.h."""
-        bool_ptr = ctypes.POINTER(ctypes.c_bool)
-        double_ptr = ctypes.POINTER(ctypes.c_double)
-        byte_ptr = ctypes.POINTER(ctypes.c_ubyte)
-        word_ptr = ctypes.POINTER(ctypes.c_uint16)
-        uint_ptr = ctypes.POINTER(ctypes.c_uint)
+    def _configure_dll_signatures(self) -> None:
+        """Declare the used exports as specified in COM-ESI-CTRL.h."""
+        byte, word, dword = ctypes.c_ubyte, ctypes.c_uint16, ctypes.c_uint32
+        ptr = ctypes.POINTER
         signatures = {
+            "COM_ESI_CTRL_GetSWVersion": ([], word),
+            "COM_ESI_CTRL_Open": ([byte], ctypes.c_int),
+            "COM_ESI_CTRL_Close": ([], ctypes.c_int),
+            "COM_ESI_CTRL_SetBaudRate": ([ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_ESI_CTRL_Purge": ([], ctypes.c_int),
+            "COM_ESI_CTRL_GetBufferState": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_DevicePurge": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_GetFwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetFwDate": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_ESI_CTRL_GetProductID": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_ESI_CTRL_GetProductNo": ([ptr(dword)], ctypes.c_int),
+            "COM_ESI_CTRL_GetManufDate": ([ptr(word), ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetDevType": ([ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHwType": ([ptr(dword)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetUptime": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetOptime": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetCPUdata": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_Restart": ([], ctypes.c_int),
+            "COM_ESI_CTRL_GetDataReadyFlags": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHousekeeping": ([ptr(ctypes.c_double)] * 5, ctypes.c_int),
+            "COM_ESI_CTRL_GetState": ([ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetDeviceState": ([ptr(byte)], ctypes.c_int),
             "COM_ESI_CTRL_SetEnable": ([ctypes.c_bool], ctypes.c_int),
-            "COM_ESI_CTRL_GetEnable": ([bool_ptr], ctypes.c_int),
-            "COM_ESI_CTRL_SetModuleActivationState": (
-                [ctypes.c_uint, ctypes.c_bool],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetModuleActivationState": (
-                [ctypes.c_uint, bool_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetModuleLEDData": (
-                [ctypes.c_uint, bool_ptr, bool_ptr, bool_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetBaseHousekeeping": (
-                [bool_ptr, double_ptr, double_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetHVsupplyMeasRanges": (
-                [ctypes.c_uint, bool_ptr, bool_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_SetHVsupplyMeasRanges": (
-                [ctypes.c_uint, ctypes.c_bool, ctypes.c_bool],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetHVsupplyOutputVoltage": (
-                [ctypes.c_uint, bool_ptr, double_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetHVsupplyOutputCurrent": (
-                [ctypes.c_uint, bool_ptr, double_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetHVsupplyPhase": (
-                [ctypes.c_uint, bool_ptr, double_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetHVsupplyTargetOutputVoltage": (
-                [ctypes.c_uint, double_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage": (
-                [ctypes.c_uint, ctypes.c_double],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetHVsupplyParamsPWM": (
-                [
-                    ctypes.c_uint,
-                    double_ptr,
-                    double_ptr,
-                    double_ptr,
-                    double_ptr,
-                    double_ptr,
-                    double_ptr,
-                    bool_ptr,
-                    byte_ptr,
-                ],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetCompleteState": (
-                [
-                    byte_ptr,
-                    byte_ptr,
-                    byte_ptr,
-                    byte_ptr,
-                    byte_ptr,
-                    word_ptr,
-                    word_ptr,
-                    byte_ptr,
-                    word_ptr,
-                ],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetConfigValues": (
-                [uint_ptr, uint_ptr, uint_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetCurrentConfig": ([byte_ptr], ctypes.c_int),
-            "COM_ESI_CTRL_SetCurrentConfig": ([byte_ptr], ctypes.c_int),
-            "COM_ESI_CTRL_GetConfigList": (
-                [bool_ptr, bool_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_LoadCurrentConfig": (
-                [ctypes.c_uint16],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_SaveCurrentConfig": (
-                [ctypes.c_uint16],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetConfigName": (
-                [ctypes.c_uint16, ctypes.c_char_p],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_SetConfigName": (
-                [ctypes.c_uint16, ctypes.c_char_p],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetConfigData": (
-                [ctypes.c_uint16, byte_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_SetConfigData": (
-                [ctypes.c_uint16, byte_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_GetConfigFlags": (
-                [ctypes.c_uint16, bool_ptr, bool_ptr],
-                ctypes.c_int,
-            ),
-            "COM_ESI_CTRL_SetConfigFlags": (
-                [ctypes.c_uint16, ctypes.c_bool, ctypes.c_bool],
-                ctypes.c_int,
-            ),
+            "COM_ESI_CTRL_GetEnable": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_GetVoltageState": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetFanState": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetTemperatureState": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetInterlockState": ([ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetInterlockEnable": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_SetInterlockEnable": ([byte], ctypes.c_int),
+            "COM_ESI_CTRL_GetInputs": ([ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_ESI_CTRL_GetPowerMonitors": ([ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_GetLEDData": ([ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_ESI_CTRL_GetFanData": ([ptr(ctypes.c_bool)] + [ptr(word)] * 3 + [ptr(ctypes.c_float)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModulePresence": ([ptr(ctypes.c_bool), ptr(ctypes.c_uint), ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_UpdateModulePresence": ([], ctypes.c_int),
+            "COM_ESI_CTRL_RescanModules": ([], ctypes.c_int),
+            "COM_ESI_CTRL_RescanModule": ([ctypes.c_uint], ctypes.c_int),
+            "COM_ESI_CTRL_RestartModule": ([ctypes.c_uint], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleFwVersion": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleProductID": ([ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleProductNo": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleDevType": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleHwType": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleHwVersion": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyFpgaVersion": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleLEDData": ([ctypes.c_uint] + [ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleDataReadyFlags": ([ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlHousekeeping": ([ptr(ctypes.c_bool)] + [ptr(ctypes.c_double)] * 5, ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyHousekeeping": ([ctypes.c_uint, ptr(ctypes.c_bool)] + [ptr(ctypes.c_double)] * 9, ctypes.c_int),
+            "COM_ESI_CTRL_GetBaseHousekeeping": ([ptr(ctypes.c_bool), ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlOutputVoltage": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlHeaterPower": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyMeasRanges": ([ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_SetHVsupplyMeasRanges": ([ctypes.c_uint, ctypes.c_bool, ctypes.c_bool], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyOutputVoltage": ([ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyOutputCurrent": ([ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyPhase": ([ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyTargetOutputVoltage": ([ctypes.c_uint, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage": ([ctypes.c_uint, ctypes.c_double], ctypes.c_int),
+            "COM_ESI_CTRL_GetHVsupplyParamsPWM": ([ctypes.c_uint] + [ptr(ctypes.c_double)] * 6 + [ptr(ctypes.c_bool), ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlHwLimits": ([ptr(ctypes.c_double)] * 4, ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlVoltageLimit": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_SetHeatCtrlVoltageLimit": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlCurrentLimit": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_SetHeatCtrlCurrentLimit": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlPowerLimit": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_SetHeatCtrlPowerLimit": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlHeaterTemperature": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_SetHeatCtrlHeaterTemperature": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlMonitoring": ([ptr(ctypes.c_bool)] + [ptr(ctypes.c_double)] * 4, ctypes.c_int),
+            "COM_ESI_CTRL_GetHeatCtrlIlockState": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleState": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_SetModuleActivationState": ([ctypes.c_uint, ctypes.c_bool], ctypes.c_int),
+            "COM_ESI_CTRL_GetModuleActivationState": ([ctypes.c_uint, ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_GetCompleteState": ([ptr(byte)] * 5 + [ptr(word), ptr(word), ptr(byte), ptr(word)], ctypes.c_int),
+            "COM_ESI_CTRL_GetConfigValues": ([ptr(ctypes.c_uint)] * 3, ctypes.c_int),
+            "COM_ESI_CTRL_GetCurrentConfig": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_SetCurrentConfig": ([ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetConfigList": ([ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_SaveCurrentConfig": ([word], ctypes.c_int),
+            "COM_ESI_CTRL_LoadCurrentConfig": ([word], ctypes.c_int),
+            "COM_ESI_CTRL_GetConfigName": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_ESI_CTRL_SetConfigName": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_ESI_CTRL_GetConfigData": ([word, ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_SetConfigData": ([word, ptr(byte)], ctypes.c_int),
+            "COM_ESI_CTRL_GetConfigFlags": ([word, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_ESI_CTRL_SetConfigFlags": ([word, ctypes.c_bool, ctypes.c_bool], ctypes.c_int),
+            "COM_ESI_CTRL_GetInterfaceState": ([], ctypes.c_int),
+            "COM_ESI_CTRL_GetErrorMessage": ([], ctypes.c_char_p),
+            "COM_ESI_CTRL_GetIOErrorMessage": ([], ctypes.c_char_p),
+            "COM_ESI_CTRL_GetIOState": ([ptr(ctypes.c_int)], ctypes.c_int),
+            "COM_ESI_CTRL_GetCommError": ([ptr(dword)], ctypes.c_int),
         }
         for name, (argtypes, restype) in signatures.items():
-            function = getattr(self.esi_dll, name)
-            function.argtypes = argtypes
-            function.restype = restype
+            function = getattr(self.esi_dll, name, None)
+            if function is not None:  # Optional exports depend on the DLL version.
+                function.argtypes = argtypes
+                function.restype = restype
 
     def describe_error(self, status: int) -> str:
         """Return the vendor message for a driver status code."""

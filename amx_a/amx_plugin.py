@@ -4252,7 +4252,7 @@ class AMXController(DeviceController):
         device = self.device
         if device is None:
             self.closeCommunication()
-            return True
+            return self.main_state == "Disconnected"
 
         self._discard_pending_runtime_applies()
         self._stop_acquisition_for_transition()
@@ -4275,7 +4275,7 @@ class AMXController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    shutdown_confirmed = True
+                    shutdown_confirmed = self.main_state == "Disconnected"
                 else:
                     started_s = time.monotonic()
                     shutdown_result = device.shutdown(
@@ -4283,7 +4283,7 @@ class AMXController(DeviceController):
                         **shutdown_kwargs,
                     )
                     self._print_if_slow("AMX shutdown command", started_s)
-                    shutdown_confirmed = shutdown_result is not False
+                    shutdown_confirmed = shutdown_result is True
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             confirmation_reason = self._format_exception(exc)
@@ -4292,7 +4292,8 @@ class AMXController(DeviceController):
                 flag=PRINT.ERROR,
             )
         else:
-            self.print("AMX shutdown sequence completed.")
+            if shutdown_confirmed:
+                self.print("AMX shutdown sequence completed.")
         finally:
             if not shutdown_confirmed:
                 self.print(
@@ -4313,7 +4314,13 @@ class AMXController(DeviceController):
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
-        resolved_final_state = str(final_state or "Disconnected")
+        if final_state is None:
+            final_state = self.main_state
+            if self.device is not None or final_state not in (
+                "Disconnected", _AMX_SHUTDOWN_UNCONFIRMED_STATE
+            ):
+                final_state = _AMX_SHUTDOWN_UNCONFIRMED_STATE
+        resolved_final_state = str(final_state)
         is_disconnected = resolved_final_state == "Disconnected"
         self.main_state = resolved_final_state
         self.device_enabled_state = "OFF" if is_disconnected else "Unknown"
@@ -4331,11 +4338,7 @@ class AMXController(DeviceController):
     def _update_state(self) -> None:
         device = self.device
         if device is None:
-            self.main_state = "Disconnected"
-            self.device_enabled_state = "OFF"
-            self.device_state_summary = "n/a"
-            self.controller_state_summary = "n/a"
-            return
+            return  # Preserve the last shutdown/transport-loss diagnosis.
 
         try:
             with self._controller_lock_section(
@@ -4343,10 +4346,6 @@ class AMXController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    self.main_state = "Disconnected"
-                    self.device_enabled_state = "OFF"
-                    self.device_state_summary = "n/a"
-                    self.controller_state_summary = "n/a"
                     return
                 snapshot = device.collect_housekeeping(
                     timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
@@ -4367,7 +4366,7 @@ class AMXController(DeviceController):
                     self.closeCommunication()
             try:
                 connected = bool(device.get_status().get("connected", False))
-                self.main_state = "Error" if connected else "Disconnected"
+                self.main_state = "Error" if connected else _AMX_SHUTDOWN_UNCONFIRMED_STATE
             except Exception:
                 self.main_state = "Unknown"
             self.device_enabled_state = "Unknown"

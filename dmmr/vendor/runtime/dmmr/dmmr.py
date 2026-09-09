@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 import time
 from pathlib import Path
@@ -466,81 +465,6 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
                 self.disconnect()
             raise
 
-    def _force_disconnect_poisoned_transport(self, timeout_s: float = 1.0) -> bool:
-        """Best-effort close for an unusable inline transport.
-
-        After a timed-out DLL call, the normal serialized close path cannot run
-        because the transport lock is GUARANTEED to still be held by the blocked
-        daemon thread (which cannot be interrupted while inside the native DLL
-        call). A direct ``close_port`` is attempted in a short-lived helper
-        thread so a fresh controller instance can reuse the COM port when the
-        vendor DLL accepts the close.
-
-        CAUTION: this unavoidably issues close_port concurrently with the still-
-        blocked abandoned thread. The vendor DLL's per-port thread safety is not
-        guaranteed; this is a least-bad recovery path, not a clean shutdown. The
-        call is made idempotent so repeated transport failures do not spawn
-        multiple competing close threads.
-        """
-        if getattr(self, "_force_disconnect_attempted", False):
-            self.logger.warning(
-                "DMMR force-close already attempted for this instance; not retrying "
-                "to avoid concurrent close_port calls against the abandoned thread."
-            )
-            return False
-        self._force_disconnect_attempted = True
-        result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
-        close_port = super().close_port
-
-        def runner() -> None:
-            try:
-                result_queue.put(("result", close_port()))
-            except Exception as exc:  # pragma: no cover - forwarded to caller
-                result_queue.put(("error", exc))
-
-        thread = threading.Thread(
-            target=runner,
-            name=f"DMMR_{self.device_id}_force_close",
-            daemon=True,
-        )
-        thread.start()
-        thread.join(timeout_s)
-
-        if thread.is_alive():
-            self.logger.warning(
-                f"DMMR close_port did not return within {timeout_s:.1f}s after the "
-                "transport became unusable. Leaving the DLL port claim active."
-            )
-            return False
-
-        try:
-            kind, payload = result_queue.get_nowait()
-        except queue.Empty:
-            self.logger.warning(
-                "DMMR force-close worker exited without reporting a close_port result."
-            )
-            return False
-
-        if kind == "error":
-            self.logger.warning(
-                f"Best-effort DMMR close_port after transport timeout failed: {payload}"
-            )
-            return False
-
-        status = int(payload)
-        if status in {self.NO_ERR, self.ERR_NOT_CONNECTED}:
-            self.logger.warning(
-                f"Released DMMR port for {self.device_id} after a transport timeout. "
-                "Create a new controller instance before reconnecting."
-            )
-            return True
-
-        self.logger.warning(
-            "Best-effort DMMR close_port after transport timeout returned "
-            f"{self.format_status(status)}"
-        )
-        return False
-
     def disconnect(self) -> bool:
         """Disconnect from the DMMR device."""
         self.stop_housekeeping()
@@ -549,9 +473,12 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         try:
             if self._transport_poisoned:
                 self.connected = False
-                released = self._force_disconnect_poisoned_transport()
-                self._set_port_claimed(not released)
-                return released
+                self._set_port_claimed(True)
+                self.logger.warning(
+                    "Skipping DMMR close_port: a timed-out DLL call may still be "
+                    "active. Shutdown is unconfirmed; restart Explorer before reconnecting."
+                )
+                return False
 
             if not was_connected:
                 self.connected = False
@@ -1177,6 +1104,12 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             self.logger.error(f"Error setting DMMR enable: {exc}")
             raise
 
+    def get_enable(self, timeout_s: Optional[float] = None):
+        """Return the measurement gate through the serialized, timed transport."""
+        return self._call_locked_with_timeout(
+            super().get_enable, self._resolve_io_timeout(timeout_s), "get_enable"
+        )
+
     def get_state(self, timeout_s: Optional[float] = None):
         """Get the DMMR main state."""
         timeout_s = self._resolve_io_timeout(timeout_s)
@@ -1509,35 +1442,42 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         disable_automatic_current: bool = True,
         timeout_s: Optional[float] = None,
     ) -> bool:
-        """Disable acquisition and disconnect from the DMMR."""
+        """Disable acquisition, verify the requested gates, then disconnect."""
+        self._raise_if_transport_poisoned()
+        if not self.connected:
+            return False  # No physical state can be confirmed without communication.
         timeout_s = self._resolve_io_timeout(timeout_s)
         errors: list[str] = []
-
-        if self.connected and disable_automatic_current:
-            status = self.set_automatic_current(False, timeout_s=timeout_s)
-            if status == self.ERR_NOT_CONNECTED:
-                self.connected = False
-                return self.disconnect()
-            if status != self.NO_ERR:
-                errors.append(
-                    f"set_automatic_current(False): {self.format_status(status)}"
-                )
-
-        if self.connected and disable_device:
-            status = self.set_enable(False, timeout_s=timeout_s)
-            if status == self.ERR_NOT_CONNECTED:
-                self.connected = False
-                return self.disconnect()
-            if status != self.NO_ERR:
-                errors.append(f"set_enable(False): {self.format_status(status)}")
-
+        gates = []
+        if disable_automatic_current:
+            gates.append(("automatic current", self.set_automatic_current, self.get_automatic_current))
+        if disable_device:
+            gates.append(("measurement enable", self.set_enable, self.get_enable))
+        # Try both disables even if the first fails. ERR_NOT_CONNECTED is an
+        # error, never evidence that the instrument stopped acquiring.
+        for label, setter, _getter in gates:
+            try:
+                status = setter(False, timeout_s=timeout_s)
+                self._raise_on_status(status, f"disable {label}")
+            except Exception as exc:
+                errors.append(f"disable {label}: {exc}")
+        for label, _setter, getter in gates:
+            try:
+                status, enabled = getter(timeout_s=timeout_s)
+                self._raise_on_status(status, f"verify {label}")
+                if enabled is not False:
+                    raise RuntimeError("disable was not confirmed")
+            except Exception as exc:
+                errors.append(f"verify {label}: {exc}")
         disconnected = self.disconnect()
+        if not disconnected:
+            errors.append("disconnect failed")
         if errors:
             raise RuntimeError(
                 "DMMR shutdown incomplete (hardware disable may have failed): "
                 + "; ".join(errors)
             )
-        return disconnected
+        return True
 
 
 class DMMR(ProcessIsolatedClientMixin):

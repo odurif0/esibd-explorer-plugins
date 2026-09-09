@@ -1289,8 +1289,6 @@ def test_load_config_now_requires_device_on():
 
 def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
     """A failed Qt emit must never run the GUI callback on the worker thread."""
-    import pytest
-
     module = _load_plugin()
 
     pyqt = types.ModuleType("PyQt6")

@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from psu_fakes import StatefulPSU
+
 
 PLUGIN_PATH = (
     Path(__file__).resolve().parents[1]
@@ -707,13 +709,9 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
             calls.append(("get_output_enabled", timeout_s))
             return (False, True)
 
-        def get_channel_measured_voltage(self, channel, timeout_s=None):
-            calls.append(("get_channel_measured_voltage", channel, timeout_s))
-            return {0: 22.0, 1: 4.5}[channel]
-
-        def get_channel_measured_current(self, channel, timeout_s=None):
-            calls.append(("get_channel_measured_current", channel, timeout_s))
-            return {0: 0.22, 1: 0.045}[channel]
+        def get_channel_measurements(self, channel, timeout_s=None):
+            calls.append(("get_channel_measurements", channel, timeout_s))
+            return {0: (22.0, 0.22, 5.0), 1: (4.5, 0.045, 6.0)}[channel]
 
     class FakeChannel:
         def __init__(self, channel):
@@ -741,19 +739,16 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
         ("collect_housekeeping", 2.5),
         ("get_device_enabled", 2.5),
         ("get_output_enabled", 2.5),
-        ("get_channel_measured_voltage", 0, 2.5),
-        ("get_channel_measured_current", 0, 2.5),
-        ("get_channel_measured_voltage", 1, 2.5),
-        ("get_channel_measured_current", 1, 2.5),
+        ("get_channel_measurements", 0, 2.5),
+        ("get_channel_measurements", 1, 2.5),
         ("get_device_enabled", 2.5),
         ("get_output_enabled", 2.5),
-        ("get_channel_measured_voltage", 0, 2.5),
-        ("get_channel_measured_current", 0, 2.5),
-        ("get_channel_measured_voltage", 1, 2.5),
-        ("get_channel_measured_current", 1, 2.5),
+        ("get_channel_measurements", 0, 2.5),
+        ("get_channel_measurements", 1, 2.5),
     ]
     assert controller.values == {0: 22.0, 1: 4.5}
     assert controller.current_values == {0: 0.22, 1: 0.045}
+    assert controller.dropout_values == {0: 5.0, 1: 6.0}
     assert controller.output_enabled_by_channel == {0: False, 1: True}
     assert controller.voltage_setpoints == {0: "30 V", 1: "0 V"}
     assert controller.current_setpoints == {0: "500 mA", 1: "0 mA"}
@@ -1103,7 +1098,7 @@ def test_manual_apply_queue_keeps_only_latest_pending_state(monkeypatch):
 
     parent = types.SimpleNamespace(name="PSU", getChannels=lambda: [])
     controller = module.PSUController(parent)
-    controller.applyManualState = lambda state: applied.append(state)
+    controller.applyManualState = lambda state, **kwargs: applied.append(state)
     monkeypatch.setattr(module, "Thread", FakeThread)
 
     controller.applyManualStateFromThread(
@@ -1131,7 +1126,7 @@ def test_toggle_on_uses_config_startup_only():
     module = _load_module()
     calls = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def initialize(self, timeout_s=None, **kwargs):
             calls.append(("initialize", timeout_s, kwargs))
 
@@ -1183,7 +1178,7 @@ def test_toggle_on_uses_config_startup_only():
     controller.toggleOn()
 
     assert calls == [
-        ("initialize", 9.0, {"standby_config": 1, "operating_config": 2}),
+        ("initialize", 9.0, {"standby_config": 1, "operating_config": 2, "cancel": controller._output_cancel}),
         ("collect_housekeeping", 5.0),
     ]
 
@@ -1193,7 +1188,7 @@ def test_toggle_on_without_startup_configs_enters_manual_standby():
     calls = []
     printed = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def set_output_enabled(self, ch0, ch1, timeout_s=None):
             calls.append(("set_output_enabled", ch0, ch1, timeout_s))
 
@@ -1252,8 +1247,21 @@ def test_apply_manual_state_updates_outputs_ranges_and_limits():
     calls = []
     printed = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
+        def get_channel_voltage_limits(self, channel, **kwargs):
+            return {0: 10.0, 1: 20.0}[channel], 10000.0
+
+        def get_channel_current_limits(self, channel, **kwargs):
+            return {0: 0.25, 1: 0.5}[channel], 1.0
+
+        def get_output_full_range(self, **kwargs):
+            return True, False
+
+        def get_device_enabled(self, **kwargs):
+            return True
+
         def set_output_enabled(self, ch0, ch1, timeout_s=None):
+            self.outputs = (ch0, ch1)
             calls.append(("set_output_enabled", ch0, ch1, timeout_s))
 
         def set_output_full_range(self, ch0, ch1, timeout_s=None):
@@ -1403,8 +1411,8 @@ def test_range_switch_wait_uses_measured_voltage(monkeypatch):
 
     controller = module.PSUController(types.SimpleNamespace())
     monkeypatch.setattr(
-        module.time,
-        "sleep",
+        controller._output_cancel,
+        "wait",
         lambda duration: calls.append(("sleep", duration)),
     )
 
@@ -1423,7 +1431,7 @@ def test_apply_manual_state_waits_before_switching_changed_range(monkeypatch):
     module = _load_module()
     calls = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def set_output_enabled(self, ch0, ch1, timeout_s=None):
             calls.append(("set_output_enabled", ch0, ch1, timeout_s))
 
@@ -1478,7 +1486,7 @@ def test_apply_manual_state_does_not_warn_when_current_limit_readback_is_lower()
     module = _load_module()
     printed = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def set_output_enabled(self, _ch0, _ch1, timeout_s=None):
             return None
 
@@ -1528,11 +1536,11 @@ def test_apply_manual_state_does_not_warn_when_current_limit_readback_is_lower()
     assert printed == [("Applied PSU manual values.", None)]
 
 
-def test_apply_manual_state_warns_when_current_limit_readback_exceeds_limit():
+def test_apply_manual_state_refuses_when_current_limit_readback_exceeds_limit():
     module = _load_module()
     printed = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def set_output_enabled(self, _ch0, _ch1, timeout_s=None):
             return None
 
@@ -1579,9 +1587,9 @@ def test_apply_manual_state_warns_when_current_limit_readback_exceeds_limit():
         }
     )
 
-    assert printed[0][1] == module.PRINT.WARNING
+    assert printed[0][1] == module.PRINT.ERROR
     assert "current limit readback 20 mA exceeds configured limit 10 mA" in printed[0][0]
-    assert printed[-1] == ("Applied PSU manual values.", None)
+    assert not any(message == "Applied PSU manual values." for message, _ in printed)
 
 
 def test_shutdown_with_config_still_forces_safe_disable_before_disconnect():
@@ -1873,7 +1881,7 @@ def test_load_operating_config_now_loads_selected_psu_config():
     printed = []
     sync_calls = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def load_config(self, config_number, timeout_s=None):
             calls.append(("load_config", config_number, timeout_s))
 

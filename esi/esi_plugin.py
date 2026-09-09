@@ -1773,7 +1773,7 @@ class ESIController(DeviceController):
     def _shutdown_communication_unlocked(self) -> bool:
         device = self.device
         if device is None:
-            return self.main_state != "Shutdown unconfirmed"
+            return self.main_state == "Disconnected"
         confirmed = False
         try:
             result = device.disconnect(timeout_s=float(self.controllerParent.connect_timeout_s))

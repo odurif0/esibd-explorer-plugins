@@ -320,6 +320,8 @@ def test_plugin_runtime_shutdown_attempts_all_outputs_before_raising():
     module = _import_plugin_module()
     driver_class = module._get_ampr_driver_class()
     backend = object.__new__(driver_class._PROCESS_CONTROLLER_CLASS)
+    backend.connected = True
+    backend._transport_poisoned = False
     calls = []
 
     backend.scan_modules = lambda timeout_s=None: {
