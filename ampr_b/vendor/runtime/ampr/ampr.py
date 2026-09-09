@@ -451,8 +451,11 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                 self.disconnect()
             raise
 
-    def shutdown(self, timeout_s: Optional[float] = None) -> None:
+    def shutdown(self, timeout_s: Optional[float] = None) -> bool:
         """Run the recommended AMPR shutdown sequence."""
+        self._raise_if_transport_poisoned()
+        if not self.connected:
+            return False
         timeout_s = self._resolve_io_timeout(timeout_s)
         errors: list[str] = []
         try:
@@ -493,12 +496,14 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                     )
 
         try:
-            status, _ = self.enable_psu(False, timeout_s=timeout_s)
+            status, enabled = self.enable_psu(False, timeout_s=timeout_s)
         except Exception as exc:
             errors.append(f"enable_psu(False): {exc}")
         else:
             if status != self.NO_ERR:
                 errors.append(f"enable_psu(False): {self.format_status(status)}")
+            elif enabled is not False:
+                errors.append("enable_psu(False): PSU disable was not confirmed")
 
         try:
             disconnected = self.disconnect()
@@ -512,6 +517,7 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             raise RuntimeError(
                 "AMPR shutdown sequence reported errors: " + "; ".join(errors)
             )
+        return True
 
     def _hk_worker(self):
         """

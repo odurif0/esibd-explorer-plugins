@@ -133,34 +133,42 @@ class TimeoutSafeDllMixin:
                 break
             self._raise_if_transport_poisoned()
 
-        result_queue = queue.Queue(maxsize=1)
         release_lock = True
-
-        def runner():
-            try:
-                result_queue.put(("result", method(*args, **kwargs)))
-            except Exception as exc:  # pragma: no cover - forwarded to caller
-                result_queue.put(("error", exc))
-
-        thread = threading.Thread(target=runner, daemon=True)
-        thread.start()
-        thread.join(timeout_s)
-
+        thread = None
         try:
+            result_queue = queue.Queue(maxsize=1)
+
+            def runner():
+                try:
+                    result_queue.put(("result", method(*args, **kwargs)))
+                except Exception as exc:  # pragma: no cover - forwarded to caller
+                    result_queue.put(("error", exc))
+
+            thread = threading.Thread(target=runner, daemon=True)
+            thread.start()
+            thread.join(timeout_s)
             if thread.is_alive():
-                self._poison_transport(step_name)
                 release_lock = False
+                self._poison_transport(step_name)
                 raise RuntimeError(
                     f"{self._INSTRUMENT_NAME} DLL call timed out during '{step_name}'. "
                     "The device may be powered off or unresponsive. "
                     f"The {self._INSTRUMENT_NAME} instance is now marked unusable."
                 )
 
-            kind, payload = result_queue.get()
+            try:
+                kind, payload = result_queue.get_nowait()
+            except queue.Empty as exc:
+                raise RuntimeError(f"DLL worker exited without a result during '{step_name}'.") from exc
             if kind == "error":
                 raise payload
             return payload
         finally:
+            # Also cover an interrupted join: never unlock a still-active DLL.
+            if thread is not None and thread.is_alive():
+                release_lock = False
+                if not self._transport_poisoned:
+                    self._poison_transport(step_name)
             if release_lock:
                 self.thread_lock.release()
 

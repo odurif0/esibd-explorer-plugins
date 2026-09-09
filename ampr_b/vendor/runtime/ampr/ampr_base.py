@@ -157,6 +157,7 @@ class AMPRBase:
                 f"Unable to load CGC AMPR DLL from '{self.ampr_dll_path}'."
             ) from exc
 
+        self._configure_dll_signatures()
         err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
         )
@@ -166,6 +167,68 @@ class AMPRBase:
         self.com = com
         self.log = log
         self.idn = idn
+
+    def _configure_dll_signatures(self) -> None:
+        """Declare the used exports as specified in COM-AMPR-12.h."""
+        byte, word, dword = ctypes.c_ubyte, ctypes.c_uint16, ctypes.c_uint32
+        ptr = ctypes.POINTER
+        signatures = {
+            "COM_AMPR_12_GetSWVersion": ([], word),
+            "COM_AMPR_12_Open": ([byte], ctypes.c_int),
+            "COM_AMPR_12_Close": ([], ctypes.c_int),
+            "COM_AMPR_12_SetBaudRate": ([ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_AMPR_12_Purge": ([], ctypes.c_int),
+            "COM_AMPR_12_DevicePurge": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_AMPR_12_GetBufferState": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_AMPR_12_GetFwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetFwDate": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_AMPR_12_GetProductID": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_AMPR_12_GetProductNo": ([ptr(dword)], ctypes.c_int),
+            "COM_AMPR_12_GetManufDate": ([ptr(word), ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetDevType": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetHwType": ([ptr(dword)], ctypes.c_int),
+            "COM_AMPR_12_GetHwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetUptime": ([ptr(dword), ptr(word), ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetOptime": ([ptr(dword), ptr(word), ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetCPUdata": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_AMPR_12_GetHousekeeping": ([ptr(ctypes.c_double)] * 14, ctypes.c_int),
+            "COM_AMPR_12_Restart": ([], ctypes.c_int),
+            "COM_AMPR_12_GetState": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetDeviceState": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_EnablePSU": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_AMPR_12_GetVoltageState": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetTemperatureState": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetInterlockState": ([ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_SetInterlockState": ([byte], ctypes.c_int),
+            "COM_AMPR_12_GetInputs": ([ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_AMPR_12_GetSyncControl": ([ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_AMPR_12_SetSyncControl": ([ctypes.c_bool] * 3, ctypes.c_int),
+            "COM_AMPR_12_GetFanData": ([ptr(ctypes.c_bool)] + [ptr(word)] * 4, ctypes.c_int),
+            "COM_AMPR_12_GetLEDData": ([ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_AMPR_12_GetModulePresence": ([ptr(ctypes.c_bool), ptr(ctypes.c_uint), ptr(byte)], ctypes.c_int),
+            "COM_AMPR_12_UpdateModulePresence": ([], ctypes.c_int),
+            "COM_AMPR_12_RescanModules": ([], ctypes.c_int),
+            "COM_AMPR_12_RescanModule": ([ctypes.c_uint], ctypes.c_int),
+            "COM_AMPR_12_RestartModule": ([ctypes.c_uint], ctypes.c_int),
+            "COM_AMPR_12_GetScannedModuleState": ([ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_AMPR_12_SetScannedModuleState": ([], ctypes.c_int),
+            "COM_AMPR_12_GetScannedModuleParams": ([ctypes.c_uint] + [ptr(dword)] * 4, ctypes.c_int),
+            "COM_AMPR_12_GetModuleFwVersion": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetModuleProductID": ([ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_AMPR_12_GetModuleProductNo": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_AMPR_12_GetModuleHwType": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_AMPR_12_GetModuleHwVersion": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_AMPR_12_GetModuleHousekeeping": ([ctypes.c_uint] + [ptr(ctypes.c_double)] * 7, ctypes.c_int),
+            "COM_AMPR_12_GetModuleOutputVoltage": ([ctypes.c_uint, ctypes.c_uint, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_AMPR_12_SetModuleOutputVoltage": ([ctypes.c_uint, ctypes.c_uint, ctypes.c_double], ctypes.c_int),
+            "COM_AMPR_12_GetMeasuredModuleOutputVoltages": ([ctypes.c_uint, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_AMPR_12_GetModuleState": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(self.ampr_dll, name, None)
+            if function is not None:  # Optional exports depend on the DLL version.
+                function.argtypes = argtypes
+                function.restype = restype
 
     def describe_error(self, status):
         """Return the vendor message for a driver status code."""

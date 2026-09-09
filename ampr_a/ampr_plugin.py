@@ -2180,7 +2180,14 @@ class AMPRController(DeviceController):
         if callable(base_close):
             base_close()
         if final_state is None:
-            final_state = getattr(self, "_forced_close_state", None) or "Disconnected"
+            final_state = getattr(self, "_forced_close_state", None)
+        if final_state is None:
+            # Absence of a communication object is not proof of a safe stop.
+            final_state = self.main_state
+            if self.device is not None or final_state not in (
+                "Disconnected", _AMPR_SHUTDOWN_UNCONFIRMED_STATE, _AMPR_COMMUNICATION_LOST_STATE
+            ):
+                final_state = _AMPR_SHUTDOWN_UNCONFIRMED_STATE
         self.main_state = final_state
         self.detected_module_ids = []
         self.detected_modules_text = ""
@@ -2202,7 +2209,7 @@ class AMPRController(DeviceController):
         device = self.device
         if device is None:
             self.closeCommunication()
-            return True
+            return self.main_state == "Disconnected"
 
         if getattr(self, "acquiring", False):
             self.stopAcquisition()
@@ -2216,9 +2223,9 @@ class AMPRController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    shutdown_confirmed = True
+                    shutdown_confirmed = self.main_state == "Disconnected"
                 else:
-                    device.shutdown()
+                    shutdown_confirmed = device.shutdown() is True
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             confirmation_reason = self._format_exception(exc)
@@ -2230,8 +2237,8 @@ class AMPRController(DeviceController):
                 flag=PRINT.ERROR,
             )
         else:
-            shutdown_confirmed = True
-            self.print("AMPR shutdown sequence completed.")
+            if shutdown_confirmed:
+                self.print("AMPR shutdown sequence completed.")
         finally:
             if not shutdown_confirmed:
                 self.print(
@@ -2368,12 +2375,7 @@ class AMPRController(DeviceController):
 
     def _update_state(self, *, already_acquired: bool = False) -> None:
         if self.device is None:
-            self.main_state = "Disconnected"
-            self.device_state_summary = "n/a"
-            self.interlock_state_summary = "n/a"
-            self.voltage_state_summary = "n/a"
-            self._clear_transport_failures()
-            return
+            return  # Preserve the last shutdown/transport-loss diagnosis.
 
         try:
             with self._controller_lock_section(
@@ -2382,11 +2384,6 @@ class AMPRController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    self.main_state = "Disconnected"
-                    self.device_state_summary = "n/a"
-                    self.interlock_state_summary = "n/a"
-                    self.voltage_state_summary = "n/a"
-                    self._clear_transport_failures()
                     return
                 status, _state_hex, state_name = device.get_state()
         except TimeoutError:

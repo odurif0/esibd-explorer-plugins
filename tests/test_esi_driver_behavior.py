@@ -240,7 +240,7 @@ def test_hv_ctypes_signatures_match_vendor_header(driver_modules):
         **{name: FakeFunction() for name in names}
     )
 
-    base._configure_hv_dll_signatures()
+    base._configure_dll_signatures()
 
     assert base.esi_dll.COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage.argtypes == [
         ctypes.c_uint,

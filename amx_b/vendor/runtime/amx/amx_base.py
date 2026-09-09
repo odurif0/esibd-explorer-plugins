@@ -146,6 +146,7 @@ class AMXBase:
                 f"{_format_dll_load_hint(self.amx_dll_path)}"
             ) from exc
 
+        self._configure_dll_signatures()
         err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
         )
@@ -156,6 +157,62 @@ class AMXBase:
         self.port = int(port)
         self.log = log
         self.idn = idn
+
+    def _configure_dll_signatures(self) -> None:
+        """Declare the used exports as specified in COM-HVAMX4ED.h."""
+        byte, word, dword = ctypes.c_ubyte, ctypes.c_uint16, ctypes.c_uint32
+        ptr = ctypes.POINTER
+        signatures = {
+            "COM_HVAMX4ED_Open": ([word, word], ctypes.c_int),
+            "COM_HVAMX4ED_Close": ([word], ctypes.c_int),
+            "COM_HVAMX4ED_SetBaudRate": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVAMX4ED_Purge": ([word], ctypes.c_int),
+            "COM_HVAMX4ED_DevicePurge": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4ED_GetBufferState": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4ED_GetMainState": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4ED_GetDeviceState": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_GetHousekeeping": ([word] + [ptr(ctypes.c_double)] * 4, ctypes.c_int),
+            "COM_HVAMX4ED_GetSensorData": ([word, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVAMX4ED_GetFanData": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)] + [ptr(word)] * 3, ctypes.c_int),
+            "COM_HVAMX4ED_GetLEDData": ([word] + [ptr(self.WIN_BOOL)] * 3, ctypes.c_int),
+            "COM_HVAMX4ED_GetOscillatorPeriod": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_SetOscillatorPeriod": ([word, dword], ctypes.c_int),
+            "COM_HVAMX4ED_GetPulserDelay": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_SetPulserDelay": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4ED_GetPulserWidth": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_SetPulserWidth": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4ED_GetPulserBurst": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_SetPulserBurst": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4ED_GetSwitchTriggerConfig": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4ED_GetSwitchEnableConfig": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4ED_GetSwitchTriggerDelay": ([word, ctypes.c_uint, ptr(byte), ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4ED_SetSwitchTriggerDelay": ([word, ctypes.c_uint, byte, byte], ctypes.c_int),
+            "COM_HVAMX4ED_GetSwitchEnableDelay": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4ED_SetSwitchEnableDelay": ([word, ctypes.c_uint, byte], ctypes.c_int),
+            "COM_HVAMX4ED_GetControllerState": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4ED_SetControllerConfig": ([word, byte], ctypes.c_int),
+            "COM_HVAMX4ED_GetDeviceEnable": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVAMX4ED_SetDeviceEnable": ([word, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVAMX4ED_SaveCurrentConfig": ([word, ctypes.c_uint], ctypes.c_int),
+            "COM_HVAMX4ED_LoadCurrentConfig": ([word, ctypes.c_uint], ctypes.c_int),
+            "COM_HVAMX4ED_GetConfigName": ([word, ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4ED_GetConfigFlags": ([word, ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4ED_GetConfigList": ([word, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4ED_GetCPUData": ([word, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVAMX4ED_GetUptime": ([word, ptr(dword), ptr(word), ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_GetTotalTime": ([word, ptr(dword), ptr(dword)], ctypes.c_int),
+            "COM_HVAMX4ED_GetHWType": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4ED_GetHWVersion": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4ED_GetFWVersion": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVAMX4ED_GetFWDate": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4ED_GetProductID": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVAMX4ED_GetProductNo": ([word, ptr(dword)], ctypes.c_int),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(self.amx_dll, name, None)
+            if function is not None:  # Optional exports depend on the DLL version.
+                function.argtypes = argtypes
+                function.restype = restype
 
     def describe_error(self, status: int) -> str:
         """Return the vendor message for a driver status code."""

@@ -138,6 +138,7 @@ class PSUBase:
                 f"{_format_dll_load_hint(self.psu_dll_path)}"
             ) from exc
 
+        self._configure_dll_signatures()
         err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
         )
@@ -148,6 +149,66 @@ class PSUBase:
         self.port = int(port)
         self.log = log
         self.idn = idn
+
+    def _configure_dll_signatures(self) -> None:
+        """Declare the used exports as specified in COM-HVPSU2D.h."""
+        word, dword = ctypes.c_uint16, ctypes.c_uint32
+        ptr = ctypes.POINTER
+        signatures = {
+            "COM_HVPSU2D_Open": ([word, word], ctypes.c_int),
+            "COM_HVPSU2D_Close": ([word], ctypes.c_int),
+            "COM_HVPSU2D_SetBaudRate": ([word, ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_HVPSU2D_Purge": ([word], ctypes.c_int),
+            "COM_HVPSU2D_DevicePurge": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_GetBufferState": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_SetInterlockEnable": ([word, self.WIN_BOOL, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVPSU2D_GetInterlockEnable": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_GetMainState": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVPSU2D_GetDeviceState": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVPSU2D_GetHousekeeping": ([word] + [ptr(ctypes.c_double)] * 4, ctypes.c_int),
+            "COM_HVPSU2D_GetSensorData": ([word, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVPSU2D_GetFanData": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)] + [ptr(word)] * 3, ctypes.c_int),
+            "COM_HVPSU2D_GetLEDData": ([word] + [ptr(self.WIN_BOOL)] * 3, ctypes.c_int),
+            "COM_HVPSU2D_GetADCHousekeeping": ([word, ctypes.c_uint] + [ptr(ctypes.c_double)] * 6, ctypes.c_int),
+            "COM_HVPSU2D_GetPSUHousekeeping": ([word, ctypes.c_uint] + [ptr(ctypes.c_double)] * 4, ctypes.c_int),
+            "COM_HVPSU2D_GetPSUData": ([word, ctypes.c_uint] + [ptr(ctypes.c_double)] * 3, ctypes.c_int),
+            "COM_HVPSU2D_SetPSUOutputVoltage": ([word, ctypes.c_uint, ctypes.c_double], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUOutputVoltage": ([word, ctypes.c_uint, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUSetOutputVoltage": ([word, ctypes.c_uint, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVPSU2D_SetPSUOutputCurrent": ([word, ctypes.c_uint, ctypes.c_double], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUOutputCurrent": ([word, ctypes.c_uint, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUSetOutputCurrent": ([word, ctypes.c_uint, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVPSU2D_SetPSUEnable": ([word, self.WIN_BOOL, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUEnable": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_HasPSUFullRange": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_SetPSUFullRange": ([word, self.WIN_BOOL, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUFullRange": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_GetPSUState": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVPSU2D_GetDeviceEnable": ([word, ptr(self.WIN_BOOL)], ctypes.c_int),
+            "COM_HVPSU2D_SetDeviceEnable": ([word, self.WIN_BOOL], ctypes.c_int),
+            "COM_HVPSU2D_ResetCurrentConfig": ([word], ctypes.c_int),
+            "COM_HVPSU2D_SaveCurrentConfig": ([word, ctypes.c_uint], ctypes.c_int),
+            "COM_HVPSU2D_LoadCurrentConfig": ([word, ctypes.c_uint], ctypes.c_int),
+            "COM_HVPSU2D_GetConfigName": ([word, ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVPSU2D_SetConfigName": ([word, ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVPSU2D_GetConfigFlags": ([word, ctypes.c_uint, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVPSU2D_SetConfigFlags": ([word, ctypes.c_uint, ctypes.c_bool, ctypes.c_bool], ctypes.c_int),
+            "COM_HVPSU2D_GetConfigList": ([word, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVPSU2D_GetCPUData": ([word, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_HVPSU2D_GetUptime": ([word, ptr(dword), ptr(word), ptr(dword)], ctypes.c_int),
+            "COM_HVPSU2D_GetTotalTime": ([word, ptr(dword), ptr(dword)], ctypes.c_int),
+            "COM_HVPSU2D_GetHWType": ([word, ptr(dword)], ctypes.c_int),
+            "COM_HVPSU2D_GetHWVersion": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVPSU2D_GetFWVersion": ([word, ptr(word)], ctypes.c_int),
+            "COM_HVPSU2D_GetFWDate": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVPSU2D_GetProductID": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_HVPSU2D_GetProductNo": ([word, ptr(dword)], ctypes.c_int),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(self.psu_dll, name, None)
+            if function is not None:  # Optional exports depend on the DLL version.
+                function.argtypes = argtypes
+                function.restype = restype
 
     def describe_error(self, status: int) -> str:
         """Return the vendor message for a driver status code."""

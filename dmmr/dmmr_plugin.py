@@ -2350,8 +2350,9 @@ class DMMRController(DeviceController):
                 self.toggleOnFromThread(parallel=True)
 
     def readNumbers(self) -> None:
+        # A new sample starts unknown: only a successful read may populate it.
+        self.initializeValues(reset=True)
         if self.device is None or not getattr(self, "initialized", False):
-            self.initializeValues(reset=True)
             return
 
         self._update_state()
@@ -2364,15 +2365,7 @@ class DMMRController(DeviceController):
         if not getattr(self.controllerParent, "isOn", lambda: False)():
             return
 
-        # Capture last-good readings before resetting so a single slow/failing
-        # module does not wipe every other channel to NaN for this poll cycle.
-        previous_values = dict(getattr(self, "values", {}) or {})
-        self.initializeValues(reset=True)
-        new_values = {
-            channel.module_address(): previous_values.get(channel.module_address(), np.nan)
-            for channel in self.controllerParent.getChannels()
-            if channel.real
-        }
+        new_values = dict(self.values)
         poll_modules = self._measurement_modules()
 
         for module in poll_modules:
@@ -2390,8 +2383,8 @@ class DMMRController(DeviceController):
                         timeout_s=float(self.controllerParent.poll_timeout_s),
                     )
             except TimeoutError:
-                # Transient controller-lock contention (another operation holds
-                # the lock); skip this module this cycle, last-good value kept.
+                # No reading this cycle; keep NaN for this module, not a stale
+                # value that the recorder could associate with a new timestamp.
                 continue
             except Exception as exc:  # noqa: BLE001
                 self.errorCount += 1
@@ -2599,13 +2592,12 @@ class DMMRController(DeviceController):
                 base_close()
             if final_state is None:
                 final_state = self._forced_close_state
-                if final_state is None:
-                    is_on = getattr(self.controllerParent, "isOn", None)
-                    final_state = (
-                        _DMMR_COMMUNICATION_LOST_STATE
-                        if callable(is_on) and bool(is_on())
-                        else "Disconnected"
-                    )
+            if final_state is None:
+                final_state = self.main_state
+                if self.device is not None or final_state not in (
+                    "Disconnected", _DMMR_SHUTDOWN_UNCONFIRMED_STATE, _DMMR_COMMUNICATION_LOST_STATE
+                ):
+                    final_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
             self.main_state = final_state
             self.detected_module_ids = []
             self.detected_modules_text = ""
@@ -2615,6 +2607,7 @@ class DMMRController(DeviceController):
             self.temperature_state_summary = summary_value
             self._sync_status_to_gui()
             self._dispose_device()
+            self.initializeValues(reset=True)
             self.initialized = False
             self._clear_transport_failures()
             self._forced_close_state = None
@@ -2626,7 +2619,7 @@ class DMMRController(DeviceController):
         device = self.device
         if device is None:
             self.closeCommunication()
-            return True
+            return self.main_state == "Disconnected"
 
         if getattr(self, "acquiring", False):
             self.stopAcquisition()
@@ -2639,12 +2632,12 @@ class DMMRController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    shutdown_confirmed = True
+                    shutdown_confirmed = self.main_state == "Disconnected"
                 else:
                     shutdown_result = device.shutdown(
                         timeout_s=float(self.controllerParent.connect_timeout_s)
                     )
-                    shutdown_confirmed = shutdown_result is not False
+                    shutdown_confirmed = shutdown_result is True
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             self._update_state()
@@ -2673,12 +2666,7 @@ class DMMRController(DeviceController):
 
     def _update_state(self) -> None:
         if self.device is None:
-            self.main_state = "Disconnected"
-            self.device_state_summary = "n/a"
-            self.voltage_state_summary = "n/a"
-            self.temperature_state_summary = "n/a"
-            self._clear_transport_failures()
-            return
+            return  # Preserve the last shutdown/transport-loss diagnosis.
 
         timeout_s = float(self.controllerParent.poll_timeout_s)
         try:
@@ -2687,11 +2675,6 @@ class DMMRController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    self.main_state = "Disconnected"
-                    self.device_state_summary = "n/a"
-                    self.voltage_state_summary = "n/a"
-                    self.temperature_state_summary = "n/a"
-                    self._clear_transport_failures()
                     return
                 status, _state_hex, state_name = device.get_state(timeout_s=timeout_s)
         except TimeoutError:

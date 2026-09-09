@@ -175,6 +175,7 @@ class DMMRBase:
                 f"Unable to load CGC DMMR DLL from '{self.dmmr_dll_path}'."
             ) from exc
 
+        self._configure_dll_signatures()
         err_path = Path(error_codes_path) if error_codes_path is not None else (
             class_dir.parent / "error_codes.json"
         )
@@ -184,6 +185,109 @@ class DMMRBase:
         self.com = com
         self.log = log
         self.idn = idn
+
+    def _configure_dll_signatures(self) -> None:
+        """Declare the used exports as specified in COM-DMMR-8.h."""
+        byte, word, dword = ctypes.c_ubyte, ctypes.c_uint16, ctypes.c_uint32
+        ptr = ctypes.POINTER
+        signatures = {
+            "COM_DMMR_8_GetSWVersion": ([], word),
+            "COM_DMMR_8_Open": ([byte], ctypes.c_int),
+            "COM_DMMR_8_Close": ([], ctypes.c_int),
+            "COM_DMMR_8_SetBaudRate": ([ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_DMMR_8_Purge": ([], ctypes.c_int),
+            "COM_DMMR_8_GetBufferState": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_DevicePurge": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_GetAutoMask": ([ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_DMMR_8_CheckAutoInput": ([ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_DMMR_8_GetFwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetFwDate": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_GetProductID": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_GetProductNo": ([ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetManufDate": ([ptr(word), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetDevType": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetHwType": ([ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetHwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetUptimeInt": ([ptr(dword), ptr(word), ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetOptimeInt": ([ptr(dword), ptr(word), ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetUptime": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetOptime": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetCPUdata": ([ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetHousekeeping": ([ptr(ctypes.c_double)] * 4, ctypes.c_int),
+            "COM_DMMR_8_Restart": ([], ctypes.c_int),
+            "COM_DMMR_8_GetState": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetDeviceState": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_SetEnable": ([ctypes.c_bool], ctypes.c_int),
+            "COM_DMMR_8_GetEnable": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_GetVoltageState": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetTemperatureState": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_RestartBase": ([], ctypes.c_int),
+            "COM_DMMR_8_GetBaseProductNo": ([ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseManufDate": ([ptr(word), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseHwVersion": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseHwType": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseState": ([ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseLEDData": ([ptr(ctypes.c_bool)] * 3, ctypes.c_int),
+            "COM_DMMR_8_GetBaseFanPWM": ([ptr(word), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseFanRPM": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetBaseTemp": ([ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetModulePresence": ([ptr(ctypes.c_bool), ptr(ctypes.c_uint), ptr(byte)], ctypes.c_int),
+            "COM_DMMR_8_UpdateModulePresence": ([], ctypes.c_int),
+            "COM_DMMR_8_RescanModules": ([], ctypes.c_int),
+            "COM_DMMR_8_RescanModule": ([ctypes.c_uint], ctypes.c_int),
+            "COM_DMMR_8_RestartModule": ([ctypes.c_uint], ctypes.c_int),
+            "COM_DMMR_8_GetModuleBufferState": ([ctypes.c_uint, ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_ModulePurge": ([ctypes.c_uint, ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_GetScannedModuleState": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_SetScannedModuleState": ([], ctypes.c_int),
+            "COM_DMMR_8_GetScannedModuleParams": ([ctypes.c_uint] + [ptr(dword)] * 4, ctypes.c_int),
+            "COM_DMMR_8_GetModuleFwVersion": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleFwDate": ([ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_GetModuleProductID": ([ctypes.c_uint, ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_GetModuleProductNo": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleManufDate": ([ctypes.c_uint, ptr(word), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleDevType": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleHwType": ([ctypes.c_uint, ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleHwVersion": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleUptimeInt": ([ctypes.c_uint, ptr(dword), ptr(word), ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleOptimeInt": ([ctypes.c_uint, ptr(dword), ptr(word), ptr(dword), ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleUptime": ([ctypes.c_uint, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleOptime": ([ctypes.c_uint, ptr(ctypes.c_double), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleCPUdata": ([ctypes.c_uint, ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleHousekeeping": ([ctypes.c_uint] + [ptr(ctypes.c_double)] * 16, ctypes.c_int),
+            "COM_DMMR_8_GetModuleState": ([ctypes.c_uint, ptr(word)], ctypes.c_int),
+            "COM_DMMR_8_SetModuleMeasRange": ([ctypes.c_uint, ctypes.c_uint], ctypes.c_int),
+            "COM_DMMR_8_SetModuleAutoRange": ([ctypes.c_uint, ctypes.c_bool], ctypes.c_int),
+            "COM_DMMR_8_GetModuleMeasRange": ([ctypes.c_uint, ptr(ctypes.c_uint), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleReadyFlags": ([ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_DMMR_8_GetModuleCurent": ([ctypes.c_uint, ptr(ctypes.c_double), ptr(ctypes.c_uint)], ctypes.c_int),
+            "COM_DMMR_8_SetAutomaticCurent": ([ctypes.c_bool], ctypes.c_int),
+            "COM_DMMR_8_GetAutomaticCurent": ([ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_GetCurent": ([ptr(ctypes.c_uint), ptr(ctypes.c_double), ptr(ctypes.c_uint), ptr(ctypes.c_double)], ctypes.c_int),
+            "COM_DMMR_8_GetCurrentConfig": ([ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_SetCurrentConfig": ([ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetConfigList": ([ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_SaveCurrentConfig": ([word], ctypes.c_int),
+            "COM_DMMR_8_LoadCurrentConfig": ([word], ctypes.c_int),
+            "COM_DMMR_8_GetConfigName": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_SetConfigName": ([word, ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_GetConfigData": ([word, ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_SetConfigData": ([word, ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetConfigFlags": ([word, ptr(ctypes.c_bool), ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_DMMR_8_SetConfigFlags": ([word, ctypes.c_bool, ctypes.c_bool], ctypes.c_int),
+            "COM_DMMR_8_GetInterfaceState": ([], ctypes.c_int),
+            "COM_DMMR_8_GetErrorMessage": ([], ctypes.c_char_p),
+            "COM_DMMR_8_GetIOErrorMessage": ([], ctypes.c_char_p),
+            "COM_DMMR_8_GetIOState": ([ptr(ctypes.c_int)], ctypes.c_int),
+            "COM_DMMR_8_GetIOStateMessage": ([ctypes.c_int], ctypes.c_char_p),
+            "COM_DMMR_8_GetCommError": ([ptr(dword)], ctypes.c_int),
+            "COM_DMMR_8_GetCommErrorMessage": ([dword], ctypes.c_char_p),
+        }
+        for name, (argtypes, restype) in signatures.items():
+            function = getattr(self.dll, name, None)
+            if function is not None:  # Optional exports depend on the DLL version.
+                function.argtypes = argtypes
+                function.restype = restype
 
     def describe_error(self, status: int) -> str:
         """Return the vendor message for a driver status code."""

@@ -10,7 +10,7 @@ import math
 import sys
 import time
 from pathlib import Path
-from threading import Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -3421,6 +3421,13 @@ class PSUDevice(Device):
             getattr(controller, "initializing", False)
             or getattr(controller, "transitioning", False)
         ):
+            requested_on = current_state if on is None else bool(on)
+            if not requested_on:
+                # An in-progress ON owns the worker; ask it to shut down rather
+                # than ignore OFF or start a competing transition worker.
+                controller._cancel_output_commands()
+                self._set_on_ui_state(False)
+                return
             restored_state = current_state if transition_target is None else bool(transition_target)
             if hasattr(self, "onAction"):
                 self.onAction.state = restored_state
@@ -3817,7 +3824,8 @@ class PSUController(DeviceController):
         self.transition_target_on: bool | None = None
         self._transition_lock = Lock()
         self._manual_apply_state_lock = Lock()
-        self._manual_apply_pending_state: dict[str, Any] | None = None
+        self._output_cancel = Event()
+        self._manual_apply_pending_state: tuple[dict[str, Any], Event] | None = None
         self._manual_apply_worker_running = False
         self._manual_apply_active = False
         self.values: dict[int, float] = {}
@@ -3951,13 +3959,11 @@ class PSUController(DeviceController):
 
         get_device_enabled = getattr(device, "get_device_enabled", None)
         get_output_enabled = getattr(device, "get_output_enabled", None)
-        get_measured_voltage = getattr(device, "get_channel_measured_voltage", None)
-        get_measured_current = getattr(device, "get_channel_measured_current", None)
+        get_measurements = getattr(device, "get_channel_measurements", None)
         if not (
             callable(get_device_enabled)
             and callable(get_output_enabled)
-            and callable(get_measured_voltage)
-            and callable(get_measured_current)
+            and callable(get_measurements)
         ):
             return None
 
@@ -3967,54 +3973,66 @@ class PSUController(DeviceController):
         )
         measured_voltages: dict[int, float] = {}
         measured_currents: dict[int, float] = {}
+        dropouts: dict[int, float] = {}
         for channel_no in self._real_channel_numbers():
-            measured_voltages[channel_no] = _coerce_float(
-                get_measured_voltage(channel_no, timeout_s=timeout_s),
-                np.nan,
-            )
-            measured_currents[channel_no] = _coerce_float(
-                get_measured_current(channel_no, timeout_s=timeout_s),
-                np.nan,
-            )
+            voltage, current, dropout = get_measurements(channel_no, timeout_s=timeout_s)
+            measured_voltages[channel_no] = _coerce_float(voltage, np.nan)
+            measured_currents[channel_no] = _coerce_float(current, np.nan)
+            dropouts[channel_no] = _coerce_float(dropout, np.nan)
         return {
             "device_enabled": device_enabled,
             "output_enabled": output_enabled,
             "values": measured_voltages,
             "current_values": measured_currents,
+            "dropout_values": dropouts,
         }
 
+    def _apply_interlock_setting_unlocked(self, device, *, timeout_s: float) -> None:
+        enabled = _coerce_bool(
+            getattr(self.controllerParent, "interlock_monitoring", False), default=False
+        )
+        device.set_interlock_enabled(enabled, enabled, timeout_s=timeout_s)
+        actual = device.get_interlock_enabled(timeout_s=timeout_s)
+        if tuple(actual) != (enabled, enabled):
+            raise RuntimeError(
+                "PSU interlock monitoring was not confirmed: "
+                f"requested={(enabled, enabled)}, actual={actual}."
+            )
+
     def _interlock_monitoring_changed(self) -> None:
-        enabled = _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", False), default=False)
-        device = getattr(self, "device", None)
-        if device is None or not getattr(self, "initialized", False):
+        if self.device is None or not self.initialized:
             return
         timeout_s = float(getattr(self.controllerParent, "connect_timeout_s", 5.0))
         try:
-            device.set_interlock_enabled(enabled, enabled, timeout_s=timeout_s)
-            state = "enabled" if enabled else "disabled"
-            self.print(f"Interlock monitoring {state}.", flag=PRINT.INFO)
+            with self._controller_lock_section("Could not acquire lock to change PSU interlocks."):
+                if self.device is None:
+                    return
+                self._apply_interlock_setting_unlocked(self.device, timeout_s=timeout_s)
+            enabled = bool(self.controllerParent.interlock_monitoring)
+            self.print(f"Interlock monitoring {'enabled' if enabled else 'disabled'}.")
         except Exception as exc:
-            self.print(f"Could not change interlock monitoring: {exc}", flag=PRINT.WARNING)
-        get_interlock = getattr(device, "get_interlock_enabled", None)
-        if not callable(get_interlock):
+            self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
+            self.print(f"Could not confirm interlock monitoring: {exc}", flag=PRINT.ERROR)
+
+    def initializeCommunication(self) -> None:
+        if getattr(self, "initializing", False):
             return
-        try:
-            actual_output, actual_bnc = get_interlock(timeout_s=timeout_s)
-            actual = _coerce_bool(actual_output, default=enabled) and _coerce_bool(
-                actual_bnc, default=enabled
-            )
-        except Exception:
-            return
-        if actual != enabled:
-            actual_state = "enabled" if actual else "disabled"
-            self.print(
-                f"Interlock monitoring readback is {actual_state} while the setting "
-                f"says {'enabled' if enabled else 'disabled'}; hardware state prevails.",
-                flag=PRINT.ERROR,
-            )
+        acquisition_thread = getattr(self, "acquisitionThread", None)
+        if acquisition_thread is not None and acquisition_thread.is_alive():
+            self.closeCommunication()
+        with self._manual_apply_state_lock:
+            self._output_cancel.set()
+            self._output_cancel = Event()
+        # Create the token before the host starts the worker, never inside it:
+        # an OFF arriving before the worker is scheduled must not be forgotten.
+        super().initializeCommunication()
 
     def runInitialization(self) -> None:
+        cancel = self._output_cancel
         self.initialized = False
+        if cancel.is_set():
+            self.initializing = False
+            return
         self._dispose_device()
         try:
             driver_class = _get_psu_driver_class()
@@ -4031,14 +4049,23 @@ class PSUController(DeviceController):
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
-            if not _coerce_bool(getattr(self.controllerParent, "interlock_monitoring", False), default=False):
-                self.device.set_interlock_enabled(False, False, timeout_s=float(self.controllerParent.connect_timeout_s))
-                self.print("Interlock monitoring disabled.", flag=PRINT.WARNING)
+            self._apply_interlock_setting_unlocked(
+                self.device, timeout_s=float(self.controllerParent.connect_timeout_s)
+            )
             self._refresh_available_configs()
             self._update_state()
-            self.signalComm.initCompleteSignal.emit()
+            if cancel.is_set():
+                self.shutdownCommunication()
+            else:
+                self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
-            self._restore_off_ui_state()
+            recovered = self._safe_disable_outputs_after_failure(
+                timeout_s=float(self.controllerParent.connect_timeout_s)
+            )
+            if recovered:
+                self._restore_off_ui_state()
+            else:
+                self._restore_on_ui_state()
             guidance = self._init_failure_guidance(exc)
             message = (
                 f"PSU initialization failed on COM{int(self.controllerParent.com)}: "
@@ -4047,7 +4074,9 @@ class PSUController(DeviceController):
             if guidance:
                 message = f"{message}\n{guidance}"
             self.print(message, flag=PRINT.ERROR)
-            self._dispose_device()
+            self.closeCommunication(final_state=(
+                "Disconnected" if recovered else _PSU_SHUTDOWN_UNCONFIRMED_STATE
+            ))
         finally:
             self.initializing = False
 
@@ -4070,6 +4099,8 @@ class PSUController(DeviceController):
         return guidance
 
     def initComplete(self) -> None:
+        if self._output_cancel.is_set():
+            return
         if self.device is not None:
             self.controllerParent._sync_channels()
         self.initializeValues(reset=True)
@@ -4077,6 +4108,7 @@ class PSUController(DeviceController):
         # A fresh transport reached this far, so any earlier in-process port
         # poisoning is no longer relevant for this COM port.
         self._poisoned_com = None
+        self._forced_close_state = None
         self.super_init_complete_called = True
         self._set_loaded_config_text("Connected")
         self._sync_status_to_gui()
@@ -4175,13 +4207,18 @@ class PSUController(DeviceController):
         self.available_configs = list(configs or [])
         self.available_configs_text = _format_available_configs(configs)
 
-    def _start_manual_mode(self, *, timeout_s: float) -> None:
+    def _start_manual_mode(self, *, timeout_s: float, cancel: Event) -> None:
         device = self.device
-        if device is None:
+        if device is None or cancel.is_set():
             return
         device.set_output_enabled(False, False, timeout_s=timeout_s)
+        if cancel.is_set():
+            return
+        if tuple(device.get_output_enabled(timeout_s=timeout_s)) != (False, False):
+            raise RuntimeError("PSU outputs were not confirmed disabled before manual mode.")
         device.set_device_enabled(True, timeout_s=timeout_s)
-        time.sleep(0.3)
+        if cancel.wait(0.3):
+            return
         self._update_state()
         self._set_loaded_config_text("Manual outputs OFF")
 
@@ -4193,53 +4230,53 @@ class PSUController(DeviceController):
         current_limit_values: dict[int, Any],
         full_range_enabled: tuple[bool, bool],
         timeout_s: float,
-    ) -> list[str]:
-        warnings: list[str] = []
-        get_voltage_limits = getattr(device, "get_channel_voltage_limits", None)
-        if callable(get_voltage_limits):
-            for channel_index in _PSU_CHANNEL_IDS:
-                expected_voltage = _coerce_float(voltage_values.get(channel_index), 0.0)
-                actual_voltage, _voltage_limit = get_voltage_limits(
-                    channel_index,
-                    timeout_s=timeout_s,
-                )
-                if not _setpoint_matches(
-                    actual_voltage,
-                    expected_voltage,
-                    abs_tolerance=_PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V,
-                ):
-                    warnings.append(
-                        f"CH{channel_index} voltage setpoint readback "
-                        f"{_format_voltage_text(actual_voltage)} does not match requested "
-                        f"{_format_voltage_text(expected_voltage)}."
-                    )
-
-        get_current_limits = getattr(device, "get_channel_current_limits", None)
-        if callable(get_current_limits):
-            for channel_index in _PSU_CHANNEL_IDS:
-                expected_current = _coerce_float(current_limit_values.get(channel_index), 0.0)
-                actual_current, _current_limit = get_current_limits(
-                    channel_index,
-                    timeout_s=timeout_s,
-                )
-                if actual_current > expected_current + _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A:
-                    warnings.append(
-                        f"CH{channel_index} current limit readback "
-                        f"{_format_current_text(actual_current)} exceeds configured limit "
-                        f"{_format_current_text(expected_current)}."
-                    )
-
-        get_output_full_range = getattr(device, "get_output_full_range", None)
-        if callable(get_output_full_range):
-            actual_range = tuple(
-                bool(value) for value in get_output_full_range(timeout_s=timeout_s)
+        voltage_targets: dict[int, float] | None = None,
+    ) -> None:
+        # These are safety checks, not optional display metadata. A missing or
+        # invalid readback must prevent activation, just like a mismatched one.
+        for channel_index in _PSU_CHANNEL_IDS:
+            expected_voltage = float(voltage_values.get(channel_index, 0.0))
+            actual_voltage, voltage_limit = device.get_channel_voltage_limits(
+                channel_index, timeout_s=timeout_s
             )
-            if actual_range != tuple(bool(value) for value in full_range_enabled):
-                warnings.append(
-                    "PSU full-range readback does not match the requested state: "
-                    f"requested={full_range_enabled}, actual={actual_range}."
+            target = (voltage_targets or voltage_values).get(channel_index, 0.0)
+            if target > 0 and (
+                voltage_limit is None or not np.isfinite(voltage_limit)
+                or voltage_limit < target
+            ):
+                raise RuntimeError(f"CH{channel_index} voltage target exceeds a verified hardware limit.")
+            if not np.isfinite(actual_voltage) or not _setpoint_matches(
+                actual_voltage, expected_voltage,
+                abs_tolerance=_PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V,
+            ):
+                raise RuntimeError(
+                    f"CH{channel_index} voltage setpoint readback "
+                    f"{_format_voltage_text(actual_voltage)} does not match requested "
+                    f"{_format_voltage_text(expected_voltage)}."
                 )
-        return warnings
+            expected_current = float(current_limit_values.get(channel_index, 0.0))
+            actual_current, current_limit = device.get_channel_current_limits(
+                channel_index, timeout_s=timeout_s
+            )
+            if expected_current > 0 and (
+                current_limit is None or not np.isfinite(current_limit) or current_limit < 0
+            ):
+                raise RuntimeError(f"CH{channel_index} current hardware limit is invalid.")
+            if not np.isfinite(actual_current) or actual_current < 0:
+                raise RuntimeError(f"CH{channel_index} current limit readback is invalid.")
+            if actual_current > expected_current + _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A:
+                raise RuntimeError(
+                    f"CH{channel_index} current limit readback "
+                    f"{_format_current_text(actual_current)} exceeds configured limit "
+                    f"{_format_current_text(expected_current)}."
+                )
+
+        actual_range = tuple(device.get_output_full_range(timeout_s=timeout_s))
+        if actual_range != full_range_enabled:
+            raise RuntimeError(
+                "PSU full-range readback does not match the requested state: "
+                f"requested={full_range_enabled}, actual={actual_range}."
+            )
 
     def _verify_output_enable_state_unlocked(
         self,
@@ -4249,36 +4286,31 @@ class PSUController(DeviceController):
         output_enabled: tuple[bool, bool],
         timeout_s: float,
     ) -> None:
-        get_device_enabled = getattr(device, "get_device_enabled", None)
-        if callable(get_device_enabled):
-            actual_device_enabled = bool(get_device_enabled(timeout_s=timeout_s))
-            if actual_device_enabled != bool(any_output_enabled):
-                expected_text = "enabled" if any_output_enabled else "disabled"
-                actual_text = "enabled" if actual_device_enabled else "disabled"
-                raise RuntimeError(
-                    f"PSU device enable readback is {actual_text} after requesting {expected_text}."
-                )
-
-        get_output_enabled = getattr(device, "get_output_enabled", None)
-        if callable(get_output_enabled):
-            actual_output_enabled = tuple(
-                bool(value) for value in get_output_enabled(timeout_s=timeout_s)
+        actual_device_enabled = device.get_device_enabled(timeout_s=timeout_s)
+        if actual_device_enabled != any_output_enabled:
+            raise RuntimeError(
+                "PSU device enable readback does not match the requested state: "
+                f"requested={any_output_enabled}, actual={actual_device_enabled}."
             )
-            if actual_output_enabled != tuple(bool(value) for value in output_enabled):
-                raise RuntimeError(
-                    "PSU output-enable readback does not match the requested state: "
-                    f"requested={output_enabled}, actual={actual_output_enabled}."
-                )
+        actual_output_enabled = tuple(device.get_output_enabled(timeout_s=timeout_s))
+        if actual_output_enabled != output_enabled:
+            raise RuntimeError(
+                "PSU output-enable readback does not match the requested state: "
+                f"requested={output_enabled}, actual={actual_output_enabled}."
+            )
 
-    def _safe_disable_outputs_after_failure(self, *, timeout_s: float) -> None:
+    def _safe_disable_outputs_after_failure(
+        self, *, timeout_s: float, already_acquired: bool = False
+    ) -> bool:
         failures: list[str] = []
         try:
             with self._controller_lock_section(
-                "Could not acquire lock to recover PSU outputs after failure."
+                "Could not acquire lock to recover PSU outputs after failure.",
+                already_acquired=already_acquired,
             ):
                 device = self.device
                 if device is None:
-                    return
+                    return self.main_state == "Disconnected"
                 try:
                     device.set_output_enabled(False, False, timeout_s=timeout_s)
                 except Exception as exc:  # noqa: BLE001
@@ -4293,15 +4325,32 @@ class PSUController(DeviceController):
                         f"set_device_enabled(False) failed: "
                         f"{self._format_exception(exc)}"
                     )
+                try:
+                    self._verify_output_enable_state_unlocked(
+                        device=device, any_output_enabled=False,
+                        output_enabled=(False, False), timeout_s=timeout_s,
+                    )
+                except Exception as exc:
+                    failures.append(f"disable verification failed: {self._format_exception(exc)}")
         except TimeoutError:
             failures.append("could not acquire the controller lock")
         if failures:
             self.errorCount += 1
+            self.main_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
+            self.hardware_main_state = "Unknown"
+            self.output_state_summary = "Unknown"
             self.print(
                 "PSU safety recovery incomplete - outputs may still be live: "
                 + "; ".join(failures),
                 flag=PRINT.ERROR,
             )
+            return False
+        self.main_state = "OFF"
+        self.hardware_main_state = "Unknown"
+        self.output_state_summary = "CH0=OFF, CH1=OFF"
+        self.device_enabled = False
+        self.output_enabled_by_channel = {0: False, 1: False}
+        return True
 
     def _perform_shutdown_sequence_unlocked(self, *, timeout_s: float) -> list[str]:
         device = self.device
@@ -4350,17 +4399,18 @@ class PSUController(DeviceController):
             return False, "device disconnected before shutdown confirmation"
 
         snapshot = device.collect_housekeeping(timeout_s=timeout_s)
-        output_enabled = tuple(
-            bool(value) for value in snapshot.get("output_enabled", (False, False))
-        )
-        if any(output_enabled):
+        raw_outputs = snapshot.get("output_enabled")
+        if not isinstance(raw_outputs, (tuple, list)) or len(raw_outputs) != 2:
+            return False, "output-enable readback is missing or invalid"
+        output_enabled = tuple(raw_outputs)
+        if output_enabled != (False, False):
             summary = ", ".join(
                 f"CH{index}={'ON' if enabled else 'OFF'}"
                 for index, enabled in enumerate(output_enabled)
             )
             return False, f"outputs still enabled ({summary})"
-        if _coerce_bool(snapshot.get("device_enabled"), False):
-            return False, "device still enabled"
+        if snapshot.get("device_enabled") is not False:
+            return False, "device disable is not confirmed"
         return True, ""
 
     def readNumbers(self, *, already_acquired: bool = False) -> None:
@@ -4497,6 +4547,10 @@ class PSUController(DeviceController):
         )
         self.values = measured_voltages
         self.current_values = measured_currents
+        self.dropout_values.update({
+            channel_no: _coerce_float(value, np.nan)
+            for channel_no, value in (readbacks.get("dropout_values", {}) or {}).items()
+        })
         if output_enabled_map:
             self.output_enabled_by_channel = output_enabled_map
         self._last_live_readback_refresh_monotonic = (
@@ -4647,17 +4701,22 @@ class PSUController(DeviceController):
             )
             return
 
+        cancel = self._output_cancel
         self._discard_pending_manual_state_apply()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to load the PSU config."
             ):
-                device = self.device
-                if device is None:
+                if cancel.is_set() or self.device is not device:
+                    return
+                self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
+                if cancel.is_set():
                     return
                 device.load_config(config_index, timeout_s=timeout_s)
-            time.sleep(0.3)
+                self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
+            if cancel.wait(0.3):
+                return
             self._update_state()
             self._set_loaded_config_text(self._format_loaded_config_text(config_index))
             sync_manual = getattr(
@@ -4676,6 +4735,7 @@ class PSUController(DeviceController):
                 f"Failed to load PSU config {config_index}: {self._format_exception(exc)}",
                 flag=PRINT.ERROR,
             )
+            self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
         finally:
             self._sync_status_to_gui(sync_manual_panel=True)
         if self.values is None:
@@ -4771,31 +4831,48 @@ class PSUController(DeviceController):
 
     def _queue_manual_state_apply(self, manual_state: dict[str, Any]) -> None:
         with self._manual_apply_state_lock:
-            self._manual_apply_pending_state = self._copy_manual_state(manual_state)
+            self._manual_apply_pending_state = (
+                self._copy_manual_state(manual_state), self._output_cancel
+            )
             if self._manual_apply_worker_running:
                 return
             self._manual_apply_worker_running = True
-            Thread(
-                target=self._manual_state_apply_worker,
-                name=f"{self.controllerParent.name} applyManualStateThread",
-                daemon=True,
-            ).start()
+            try:
+                Thread(
+                    target=self._manual_state_apply_worker,
+                    name=f"{self.controllerParent.name} applyManualStateThread",
+                    daemon=True,
+                ).start()
+            except Exception:
+                self._manual_apply_worker_running = False
+                self._manual_apply_pending_state = None
+                raise
 
     def _discard_pending_manual_state_apply(self) -> None:
         with self._manual_apply_state_lock:
             self._manual_apply_pending_state = None
 
+    def _cancel_output_commands(self) -> None:
+        # Signal OFF before waiting for the controller lock. Never clear an old
+        # token: queued commands must remain cancelled after a later explicit ON.
+        with self._manual_apply_state_lock:
+            self._output_cancel.set()
+            self._manual_apply_pending_state = None
+
     def _manual_state_apply_worker(self) -> None:
         while True:
             with self._manual_apply_state_lock:
-                manual_state = self._manual_apply_pending_state
+                pending = self._manual_apply_pending_state
                 self._manual_apply_pending_state = None
-                if manual_state is None:
+                if pending is None:
                     self._manual_apply_worker_running = False
                     return
-            self.applyManualState(manual_state)
+            manual_state, cancel = pending
+            self.applyManualState(manual_state, cancel=cancel)
 
-    def _await_discharge_before_range_switch(self, device, *, timeout_s: float) -> None:
+    def _await_discharge_before_range_switch(
+        self, device, *, timeout_s: float, cancel: Event | None = None
+    ) -> None:
         """Wait for HV to discharge near zero before switching the range relay.
 
         Switching the Full/Half range relay while a channel still carries HV can
@@ -4805,11 +4882,14 @@ class PSUController(DeviceController):
         """
         import time
 
+        cancel = self._output_cancel if cancel is None else cancel
         get_measured_voltage = getattr(device, "get_channel_measured_voltage", None)
         if not callable(get_measured_voltage):
-            return
+            raise RuntimeError("Cannot verify PSU discharge: measured voltage is unavailable.")
         deadline = time.monotonic() + _PSU_RANGE_SWITCH_SETTLE_S
         while time.monotonic() < deadline:
+            if cancel.is_set():
+                return
             try:
                 voltages = [
                     get_measured_voltage(channel_index, timeout_s=timeout_s)
@@ -4819,9 +4899,10 @@ class PSUController(DeviceController):
                 raise RuntimeError(
                     f"Cannot verify PSU discharge before range switch: {exc}"
                 ) from exc
-            if all(abs(v) < _PSU_RANGE_SWITCH_SAFE_V for v in voltages):
+            if all(np.isfinite(v) and abs(v) < _PSU_RANGE_SWITCH_SAFE_V for v in voltages):
                 return
-            time.sleep(0.1)
+            if cancel.wait(0.1):
+                return
         raise RuntimeError(
             "PSU outputs did not discharge below "
             f"{_PSU_RANGE_SWITCH_SAFE_V} V within {_PSU_RANGE_SWITCH_SETTLE_S} s; "
@@ -4829,161 +4910,154 @@ class PSUController(DeviceController):
         )
 
     def _ramp_channel_voltage(
-        self, device, channel: int, target_v: float, *, timeout_s: float
-    ) -> None:
+        self, device, channel: int, target_v: float, *, timeout_s: float, cancel: Event
+    ) -> bool:
         """Step one channel's voltage from 0 up to target_v in bounded increments.
 
         Limits dV/dt inrush on capacitive/inductive HV loads after the output is
         enabled. Step size and cadence are conservative defaults; tune
         _PSU_VOLTAGE_RAMP_STEP_V / _PSU_VOLTAGE_RAMP_STEP_S on the real hardware.
         """
-        import time
-
         steps = max(1, int(np.ceil(target_v / _PSU_VOLTAGE_RAMP_STEP_V)))
         for i in range(1, steps + 1):
+            if cancel.is_set():
+                return False
             device.set_channel_voltage(
                 channel, target_v * i / steps, timeout_s=timeout_s
             )
-            time.sleep(_PSU_VOLTAGE_RAMP_STEP_S)
+            if cancel.wait(_PSU_VOLTAGE_RAMP_STEP_S):
+                return False
+        return True
 
-    def applyManualState(self, manual_state: dict[str, Any]) -> None:
+    def applyManualState(
+        self, manual_state: dict[str, Any], *, cancel: Event | None = None
+    ) -> None:
+        cancel = self._output_cancel if cancel is None else cancel
         device = self.device
-        if device is None or not getattr(self, "initialized", False):
+        if cancel.is_set():
+            return
+        if device is None or not self.initialized:
             self.print(
                 f"Cannot apply {self.controllerParent.name} manual values: communication not initialized.",
                 flag=PRINT.WARNING,
             )
             return
-
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
-        output_enabled = tuple(
-            bool((manual_state.get("output_enabled", {}) or {}).get(channel_index, False))
-            for channel_index in _PSU_CHANNEL_IDS
-        )
-        full_range_enabled = tuple(
-            bool((manual_state.get("full_range_enabled", {}) or {}).get(channel_index, False))
-            for channel_index in _PSU_CHANNEL_IDS
-        )
-        voltage_values = manual_state.get("voltage_values", {}) or {}
-        current_limit_values = manual_state.get("current_limit_values", {}) or {}
         self._manual_apply_active = True
         try:
-            with self._controller_lock_section(
-                "Could not acquire lock to apply PSU manual values."
-            ):
-                device = self.device
-                if device is None:
+            with self._controller_lock_section("Could not acquire lock to apply PSU manual values."):
+                if cancel.is_set() or self.device is not device:
                     return
-                device.set_output_enabled(False, False, timeout_s=timeout_s)
-                set_full_range = getattr(device, "set_output_full_range", None)
-                range_changes = tuple(
-                    bool(getattr(self, "full_range_by_channel", {}).get(channel_index, False))
-                    != full_range_enabled[channel_index]
-                    for channel_index in _PSU_CHANNEL_IDS
-                )
-                if callable(set_full_range) and any(range_changes):
-                    # Allow HV to discharge before switching the range relay to
-                    # avoid arcing under load.
-                    self._await_discharge_before_range_switch(device, timeout_s=timeout_s)
-                    set_full_range(
-                        full_range_enabled[0],
-                        full_range_enabled[1],
-                        timeout_s=timeout_s,
+                try:
+                    applied = self._apply_manual_state_unlocked(device, manual_state, timeout_s, cancel)
+                except Exception:
+                    # Recover before releasing the lock: no later command may
+                    # enable outputs between a failed verification and rollback.
+                    self._safe_disable_outputs_after_failure(
+                        timeout_s=timeout_s, already_acquired=True
                     )
-                voltage_targets = {
-                    channel_index: _coerce_float(
-                        voltage_values.get(channel_index), 0.0
-                    )
-                    for channel_index in _PSU_CHANNEL_IDS
-                }
-                # Channels enabled with a large voltage delta are ramped from 0
-                # after enable (limits dV/dt inrush on capacitive HV loads);
-                # pre-enable they are held at 0 V.
-                ramp_channels = {
-                    channel_index
-                    for channel_index in _PSU_CHANNEL_IDS
-                    if output_enabled[channel_index]
-                    and voltage_targets[channel_index] > _PSU_VOLTAGE_RAMP_THRESHOLD_V
-                }
-                pre_ramp_voltage_values = {
-                    channel_index: (
-                        0.0
-                        if channel_index in ramp_channels
-                        else voltage_targets[channel_index]
-                    )
-                    for channel_index in _PSU_CHANNEL_IDS
-                }
-                for channel_index in _PSU_CHANNEL_IDS:
-                    device.set_channel_voltage(
-                        channel_index,
-                        pre_ramp_voltage_values[channel_index],
-                        timeout_s=timeout_s,
-                    )
-                    device.set_channel_current(
-                        channel_index,
-                        _coerce_float(current_limit_values.get(channel_index), 0.0),
-                        timeout_s=timeout_s,
-                    )
-                readback_warnings = self._verify_manual_state_unlocked(
-                    device=device,
-                    voltage_values=pre_ramp_voltage_values,
-                    current_limit_values=current_limit_values,
-                    full_range_enabled=full_range_enabled,
-                    timeout_s=timeout_s,
-                )
-                any_output_enabled = any(output_enabled)
-                device.set_device_enabled(any_output_enabled, timeout_s=timeout_s)
-                if any_output_enabled:
-                    device.set_output_enabled(
-                        output_enabled[0],
-                        output_enabled[1],
-                        timeout_s=timeout_s,
-                    )
-                self._verify_output_enable_state_unlocked(
-                    device=device,
-                    any_output_enabled=any_output_enabled,
-                    output_enabled=output_enabled,
-                    timeout_s=timeout_s,
-                )
-                # Ramp enabled channels from 0 V up to their target to limit
-                # dV/dt inrush (skipped for small deltas; tune on hardware).
-                for channel_index in sorted(ramp_channels):
-                    self._ramp_channel_voltage(
-                        device,
-                        channel_index,
-                        voltage_targets[channel_index],
-                        timeout_s=timeout_s,
-                    )
-            self._update_state()
-            self._set_loaded_config_text("Manual (unsaved)")
-            sync_manual = getattr(
-                self.controllerParent,
-                "_sync_manual_panel_from_controller",
-                None,
-            )
-            if callable(sync_manual):
-                sync_manual()
-            if readback_warnings:
-                self.print(
-                    "Applied PSU manual values with setpoint readback warning(s): "
-                    + " ".join(readback_warnings),
-                    flag=PRINT.WARNING,
-                )
+                    raise
+                if not applied or cancel.is_set():
+                    return
+                self._update_state()
+                self._set_loaded_config_text("Manual (unsaved)")
             self.print("Applied PSU manual values.")
         except TimeoutError:
             return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
-            self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
-            with contextlib.suppress(Exception):
-                self._update_state()
             self.print(
                 f"Failed to apply PSU manual values: {self._format_exception(exc)}",
                 flag=PRINT.ERROR,
             )
         finally:
             self._manual_apply_active = False
-            self._sync_status_to_gui()
+            self._sync_status_to_gui(sync_manual_panel=True)
+
+    def _apply_manual_state_unlocked(
+        self, device, manual_state: dict[str, Any], timeout_s: float, cancel: Event
+    ) -> bool:
+        output_enabled = tuple(
+            bool((manual_state.get("output_enabled") or {}).get(ch, False))
+            for ch in _PSU_CHANNEL_IDS
+        )
+        full_range_enabled = tuple(
+            bool((manual_state.get("full_range_enabled") or {}).get(ch, False))
+            for ch in _PSU_CHANNEL_IDS
+        )
+        voltage_targets = {
+            ch: float((manual_state.get("voltage_values") or {}).get(ch, 0.0))
+            for ch in _PSU_CHANNEL_IDS
+        }
+        current_limits = {
+            ch: float((manual_state.get("current_limit_values") or {}).get(ch, 0.0))
+            for ch in _PSU_CHANNEL_IDS
+        }
+        if any(not np.isfinite(v) or v < 0 for v in (*voltage_targets.values(), *current_limits.values())):
+            raise ValueError("PSU setpoints must be finite and non-negative.")
+
+        device.set_output_enabled(False, False, timeout_s=timeout_s)
+        if cancel.is_set():
+            return False
+        if tuple(device.get_output_enabled(timeout_s=timeout_s)) != (False, False):
+            raise RuntimeError("PSU outputs were not confirmed disabled before changing setpoints.")
+        range_changes = any(
+            bool(self.full_range_by_channel.get(ch, False)) != full_range_enabled[ch]
+            for ch in _PSU_CHANNEL_IDS
+        )
+        if range_changes:
+            self._await_discharge_before_range_switch(device, timeout_s=timeout_s, cancel=cancel)
+            if cancel.is_set():
+                return False
+            device.set_output_full_range(*full_range_enabled, timeout_s=timeout_s)
+
+        ramp_channels = {
+            ch for ch in _PSU_CHANNEL_IDS
+            if output_enabled[ch] and voltage_targets[ch] > _PSU_VOLTAGE_RAMP_THRESHOLD_V
+        }
+        pre_ramp_voltages = {
+            ch: 0.0 if ch in ramp_channels else voltage_targets[ch]
+            for ch in _PSU_CHANNEL_IDS
+        }
+        for ch in _PSU_CHANNEL_IDS:
+            if cancel.is_set():
+                return False
+            device.set_channel_voltage(ch, pre_ramp_voltages[ch], timeout_s=timeout_s)
+            if cancel.is_set():
+                return False
+            device.set_channel_current(ch, current_limits[ch], timeout_s=timeout_s)
+        self._verify_manual_state_unlocked(
+            device=device, voltage_values=pre_ramp_voltages,
+            current_limit_values=current_limits, full_range_enabled=full_range_enabled,
+            timeout_s=timeout_s, voltage_targets=voltage_targets,
+        )
+        if cancel.is_set():
+            return False
+        if any(output_enabled):
+            self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
+        if cancel.is_set():
+            return False
+        device.set_device_enabled(any(output_enabled), timeout_s=timeout_s)
+        if cancel.is_set():
+            return False
+        if any(output_enabled):
+            device.set_output_enabled(*output_enabled, timeout_s=timeout_s)
+        self._verify_output_enable_state_unlocked(
+            device=device, any_output_enabled=any(output_enabled),
+            output_enabled=output_enabled, timeout_s=timeout_s,
+        )
+        for ch in sorted(ramp_channels):
+            if not self._ramp_channel_voltage(
+                device, ch, voltage_targets[ch], timeout_s=timeout_s, cancel=cancel
+            ):
+                return False
+        if ramp_channels and not cancel.is_set():
+            self._verify_manual_state_unlocked(
+                device=device, voltage_values=voltage_targets,
+                current_limit_values=current_limits, full_range_enabled=full_range_enabled,
+                timeout_s=timeout_s,
+            )
+        return not cancel.is_set()
 
     def saveCurrentConfigFromThread(
         self,
@@ -5103,6 +5177,10 @@ class PSUController(DeviceController):
 
     def toggleOn(self) -> None:
         target_on = bool(getattr(self.controllerParent, "isOn", lambda: False)())
+        if not target_on:
+            self._cancel_output_commands()
+        cancel = self._output_cancel
+        was_cancelled = cancel.is_set()
         device = self.device
         if device is None:
             self._end_transition()
@@ -5125,9 +5203,22 @@ class PSUController(DeviceController):
                     if device is None:
                         self._restore_off_ui_state()
                         return
+                    if not self.controllerParent.isOn():
+                        return
+                    with self._manual_apply_state_lock:
+                        if not was_cancelled and cancel.is_set():
+                            return
+                        # A fresh explicit ON never clears a previous command's token.
+                        self._output_cancel.set()
+                        self._output_cancel = Event()
+                        cancel = self._output_cancel
+                    self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
+                    if cancel.is_set():
+                        return
                     startup_kwargs = self._startup_kwargs()
                     if startup_kwargs:
-                        device.initialize(timeout_s=timeout_s, **startup_kwargs)
+                        device.initialize(timeout_s=timeout_s, cancel=cancel, **startup_kwargs)
+                        self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
                         loaded_config = _coerce_int(
                             startup_kwargs.get("operating_config"),
                             _coerce_int(startup_kwargs.get("standby_config"), -1),
@@ -5138,7 +5229,7 @@ class PSUController(DeviceController):
                             )
                         message = "PSU startup sequence completed from controller configs."
                     else:
-                        self._start_manual_mode(timeout_s=timeout_s)
+                        self._start_manual_mode(timeout_s=timeout_s, cancel=cancel)
                         message = (
                             "PSU communication initialized without a startup config. "
                             "Outputs remain OFF until manual values are applied."
@@ -5160,21 +5251,27 @@ class PSUController(DeviceController):
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             if target_on:
-                self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
-                self._restore_off_ui_state()
+                if self._safe_disable_outputs_after_failure(timeout_s=timeout_s):
+                    self._restore_off_ui_state()
+                else:
+                    self._restore_on_ui_state()
             self.print(
                 f"Failed to toggle PSU: {self._format_exception(exc)}",
                 flag=PRINT.ERROR,
             )
         finally:
+            if target_on and cancel.is_set() and self.device is not None:
+                if not self.shutdownCommunication():
+                    self._restore_on_ui_state()
             self._end_transition()
             self._sync_status_to_gui()
 
     def shutdownCommunication(self) -> bool:
+        self._cancel_output_commands()
         device = self.device
         if device is None:
             self.closeCommunication()
-            return True
+            return self.main_state == "Disconnected"
 
         self._discard_pending_manual_state_apply()
         stop_acquisition = getattr(self, "stopAcquisition", None)
@@ -5231,10 +5328,19 @@ class PSUController(DeviceController):
         return shutdown_confirmed
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        self._cancel_output_commands()
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
-        resolved_final_state = str(final_state or "Disconnected")
+        if final_state is None:
+            final_state = getattr(self, "_forced_close_state", None)
+        if final_state is None:
+            final_state = self.main_state
+            if self.device is not None or final_state not in (
+                "Disconnected", _PSU_SHUTDOWN_UNCONFIRMED_STATE, _PSU_COMMUNICATION_LOST_STATE
+            ):
+                final_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
+        resolved_final_state = str(final_state)
         is_disconnected = resolved_final_state == "Disconnected"
         self.main_state = resolved_final_state
         self.hardware_main_state = (
@@ -5255,11 +5361,7 @@ class PSUController(DeviceController):
     def _update_state(self) -> None:
         device = self.device
         if device is None:
-            self.main_state = "Disconnected"
-            self.hardware_main_state = "Disconnected"
-            self.output_state_summary = "CH0=OFF, CH1=OFF"
-            self.device_state_summary = "n/a"
-            return
+            return  # Preserve the last shutdown/transport-loss diagnosis.
 
         try:
             timeout_s = float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
@@ -5273,7 +5375,10 @@ class PSUController(DeviceController):
                 )
             except Exception:
                 self.hardware_main_state = "Unknown"
-            self.main_state = _normalize_runtime_state(self.hardware_main_state)
+            self.main_state = (
+                _PSU_SHUTDOWN_UNCONFIRMED_STATE
+                if self.hardware_main_state == "False" else "State error"
+            )
             self.device_state_summary = "Unknown"
             self.output_state_summary = "Unknown"
             return
@@ -5360,6 +5465,7 @@ class PSUController(DeviceController):
             "OFF via the front panel / hardware interlock before approaching the device.",
             flag=PRINT.ERROR,
         )
+        self._cancel_output_commands()
         self.main_state = _PSU_COMMUNICATION_LOST_STATE
         self._forced_close_state = _PSU_COMMUNICATION_LOST_STATE
         self.acquiring = False
@@ -5367,7 +5473,7 @@ class PSUController(DeviceController):
         self._clear_transport_failures()
         stop = getattr(self.controllerParent, "_stop_refresh_timer", None)
         if callable(stop):
-            stop()
+            _invoke_gui_callback(stop)
         self._dispose_device()
         self._sync_status_to_gui()
         close_signal = getattr(

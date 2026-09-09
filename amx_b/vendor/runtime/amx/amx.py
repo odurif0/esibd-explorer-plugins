@@ -1059,6 +1059,9 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
                 "sequence."
             )
 
+        self._raise_if_transport_poisoned()
+        if not self.connected:
+            return False
         standby_loaded = False
         if self.connected and standby_config is not None:
             try:
@@ -1072,36 +1075,15 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
                 self._append_shutdown_error(
                     errors, f"load_config({standby_config})", exc
                 )
-            if standby_loaded:
-                try:
-                    # A standby config must not leave the device HV-enabled at
-                    # disconnect; force OFF and verify when it does.
-                    still_enabled = self._call_with_optional_timeout(
-                        self.get_device_enabled, timeout_s=timeout_s
-                    )
-                    if still_enabled:
-                        self._call_with_optional_timeout(
-                            self.set_device_enabled, False, timeout_s=timeout_s
-                        )
-                        still_enabled = self._call_with_optional_timeout(
-                            self.get_device_enabled, timeout_s=timeout_s
-                        )
-                    if still_enabled:
-                        self._append_shutdown_error(
-                            errors,
-                            "standby disable verification",
-                            RuntimeError(
-                                "AMX remained enabled after standby config load "
-                                "and forced disable."
-                            ),
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    self._append_shutdown_error(
-                        errors, "standby disable verification", exc
-                    )
-        should_disable_device = disable_device or (
-            standby_config is not None and not standby_loaded
-        )
+        should_disable_device = disable_device or not standby_loaded
+        if self.connected and standby_loaded and not disable_device:
+            try:
+                should_disable_device = self._call_with_optional_timeout(
+                    self.get_device_enabled, timeout_s=timeout_s
+                ) is not False
+            except Exception as exc:
+                self._append_shutdown_error(errors, "standby disable verification", exc)
+                should_disable_device = True
         if self.connected and should_disable_device:
             try:
                 self._call_with_optional_timeout(
@@ -1111,6 +1093,15 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
                 )
             except Exception as exc:  # noqa: BLE001
                 self._append_shutdown_error(errors, "set_device_enabled(False)", exc)
+
+        if self.connected:
+            try:
+                if self._call_with_optional_timeout(
+                    self.get_device_enabled, timeout_s=timeout_s
+                ) is not False:
+                    raise RuntimeError("AMX remained enabled after shutdown.")
+            except Exception as exc:
+                self._append_shutdown_error(errors, "disable verification", exc)
 
         disconnected = self._call_with_optional_timeout(
             self.disconnect,

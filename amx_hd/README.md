@@ -91,11 +91,10 @@ not hard-code a channel count. Each timer channel exposes:
 
 ## Process Backend
 
-The embedded AMX HD runtime defaults to the inline controller path (consistent
-with the normal AMX plugin), avoiding "worker timed out during worker startup"
-warnings seen on some Explorer deployments. Process isolation remains available
-for debugging or special cases by constructing the AMX HD runtime with
-`process_backend=True`.
+The bundled runtime runs inside Explorer. Process isolation is disabled:
+a spawned interpreter cannot import the private bundled modules. After a DLL
+timeout, the connection cannot be reused. Switch the instrument OFF using its
+hardware controls before restarting Explorer.
 
 ## Portability Note
 

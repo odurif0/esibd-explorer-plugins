@@ -1306,6 +1306,7 @@ def test_toggle_on_runs_shutdown_when_switching_off():
 
         def shutdown(self):
             self.calls.append("shutdown")
+            return True
 
     original_toggle_on = getattr(module.DeviceController, "toggleOn", None)
     module.DeviceController.toggleOn = lambda self: None
@@ -1538,6 +1539,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
 
         def shutdown(self):
             self.calls.append("shutdown")
+            return True
 
     original_toggle_on = getattr(module.DeviceController, "toggleOn", None)
     module.DeviceController.toggleOn = lambda self: None
@@ -1840,6 +1842,7 @@ def test_shutdown_communication_runs_full_device_shutdown():
 
         def shutdown(self):
             self.calls.append("shutdown")
+            return True
 
     original_close = getattr(module.DeviceController, "closeCommunication", None)
     module.DeviceController.closeCommunication = lambda self: setattr(

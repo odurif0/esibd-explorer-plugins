@@ -38,7 +38,7 @@ def test_real_qt_dispatch_and_widget_backed_settings(entrypoint):
 
 def probe(path):
     try:
-        from PyQt6.QtCore import QThread
+        from PyQt6.QtCore import QThread, QTimer
         from PyQt6.QtWidgets import QApplication, QLabel
     except ImportError:
         return 77
@@ -47,6 +47,7 @@ def probe(path):
     names = {
         "_invoke_gui_callback", "_sync_status_to_gui", "_sync_status",
         "_restore_off_ui_state", "_restore_on_ui_state", "_set_on_ui_state",
+        "_handle_transport_loss", "_stop_refresh_timer",
     }
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     lock = next(
@@ -160,6 +161,28 @@ def probe(path):
     in_worker(lambda: ns["_set_on_ui_state"](parent, False))
     drain_until(lambda: parent.deviceOnAction.state is False)
     assert parent.onAction.state is False
+
+    if "_stop_refresh_timer" in ns:
+        class Timer(QTimer):
+            def stop(self):
+                on_gui()
+                super().stop()
+
+        timer = Timer()
+        timer.start(60_000)
+        object.__setattr__(parent, "_refreshTimer", timer)
+        object.__setattr__(parent, "_stop_refresh_timer", lambda: ns["_stop_refresh_timer"](parent))
+        controller.print = lambda *args, **kwargs: None
+        controller._cancel_output_commands = lambda: None
+        controller._clear_transport_failures = lambda: None
+        controller._dispose_device = lambda: None
+        controller._sync_status_to_gui = lambda: sync(controller)
+        ns["PRINT"] = types.SimpleNamespace(ERROR="error")
+        ns["_PSU_COMMUNICATION_LOST_STATE"] = "Communication lost"
+        in_worker(lambda: ns["_handle_transport_loss"](controller))
+        assert timer.isActive(), "timer was accessed before GUI dispatch"
+        drain_until(lambda: not timer.isActive())
+        drain_until(lambda: parent.labels["main_state"].text() == "Communication lost")
 
     # A failed update must be logged, not escape a Qt slot and abort the host.
     def broken():
