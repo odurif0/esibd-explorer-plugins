@@ -783,6 +783,108 @@ def providePlugins() -> "list[type[Plugin]]":
     return [AMXDevice]
 
 
+def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
+    """Keep the usual card grid, wrapping to fewer columns in a narrow dock."""
+    from PyQt6.QtCore import QRect, QSize
+    from PyQt6.QtWidgets import QLayout
+
+    class CardGrid(QLayout):
+        def __init__(self) -> None:
+            super().__init__(parent)
+            self._items = []
+            self.setContentsMargins(0, 0, 0, 0)
+            self.setSpacing(spacing)
+
+        def addItem(self, item) -> None:
+            self._items.append(item)
+            self.invalidate()
+
+        def count(self) -> int:
+            return len(self._items)
+
+        def itemAt(self, index):
+            return self._items[index] if 0 <= index < self.count() else None
+
+        def takeAt(self, index):
+            if 0 <= index < self.count():
+                item = self._items.pop(index)
+                self.invalidate()
+                return item
+            return None
+
+        def minimumSize(self):
+            size = QSize(0, 0)
+            for item in self._items:
+                size = size.expandedTo(item.minimumSize())
+            return size
+
+        def sizeHint(self):
+            columns = min(max_columns, self.count())
+            if not columns:
+                return QSize(0, 0)
+            width = max(item.sizeHint().width() for item in self._items)
+            width = columns * width + (columns - 1) * self.spacing()
+            return QSize(width, self.heightForWidth(width))
+
+        def hasHeightForWidth(self) -> bool:
+            return True
+
+        def heightForWidth(self, width: int) -> int:
+            return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+        def setGeometry(self, rect) -> None:
+            super().setGeometry(rect)
+            self._arrange(rect, apply=True)
+
+        def _arrange(self, rect, *, apply: bool) -> int:
+            if not self._items:
+                return 0
+            gap = self.spacing()
+            minimum = max(1, self.minimumSize().width())
+            columns = min(max_columns, self.count(), max(1, (rect.width() + gap) // (minimum + gap)))
+            width = max(minimum, (rect.width() - (columns - 1) * gap) // columns)
+            width = min(width, max(item.maximumSize().width() for item in self._items))
+            left = rect.x() + max(0, (rect.width() - columns * width - (columns - 1) * gap) // 2)
+            y = rect.y()
+            for start in range(0, self.count(), columns):
+                row = self._items[start:start + columns]
+                heights = [
+                    max(item.minimumSize().height(),
+                        item.heightForWidth(width) if item.hasHeightForWidth() else item.sizeHint().height())
+                    for item in row
+                ]
+                if apply:
+                    for column, (item, height) in enumerate(zip(row, heights)):
+                        item.setGeometry(QRect(left + column * (width + gap), y, width, height))
+                y += max(heights) + gap
+            return y - rect.y() - gap
+
+    return CardGrid()
+
+
+def _scrollable_panel(panel: Any) -> Any:
+    """Do not propagate the content's minimum size to Explorer's dock area."""
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFrame, QScrollArea
+
+    class PanelScrollArea(QScrollArea):
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Type.Wheel and isinstance(watched, (QAbstractSpinBox, QComboBox)):
+                # Scrolling the panel must never edit an output setpoint/range,
+                # even when the editor has focus. Keep arrows/keyboard available.
+                QApplication.sendEvent(self.viewport(), event)
+                return True
+            return super().eventFilter(watched, event)
+
+    scroll = PanelScrollArea()
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(panel)
+    for editor in panel.findChildren(QAbstractSpinBox) + panel.findChildren(QComboBox):
+        editor.installEventFilter(scroll)
+    return scroll
+
+
 class AMXDevice(Device):
     """Drive AMX oscillator and pulser timing from ESIBD Explorer."""
 
@@ -1754,7 +1856,7 @@ class AMXDevice(Device):
         }
 
     def _ensure_operator_panel(self) -> None:
-        """Add a fixed four-pulser panel while retaining the advanced table."""
+        """Add a responsive four-pulser panel while retaining the advanced table."""
         if hasattr(self, "amxPanel"):
             self._update_operator_panel()
             return
@@ -1795,6 +1897,8 @@ class AMXDevice(Device):
         header.addStretch(1)
         header.addWidget(self.amxPanelSignalValue)
         header.addWidget(self.amxPanelFrequencyValue)
+        for label in (title, self.amxPanelSignalValue, self.amxPanelFrequencyValue):
+            label.setWordWrap(True)
         layout.addLayout(header)
 
         notice = QLabel(
@@ -1805,23 +1909,13 @@ class AMXDevice(Device):
         notice.setStyleSheet(_AMX_PANEL_NOTICE_STYLE)
         layout.addWidget(notice)
 
-        cards_row = QWidget()
-        cards_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        cards_row_layout = QHBoxLayout(cards_row)
-        cards_row_layout.setContentsMargins(0, 0, 0, 0)
-        cards_row_layout.addStretch(1)
         cards_host = QWidget()
-        cards_grid = QGridLayout(cards_host)
-        cards_grid.setContentsMargins(0, 0, 0, 0)
-        cards_grid.setHorizontalSpacing(12)
-        cards_grid.setVerticalSpacing(12)
-        cards_row_layout.addWidget(cards_host)
-        cards_row_layout.addStretch(1)
-        layout.addWidget(cards_row)
+        cards_grid = _create_card_grid(cards_host, _AMX_PANEL_GRID_COLUMNS)
+        layout.addWidget(cards_host)
         layout.addStretch(1)
 
         self.amxPanelCards: dict[int, dict[str, Any]] = {}
-        for index, pulser in enumerate(_AMX_PULSER_IDS):
+        for pulser in _AMX_PULSER_IDS:
             card = QFrame()
             card.setObjectName("AMXPulserCard")
             card.setMinimumWidth(_AMX_PANEL_CARD_MIN_WIDTH)
@@ -1911,9 +2005,7 @@ class AMXDevice(Device):
                 register_values[key] = value_label
             card_layout.addLayout(register_grid)
 
-            row = index // _AMX_PANEL_GRID_COLUMNS
-            column = index % _AMX_PANEL_GRID_COLUMNS
-            cards_grid.addWidget(card, row, column)
+            cards_grid.addWidget(card)
             self.amxPanelCards[pulser] = {
                 "card": card,
                 "title": card_title,
@@ -1945,7 +2037,7 @@ class AMXDevice(Device):
             )
 
         self.amxPanel = panel
-        self.addContentWidget(panel)
+        self.addContentWidget(_scrollable_panel(panel))
         self._update_channel_table_visibility()
         self._update_operator_panel()
 

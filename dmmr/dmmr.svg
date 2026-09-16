@@ -1,49 +1,11 @@
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg viewBox="0 0 128 128" version="1.1" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="panel" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1a2e3e"/>
-      <stop offset="100%" stop-color="#0c1a24"/>
-    </linearGradient>
-    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#4fc3f7"/>
-      <stop offset="100%" stop-color="#0288d1"/>
-    </linearGradient>
-    <linearGradient id="wire" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#80deea"/>
-      <stop offset="100%" stop-color="#4fc3f7"/>
-    </linearGradient>
-  </defs>
-
-  <!-- Background panel -->
-  <rect x="4" y="4" width="120" height="120" rx="18" fill="url(#panel)"
-        stroke="#2a4a5a" stroke-width="2"/>
-
-  <!-- Subtle circuit trace decorations -->
-  <path d="M 20 24 H 40" stroke="#1a3a4a" stroke-width="2" stroke-linecap="round"/>
-  <path d="M 88 24 H 108" stroke="#1a3a4a" stroke-width="2" stroke-linecap="round"/>
-  <path d="M 20 104 H 40" stroke="#1a3a4a" stroke-width="2" stroke-linecap="round"/>
-  <path d="M 88 104 H 108" stroke="#1a3a4a" stroke-width="2" stroke-linecap="round"/>
-  <circle cx="20" cy="24" r="2.5" fill="#1a3a4a"/>
-  <circle cx="108" cy="24" r="2.5" fill="#1a3a4a"/>
-  <circle cx="20" cy="104" r="2.5" fill="#1a3a4a"/>
-  <circle cx="108" cy="104" r="2.5" fill="#1a3a4a"/>
-
-  <!-- Input wire -->
-  <line x1="64" y1="18" x2="64" y2="33" stroke="url(#wire)" stroke-width="3.5" stroke-linecap="round"/>
-
-  <!-- Ammeter glow -->
-  <circle cx="64" cy="60" r="28" fill="none" stroke="#4fc3f7" stroke-width="6" opacity="0.15"/>
-  <!-- Ammeter circle -->
-  <circle cx="64" cy="60" r="25" fill="#0a1820" stroke="url(#ring)" stroke-width="3.5"/>
-  <!-- A label -->
-  <text x="64" y="72" font-size="32" font-weight="bold" fill="#e0f4f8"
-        font-family="'Helvetica Neue', Arial, sans-serif" text-anchor="middle">A</text>
-
-  <!-- Wire to ground -->
-  <line x1="64" y1="85" x2="64" y2="98" stroke="url(#wire)" stroke-width="3.5" stroke-linecap="round"/>
-  <!-- Ground symbol -->
-  <line x1="46" y1="98"  x2="82" y2="98"  stroke="#80deea" stroke-width="3" stroke-linecap="round"/>
-  <line x1="52" y1="105" x2="76" y2="105" stroke="#80deea" stroke-width="3" stroke-linecap="round"/>
-  <line x1="58" y1="112" x2="70" y2="112" stroke="#80deea" stroke-width="3" stroke-linecap="round"/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>Picoammeter — pA</title>
+  <rect x="4" y="4" width="120" height="120" rx="18"
+        fill="#132532" stroke="#2a4a5a" stroke-width="2"/>
+  <!-- DejaVu Sans Bold outlines: no font dependency at runtime. -->
+  <g fill="#ffffff">
+    <path d="M24.977 77.467V98.781H12V42.74H24.977V48.685Q27.66 45.132 30.922 43.446Q34.185 41.761 38.426 41.761Q45.93 41.761 50.751 47.724Q55.572 53.687 55.572 63.076Q55.572 72.464 50.751 78.427Q45.93 84.39 38.426 84.39Q34.185 84.39 30.922 82.705Q27.66 81.019 24.977 77.467ZM33.605 51.186Q29.436 51.186 27.207 54.249Q24.977 57.312 24.977 63.076Q24.977 68.839 27.207 71.902Q29.436 74.965 33.605 74.965Q37.773 74.965 39.967 71.921Q42.16 68.876 42.16 63.076Q42.16 57.276 39.967 54.231Q37.773 51.186 33.605 51.186Z"/>
+    <path d="M98.564 73.479H76.742L73.298 83.339H59.269L79.315 29.219H95.954L116 83.339H101.971ZM80.222 63.438H95.048L87.653 41.906Z"/>
+  </g>
 </svg>

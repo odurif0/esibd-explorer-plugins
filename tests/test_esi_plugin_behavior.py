@@ -512,7 +512,7 @@ def test_channel_defaults_enforce_3kv_positive_range():
     assert channel.getParameterByName(channel.MONITOR).unit == "degC"
 
 
-def test_operator_panel_widths_are_fixed_and_aligned():
+def test_operator_cards_keep_their_width_and_heat_panel_can_shrink():
     module = _load_plugin()
     source = PLUGIN_PATH.read_text(encoding="utf-8")
 
@@ -520,6 +520,7 @@ def test_operator_panel_widths_are_fixed_and_aligned():
     assert module._ESI_HEAT_CARD_WIDTH == (
         2 * module._ESI_HV_CARD_WIDTH + module._ESI_CARD_SPACING
     )
+    assert "heat_card.setMaximumWidth(_ESI_HEAT_CARD_WIDTH)" in source
     assert module._ESI_PANEL_STANDBY == "color: #d69e2e; font-weight: 600;"
     assert "else _ESI_PANEL_STANDBY" in source
     assert "polarity = measurement_polarity.get(address)" in source

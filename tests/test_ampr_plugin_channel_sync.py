@@ -1148,6 +1148,10 @@ def test_apply_value_ignores_device_disposal_race():
     class FakeChannel:
         value = 12.5
         enabled = True
+        VALUE = "Value"
+
+        def getParameterByName(self, name):
+            return None
 
         def module_address(self):
             return 2
@@ -1155,19 +1159,21 @@ def test_apply_value_ignores_device_disposal_race():
         def channel_number(self):
             return 4
 
-    controller = object.__new__(module.AMPRController)
+    controller = module.AMPRController(types.SimpleNamespace(name="AMPR", isOn=lambda: True))
     controller.lock = FakeLock()
     controller.errorCount = 0
     controller.initialized = True
     controller.main_state = "ST_ON"
-    controller.ramping = False
-    controller.transitioning = False
-    controller.controllerParent = types.SimpleNamespace(isOn=lambda: True)
     controller.print = lambda *args, **kwargs: None
     controller.device = FakeDevice(controller)
 
     module.AMPRController.applyValue(controller, FakeChannel())
+    worker = controller._setpoint_thread
+    if worker is not None:
+        worker.join(timeout=2)
+        assert not worker.is_alive()
 
+    assert controller.device is None
     assert controller.errorCount == 0
 
 

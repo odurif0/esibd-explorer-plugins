@@ -20,7 +20,7 @@ def test_missing_dmmr_sample_becomes_nan_without_losing_other_channels(failure):
     controller = module.DMMRController(parent)
     controller.lock = threading.Lock()
     controller.initialized = controller.acquiring = True
-    controller._update_state = lambda: None
+    controller._update_state = lambda **kwargs: None
     controller.print = lambda *args, **kwargs: None
     failing = False
     calls = []
@@ -57,6 +57,6 @@ def test_dmmr_state_poll_failure_cannot_leave_old_samples():
     controller.initialized = controller.acquiring = True
     controller.device = object()
     controller.values = {1: 12e-12}
-    controller._update_state = lambda: setattr(controller, "acquiring", False)
+    controller._update_state = lambda **kwargs: setattr(controller, "acquiring", False)
     controller.readNumbers()
     assert math.isnan(controller.values[1])

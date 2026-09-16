@@ -134,7 +134,9 @@ def _install_esibd_stubs() -> None:
     core.Parameter = Parameter
     core.ToolButton = ToolButton
     core.parameterDict = parameterDict
+    core.getTestMode = lambda: False
     plugins.Device = Device
+    plugins.LiveDisplay = type("LiveDisplay", (), {})
     plugins.Plugin = Plugin
 
     sys.modules["esibd"] = esibd
