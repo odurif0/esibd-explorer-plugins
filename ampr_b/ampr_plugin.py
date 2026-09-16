@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Event, Lock, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -1365,6 +1365,22 @@ class AMPRDevice(Device):
             self.initializeCommunication()
 
 
+class _AMPRSetpoint:
+    """One immutable input snapshot; only its delivery state changes under a lock."""
+
+    def __init__(self, channel, device, cancel: Event) -> None:
+        self.channel = channel
+        self.key = (channel.module_address(), channel.channel_number())
+        self.value = float(channel.value)
+        self.target = self.value if channel.enabled else 0.0
+        self.device = device
+        self.cancel = cancel
+        parameter = channel.getParameterByName(channel.VALUE)
+        self.decimals = int(getattr(parameter, "displayDecimals", 2))
+        self.state = "pending"
+        self.detail = ""
+
+
 class AMPRChannel(Channel):
     """AMPR output channel definition."""
 
@@ -1438,6 +1454,41 @@ class AMPRChannel(Channel):
         self._sync_enabled_toggle_widget()
         self._sync_monitor_feedback()
         self.scalingChanged()
+        parameter = self.getParameterByName(self.VALUE)
+        if parameter is not None and getattr(parameter, "spin", None) is not None:
+            # Keep programmatic changes immediate, but do not drive hardware
+            # with intermediate digits while the user is still typing.
+            parameter.spin.setKeyboardTracking(False)
+            parameter.spin.editingFinished.connect(self._retry_failed_setpoint)
+
+    def applyValue(self, apply: bool = False) -> None:
+        if not self.real:
+            return
+        controller = getattr(self, "controller", None) or getattr(self.channelParent, "controller", None)
+        if controller is not None:
+            # Explorer marks lastAppliedValue before dispatch; AMPR must wait
+            # for the hardware setpoint readback instead.
+            controller.applyValueFromThread(self, force=apply)
+
+    def _retry_failed_setpoint(self) -> None:
+        if getattr(self, "_ampr_setpoint_state", "") in {"error", "mismatch"}:
+            self.applyValue(apply=True)
+
+    def _setpoint_feedback(self, state: str, target: float, detail: str) -> None:
+        """Update the existing voltage cell, never replace the user's input."""
+        self._ampr_setpoint_state = state
+        parameter = self.getParameterByName(self.VALUE)
+        widget = getattr(parameter, "spin", None)
+        if widget is not None:
+            style = (_AMPR_MONITOR_ERROR_STYLE if state in {"error", "mismatch"}
+                     else _AMPR_MONITOR_WARN_STYLE if state in {"pending", "sent"}
+                     else "")
+            if widget.styleSheet() != style:
+                widget.setStyleSheet(style)
+            tooltip = f"Requested output: {target:.3f} V. {detail}"
+            if widget.toolTip() != tooltip:
+                widget.setToolTip(tooltip)
+        self._sync_monitor_feedback()
 
     def scalingChanged(self) -> None:
         super().scalingChanged()
@@ -1586,6 +1637,8 @@ class AMPRChannel(Channel):
         if not getattr(self, "enabled", False) or not getattr(self, "real", True):
             return "default"
         if getattr(self, "waitToStabilize", False):
+            return "default"
+        if getattr(self, "_ampr_setpoint_state", "confirmed") != "confirmed":
             return "default"
 
         channel_parent = getattr(self, "channelParent", None)
@@ -1767,6 +1820,11 @@ class AMPRController(DeviceController):
         self.transitioning = False
         self.transition_target_on: bool | None = None
         self._transition_lock = Lock()
+        self._setpoint_lock = Lock()
+        self._pending_setpoints: dict[tuple[int, int], _AMPRSetpoint] = {}
+        self._latest_setpoints: dict[tuple[int, int], _AMPRSetpoint] = {}
+        self._setpoint_cancel = Event()
+        self._setpoint_thread: Thread | None = None
         self._forced_close_state: str | None = None
         self._consecutive_transport_failures = 0
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
@@ -1935,6 +1993,10 @@ class AMPRController(DeviceController):
                     if device is None:
                         return
                     voltages = device.get_module_voltages(module)
+                    # Polling already reads both requested and measured voltage.
+                    # Check the request while holding the same hardware lock so
+                    # an old frame can never confirm a newer write.
+                    self._confirm_setpoints(module, voltages, device)
             except TimeoutError:
                 # Transient controller-lock contention (another operation holds
                 # the lock); skip this module this cycle. A real read fault is
@@ -1964,64 +2026,170 @@ class AMPRController(DeviceController):
         # communication happened at all in that mode.
 
     def applyValue(self, channel: AMPRChannel) -> None:
-        device = self.device
-        if (
-            device is None
-            or not getattr(self, "initialized", False)
-            or getattr(self, "ramping", False)
-            or getattr(self, "transitioning", False)
-            or not self.controllerParent.isOn()
-            or self.main_state != "ST_ON"
-        ):
-            return
+        self.applyValueFromThread(channel)
 
-        target_voltage = float(channel.value if channel.enabled else 0.0)
-        module = channel.module_address()
-        channel_id = channel.channel_number()
-        if module < 0 or channel_id <= 0:
-            self.errorCount += 1
-            self.print(
-                f"Skipping channel with invalid module/channel configuration "
-                f"(module {channel.module!r} CH{channel.id!r}); fix the channel "
-                "configuration.",
-                flag=PRINT.ERROR,
-            )
+    def applyValueFromThread(self, channel: AMPRChannel, *, force: bool = False) -> None:
+        """Snapshot on the GUI thread; one worker serializes all pending writes."""
+        _invoke_gui_callback(lambda: self._queue_setpoint(channel, force=force))
+
+    def _queue_setpoint(self, channel: AMPRChannel, *, force: bool = False) -> None:
+        if self.device is None or not self.initialized or not self.controllerParent.isOn():
+            channel.lastAppliedValue = np.nan
+            feedback = getattr(channel, "_setpoint_feedback", None)
+            if callable(feedback):
+                feedback("stored", float(channel.value), "Stored only; no active ON command/communication.")
             return
-        voltage_limit = self._module_voltage_limit(module)
-        if abs(target_voltage) > voltage_limit:
-            self.errorCount += 1
-            self.print(
-                f"Refusing {target_voltage:.3f} V for module {module} CH{channel_id}: "
-                f"detected module rating is ±{voltage_limit:.0f} V.",
-                flag=PRINT.ERROR,
-            )
+        request = _AMPRSetpoint(channel, self.device, self._setpoint_cancel)
+        with self._setpoint_lock:
+            previous = self._latest_setpoints.get(request.key)
+            if (previous is not None and previous.channel is channel
+                    and previous.target == request.target and previous.value == request.value
+                    and previous.device is request.device and previous.cancel is request.cancel
+                    and (not force or previous.state in {"pending", "sent"})):
+                return
+            self._latest_setpoints[request.key] = request
+            # Invalid edits must also supersede an older, still queued target.
+            self._pending_setpoints.pop(request.key, None)
+        module, number = request.key
+        limit = self._module_voltage_limit(module)
+        if not 0 <= module < 12 or not 1 <= number <= _CHANNELS_PER_MODULE or not np.isfinite(request.target) or abs(request.target) > limit:
+            self._publish_setpoint(request, "error", f"Refusing invalid target/address (module rating ±{limit:.0f} V).")
             return
-        try:
-            with self._controller_lock_section(
-                f"Could not acquire lock to apply module {module} CH{channel_id}."
-            ):
-                device = self.device
-                if device is None:
+        if request.cancel.is_set():
+            self._publish_setpoint(request, "stored", "Not sent; output is stopping.")
+            return
+        # Publish pending BEFORE exposing the request to an already running
+        # worker; a very fast ACK must not be overwritten by this initial state.
+        self._publish_setpoint(request, "pending", "Waiting for communication; not yet applied.")
+        with self._setpoint_lock:
+            if self._latest_setpoints.get(request.key) is not request or request.cancel.is_set():
+                return
+            self._pending_setpoints[request.key] = request
+        self._start_setpoint_worker()
+
+    def _start_setpoint_worker(self) -> None:
+        if not hasattr(self, "_setpoint_lock"):
+            return
+        failed = []
+        with self._setpoint_lock:
+            if (not self._pending_setpoints or self._setpoint_thread is not None
+                    or self.transitioning or self.ramping):
+                return
+            try:
+                self._setpoint_thread = Thread(target=self._write_pending_setpoints,
+                                              name=f"{self.controllerParent.name} setpoints", daemon=True)
+                self._setpoint_thread.start()
+            except Exception as exc:  # noqa: BLE001
+                self._setpoint_thread = None
+                failed = list(self._pending_setpoints.values())
+                self._pending_setpoints.clear()
+                failure = str(exc)
+        for request in failed:
+            self._publish_setpoint(request, "error", f"Cannot start setpoint worker: {failure}")
+
+    def _write_pending_setpoints(self) -> None:
+        while True:
+            with self._setpoint_lock:
+                if not self._pending_setpoints or self.transitioning or self.ramping:
+                    # Release ownership atomically: an edit arriving now must
+                    # either belong to this worker or start the next one.
+                    self._setpoint_thread = None
                     return
-                status = device.set_module_voltage(module, channel_id, target_voltage)
-        except TimeoutError:
-            return
-        except Exception as exc:  # noqa: BLE001
-            self.errorCount += 1
-            self.print(
-                f"Failed to apply {target_voltage:.3f} V to module "
-                f"{module} CH{channel_id}: {exc}",
-                flag=PRINT.ERROR,
-            )
-            return
+            try:
+                with self._controller_lock_section("Waiting to send AMPR setpoints.", log_timeout=False):
+                    with self._setpoint_lock:
+                        if not self._pending_setpoints or self.transitioning or self.ramping:
+                            continue
+                        key = next(iter(self._pending_setpoints))
+                        request = self._pending_setpoints.pop(key)
+                    if request.cancel.is_set() or request.device is not self.device or not self.initialized:
+                        self._publish_setpoint(request, "stored", "Not sent; communication was stopped.")
+                        continue
+                    if self.main_state != "ST_ON":
+                        self._publish_setpoint(request, "error", "Not sent; AMPR is not in ST_ON.")
+                        continue
+                    # A native timeout is an I/O failure, NOT lock contention:
+                    # do not retry it or mistake it for an unsent command.
+                    try:
+                        status = request.device.set_module_voltage(*key, request.target)
+                        if status != request.device.NO_ERR:
+                            raise RuntimeError(f"AMPR rejected the command: {self._format_status(status, request.device)}")
+                    except Exception as exc:  # noqa: BLE001
+                        self._publish_setpoint(request, "error", str(exc))
+                        if _transport_failure_is_fatal(exc):
+                            self._handle_transport_loss()
+                    else:
+                        self._publish_setpoint(request, "sent", "Sent; awaiting the hardware setpoint readback.")
+            except TimeoutError:
+                # Retain every channel's latest request until the poll/ramp
+                # releases the lock. Never access widgets from this worker.
+                continue
+            except Exception as exc:  # noqa: BLE001
+                with self._setpoint_lock:
+                    failed = [item for item in self._latest_setpoints.values()
+                              if item.state in {"pending", "sent"}]
+                    self._pending_setpoints.clear()
+                    self._setpoint_thread = None
+                for item in failed:
+                    self._publish_setpoint(item, "error", f"Setpoint worker failed: {exc}")
+                return
 
-        if status != device.NO_ERR:
-            self.errorCount += 1
-            self.print(
-                f"AMPR rejected {target_voltage:.3f} V for module "
-                f"{module} CH{channel_id}: {self._format_status(status, device=device)}",
-                flag=PRINT.ERROR,
-            )
+    def _publish_setpoint(self, request: _AMPRSetpoint, state: str, detail: str) -> None:
+        with self._setpoint_lock:
+            if (self._latest_setpoints.get(request.key) is not request
+                    or (request.cancel.is_set() and state not in {"stored", "error"})):
+                return
+            changed = request.state != state
+            if not changed and request.detail == detail:
+                return
+            request.state, request.detail = state, detail
+        if changed and state in {"error", "mismatch"}:
+            self.print(f"AMPR module {request.key[0]} CH{request.key[1]}, requested {request.target:.3f} V: {detail}", flag=PRINT.ERROR)
+
+        def update_gui() -> None:
+            with self._setpoint_lock:
+                if (self._latest_setpoints.get(request.key) is not request
+                        or request.state != state or request.detail != detail
+                        or (request.cancel.is_set() and state not in {"stored", "error"})):
+                    return
+            if changed and state == "error":
+                self.errorCount += 1
+            channel = request.channel
+            channel.lastAppliedValue = request.value if state == "confirmed" else np.nan
+            feedback = getattr(channel, "_setpoint_feedback", None)
+            if callable(feedback):
+                feedback(state, request.target, detail)
+
+        _invoke_gui_callback(update_gui)
+
+    def _confirm_setpoints(self, module: int, voltages: dict, device: Any) -> None:
+        if not hasattr(self, "_setpoint_lock"):
+            return
+        with self._setpoint_lock:
+            requests = [request for key, request in self._latest_setpoints.items()
+                        if key[0] == module and request.device is device
+                        and not request.cancel.is_set()
+                        and request.state in {"sent", "confirmed", "mismatch"}]
+        for request in requests:
+            actual = _coerce_float(voltages.get(request.key[1], {}).get("setpoint"), np.nan)
+            if not np.isfinite(actual):
+                self._publish_setpoint(request, "sent", "Hardware setpoint readback unavailable; not confirmed.")
+            elif round(actual, request.decimals) == round(request.target, request.decimals):
+                # This is display precision, not an electrical output tolerance.
+                self._publish_setpoint(request, "confirmed", f"Hardware setpoint: {actual:.3f} V. Measured voltage is shown in Monitor.")
+            else:
+                self._publish_setpoint(request, "mismatch", f"Hardware setpoint is {actual:.3f} V, not the requested value.")
+
+    def _cancel_setpoints(self) -> None:
+        if not hasattr(self, "_setpoint_lock"):
+            return
+        with self._setpoint_lock:
+            self._setpoint_cancel.set()
+            self._pending_setpoints.clear()
+            requests = list(self._latest_setpoints.values())
+        for request in requests:
+            if request.state not in {"error", "mismatch"}:
+                self._publish_setpoint(request, "stored", "Request cancelled by OFF/disconnection; not confirmed.")
 
     def updateValues(self) -> None:
         if self.values is None:
@@ -2176,6 +2344,7 @@ class AMPRController(DeviceController):
             self.print("AMPR PSU turned ON. State: ST_ON.")
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        self._cancel_setpoints()
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
@@ -2206,6 +2375,7 @@ class AMPRController(DeviceController):
 
     def shutdownCommunication(self) -> bool:
         """Run the AMPR shutdown sequence before releasing communication resources."""
+        self._cancel_setpoints()
         device = self.device
         if device is None:
             self.closeCommunication()
@@ -2510,6 +2680,7 @@ class AMPRController(DeviceController):
     def _dispose_device(self) -> None:
         import gc
 
+        self._cancel_setpoints()
         device = self.device
         self.device = None
         self.initialized = False
@@ -2652,6 +2823,12 @@ class AMPRController(DeviceController):
                 return False
             self.transitioning = True
             self.transition_target_on = bool(target_on)
+            if not target_on:
+                self._cancel_setpoints()
+            elif hasattr(self, "_setpoint_lock"):
+                with self._setpoint_lock:
+                    if self._setpoint_cancel.is_set():
+                        self._setpoint_cancel = Event()
             return True
 
     def _end_transition(self) -> None:
@@ -2659,6 +2836,7 @@ class AMPRController(DeviceController):
         with self._transition_guard():
             self.transitioning = False
             self.transition_target_on = None
+        self._start_setpoint_worker()
 
     def _channel_target_voltages(
         self,

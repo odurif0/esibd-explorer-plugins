@@ -56,6 +56,9 @@ loads a config.
 
 ## Operator Panel
 
+Channel cards wrap to fit narrower panels. Scrollbars keep all controls
+accessible when space is limited; the mouse wheel does not edit setpoints.
+
 Each PSU channel card exposes:
 
 - output ON/OFF readback

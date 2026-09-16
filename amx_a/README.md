@@ -45,9 +45,10 @@ Toolbar notes:
 
 ## Operator Panel
 
-The default view contains fixed cards for pulsers `P0` through `P3`. Each card
-separates the requested channel configuration from controller-register
-readbacks:
+The default view contains cards for pulsers `P0` through `P3`. Cards wrap to
+fit narrower panels, with scrollbars when needed; the mouse wheel does not
+edit pulse widths. Each card separates the requested channel configuration
+from controller-register readbacks:
 
 - `On when AMX active` stages whether the width is applied after the global AMX
   reaches its ON state; it is not an independent physical-output measurement

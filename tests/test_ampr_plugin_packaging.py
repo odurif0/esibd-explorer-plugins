@@ -86,6 +86,7 @@ def _install_esibd_stubs() -> None:
         PARAMETER_TYPE = "PARAMETER_TYPE"
 
     class Channel:
+        real = True
         COLLAPSE = "Collapse"
         NAME = "Name"
         ACTIVE = "Active"
@@ -859,7 +860,7 @@ def test_channel_keeps_display_checkbox_and_explicit_toggle_buttons():
     channel.loading = False
     channel.tree = FakeTree()
     channel.useDisplays = True
-    channel.getParameterByName = lambda name: parameters[name]
+    channel.getParameterByName = parameters.get
 
     module.AMPRChannel.initGUI(channel, {"Name": "dummy"})
 

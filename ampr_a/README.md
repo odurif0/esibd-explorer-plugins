@@ -39,6 +39,16 @@ Each real channel must be configured with:
 The plugin reads measured voltages as channel monitors and applies channel
 setpoints through the AMPR driver.
 
+Validate a voltage edit with Enter, Tab, or a click outside the cell. Typing
+does not send intermediate digits. Communication runs in the background;
+only the latest unsent value per channel is kept. OFF/disconnection cancels
+pending commands.
+
+An orange voltage cell means pending or awaiting hardware readback. Red means
+an error or a different setpoint readback; the tooltip gives details. Revalidate
+the value to retry. The cell returns to normal after matching the readback at
+the displayed precision. `Monitor` remains the measured output voltage.
+
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `ampr_a/` directory

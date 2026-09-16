@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import logging
 import sys
+import time
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any, cast
@@ -21,9 +22,10 @@ from esibd.core import (
     DeviceController,
     Parameter,
     ToolButton,
+    getTestMode,
     parameterDict,
 )
-from esibd.plugins import Device, Plugin
+from esibd.plugins import Device, LiveDisplay, Plugin
 
 try:
     from esibd.core import LabviewDoubleSpinBox
@@ -674,8 +676,141 @@ def providePlugins() -> "list[type[Plugin]]":
     return [DMMRDevice]
 
 
+class _DMMRLiveDisplay(LiveDisplay):
+    """Keep a constant picoamp signal visible without changing stored amperes."""
+
+    def plotGroup(self, livePlotWidget, timeAxes, channels, apply) -> None:
+        from pyqtgraph import ViewBox
+
+        super().plotGroup(livePlotWidget, timeAxes, channels, apply)
+        view_box = livePlotWidget if isinstance(livePlotWidget, ViewBox) else livePlotWidget.getViewBox()
+        if view_box is None or not view_box.autoRangeEnabled()[1]:
+            return  # Preserve the user's manual Y zoom.
+        if any(channel.plotCurve is not None and channel.plotCurve.opts["logMode"][1]
+               for channel in channels):
+            return  # A logarithmic view is in decades, not amperes.
+        bounds = view_box.childrenBounds()[1]
+        if bounds is None or not np.all(np.isfinite(bounds)) or bounds[0] != bounds[1]:
+            return  # Ordinary auto-ranging handles varying data and multiple levels.
+
+        current = float(bounds[0])
+        # With min == max, pyqtgraph preserves the previous Y span (initially
+        # one ampere). Use the signal's order of magnitude instead. For an
+        # exact zero, +/-1 pA is only a display window, not an offset tolerance.
+        half_span = 10.0 ** np.floor(np.log10(abs(current))) if current else 1e-12
+        view_box.setRange(
+            yRange=(current - half_span, current + half_span),
+            padding=0,
+            disableAutoRange=False,
+        )
+
+
+def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
+    """Keep the usual card grid, wrapping to fewer columns in a narrow dock."""
+    from PyQt6.QtCore import QRect, QSize
+    from PyQt6.QtWidgets import QLayout
+
+    class CardGrid(QLayout):
+        def __init__(self) -> None:
+            super().__init__(parent)
+            self._items = []
+            self.setContentsMargins(0, 0, 0, 0)
+            self.setSpacing(spacing)
+
+        def addItem(self, item) -> None:
+            self._items.append(item)
+            self.invalidate()
+
+        def count(self) -> int:
+            return len(self._items)
+
+        def itemAt(self, index):
+            return self._items[index] if 0 <= index < self.count() else None
+
+        def takeAt(self, index):
+            if 0 <= index < self.count():
+                item = self._items.pop(index)
+                self.invalidate()
+                return item
+            return None
+
+        def minimumSize(self):
+            size = QSize(0, 0)
+            for item in self._items:
+                size = size.expandedTo(item.minimumSize())
+            return size
+
+        def sizeHint(self):
+            columns = min(max_columns, self.count())
+            if not columns:
+                return QSize(0, 0)
+            width = max(item.sizeHint().width() for item in self._items)
+            width = columns * width + (columns - 1) * self.spacing()
+            return QSize(width, self.heightForWidth(width))
+
+        def hasHeightForWidth(self) -> bool:
+            return True
+
+        def heightForWidth(self, width: int) -> int:
+            return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+        def setGeometry(self, rect) -> None:
+            super().setGeometry(rect)
+            self._arrange(rect, apply=True)
+
+        def _arrange(self, rect, *, apply: bool) -> int:
+            if not self._items:
+                return 0
+            gap = self.spacing()
+            minimum = max(1, self.minimumSize().width())
+            columns = min(max_columns, self.count(), max(1, (rect.width() + gap) // (minimum + gap)))
+            width = max(minimum, (rect.width() - (columns - 1) * gap) // columns)
+            width = min(width, max(item.maximumSize().width() for item in self._items))
+            left = rect.x() + max(0, (rect.width() - columns * width - (columns - 1) * gap) // 2)
+            y = rect.y()
+            for start in range(0, self.count(), columns):
+                row = self._items[start:start + columns]
+                heights = [
+                    max(item.minimumSize().height(),
+                        item.heightForWidth(width) if item.hasHeightForWidth() else item.sizeHint().height())
+                    for item in row
+                ]
+                if apply:
+                    for column, (item, height) in enumerate(zip(row, heights)):
+                        item.setGeometry(QRect(left + column * (width + gap), y, width, height))
+                y += max(heights) + gap
+            return y - rect.y() - gap
+
+    return CardGrid()
+
+
+def _scrollable_panel(panel: Any) -> Any:
+    """Do not propagate the content's minimum size to Explorer's dock area."""
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFrame, QScrollArea
+
+    class PanelScrollArea(QScrollArea):
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Type.Wheel and isinstance(watched, (QAbstractSpinBox, QComboBox)):
+                # Scrolling the panel must never edit an output setpoint/range,
+                # even when the editor has focus. Keep arrows/keyboard available.
+                QApplication.sendEvent(self.viewport(), event)
+                return True
+            return super().eventFilter(watched, event)
+
+    scroll = PanelScrollArea()
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(panel)
+    for editor in panel.findChildren(QAbstractSpinBox) + panel.findChildren(QComboBox):
+        editor.installEventFilter(scroll)
+    return scroll
+
+
 class DMMRDevice(Device):
     """Read DMMR module currents and expose live current monitors."""
+
+    LiveDisplay = _DMMRLiveDisplay
 
     documentation = (
         "Reads DMMR module currents and exposes live picoammeter measurements."
@@ -953,6 +1088,25 @@ class DMMRDevice(Device):
             display_changed()
         self._update_channel_panel()
 
+    def _channel_panel_color_clicked(self, module: int) -> None:
+        """Edit the existing channel Color parameter and persist the choice."""
+        from PyQt6.QtGui import QColor
+        from PyQt6.QtWidgets import QColorDialog
+
+        channel = self._channel_by_module(module)
+        if channel is None:
+            return
+        color = QColorDialog.getColor(
+            QColor(channel.color), self.channelPanel, f"Plot color — Module {module}"
+        )
+        # The dialog runs an event loop: a hardware rescan may replace channels.
+        channel = self._channel_by_module(module)
+        if channel is None or not color.isValid() or color.name() == channel.color:
+            return
+        channel.color = color.name()  # The normal Parameter event refreshes the plot.
+        self._update_channel_panel()
+        self.exportConfiguration(useDefaultFile=True)
+
     def _channel_panel_read_toggled(self, module: int, checked: bool) -> None:
         channel = self._channel_by_module(module)
         if channel is None:
@@ -1012,6 +1166,7 @@ class DMMRDevice(Device):
             "read_enabled": channel is not None,
             "display_checked": self._channel_display_checked(channel),
             "display_enabled": channel is not None,
+            "color": getattr(channel, "color", "#e8e8e8"),
         }
 
     def _rebuild_channel_panel_cards(self) -> None:
@@ -1035,11 +1190,11 @@ class DMMRDevice(Device):
         if not channels:
             empty_label = QLabel("No detected modules yet.")
             empty_label.setStyleSheet(_DMMR_PANEL_EMPTY_STYLE)
-            grid.addWidget(empty_label, 0, 0)
+            grid.addWidget(empty_label)
             self.channelPanelSignature = ()
             return
 
-        for index, channel in enumerate(channels):
+        for channel in channels:
             module = channel.module_address()
             card = QFrame()
             card.setSizePolicy(
@@ -1086,6 +1241,7 @@ class DMMRDevice(Device):
                 )
             )
             display_box = QCheckBox("Display")
+            display_box.setStyleSheet("QCheckBox { color: #f7fafc; }")
             display_box.toggled.connect(
                 lambda checked, module=module: self._channel_panel_display_toggled(
                     module,
@@ -1095,11 +1251,17 @@ class DMMRDevice(Device):
             controls_layout.addWidget(read_button)
             controls_layout.addStretch(1)
             controls_layout.addWidget(display_box)
+            color_button = QPushButton()
+            color_button.setFixedSize(22, 22)
+            color_button.setToolTip("Choose plot color for this module.")
+            color_button.setAccessibleName(f"Plot color for module {module}")
+            color_button.clicked.connect(
+                lambda checked=False, module=module: self._channel_panel_color_clicked(module)
+            )
+            controls_layout.addWidget(color_button)
             card_layout.addLayout(controls_layout)
 
-            row = index // _DMMR_PANEL_GRID_COLUMNS
-            column = index % _DMMR_PANEL_GRID_COLUMNS
-            grid.addWidget(card, row, column)
+            grid.addWidget(card)
             self.channelPanelCards[module] = {
                 "card": card,
                 "title": title_label,
@@ -1107,6 +1269,7 @@ class DMMRDevice(Device):
                 "current_value": current_value,
                 "read_button": read_button,
                 "display_box": display_box,
+                "color_button": color_button,
             }
 
         self.channelPanelSignature = tuple(
@@ -1118,39 +1281,24 @@ class DMMRDevice(Device):
         self._hide_channel_table()
         self._hide_channel_table_actions()
         if not hasattr(self, "channelPanel"):
-            from PyQt6.QtWidgets import (
-                QGridLayout,
-                QHBoxLayout,
-                QVBoxLayout,
-                QWidget,
-            )
+            from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
             panel = QWidget()
             panel_layout = QVBoxLayout(panel)
             panel_layout.setContentsMargins(12, 12, 12, 12)
             panel_layout.setSpacing(12)
 
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(0)
-            row_layout.addStretch(1)
-
             host = QWidget()
-            grid = QGridLayout(host)
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(12)
-            grid.setVerticalSpacing(12)
-            row_layout.addWidget(host)
-            row_layout.addStretch(1)
-            panel_layout.addWidget(row)
+            grid = _create_card_grid(host, _DMMR_PANEL_GRID_COLUMNS)
+            panel_layout.addWidget(host)
+            panel_layout.addStretch(1)
 
             self.channelPanel = panel
             self.channelPanelHost = host
             self.channelPanelGrid = grid
             self.channelPanelCards = {}
             self.channelPanelSignature = None
-            self.addContentWidget(panel)
+            self.addContentWidget(_scrollable_panel(panel))
 
         signature = tuple(channel.module_address() for channel in self._panel_channels())
         if getattr(self, "channelPanelSignature", None) != signature:
@@ -1324,6 +1472,13 @@ class DMMRDevice(Device):
                 checked=bool(snapshot["display_checked"]),
                 enabled=bool(snapshot["display_enabled"]),
             )
+            color_button = widgets.get("color_button")
+            if color_button is not None:
+                color_button.setEnabled(bool(snapshot["display_enabled"]))
+                color_button.setStyleSheet(
+                    f"QPushButton {{ background-color: {snapshot['color']};"
+                    " border: 1px solid #64748b; border-radius: 3px; padding: 0px; }"
+                )
 
     def _set_channel_headers_from_template(self) -> None:
         """Apply channel headers even when no concrete channel exists yet."""
@@ -2349,13 +2504,34 @@ class DMMRController(DeviceController):
             if self._begin_transition(True):
                 self.toggleOnFromThread(parallel=True)
 
-    def readNumbers(self) -> None:
+    def runAcquisition(self) -> None:
+        """Own the polling lock once, as in the AMPR/AMX acquisition loops."""
+        while self.acquiring:
+            try:
+                with self._controller_lock_section(
+                    "Could not acquire lock to acquire DMMR data.",
+                    log_timeout=False,
+                ):
+                    if not self.acquiring:
+                        break
+                    if getTestMode():
+                        self.fakeNumbers()
+                    else:
+                        self.readNumbers(already_acquired=True)
+            except TimeoutError:
+                # A busy controller is not a hardware fault, but the previous
+                # sample must not be recorded again as a fresh measurement.
+                self.initializeValues(reset=True)
+            self.signalComm.updateValuesSignal.emit()
+            time.sleep(self.controllerParent.interval / 1000)
+
+    def readNumbers(self, *, already_acquired: bool = False) -> None:
         # A new sample starts unknown: only a successful read may populate it.
         self.initializeValues(reset=True)
         if self.device is None or not getattr(self, "initialized", False):
             return
 
-        self._update_state()
+        self._update_state(already_acquired=already_acquired)
         # If _update_state detected an unusable device it will have set
         # acquiring=False and emitted closeCommunicationSignal.  Bail out
         # immediately to avoid a cascade of redundant module-read errors.
@@ -2369,11 +2545,14 @@ class DMMRController(DeviceController):
         poll_modules = self._measurement_modules()
 
         for module in poll_modules:
+            if not self.acquiring or self.device is None:
+                return
             status = None
             measured_current = np.nan
             try:
                 with self._controller_lock_section(
                     f"Could not acquire lock to read DMMR module {module}.",
+                    already_acquired=already_acquired,
                 ):
                     device = self.device
                     if device is None:
@@ -2405,6 +2584,7 @@ class DMMRController(DeviceController):
                 try:
                     with self._controller_lock_section(
                         "Could not acquire lock to recover DMMR polling mode.",
+                        already_acquired=already_acquired,
                     ):
                         device = self.device
                         if device is None:
@@ -2501,6 +2681,12 @@ class DMMRController(DeviceController):
                     # set_enable(True) succeeded: a later step failing must not
                     # leave acquisition enabled with the button forced OFF.
                     enable_completed = True
+                    # Stop unsolicited current frames before configuring module
+                    # ranges, not only after all those command/reply exchanges.
+                    self._disable_automatic_current_for_module_polling(
+                        timeout_s=float(self.controllerParent.connect_timeout_s),
+                        device=device,
+                    )
                     set_module_auto_range = getattr(device, "set_module_auto_range", None)
                     if callable(set_module_auto_range):
                         for module in measurement_modules:
@@ -2514,10 +2700,6 @@ class DMMRController(DeviceController):
                                     f"set_module_auto_range({module}, True) failed: "
                                     f"{self._format_status(auto_range_status, device=device)}"
                                 )
-                    self._disable_automatic_current_for_module_polling(
-                        timeout_s=float(self.controllerParent.connect_timeout_s),
-                        device=device,
-                    )
                 self._update_state()
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
@@ -2664,14 +2846,15 @@ class DMMRController(DeviceController):
             )
         return shutdown_confirmed
 
-    def _update_state(self) -> None:
+    def _update_state(self, *, already_acquired: bool = False) -> None:
         if self.device is None:
             return  # Preserve the last shutdown/transport-loss diagnosis.
 
         timeout_s = float(self.controllerParent.poll_timeout_s)
         try:
             with self._controller_lock_section(
-                "Could not acquire lock to refresh the DMMR state."
+                "Could not acquire lock to refresh the DMMR state.",
+                already_acquired=already_acquired,
             ):
                 device = self.device
                 if device is None:
@@ -2982,20 +3165,8 @@ class DMMRController(DeviceController):
             lock = Lock()
             self.lock = lock
 
-        acquire_timeout = getattr(lock, "acquire_timeout", None)
-        if callable(acquire_timeout):
-            with acquire_timeout(
-                float(timeout_s),
-                timeoutMessage=timeout_message if log_timeout else "",
-                already_acquired=already_acquired,
-            ) as lock_acquired:
-                if not lock_acquired:
-                    if log_timeout:
-                        self.print(timeout_message, flag=PRINT.ERROR)
-                    raise TimeoutError(timeout_message)
-                yield
-            return
-
+        # Explorer's acquire_timeout() can swallow hardware exceptions (or
+        # retain the lock in verbose mode). Prefer its raw lock API, as AMPR does.
         acquire = getattr(lock, "acquire", None)
         release = getattr(lock, "release", None)
         if callable(acquire) and callable(release):
@@ -3010,6 +3181,20 @@ class DMMRController(DeviceController):
                 yield
             finally:
                 release()
+            return
+
+        acquire_timeout = getattr(lock, "acquire_timeout", None)
+        if callable(acquire_timeout):
+            with acquire_timeout(
+                float(timeout_s),
+                timeoutMessage=timeout_message if log_timeout else "",
+                already_acquired=already_acquired,
+            ) as lock_acquired:
+                if not lock_acquired:
+                    if log_timeout:
+                        self.print(timeout_message, flag=PRINT.ERROR)
+                    raise TimeoutError(timeout_message)
+                yield
             return
 
         raise TypeError(

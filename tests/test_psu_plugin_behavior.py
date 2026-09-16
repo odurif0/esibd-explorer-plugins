@@ -777,7 +777,7 @@ def test_channel_panel_diagnostics_snapshot_formats_compact_summary():
     assert "CH1 rails: 24Vp 24 V, 12Vp 12.1 V" in snapshot["tooltip"]
 
 
-def test_channel_panel_widths_are_fixed_and_diagnostics_span_both_channels():
+def test_channel_cards_keep_their_width_and_diagnostics_can_shrink():
     module = _load_module()
     source = PLUGIN_PATH.read_text(encoding="utf-8")
 
@@ -786,7 +786,7 @@ def test_channel_panel_widths_are_fixed_and_diagnostics_span_both_channels():
         2 * module._PSU_PANEL_CARD_WIDTH + module._PSU_PANEL_CARD_SPACING
     )
     assert "card.setFixedWidth(_PSU_PANEL_CARD_WIDTH)" in source
-    assert "diag_frame.setFixedWidth(_PSU_PANEL_DIAGNOSTICS_WIDTH)" in source
+    assert "diag_frame.setMaximumWidth(_PSU_PANEL_DIAGNOSTICS_WIDTH)" in source
     assert "cards_layout.addWidget(diag_frame)" not in source
     assert "diagnostics_layout.addWidget(diag_frame)" in source
 

@@ -101,6 +101,9 @@ Heating is blocked when the temperature readback is missing, non-finite, below
 0 degC, or above the hardware maximum. A disconnected sensor can report a high
 out-of-range value even while heater power is zero.
 
+The HV cards wrap to fit narrower panels. Scrollbars keep all controls
+accessible when space is limited; the mouse wheel does not edit setpoints.
+
 ## Voltage Safety
 
 The HVPS-3kB software target range is 0 to 3000 V. Each module has one shared

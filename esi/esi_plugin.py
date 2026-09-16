@@ -226,6 +226,108 @@ def providePlugins() -> "list[type[Plugin]]":
     return [ESIDevice]
 
 
+def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
+    """Keep the usual card grid, wrapping to fewer columns in a narrow dock."""
+    from PyQt6.QtCore import QRect, QSize
+    from PyQt6.QtWidgets import QLayout
+
+    class CardGrid(QLayout):
+        def __init__(self) -> None:
+            super().__init__(parent)
+            self._items = []
+            self.setContentsMargins(0, 0, 0, 0)
+            self.setSpacing(spacing)
+
+        def addItem(self, item) -> None:
+            self._items.append(item)
+            self.invalidate()
+
+        def count(self) -> int:
+            return len(self._items)
+
+        def itemAt(self, index):
+            return self._items[index] if 0 <= index < self.count() else None
+
+        def takeAt(self, index):
+            if 0 <= index < self.count():
+                item = self._items.pop(index)
+                self.invalidate()
+                return item
+            return None
+
+        def minimumSize(self):
+            size = QSize(0, 0)
+            for item in self._items:
+                size = size.expandedTo(item.minimumSize())
+            return size
+
+        def sizeHint(self):
+            columns = min(max_columns, self.count())
+            if not columns:
+                return QSize(0, 0)
+            width = max(item.sizeHint().width() for item in self._items)
+            width = columns * width + (columns - 1) * self.spacing()
+            return QSize(width, self.heightForWidth(width))
+
+        def hasHeightForWidth(self) -> bool:
+            return True
+
+        def heightForWidth(self, width: int) -> int:
+            return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+        def setGeometry(self, rect) -> None:
+            super().setGeometry(rect)
+            self._arrange(rect, apply=True)
+
+        def _arrange(self, rect, *, apply: bool) -> int:
+            if not self._items:
+                return 0
+            gap = self.spacing()
+            minimum = max(1, self.minimumSize().width())
+            columns = min(max_columns, self.count(), max(1, (rect.width() + gap) // (minimum + gap)))
+            width = max(minimum, (rect.width() - (columns - 1) * gap) // columns)
+            width = min(width, max(item.maximumSize().width() for item in self._items))
+            left = rect.x() + max(0, (rect.width() - columns * width - (columns - 1) * gap) // 2)
+            y = rect.y()
+            for start in range(0, self.count(), columns):
+                row = self._items[start:start + columns]
+                heights = [
+                    max(item.minimumSize().height(),
+                        item.heightForWidth(width) if item.hasHeightForWidth() else item.sizeHint().height())
+                    for item in row
+                ]
+                if apply:
+                    for column, (item, height) in enumerate(zip(row, heights)):
+                        item.setGeometry(QRect(left + column * (width + gap), y, width, height))
+                y += max(heights) + gap
+            return y - rect.y() - gap
+
+    return CardGrid()
+
+
+def _scrollable_panel(panel: Any) -> Any:
+    """Do not propagate the content's minimum size to Explorer's dock area."""
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFrame, QScrollArea
+
+    class PanelScrollArea(QScrollArea):
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Type.Wheel and isinstance(watched, (QAbstractSpinBox, QComboBox)):
+                # Scrolling the panel must never edit an output setpoint/range,
+                # even when the editor has focus. Keep arrows/keyboard available.
+                QApplication.sendEvent(self.viewport(), event)
+                return True
+            return super().eventFilter(watched, event)
+
+    scroll = PanelScrollArea()
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(panel)
+    for editor in panel.findChildren(QAbstractSpinBox) + panel.findChildren(QComboBox):
+        editor.installEventFilter(scroll)
+    return scroll
+
+
 class ESIDevice(Device):
     """Electrospray HV and HEAT-CTRL-2410 controller."""
 
@@ -515,12 +617,9 @@ class ESIDevice(Device):
         layout.setSpacing(12)
 
         cards_row = QWidget()
-        cards_layout = QHBoxLayout(cards_row)
-        cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(_ESI_CARD_SPACING)
+        cards_layout = _create_card_grid(cards_row, 2, _ESI_CARD_SPACING)
 
         self.esiHVCards: dict[int, dict[str, Any]] = {}
-        cards_layout.addStretch(1)
         for module_number, address in ((1, 1), (2, 2)):
             card = QFrame()
             card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -643,12 +742,11 @@ class ESIDevice(Device):
             sel_group.idClicked.connect(
                 lambda gid, addr=address: self._panel_output_selected(addr, gid)
             )
-        cards_layout.addStretch(1)
         layout.addWidget(cards_row)
 
         heat_card = QFrame()
-        heat_card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        heat_card.setFixedWidth(_ESI_HEAT_CARD_WIDTH)
+        heat_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        heat_card.setMaximumWidth(_ESI_HEAT_CARD_WIDTH)
         heat_card.setStyleSheet(_ESI_PANEL_CARD_OFF)
         heat_cl = QVBoxLayout(heat_card)
         heat_cl.setContentsMargins(12, 12, 12, 12)
@@ -691,9 +789,7 @@ class ESIDevice(Device):
         heat_row = QWidget()
         heat_layout = QHBoxLayout(heat_row)
         heat_layout.setContentsMargins(0, 0, 0, 0)
-        heat_layout.addStretch(1)
         heat_layout.addWidget(heat_card)
-        heat_layout.addStretch(1)
         layout.addWidget(heat_row)
 
         self.esiPanel = panel
@@ -709,7 +805,8 @@ class ESIDevice(Device):
 
         if self.tree is not None:
             self.tree.setVisible(False)
-        self.addContentWidget(panel)
+        layout.addStretch(1)
+        self.addContentWidget(_scrollable_panel(panel))
         self._update_operator_panel()
 
     def _panel_target_changed(self, address: int, value: float) -> None:

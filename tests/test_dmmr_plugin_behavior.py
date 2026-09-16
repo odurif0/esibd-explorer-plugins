@@ -127,7 +127,9 @@ def _install_esibd_stubs() -> None:
     core.ToolButton = ToolButton
     core.LabviewDoubleSpinBox = LabviewDoubleSpinBox
     core.parameterDict = parameterDict
+    core.getTestMode = lambda: False
     plugins.Device = Device
+    plugins.LiveDisplay = type("LiveDisplay", (), {})
     plugins.Plugin = Plugin
 
     sys.modules["esibd"] = esibd
@@ -528,9 +530,9 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
 
     assert calls == [
         ("set_enable", True, 7.0),
+        ("set_automatic_current", False, 7.0),
         ("set_module_auto_range", 1, True, 7.0),
         ("set_module_auto_range", 3, True, 7.0),
-        ("set_automatic_current", False, 7.0),
     ]
     assert controller.acquiring is True
 

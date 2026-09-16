@@ -40,6 +40,14 @@ The plugin auto-discovers installed modules, creates one channel per detected
 module, reads live current measurements as channel monitors, and exposes a
 global ON/OFF control that enables or disables DMMR acquisition.
 
+Use `Display` to show or hide a module's time trace. The color square next to
+it opens the color picker; the choice is saved in the channel configuration.
+Automatic Y scaling also handles constant picoamp signals without changing
+manual zoom. Measurements and recordings remain in amperes.
+
+Module cards wrap to fit narrower panels. Scrollbars keep all controls
+accessible when space is limited.
+
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `dmmr/` directory
