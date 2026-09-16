@@ -4,17 +4,62 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import queue
 import sys
 import threading
 import time
 import warnings
 import weakref
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
 from ._controller_process import ControllerProcessProxy
+
+try:
+    from logging.handlers import RotatingFileHandler
+except ModuleNotFoundError as exc:
+    if exc.name != "logging.handlers":
+        raise
+
+    class RotatingFileHandler(logging.FileHandler):
+        """Size-based rotation for frozen hosts that omit logging.handlers."""
+
+        def __init__(self, filename, *, maxBytes, backupCount, encoding):
+            super().__init__(filename, mode="a", encoding=encoding)
+            self.maxBytes = maxBytes
+            self.backupCount = backupCount
+
+        def emit(self, record):
+            # Handler.handle() holds the logging lock during writes/rotation.
+            try:
+                if self.stream is None:
+                    self.stream = self._open()
+                if self.maxBytes > 0 and self.backupCount > 0:
+                    self.stream.seek(0, os.SEEK_END)
+                    size = self.stream.tell()
+                    message = self.format(record) + self.terminator
+                    encoded = message.replace("\n", os.linesep).encode(
+                        self.stream.encoding, self.stream.errors
+                    )
+                    if size > 0 and size + len(encoded) >= self.maxBytes:
+                        # Close before renaming: Windows forbids renaming an
+                        # open log file. Replace backups from oldest to newest.
+                        self.stream.close()
+                        self.stream = None
+                        for index in range(self.backupCount, 0, -1):
+                            source = Path(
+                                self.baseFilename if index == 1
+                                else f"{self.baseFilename}.{index - 1}"
+                            )
+                            if source.exists():
+                                source.replace(f"{self.baseFilename}.{index}")
+                        self.stream = self._open()
+                super().emit(record)
+            except Exception:
+                # A logging/rotation error must not interrupt device control.
+                self.handleError(record)
+
 
 RUNTIME_IS_WINDOWS = sys.platform.startswith("win")
 
