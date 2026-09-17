@@ -49,6 +49,7 @@ _PARAMETER_ADVANCED_KEY = getattr(Parameter, "ADVANCED", "Advanced")
 _PARAMETER_TOOLTIP_KEY = getattr(Parameter, "TOOLTIP", "Tooltip")
 _PARAMETER_EVENT_KEY = getattr(Parameter, "EVENT", "Event")
 _DMMR_MODULE_KEY = "Module"
+_DMMR_INITIAL_HISTORY_POINTS = 100_000
 _DMMR_MIN_ROW_HEIGHT = 28
 _DMMR_COMMUNICATION_LOST_STATE = "Communication lost"
 _DMMR_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
@@ -71,7 +72,7 @@ _DMMR_TOGGLE_BUTTON_STYLE = (
     "QToolButton:checked { background-color: #1f2933; color: #ffffff; }"
 )
 _DMMR_PANEL_CARD_ACTIVE_STYLE = (
-    "QFrame {"
+    "QFrame#dmmrModuleCard {"
     " background-color: #162433;"
     " border: 1px solid #3182ce;"
     " border-radius: 8px;"
@@ -79,7 +80,7 @@ _DMMR_PANEL_CARD_ACTIVE_STYLE = (
     "}"
 )
 _DMMR_PANEL_CARD_MUTED_STYLE = (
-    "QFrame {"
+    "QFrame#dmmrModuleCard {"
     " background-color: #202938;"
     " border: 1px solid #64748b;"
     " border-radius: 8px;"
@@ -87,48 +88,28 @@ _DMMR_PANEL_CARD_MUTED_STYLE = (
     "}"
 )
 _DMMR_PANEL_CARD_DISCONNECTED_STYLE = (
-    "QFrame {"
+    "QFrame#dmmrModuleCard {"
     " background-color: #151b26;"
     " border: 1px solid #475569;"
     " border-radius: 8px;"
     " color: #e2e8f0;"
     "}"
 )
-_DMMR_PANEL_TITLE_STYLE = "color: #f8fafc; font-weight: 700; font-size: 14px;"
-_DMMR_PANEL_CURRENT_LABEL_STYLE = "color: #cbd5e1; font-weight: 600;"
-_DMMR_PANEL_CURRENT_VALUE_STYLE = "color: #f8fafc; font-weight: 700; font-size: 18px;"
-_DMMR_PANEL_BADGE_READ_STYLE = (
-    "background-color: #1f2933; color: #ffffff; margin:0px; padding:0px 6px;"
+_DMMR_PANEL_TITLE_STYLE = "color: #cbd5e1; font-weight: 600; font-size: 12px;"
+_DMMR_PANEL_LABEL_STYLE = (
+    "QLineEdit { color: #f8fafc; background: transparent; font-size: 13px;"
+    " border: none; border-bottom: 1px solid transparent; padding: 2px 0px; }"
+    "QLineEdit:hover { border-bottom-color: #475569; }"
+    "QLineEdit:focus { border-bottom-color: #63b3ed; }"
 )
-_DMMR_PANEL_BADGE_MUTED_STYLE = (
-    "background-color: #4a5568; color: #ffffff; margin:0px; padding:0px 6px;"
-)
-_DMMR_PANEL_BADGE_OFF_STYLE = (
-    "background-color: #718096; color: #ffffff; margin:0px; padding:0px 6px;"
-)
-_DMMR_PANEL_READ_BUTTON_STYLE = (
-    "QPushButton {"
-    " background-color: #334155;"
-    " color: #f8fafc;"
-    " border: 1px solid #475569;"
-    " border-radius: 6px;"
-    " padding: 4px 10px;"
-    "}"
-    "QPushButton:checked {"
-    " background-color: #0f172a;"
-    " color: #ffffff;"
-    " border: 1px solid #94a3b8;"
-    "}"
-    "QPushButton:disabled {"
-    " background-color: #1f2937;"
-    " color: #94a3b8;"
-    " border: 1px solid #374151;"
-    "}"
-)
+_DMMR_PANEL_LABEL_TOOLTIP = "Module label. Enter, Tab or click elsewhere to save; Escape to cancel."
+_DMMR_PANEL_CURRENT_VALUE_STYLE = "color: #f8fafc; font-weight: 600; font-size: 24px;"
+_DMMR_PANEL_BADGE_READ_STYLE = "color: #94a3b8; font-size: 11px;"
+_DMMR_PANEL_BADGE_MUTED_STYLE = "color: #a8b3c4; font-size: 11px;"
+_DMMR_PANEL_BADGE_OFF_STYLE = "color: #a8b3c4; font-size: 11px;"
 _DMMR_PANEL_EMPTY_STYLE = "color: #718096; font-style: italic; padding: 8px 0px;"
-_DMMR_PANEL_CARD_MIN_WIDTH = 220
-_DMMR_PANEL_CARD_MAX_WIDTH = 260
-_DMMR_PANEL_GRID_COLUMNS = 3
+_DMMR_PANEL_CARD_MIN_WIDTH = 180
+_DMMR_PANEL_CARD_MAX_WIDTH = 210
 
 
 def _is_nan(value: Any) -> bool:
@@ -705,8 +686,8 @@ class _DMMRLiveDisplay(LiveDisplay):
         )
 
 
-def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
-    """Keep the usual card grid, wrapping to fewer columns in a narrow dock."""
+def _create_card_grid(parent: Any, spacing: int = 10) -> Any:
+    """Use all available columns, and wrap without imposing a dock minimum."""
     from PyQt6.QtCore import QRect, QSize
     from PyQt6.QtWidgets import QLayout
 
@@ -741,7 +722,7 @@ def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
             return size
 
         def sizeHint(self):
-            columns = min(max_columns, self.count())
+            columns = min(3, self.count())  # Initial size hint, NOT a layout ceiling.
             if not columns:
                 return QSize(0, 0)
             width = max(item.sizeHint().width() for item in self._items)
@@ -763,7 +744,7 @@ def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
                 return 0
             gap = self.spacing()
             minimum = max(1, self.minimumSize().width())
-            columns = min(max_columns, self.count(), max(1, (rect.width() + gap) // (minimum + gap)))
+            columns = min(self.count(), max(1, (rect.width() + gap) // (minimum + gap)))
             width = max(minimum, (rect.width() - (columns - 1) * gap) // columns)
             width = min(width, max(item.maximumSize().width() for item in self._items))
             left = rect.x() + max(0, (rect.width() - columns * width - (columns - 1) * gap) // 2)
@@ -1107,6 +1088,30 @@ class DMMRDevice(Device):
         self._update_channel_panel()
         self.exportConfiguration(useDefaultFile=True)
 
+    def _channel_panel_label_edited(self, module: int, editor: Any) -> None:
+        """Save a human label without renaming the channel or its recorded data."""
+        channel = self._channel_by_module(module)
+        if channel is None or editor.channel is not channel:
+            return  # A configuration reload replaced the edited channel.
+        text = editor.text().strip()
+        previous = getattr(channel, "label", "")
+        if text != previous:
+            channel.label = text
+            try:
+                self.exportConfiguration(useDefaultFile=True)
+            except Exception as exc:
+                channel.label = previous
+                # Keep the draft for retry, even after focus leaves the field.
+                editor.setModified(True)
+                editor.setStyleSheet(_DMMR_PANEL_LABEL_STYLE + "QLineEdit, QLineEdit:focus, QLineEdit:hover { border-bottom-color: #f87171; }")
+                editor.setToolTip(f"Label not saved: {exc}. Press Enter to retry.")
+                self.print(f"Could not save Module {module} label: {exc}", flag=PRINT.ERROR)
+                return
+        editor.setText(text)
+        editor.setModified(False)
+        editor.setStyleSheet(_DMMR_PANEL_LABEL_STYLE)
+        editor.setToolTip(_DMMR_PANEL_LABEL_TOOLTIP)
+
     def _channel_panel_read_toggled(self, module: int, checked: bool) -> None:
         channel = self._channel_by_module(module)
         if channel is None:
@@ -1154,6 +1159,7 @@ class DMMRDevice(Device):
 
         return {
             "title": f"Module {module}",
+            "label": getattr(channel, "label", ""),
             "state_text": state_text,
             "state_style": _dmmr_panel_badge_style(state_text),
             "card_style": _dmmr_panel_card_style(
@@ -1174,15 +1180,31 @@ class DMMRDevice(Device):
         if grid is None:
             return
 
+        from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import (
             QCheckBox,
             QFrame,
             QHBoxLayout,
             QLabel,
+            QLineEdit,
             QPushButton,
             QSizePolicy,
             QVBoxLayout,
         )
+
+        device = self
+
+        class LabelEdit(QLineEdit):
+            def keyPressEvent(self, event):
+                if event.key() == Qt.Key.Key_Escape:
+                    channel = device._channel_by_module(self.module)
+                    self.setText(getattr(channel, "label", ""))
+                    self.setModified(False)
+                    self.setStyleSheet(_DMMR_PANEL_LABEL_STYLE)
+                    self.setToolTip(_DMMR_PANEL_LABEL_TOOLTIP)
+                    event.accept()
+                else:
+                    super().keyPressEvent(event)
 
         self._clear_channel_panel_layout(grid)
         self.channelPanelCards = {}
@@ -1197,6 +1219,7 @@ class DMMRDevice(Device):
         for channel in channels:
             module = channel.module_address()
             card = QFrame()
+            card.setObjectName("dmmrModuleCard")
             card.setSizePolicy(
                 QSizePolicy.Policy.Preferred,
                 QSizePolicy.Policy.Fixed,
@@ -1205,8 +1228,8 @@ class DMMRDevice(Device):
             card.setMaximumWidth(_DMMR_PANEL_CARD_MAX_WIDTH)
 
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(12, 12, 12, 12)
-            card_layout.setSpacing(8)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(4)
 
             header_layout = QHBoxLayout()
             header_layout.setContentsMargins(0, 0, 0, 0)
@@ -1220,20 +1243,30 @@ class DMMRDevice(Device):
             header_layout.addWidget(state_badge)
             card_layout.addLayout(header_layout)
 
-            current_name = QLabel("Current")
-            current_name.setStyleSheet(_DMMR_PANEL_CURRENT_LABEL_STYLE)
+            label_edit = LabelEdit()
+            label_edit.module = module
+            label_edit.channel = channel
+            label_edit.setText(getattr(channel, "label", ""))
+            label_edit.setPlaceholderText("Label")
+            label_edit.setAccessibleName(f"Label for module {module}")
+            label_edit.setToolTip(_DMMR_PANEL_LABEL_TOOLTIP)
+            label_edit.setStyleSheet(_DMMR_PANEL_LABEL_STYLE)
+            label_edit.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            label_edit.editingFinished.connect(
+                lambda module=module, editor=label_edit: self._channel_panel_label_edited(module, editor)
+            )
+            card_layout.addWidget(label_edit)
             current_value = QLabel("NaN")
+            current_value.setTextFormat(Qt.TextFormat.PlainText)
             current_value.setStyleSheet(_DMMR_PANEL_CURRENT_VALUE_STYLE)
-            card_layout.addWidget(current_name)
             card_layout.addWidget(current_value)
 
             controls_layout = QHBoxLayout()
             controls_layout.setContentsMargins(0, 0, 0, 0)
-            controls_layout.setSpacing(10)
+            controls_layout.setSpacing(8)
 
-            read_button = QPushButton("Read")
-            read_button.setCheckable(True)
-            read_button.setStyleSheet(_DMMR_PANEL_READ_BUTTON_STYLE)
+            read_button = QCheckBox("Read")
+            read_button.setStyleSheet("QCheckBox { color: #cbd5e1; font-size: 11px; }")
             read_button.clicked.connect(
                 lambda checked, module=module: self._channel_panel_read_toggled(
                     module,
@@ -1241,7 +1274,7 @@ class DMMRDevice(Device):
                 )
             )
             display_box = QCheckBox("Display")
-            display_box.setStyleSheet("QCheckBox { color: #f7fafc; }")
+            display_box.setStyleSheet("QCheckBox { color: #cbd5e1; font-size: 11px; }")
             display_box.toggled.connect(
                 lambda checked, module=module: self._channel_panel_display_toggled(
                     module,
@@ -1252,7 +1285,7 @@ class DMMRDevice(Device):
             controls_layout.addStretch(1)
             controls_layout.addWidget(display_box)
             color_button = QPushButton()
-            color_button.setFixedSize(22, 22)
+            color_button.setFixedSize(18, 18)
             color_button.setToolTip("Choose plot color for this module.")
             color_button.setAccessibleName(f"Plot color for module {module}")
             color_button.clicked.connect(
@@ -1265,6 +1298,7 @@ class DMMRDevice(Device):
             self.channelPanelCards[module] = {
                 "card": card,
                 "title": title_label,
+                "label_edit": label_edit,
                 "state_badge": state_badge,
                 "current_value": current_value,
                 "read_button": read_button,
@@ -1289,7 +1323,7 @@ class DMMRDevice(Device):
             panel_layout.setSpacing(12)
 
             host = QWidget()
-            grid = _create_card_grid(host, _DMMR_PANEL_GRID_COLUMNS)
+            grid = _create_card_grid(host)
             panel_layout.addWidget(host)
             panel_layout.addStretch(1)
 
@@ -1451,6 +1485,17 @@ class DMMRDevice(Device):
                 widget = widgets.get(key)
                 if widget is not None and hasattr(widget, "setText"):
                     widget.setText(str(snapshot["current_text" if key == "current_value" else key]))
+            editor = widgets.get("label_edit")
+            if editor is not None:
+                channel = self._channel_by_module(module)
+                if editor.channel is not channel:
+                    editor.channel = channel
+                    editor.setText(snapshot["label"])
+                    editor.setModified(False)
+                    editor.setStyleSheet(_DMMR_PANEL_LABEL_STYLE)
+                    editor.setToolTip(_DMMR_PANEL_LABEL_TOOLTIP)
+                elif not editor.hasFocus() and not editor.isModified() and editor.text() != snapshot["label"]:
+                    editor.setText(snapshot["label"])
             current_widget = widgets.get("current_value")
             if current_widget is not None and hasattr(current_widget, "setToolTip"):
                 current_widget.setToolTip(str(snapshot["current_tooltip"]))
@@ -1459,6 +1504,8 @@ class DMMRDevice(Device):
                 state_badge.setText(str(snapshot["state_text"]))
             if state_badge is not None and hasattr(state_badge, "setStyleSheet"):
                 state_badge.setStyleSheet(snapshot["state_style"])
+            if state_badge is not None and hasattr(state_badge, "setVisible"):
+                state_badge.setVisible(snapshot["state_text"] != "Read")
             card = widgets.get("card")
             if card is not None and hasattr(card, "setStyleSheet"):
                 card.setStyleSheet(snapshot["card_style"])
@@ -1548,14 +1595,14 @@ class DMMRDevice(Device):
         self.exportConfiguration(useDefaultFile=True)
         return True
 
-    def _apply_channel_items(self, items: list[dict[str, Any]]) -> None:
+    def _apply_channel_items(self, items: list[dict[str, Any]], *, file: "Path | None" = None, append: bool = False) -> None:
         """Apply a rebuilt channel configuration using the standard ESIBD flow."""
-        config_file = self.customConfigFile(self.confINI)
+        config_file = file or self.customConfigFile(self.confINI)
         self.loading = True
         if self.tree is not None:
             self.tree.setUpdatesEnabled(False)
         try:
-            self.updateChannelConfig(items, config_file)
+            self.updateChannelConfig(items, config_file, append=append)
             if self.channels and self.tree is not None:
                 self.tree.setHeaderLabels(
                     [
@@ -1587,13 +1634,87 @@ class DMMRDevice(Device):
             self.processEvents()
             self.loading = False
 
+    def exportConfiguration(self, file: "Path | None" = None, useDefaultFile: bool = False) -> None:
+        """Use Explorer's config schema, with literal UTF-8 labels on all platforms.
+
+        Explorer's writer assumes ASCII for HDF text and treats '%' as INI
+        interpolation. Both are valid characters in a human module label.
+        """
+        import configparser
+        import tempfile
+        from esibd.const import infoDict
+
+        if not self.channels:
+            self.print("No channels found to export.", flag=PRINT.ERROR)
+            return
+        if useDefaultFile:
+            file = self.customConfigFile(self.confINI)
+        if file is None:
+            from PyQt6.QtWidgets import QFileDialog
+            file = Path(QFileDialog.getSaveFileName(None, "Select File", filter=self.FILTER_INI_H5)[0])
+        file = Path(file)
+        if file == Path():
+            return
+        if file.suffix.lower() == ".ini":
+            config = configparser.ConfigParser()
+            config["Info"] = infoDict(self.name)
+            for index, channel in enumerate(self.channels):
+                values = channel.asDict(includeTempParameters=True, formatValue=True)
+                config[f"{self.CHANNEL}_{index:03d}"] = {
+                    key: str(value).replace("%", "%%") for key, value in values.items()
+                }
+            # A failed label save must not truncate the existing channel config.
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding=self.UTF8, dir=file.parent, delete=False) as output:
+                    temporary = Path(output.name)
+                    config.write(output)
+                temporary.replace(file)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        else:
+            import h5py
+            with h5py.File(file, "a", track_order=True) as output:
+                self.hdfUpdateVersion(output)
+                group = self.requireGroup(output, self.name)
+                for key in self.channels[0].asDict(includeTempParameters=True):
+                    if key in group:
+                        self.print(f"Ignoring duplicate parameter {key}", flag=PRINT.WARNING)
+                        continue
+                    kind = self.channels[0].getParameterByName(key).parameterType
+                    values = [channel.getParameterByName(key).value for channel in self.channels]
+                    dtype = {PARAMETERTYPE.INT: np.int32, PARAMETERTYPE.FLOAT: np.float32,
+                             PARAMETERTYPE.BOOL: np.bool_}.get(kind)
+                    if dtype is None:
+                        values = [str(value).encode("utf-8") for value in values]
+                        dtype = h5py.string_dtype("utf-8", length=max(1, max(map(len, values))))
+                    group.create_dataset(key, data=np.asarray(values, dtype=dtype))
+        if not self.pluginManager.loading:
+            self.pluginManager.Explorer.populateTree()
+
+    def _read_ini_channel_items(self, file: Path) -> list[Any]:
+        import configparser
+        config = configparser.ConfigParser()
+        config.read(file, encoding=self.UTF8)
+        return [section for name, section in config.items() if name not in {"DEFAULT", "Info", "Version"}]
+
+    def channelConfigChanged(self, file: "Path | None" = None, useDefaultFile: bool = True) -> bool:
+        # Match the loader's encoding even on Windows with a non-UTF-8 locale.
+        if useDefaultFile:
+            file = self.customConfigFile(self.confINI)
+        if file is None or not Path(file).is_file():
+            return False
+        items = self._read_ini_channel_items(Path(file))
+        return bool(items) and self.compareItemsConfig(items, ignoreIndicators=True)[1]
+
     def loadConfiguration(
         self,
         file: "Path | None" = None,
         useDefaultFile: bool = False,
         append: bool = False,
     ) -> None:
-        """Skip the generic bootstrap until DMMR hardware is initialized."""
+        """Load UTF-8 labels, including configurations saved before labels existed."""
         if useDefaultFile:
             file = self.customConfigFile(self.confINI)
 
@@ -1628,7 +1749,38 @@ class DMMRDevice(Device):
                 self.loading = False
             return
 
-        super().loadConfiguration(file=file, useDefaultFile=False, append=append)
+        if file is None:
+            if self.initialized:
+                self.print("Stop communication to load channels.", flag=PRINT.WARNING)
+                return
+            from PyQt6.QtWidgets import QFileDialog
+            file = Path(QFileDialog.getOpenFileName(None, "Select File", filter=self.FILTER_INI_H5)[0])
+        file = Path(file)
+        if file == Path():
+            return
+        if file.suffix.lower() == ".ini" and file.exists():
+            items = self._read_ini_channel_items(file)
+            if not items:
+                self.print(f"No valid channels found in {file}.", flag=PRINT.WARNING)
+                return
+            self._apply_channel_items(items, file=file, append=append)
+        elif file.suffix.lower() != ".ini":
+            import h5py
+            with h5py.File(file, "r") as source:
+                group = source[self.name]
+                items = [{} for _ in group["Name"]]
+                for key in self._default_channel_template():
+                    # Label is optional in files saved by earlier plugin versions.
+                    if key == DMMRChannel.LABEL and key not in group:
+                        continue
+                    values = group[key][:]
+                    if len(values) != len(items):
+                        raise ValueError(f"Invalid DMMR configuration length for {key}.")
+                    for item, value in zip(items, values):
+                        item[key] = value.decode("utf-8") if isinstance(value, bytes) else value
+            self._apply_channel_items(items, file=file, append=append)
+        else:
+            super().loadConfiguration(file=file, useDefaultFile=False, append=append)
         self._hide_channel_table()
         self._hide_channel_table_actions()
         self._ensure_channel_panel()
@@ -1668,20 +1820,35 @@ class DMMRDevice(Device):
         self._ensure_channel_panel()
 
     def estimateStorage(self) -> None:
-        """Avoid division by zero before the first DMMR channel discovery."""
+        """Keep time and current buffers on the same, nonzero history limit."""
         if self.channels:
             super().estimateStorage()
-            return
+        else:
+            # Channel.__init__ captures this setting in DynamicNp(max_size=...).
+            # Zero means thin on EVERY append, not an unknown/unlimited capacity.
+            self.maxDataPoints = _DMMR_INITIAL_HISTORY_POINTS
+            widget = self.pluginManager.Settings.settings[
+                f"{self.name}/{self.MAXDATAPOINTS}"
+            ].getWidget()
+            if widget:
+                widget.setToolTip(
+                    "Storage estimate will be available after the first successful "
+                    "DMMR hardware initialization."
+                )
 
-        self.maxDataPoints = 0
-        widget = self.pluginManager.Settings.settings[
-            f"{self.name}/{self.MAXDATAPOINTS}"
-        ].getWidget()
-        if widget:
-            widget.setToolTip(
-                "Storage estimate will be available after the first successful "
-                "DMMR hardware initialization."
-            )
+        limit = self.maxDataPoints
+        time_buffer = getattr(self, "time", None)
+        if time_buffer is not None:
+            if time_buffer.size and time_buffer.max_size and time_buffer.max_size > 0:
+                # Explorer applies storage edits to the NEXT history. Do not
+                # shrink or reset a valid recording when its estimate changes.
+                limit = time_buffer.max_size
+            time_buffer.max_size = limit
+        for channel in self.channels:
+            for name in ("values", "backgrounds"):
+                buffer = getattr(channel, name, None)
+                if buffer is not None:
+                    buffer.max_size = limit
 
     def getDefaultSettings(self) -> dict[str, dict]:
         settings = super().getDefaultSettings()
@@ -1737,7 +1904,7 @@ class DMMRDevice(Device):
             restore=False,
         )
         settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
-        settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
+        settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = _DMMR_INITIAL_HISTORY_POINTS
         return settings
 
     def _acquisition_readiness(self) -> tuple[bool, str]:
@@ -2010,6 +2177,8 @@ class DMMRChannel(Channel):
     """DMMR module channel definition."""
 
     MODULE = "Module"
+    LABEL = "Label"
+    label: str
     channelParent: DMMRDevice
 
     def getDefaultChannel(self) -> dict[str, dict]:
@@ -2037,6 +2206,12 @@ class DMMRChannel(Channel):
                 "Measured DMMR module current. Values are stored in amps and "
                 "displayed with automatic SI prefixes."
             )
+        # The card has its own editor. Use a label-backed parameter internally:
+        # Explorer's TEXT widget strips Unicode even on programmatic updates.
+        channel[self.LABEL] = parameterDict(
+            value="", parameterType=PARAMETERTYPE.LABEL, attr="label",
+            toolTip="Human-readable module label; does not rename recorded channels.",
+        )
         channel[self.MODULE] = parameterDict(
             value="0",
             parameterType=PARAMETERTYPE.LABEL,
@@ -2053,6 +2228,7 @@ class DMMRChannel(Channel):
             self.displayedParameters.remove(self.OPTIMIZE)
         if self.DISPLAY in self.displayedParameters:
             self.displayedParameters.remove(self.DISPLAY)
+        self.displayedParameters.append(self.LABEL)
         self.displayedParameters.append(self.MODULE)
         self.displayedParameters.append(self.DISPLAY)
 

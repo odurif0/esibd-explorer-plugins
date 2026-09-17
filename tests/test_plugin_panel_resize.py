@@ -161,7 +161,7 @@ def probe(folder, output):
 
     resize(900)
     if cards:
-        assert columns() == (3 if family == "dmmr" else 2), (folder, columns())
+        assert columns() == (4 if family == "dmmr" else 2), (folder, columns())
     window.grab().save(str(output / f"{folder}-wide.png"))
     if family == "dmmr":
         resize(530)
@@ -233,7 +233,7 @@ def probe(folder, output):
         window.resize(1300, 800)
         for _ in range(3):
             resize(900)
-            assert columns() == (3 if family == "dmmr" else 2)
+            assert columns() == (4 if family == "dmmr" else 2)
             resize(370)
             assert columns() == 1
         assert all(len(spy) == 0 for spy in spies)
@@ -276,7 +276,7 @@ def probe(folder, output):
                 assert columns() == 1
             resize(900)
             if cards:
-                assert columns() == min(count, 3)
+                assert columns() == min(count, 4)
         assert len(host.findChildren(QScrollArea)) == 1
     window.close()
     return 0

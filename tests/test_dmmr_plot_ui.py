@@ -19,7 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("case", ["constant", "varying", "manual", "empty", "log", "panel"])
+@pytest.mark.parametrize("case", ["constant", "varying", "manual", "empty", "log", "panel", "history"])
 def test_dmmr_plot_and_panel(case, tmp_path):
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), "--probe", case, str(tmp_path)],
@@ -216,6 +216,46 @@ def probe(case, output):
         app.processEvents()
         low, high = plot.viewRange()[1]
         assert low < np.log10(1.5e-12) < high and high - low < 2
+    elif case == "history":
+        # Reproduce startup -> discovery -> acquisition -> plotted curve with
+        # Explorer's real buffers AND real append path, not the UI-only Buffer.
+        dynamic_np = extract(host / "core.py", "DynamicNp")
+        append_data = extract(host / "plugins.py", "appendData", "Device")
+        sys.modules["esibd.plugins"].Device.estimateStorage = extract(host / "plugins.py", "estimateStorage", "Device")
+        clock = types.SimpleNamespace(now=0.)
+        ns.update(time=types.SimpleNamespace(time=lambda: clock.now), INOUT=types.SimpleNamespace(IN=1, OUT=2))
+        device.channels = []
+        device.time = dynamic_np(dtype=np.float64)
+        device.maxDataPoints, device.maxStorage, device.interval = 100000, 50, 1000
+        device.useBackgrounds = False
+        device.MAXDATAPOINTS = "Max data points"
+        device.pluginManager = types.SimpleNamespace(Settings=types.SimpleNamespace(settings={
+            "DMMR/Max data points": types.SimpleNamespace(getWidget=lambda: None),
+        }))
+        device.plotableChannels = True
+        device.updateValues = device.measureInterval = lambda: None
+        device.liveDisplayActive = lambda: False
+        device.estimateStorage()
+        channel.values = dynamic_np(max_size=device.maxDataPoints)
+        channel.time = device.time
+        channel.inout = ns["INOUT"].IN
+        device.channels = [channel]
+        device.estimateStorage()
+        for index in range(1000):
+            clock.now = float(index + 1)
+            channel.monitor = (1.5 + index / 1000 + .03 * math.sin(index / 10)) * 1e-12
+            append_data(device)
+        times, values = device.time.get(), channel.values.get()
+        assert len(times) == len(values) == 1000
+        assert np.isfinite(values).sum() == 1000
+        plot.setXRange(0, 1001, padding=0)
+        live.plotGroup(plot, {device.name: (0, None, 1, times)}, [channel], True)
+        plot.show()
+        app.processEvents()
+        x, y = channel.plotCurve.getData()
+        np.testing.assert_array_equal(x, times)
+        np.testing.assert_array_equal(y, values)
+        plot.grab().save(str(output / "dmmr-history-plot.png"))
     elif case == "panel":
         window = QWidget()
         layout = QHBoxLayout(window)

@@ -45,8 +45,14 @@ it opens the color picker; the choice is saved in the channel configuration.
 Automatic Y scaling also handles constant picoamp signals without changing
 manual zoom. Measurements and recordings remain in amperes.
 
-Module cards wrap to fit narrower panels. Scrollbars keep all controls
-accessible when space is limited.
+Compact module cards use as many columns as the panel can fit, with
+scrollbars when space is limited. Edit the label below the module number;
+Enter or leaving the field saves it, Escape cancels the edit. Labels are
+stored by module address without renaming recorded channels.
+
+Time and current histories share the same capacity, including before module
+discovery. At the storage limit, older values and timestamps are thinned
+together so each retained measurement keeps its original time.
 
 ## Portability Note
 
