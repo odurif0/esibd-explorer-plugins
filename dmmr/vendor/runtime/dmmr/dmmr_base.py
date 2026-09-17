@@ -187,7 +187,7 @@ class DMMRBase:
         self.idn = idn
 
     def _configure_dll_signatures(self) -> None:
-        """Declare the used exports as specified in COM-DMMR-8.h."""
+        """Declare the header ABI and the separately verified native debug API."""
         byte, word, dword = ctypes.c_ubyte, ctypes.c_uint16, ctypes.c_uint32
         ptr = ctypes.POINTER
         signatures = {
@@ -282,6 +282,11 @@ class DMMRBase:
             "COM_DMMR_8_GetIOStateMessage": ([ctypes.c_int], ctypes.c_char_p),
             "COM_DMMR_8_GetCommError": ([ptr(dword)], ctypes.c_int),
             "COM_DMMR_8_GetCommErrorMessage": ([dword], ctypes.c_char_p),
+            # Not declared in the header: verified in the bundled x64 binary
+            # (Open RVA 0xa160, Close RVA 0xa100). The controller checks its SHA
+            # before using these optional exports. No serial commands involved.
+            "COM_DMMR_8_OpenDebugFile": ([ctypes.c_char_p], ctypes.c_int),
+            "COM_DMMR_8_CloseDebugFile": ([], ctypes.c_int),
         }
         for name, (argtypes, restype) in signatures.items():
             function = getattr(self.dll, name, None)

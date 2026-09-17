@@ -38,7 +38,14 @@ Each real channel must be configured with:
 
 The plugin auto-discovers installed modules, creates one channel per detected
 module, reads live current measurements as channel monitors, and exposes a
-global ON/OFF control that enables or disables DMMR acquisition.
+global ON/OFF control that enables or disables DMMR acquisition. Switching OFF
+verifies that acquisition is disabled, closes the port, and reports
+`Disconnected`. The next ON reconnects automatically. If the port cannot be
+closed, the failure remains visible and the next click retries OFF.
+
+After a failed start, OFF is shown only when both acquisition gates read back
+disabled. Otherwise, `Shutdown unconfirmed` is displayed and the button stays
+ON so the next click retries OFF; this does not mean acquisition is running.
 
 Use `Display` to show or hide a module's time trace. The color square next to
 it opens the color picker; the choice is saved in the channel configuration.
@@ -53,6 +60,18 @@ stored by module address without renaming recorded channels.
 Time and current histories share the same capacity, including before module
 discovery. At the storage limit, older values and timestamps are thinned
 together so each retained measurement keeps its original time.
+
+## Startup Diagnostics
+
+Each ON attempt captures the native DLL startup exchanges, including failed-start
+cleanup, into `esibd explorer.log` under `[DMMR startup]` / `[DMMR native]`.
+To investigate an error, try ON once and share that Explorer log. No additional
+tool or setting is needed; retries and serial timeouts are unchanged.
+
+Capture stops before continuous polling. The raw file in `dmmr/logs/` is reused
+on each attempt and trimmed to 64 KiB after closing. A blocked DLL is never
+closed concurrently: any partial capture is reported, and Explorer must be
+restarted. An unavailable capture is explicitly reported, not silently omitted.
 
 ## Portability Note
 

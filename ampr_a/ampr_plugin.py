@@ -741,11 +741,8 @@ class AMPRDevice(Device):
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
-        action.blockSignals(True)
-        try:
-            action.state = self.isOn()
-        finally:
-            action.blockSignals(False)
+        # StateAction.toggled updates the icon/tooltip; only triggered sends commands.
+        action.state = self.isOn()
 
     def _ensure_status_widgets(self) -> None:
         """Add compact global AMPR status labels to the plugin toolbar."""

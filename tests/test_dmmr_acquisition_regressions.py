@@ -58,6 +58,7 @@ class Device:
     def __init__(self):
         self.calls = []
         self.enabled = False
+        self.automatic = False
         self.auto_range_failure = None
         self.wrong_command_once = False
 
@@ -68,7 +69,14 @@ class Device:
 
     def set_automatic_current(self, enabled, **kwargs):
         self.calls.append(("automatic", enabled))
+        self.automatic = enabled
         return self.NO_ERR
+
+    def get_enable(self, **kwargs):
+        return self.NO_ERR, self.enabled
+
+    def get_automatic_current(self, **kwargs):
+        return self.NO_ERR, self.automatic
 
     def set_module_auto_range(self, address, enabled, **kwargs):
         self.calls.append(("auto_range", address, enabled))
