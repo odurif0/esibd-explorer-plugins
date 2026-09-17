@@ -29,6 +29,8 @@ def _install_esibd_stubs() -> None:
         INT = "INT"
         FLOAT = "FLOAT"
         LABEL = "LABEL"
+        TEXT = "TEXT"
+        BOOL = "BOOL"
 
     class _PluginTypeValue:
         def __init__(self, value):
