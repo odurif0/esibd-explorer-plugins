@@ -684,7 +684,7 @@ def test_finalize_init_adds_local_on_action_and_set_on_keeps_it_synced():
     assert added[0]["defaultState"] is False
     assert isinstance(device.deviceOnAction, FakeStateAction)
     assert device.deviceOnAction.state is False
-    assert device.deviceOnAction.blocked == [True, False, True, False]
+    assert device.deviceOnAction.blocked == [], "StateAction needs toggled for its icon and tooltip"
     assert toggle_calls == [True]
 
 

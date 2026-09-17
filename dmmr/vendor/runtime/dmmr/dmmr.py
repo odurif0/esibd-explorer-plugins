@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,6 +26,9 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
     _active_connections: dict[int, dict[str, object]] = {}
     _EXPECTED_PRODUCT_TOKENS = ("DMMR",)
     _DEFAULT_IO_TIMEOUT_S = 5.0
+    _STARTUP_LOG_MAX_BYTES = 64 * 1024
+    # The debug exports have no public header; do not guess their ABI in other DLLs.
+    _STARTUP_DEBUG_DLL_SHA256 = "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3"
     _COMPAT_OPTIONAL_STATUSES = frozenset(
         {
             DMMRBase.ERR_COMMAND_RECEIVE,
@@ -65,6 +69,8 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         self._dll_port_claimed = False
         self._transport_poisoned = False
         self._transport_error = None
+        self._startup_log_dir = Path(log_dir) if log_dir is not None else Path(__file__).resolve().parents[3] / "logs"
+        self._startup_log_path: Path | None = None
         self._optional_command_warnings: set[tuple[str, int]] = set()
         self._optional_command_support: dict[tuple[str, Optional[int]], bool] = {}
 
@@ -90,6 +96,89 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         )
 
         super().__init__(com=com, log=None, idn=device_id, dll_path=dll_path)
+
+    def begin_startup_diagnostics(self, timeout_s: Optional[float] = None) -> str:
+        """Enable native evidence for one ON attempt, never for ongoing polling."""
+        identity = f"COM{self.com}; baud={self.baudrate}; DLL={self.dmmr_dll_path}"
+        try:
+            # Some frozen Explorer builds omit unused stdlib modules; optional
+            # diagnostics must not make loading the hardware driver fail.
+            import hashlib
+
+            self._raise_if_transport_poisoned()
+            if self._startup_log_path is not None:
+                raise RuntimeError("a native startup capture is already active")
+            open_log = getattr(self.dll, "COM_DMMR_8_OpenDebugFile", None)
+            close_log = getattr(self.dll, "COM_DMMR_8_CloseDebugFile", None)
+            if not callable(open_log) or not callable(close_log):
+                raise RuntimeError("native debug exports are missing")
+            digest = hashlib.sha256(Path(self.dmmr_dll_path).read_bytes()).hexdigest()
+            identity += f"; SHA-256={digest}"
+            if digest != self._STARTUP_DEBUG_DLL_SHA256:
+                raise RuntimeError("unverified DLL: native debug ABI is not known")
+            self._startup_log_dir.mkdir(parents=True, exist_ok=True)
+            path = (self._startup_log_dir / f"dmmr_startup_com{self.com}.log").resolve()
+            # fopen takes an ANSI path, not Windows' UTF-8 filesystem encoding.
+            filename = str(path).encode("mbcs" if sys.platform == "win32" else "utf-8")
+            self._startup_log_path = path  # Retain the path if native opening times out.
+            status = self._call_locked_with_timeout(
+                open_log, self._resolve_io_timeout(timeout_s), "open startup debug log", filename,
+            )
+            if status != self.NO_ERR:
+                self._startup_log_path = None
+                raise RuntimeError(f"OpenDebugFile returned {status}")
+            return f"[DMMR startup] {identity}\n[DMMR startup] Native capture opened: {path}"
+        except Exception as exc:
+            # A filesystem/optional-export error must not prevent device control.
+            return f"[DMMR startup] {identity}\n[DMMR startup] Native capture unavailable: {exc}"
+
+    def end_startup_diagnostics(self, timeout_s: Optional[float] = None) -> str:
+        """Close safely, then copy a bounded, byte-preserving report into Explorer."""
+        path = self._startup_log_path
+        if path is None:
+            return ""
+        notes = []
+        closed = False
+        if self._transport_poisoned:
+            # The blocked worker may still write to the FILE. Do not close or
+            # truncate it concurrently, even though this is 'only' diagnostics.
+            notes.append(f"Native capture not closed: DLL still active; restart Explorer. Partial file: {path}")
+        else:
+            try:
+                status = self._call_locked_with_timeout(
+                    getattr(self.dll, "COM_DMMR_8_CloseDebugFile"),
+                    self._resolve_io_timeout(timeout_s), "close startup debug log",
+                )
+                # The verified DLL nulls FILE* even when fclose reports -401.
+                closed = True
+                self._startup_log_path = None
+                if status != self.NO_ERR:
+                    notes.append(f"CloseDebugFile returned {status}; capture may be incomplete.")
+            except Exception as exc:
+                notes.append(f"Native capture not closed: {exc}. File: {path}")
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(self._STARTUP_LOG_MAX_BYTES + 1)
+            if len(raw) > self._STARTUP_LOG_MAX_BYTES:
+                raw = raw[:self._STARTUP_LOG_MAX_BYTES]
+                notes.append(f"Capture truncated to the first {self._STARTUP_LOG_MAX_BYTES} bytes.")
+                if closed:
+                    try:
+                        with path.open("r+b") as stream:
+                            stream.truncate(self._STARTUP_LOG_MAX_BYTES)
+                    except OSError as exc:
+                        notes.append(f"Could not trim native file: {exc}")
+            # Keep native byte values visible, including embedded NUL/CR/ESC and
+            # bytes that are not valid UTF-8. Prefix lines so data cannot look
+            # like a new Explorer message. The raw file is retained for CGC.
+            lines = [
+                "".join(chr(byte) if 32 <= byte < 127 else f"\\x{byte:02x}" for byte in line.removesuffix(b"\r"))
+                for line in raw.split(b"\n") if line
+            ]
+            notes.extend(lines or ["Native capture is empty."])
+        except OSError as exc:
+            notes.append(f"Native capture unavailable: {exc}")
+        return "\n".join(f"[DMMR native] {line}" for line in notes)
 
     @staticmethod
     def _validate_init_args(device_id, com, baudrate, hk_interval_s):

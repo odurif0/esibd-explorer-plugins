@@ -1180,11 +1180,8 @@ class AMXHDDevice(Device):
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
-        action.blockSignals(True)
-        try:
-            action.state = self.isOn()
-        finally:
-            action.blockSignals(False)
+        # StateAction.toggled updates the icon/tooltip; only triggered sends commands.
+        action.state = self.isOn()
 
     def _display_main_state(self) -> str:
         """Return the operator-facing state shown in the toolbar badge."""

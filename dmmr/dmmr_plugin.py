@@ -910,11 +910,8 @@ class DMMRDevice(Device):
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
-        action.blockSignals(True)
-        try:
-            action.state = self.isOn()
-        finally:
-            action.blockSignals(False)
+        # StateAction.toggled updates the icon/tooltip; only triggered sends commands.
+        action.state = self.isOn()
 
     def _hide_channel_table(self) -> None:
         tree = getattr(self, "tree", None)
@@ -2820,6 +2817,17 @@ class DMMRController(DeviceController):
                 # updates through the GUI dispatcher.
                 _invoke_gui_callback(sync_monitor)
 
+    def _report_startup_diagnostics(self, device: Any, *, start: bool) -> None:
+        method = getattr(device, "begin_startup_diagnostics" if start else "end_startup_diagnostics", None)
+        if not callable(method):
+            return
+        try:
+            report = method(timeout_s=float(self.controllerParent.connect_timeout_s))
+            if report:
+                self.print(report)
+        except Exception as exc:  # Diagnostic failures are not acquisition results.
+            self.print(f"DMMR startup diagnostics unavailable: {exc}", flag=PRINT.WARNING)
+
     def toggleOn(self) -> None:
         base_toggle_on = getattr(super(), "toggleOn", None)
         if callable(base_toggle_on):
@@ -2835,7 +2843,7 @@ class DMMRController(DeviceController):
             self.stopAcquisition()
             self.acquiring = False
 
-        enable_completed = False
+        diagnostics_device = None
         try:
             if target_on:
                 measurement_modules = self._measurement_modules()
@@ -2844,8 +2852,9 @@ class DMMRController(DeviceController):
                 ):
                     device = self.device
                     if device is None:
-                        self._restore_off_ui_state()
-                        return
+                        raise RuntimeError("DMMR became unavailable during startup.")
+                    diagnostics_device = device
+                    self._report_startup_diagnostics(device, start=True)
                     enable_status = device.set_enable(
                         True,
                         timeout_s=float(self.controllerParent.connect_timeout_s),
@@ -2854,9 +2863,6 @@ class DMMRController(DeviceController):
                         raise RuntimeError(
                             f"set_enable(True) failed: {self._format_status(enable_status, device=device)}"
                         )
-                    # set_enable(True) succeeded: a later step failing must not
-                    # leave acquisition enabled with the button forced OFF.
-                    enable_completed = True
                     # Stop unsolicited current frames before configuring module
                     # ranges, not only after all those command/reply exchanges.
                     self._disable_automatic_current_for_module_polling(
@@ -2876,57 +2882,60 @@ class DMMRController(DeviceController):
                                     f"set_module_auto_range({module}, True) failed: "
                                     f"{self._format_status(auto_range_status, device=device)}"
                                 )
-                self._update_state()
+                if not self._update_state():
+                    raise RuntimeError("Could not confirm the DMMR state after startup.")
+                self._report_startup_diagnostics(diagnostics_device, start=False)
+                diagnostics_device = None  # Close before starting continuous reads.
+                if getattr(device, "_transport_poisoned", False):
+                    raise RuntimeError("DMMR transport is unusable after startup diagnostics; restart Explorer.")
+                if getattr(device, "_startup_log_path", None) is not None:
+                    raise RuntimeError("Native startup capture could not be closed; acquisition was not started.")
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
                     start_acquisition()
                 self.print("DMMR acquisition enabled.")
             else:
+                if not self._disable_acquisition():
+                    raise RuntimeError("DMMR acquisition shutdown could not be confirmed.")
+                # OFF, like the other plugins, releases communication too.
+                # Verify close before discarding the backend or marking Explorer
+                # uninitialized; a failed close must remain visible and retryable.
                 with self._controller_lock_section(
-                    "Could not acquire lock to disable DMMR acquisition."
+                    "Could not acquire lock to close DMMR communication."
                 ):
                     device = self.device
-                    if device is None:
-                        return
-                    failures: list[str] = []
-                    automatic_status = device.set_automatic_current(
-                        False,
-                        timeout_s=float(self.controllerParent.connect_timeout_s),
-                    )
-                    if automatic_status != device.NO_ERR:
-                        failures.append(
-                            "set_automatic_current(False) failed: "
-                            f"{self._format_status(automatic_status, device=device)}"
-                        )
-                    # Always attempt the hardware disable even if disabling the
-                    # automatic current mode failed.
-                    enable_status = device.set_enable(
-                        False,
-                        timeout_s=float(self.controllerParent.connect_timeout_s),
-                    )
-                    if enable_status != device.NO_ERR:
-                        failures.append(
-                            f"set_enable(False) failed: {self._format_status(enable_status, device=device)}"
-                        )
-                    if failures:
-                        raise RuntimeError("; ".join(failures))
-                self._update_state()
+                    if device is None or device.disconnect() is not True:
+                        raise RuntimeError("DMMR communication closure could not be confirmed.")
+                self.closeCommunication(final_state="Disconnected")
                 self.print("DMMR acquisition disabled.")
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
-            if target_on:
-                if enable_completed:
-                    self._safe_disable_after_toggle_failure()
+            self.acquiring = False
+            # Even a failed enable command may have reached the hardware before
+            # its ACK was lost. Never infer OFF from a failed ON request.
+            if target_on and self._disable_acquisition():
+                self.main_state = "OFF"
                 self._restore_off_ui_state()
             else:
-                self._restore_on_ui_state()
-            self._update_state()
+                if self.main_state != _DMMR_COMMUNICATION_LOST_STATE:
+                    self.main_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+                self.device_state_summary = "Unknown"
+                self.voltage_state_summary = "Unknown"
+                self.temperature_state_summary = "Unknown"
+                self._restore_on_ui_state()  # Keep the next click an OFF attempt.
+            self.initializeValues(reset=True)
+            update_signal = getattr(getattr(self, "signalComm", None), "updateValuesSignal", None)
+            if update_signal is not None:
+                update_signal.emit()
             self.print(
                 f"Failed to toggle DMMR acquisition: {self._format_exception(exc)}"
                 f"{self._runtime_diagnostics(device=device)}",
                 flag=PRINT.ERROR,
             )
         finally:
+            if diagnostics_device is not None:
+                # Include the failed command and its OFF/readback cleanup.
+                self._report_startup_diagnostics(diagnostics_device, start=False)
             self._end_transition()
             self._sync_status_to_gui()
 
@@ -3022,9 +3031,9 @@ class DMMRController(DeviceController):
             )
         return shutdown_confirmed
 
-    def _update_state(self, *, already_acquired: bool = False) -> None:
+    def _update_state(self, *, already_acquired: bool = False) -> bool:
         if self.device is None:
-            return  # Preserve the last shutdown/transport-loss diagnosis.
+            return False  # Preserve the last shutdown/transport-loss diagnosis.
 
         timeout_s = float(self.controllerParent.poll_timeout_s)
         try:
@@ -3034,12 +3043,12 @@ class DMMRController(DeviceController):
             ):
                 device = self.device
                 if device is None:
-                    return
+                    return False
                 status, _state_hex, state_name = device.get_state(timeout_s=timeout_s)
         except TimeoutError:
             # Transient controller-lock contention; skip this refresh and keep
             # the last state. A real device fault is handled by except-Exception.
-            return
+            return False
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             failure_count = self._note_transport_failure()
@@ -3047,9 +3056,10 @@ class DMMRController(DeviceController):
             transport_lost = transport_unusable or (
                 failure_count >= _DMMR_TRANSPORT_FAILURE_THRESHOLD
             )
-            self.main_state = (
-                _DMMR_COMMUNICATION_LOST_STATE if transport_lost else "State error"
-            )
+            if transport_lost:
+                self.main_state = _DMMR_COMMUNICATION_LOST_STATE
+            elif self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
+                self.main_state = "State error"
             self.print(f"Failed to read DMMR state: {exc}", flag=PRINT.ERROR)
             self.device_state_summary = self._safe_query_state("get_device_state") or "Unknown"
             self.voltage_state_summary = self._safe_query_state("get_voltage_state") or "Unknown"
@@ -3061,13 +3071,15 @@ class DMMRController(DeviceController):
             # COM port is released for potential re-initialization.
             if transport_lost:
                 self._handle_transport_loss()
-            return
+            return False
 
         self._clear_transport_failures()
         if status == device.NO_ERR:
-            self.main_state = state_name
+            if self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
+                self.main_state = state_name
         else:
-            self.main_state = "State error"
+            if self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
+                self.main_state = "State error"
             self.errorCount += 1
             self.print(
                 f"Failed to read DMMR state: {self._format_status(status, device=device)}",
@@ -3079,6 +3091,7 @@ class DMMRController(DeviceController):
         self.temperature_state_summary = (
             self._safe_query_state("get_temperature_state") or "Unknown"
         )
+        return status == device.NO_ERR
 
     def _handle_transport_loss(self) -> None:
         """Force immediate backend teardown after a fatal transport timeout."""
@@ -3191,7 +3204,7 @@ class DMMRController(DeviceController):
         already degraded when this method is called.
         """
         device = self.device
-        if device is None:
+        if device is None or not getattr(device, "connected", True):
             return
         try:
             device.set_enable(False, timeout_s=1.0)
@@ -3269,62 +3282,47 @@ class DMMRController(DeviceController):
 
         _invoke_gui_callback(_update_gui)
 
-    def _safe_disable_after_toggle_failure(self) -> None:
-        """Best-effort cleanup after a failed DMMR acquisition startup.
+    def _disable_acquisition(self) -> bool:
+        """Attempt both OFF commands and confirm both gates, also after failed ON.
 
-        Disables acquisition so the device is not left enabled while the ON/OFF
-        button is forced OFF (which would strand the operator: clicking only
-        re-attempts the failing ON). Mirrors the AMPR controller's
-        safe-disable-on-failure pattern. Never raises: any cleanup issue is
-        reported as a warning.
+        A rejected command, unreadable flag or still-enabled gate leaves the
+        stop unconfirmed. Never skip the hardware disable because the automatic
+        current command failed, and never raise out of startup failure cleanup.
         """
-        device = self.device
-        if device is None:
-            return
-        cleanup_errors: list[str] = []
+        errors: list[str] = []
         try:
             with self._controller_lock_section(
-                "Could not acquire lock for DMMR failure cleanup."
+                "Could not acquire lock to disable DMMR acquisition."
             ):
                 device = self.device
                 if device is None:
-                    cleanup_errors.append("device disappeared")
-                else:
-                    timeout_s = float(
-                        getattr(self.controllerParent, "connect_timeout_s", 5.0)
-                    )
+                    raise RuntimeError("device unavailable")
+                timeout_s = float(self.controllerParent.connect_timeout_s)
+                for name in ("set_automatic_current", "set_enable"):
                     try:
-                        automatic_status = device.set_automatic_current(
-                            False, timeout_s=timeout_s
-                        )
-                    except Exception as cleanup_exc:  # noqa: BLE001
-                        cleanup_errors.append(
-                            f"set_automatic_current(False) failed: {cleanup_exc}"
-                        )
-                    else:
-                        if automatic_status != device.NO_ERR:
-                            cleanup_errors.append(
-                                "set_automatic_current(False) failed: "
-                                f"{self._format_status(automatic_status, device=device)}"
-                            )
+                        status = getattr(device, name)(False, timeout_s=timeout_s)
+                        if status != device.NO_ERR:
+                            raise RuntimeError(self._format_status(status, device=device))
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"{name}(False) failed: {exc}")
+                for name in ("get_automatic_current", "get_enable"):
                     try:
-                        enable_status = device.set_enable(False, timeout_s=timeout_s)
-                    except Exception as cleanup_exc:  # noqa: BLE001
-                        cleanup_errors.append(f"set_enable(False) failed: {cleanup_exc}")
-                    else:
-                        if enable_status != device.NO_ERR:
-                            cleanup_errors.append(
-                                f"set_enable(False) failed: "
-                                f"{self._format_status(enable_status, device=device)}"
-                            )
-        except TimeoutError:
-            cleanup_errors.append("lock timeout")
-        if cleanup_errors:
+                        status, enabled = getattr(device, name)(timeout_s=timeout_s)
+                        if status != device.NO_ERR:
+                            raise RuntimeError(self._format_status(status, device=device))
+                        if enabled is not False:
+                            raise RuntimeError(f"OFF not confirmed (readback {enabled!r})")
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"{name}() failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(str(exc))
+        if errors:
             self.print(
-                "DMMR startup cleanup encountered issues: "
-                + "; ".join(cleanup_errors),
+                "DMMR shutdown unconfirmed: " + "; ".join(errors)
+                + ". OFF can be retried with the ON/OFF button.",
                 flag=PRINT.WARNING,
             )
+        return not errors
 
     @contextlib.contextmanager
     def _controller_lock_section(

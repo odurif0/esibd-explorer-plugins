@@ -1780,11 +1780,8 @@ class PSUDevice(Device):
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
-        action.blockSignals(True)
-        try:
-            action.state = self.isOn()
-        finally:
-            action.blockSignals(False)
+        # StateAction.toggled updates the icon/tooltip; only triggered sends commands.
+        action.state = self.isOn()
 
     def _ensure_interlock_action(self) -> None:
         """Expose a toolbar 'Disable interlock' button while the PSU reports ST_ERR_ILOCK."""

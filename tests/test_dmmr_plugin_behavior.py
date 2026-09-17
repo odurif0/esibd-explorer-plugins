@@ -546,6 +546,19 @@ def test_controller_toggle_off_syncs_status_back_to_gui():
 
     class FakeDevice:
         NO_ERR = 0
+        connected = True
+
+        def disconnect(self):
+            if self.connected:
+                calls.append(("disconnect",))
+                self.connected = False
+            return True
+
+        def get_enable(self, **kwargs):
+            return self.NO_ERR, False
+
+        def get_automatic_current(self, **kwargs):
+            return self.NO_ERR, False
 
         def set_enable(self, enabled, timeout_s=None):
             calls.append(("set_enable", enabled, timeout_s))
@@ -591,9 +604,11 @@ def test_controller_toggle_off_syncs_status_back_to_gui():
     assert calls == [
         ("set_automatic_current", False, 7.0),
         ("set_enable", False, 7.0),
+        ("disconnect",),
     ]
-    assert parent.main_state == "ST_ON"
-    assert sync_calls == ["sync"]
+    assert parent.main_state == "Disconnected"
+    assert controller.device is None and controller.initialized is False
+    assert sync_calls
 
 
 def test_controller_toggle_off_failure_restores_on_ui_state():
@@ -1292,10 +1307,8 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
     assert controller._poisoned_com is None
 
 
-def test_safe_disable_after_toggle_failure_disables_acquisition():
-    """Alignment with the AMPR pattern: on a failed ON, DMMR best-effort
-    disables acquisition so the device is not left enabled while the ON/OFF
-    button is forced OFF (which would strand the operator)."""
+def test_disable_acquisition_confirms_both_off_gates():
+    """An OFF command only confirms shutdown when both gates read back OFF."""
     module = _load_module()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
     controller = module.DMMRController(parent)
@@ -1315,14 +1328,15 @@ def test_safe_disable_after_toggle_failure_disables_acquisition():
             return self.NO_ERR
 
     controller.device = FakeDevice()
-    controller._safe_disable_after_toggle_failure()
+    controller.device.get_enable = lambda **kwargs: (0, False)
+    controller.device.get_automatic_current = lambda **kwargs: (0, False)
+    assert controller._disable_acquisition() is True
     assert ("automatic", False) in calls
     assert ("enable", False) in calls
 
 
-def test_safe_disable_after_toggle_failure_never_raises():
-    """Cleanup must never raise: if the device is unresponsive, issues are
-    reported as a warning instead of propagating (mirrors AMPR)."""
+def test_disable_acquisition_reports_failure_without_raising():
+    """Startup cleanup reports failure without masking the original error."""
     module = _load_module()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
     controller = module.DMMRController(parent)
@@ -1340,8 +1354,8 @@ def test_safe_disable_after_toggle_failure_never_raises():
             raise OSError("device gone")
 
     controller.device = BrokenDevice()
-    controller._safe_disable_after_toggle_failure()  # must not raise
-    assert any("cleanup encountered issues" in m for m in logs)
+    assert controller._disable_acquisition() is False
+    assert any("shutdown unconfirmed" in m for m in logs)
 
 
 def test_run_initialization_does_not_emit_success_after_fatal_state_update():

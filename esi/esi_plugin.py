@@ -452,14 +452,8 @@ class ESIDevice(Device):
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
-        blocker = getattr(action, "blockSignals", None)
-        if callable(blocker):
-            blocker(True)
-        try:
-            action.state = self.isOn()
-        finally:
-            if callable(blocker):
-                blocker(False)
+        # StateAction.toggled updates the icon/tooltip; only triggered sends commands.
+        action.state = self.isOn()
 
     def _ensure_status_widgets(self) -> None:
         """Add compact ESI status labels to the plugin toolbar."""
