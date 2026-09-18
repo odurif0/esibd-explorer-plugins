@@ -327,7 +327,9 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                     "after a timed-out DLL call. Recreate the AMPR instance."
                 )
                 return False
-            
+            if not self.connected:
+                return True
+
             status = self._call_locked_with_timeout(
                 super().close_port,
                 self._resolve_io_timeout(None),
@@ -339,16 +341,14 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                 self.logger.info(f"Successfully disconnected AMPR device {self.device_id}")
                 return True
 
-            self.connected = False
             self.logger.error(
                 "Failed to disconnect AMPR device "
                 f"{self.device_id}: {self.format_status(status)}. "
-                "Object marked disconnected locally to avoid further unsafe reuse."
+                "Port retained for an explicit OFF retry."
             )
             return False
                 
         except Exception as e:
-            self.connected = False
             self.logger.error(f"Disconnection error: {e}")
             return False
 
@@ -360,7 +360,6 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
         enable_psu = super().enable_psu
         get_state = super().get_state
         psu_enabled = False
-        was_connected = self.connected
 
         try:
             if self.connected:
@@ -431,24 +430,25 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                     )
                 else:
                     try:
-                        disable_status, _ = self._call_locked_with_timeout(
+                        disable_status, still_enabled = self._call_locked_with_timeout(
                             enable_psu,
                             timeout_s,
                             "disable_psu_after_initialize_failure",
                             False,
                         )
-                        if disable_status != self.NO_ERR:
+                        if disable_status != self.NO_ERR or still_enabled is not False:
                             self.logger.error(
-                                "AMPR cleanup failed to disable PSU after initialization "
-                                f"error: {self.format_status(disable_status)}"
+                                "AMPR cleanup did not confirm PSU disable after initialization "
+                                f"error: {self.format_status(disable_status)}, enabled={still_enabled!r}"
                             )
                     except Exception as cleanup_error:
                         self.logger.error(
                             "AMPR cleanup failed while disabling PSU after initialization "
                             f"error: {cleanup_error}"
                         )
-            if was_connected or self.connected or self._transport_poisoned:
-                self.disconnect()
+            # The controller must still be able to verify OFF after startup
+            # failure (including an enable command whose acknowledgement was lost).
+            # Leave this link open for its confirmed shutdown/retry path.
             raise
 
     def shutdown(self, timeout_s: Optional[float] = None) -> bool:
@@ -505,6 +505,11 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             elif enabled is not False:
                 errors.append("enable_psu(False): PSU disable was not confirmed")
 
+        # Keep the link available for a later explicit OFF when disable failed.
+        if errors:
+            raise RuntimeError(
+                "AMPR shutdown sequence reported errors: " + "; ".join(errors)
+            )
         try:
             disconnected = self.disconnect()
         except Exception as exc:

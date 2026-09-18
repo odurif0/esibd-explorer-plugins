@@ -2940,6 +2940,16 @@ class DMMRController(DeviceController):
             self._sync_status_to_gui()
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        if (final_state or self.main_state) == _DMMR_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+            self.acquiring = False
+            self.initialized = True
+            self.main_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+            self.device_state_summary = self.voltage_state_summary = "Unknown"
+            self.temperature_state_summary = "Unknown"
+            self.initializeValues(reset=True)
+            self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return
         close_lock = self._close_guard()
         if not close_lock.acquire(blocking=False):
             return

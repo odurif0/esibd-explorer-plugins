@@ -49,6 +49,11 @@ an error or a different setpoint readback; the tooltip gives details. Revalidate
 the value to retry. The cell returns to normal after matching the readback at
 the displayed precision. `Monitor` remains the measured output voltage.
 
+After a failed startup or ramp, the plugin verifies disable before closing
+the port. If this fails, `Shutdown unconfirmed` stays visible and the next
+click retries OFF; the button's ON state does not confirm an active output.
+A confirmed OFF does not certify complete electrical discharge.
+
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `ampr_b/` directory

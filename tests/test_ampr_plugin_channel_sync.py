@@ -1399,6 +1399,7 @@ def test_toggle_on_does_not_log_success_outside_st_on():
             startup_timeout_s=12.0,
             _set_on_ui_state=lambda on: ui_states.append(on),
         )
+        controller._sync_status_to_gui = lambda: None
         controller._refresh_module_scan = lambda: None
         controller._update_state = lambda: setattr(controller, "main_state", "ST_STBY")
         controller.print = lambda message, flag=None: logs.append((message, flag))
@@ -1412,14 +1413,10 @@ def test_toggle_on_does_not_log_success_outside_st_on():
 
     assert device.calls == [("initialize", 12.0)]
     assert controller.errorCount == 1
-    assert ui_states == [False]
-    assert logs == [
-        ("Starting AMPR PSU. Waiting up to 12.0 s for ST_ON.", None),
-        (
-            "AMPR PSU ON sequence ended in an unexpected state: ST_STBY.",
-            module.PRINT.ERROR,
-        ),
-    ]
+    assert ui_states == [True]  # This stub cannot confirm disable: keep OFF retryable.
+    assert controller.main_state == "Shutdown unconfirmed"
+    assert any("cleanup encountered issues" in message for message, _ in logs)
+    assert ("AMPR PSU ON sequence ended in an unexpected state: ST_STBY.", module.PRINT.ERROR) in logs
 
 
 def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
@@ -1641,6 +1638,14 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
             self.calls.append(("enable_psu", enabled))
             return self.NO_ERR, enabled
 
+        def disconnect(self):
+            self.calls.append(("disconnect",))
+            self.connected = False
+            return True
+
+        def close(self):
+            pass
+
         def format_status(self, status):
             return f"STATUS_{status}"
 
@@ -1657,6 +1662,7 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
         controller.ramping = False
         controller.transitioning = True
         controller.transition_target_on = True
+        controller._sync_status_to_gui = lambda: None
         controller.controllerParent = types.SimpleNamespace(
             isOn=lambda: True,
             connect_timeout_s=7.5,
@@ -1682,12 +1688,13 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
         ("set_module_voltages", 2, {1: 1.0}),
         ("set_module_voltages", 2, {1: 0.0}),
         ("enable_psu", False),
+        ("disconnect",),
     ]
     assert controller.transitioning is False
     assert logs == [
         ("Starting AMPR PSU. Waiting up to 12.0 s for ST_ON.", None),
         ("Starting AMPR ramp-up at 10.0 V/s (estimated 0.2 s).", None),
-        ("AMPR startup cleanup disabled the PSU after failure.", module.PRINT.WARNING),
+        ("AMPR startup cleanup disabled the PSU and disconnected after failure.", module.PRINT.WARNING),
         (
             "Failed to toggle AMPR PSU: RuntimeError: AMPR rejected 1.000 V for module 2 CH1: STATUS_123",
             module.PRINT.ERROR,
@@ -1817,6 +1824,7 @@ def test_toggle_on_failure_logs_runtime_diagnostics():
             poll_timeout_s=1.0,
             _set_on_ui_state=lambda on: ui_states.append(on),
         )
+        controller._sync_status_to_gui = lambda: None
         controller._update_state = lambda: setattr(controller, "main_state", "ST_STBY")
         controller.print = lambda message, flag=None: logs.append((message, flag))
 
@@ -1828,15 +1836,14 @@ def test_toggle_on_failure_logs_runtime_diagnostics():
             module.DeviceController.toggleOn = original_toggle_on
 
     assert controller.errorCount == 1
-    assert ui_states == [False]
-    assert logs == [
-        ("Starting AMPR PSU. Waiting up to 15.0 s for ST_ON.", None),
-        (
-            "Failed to toggle AMPR PSU: RuntimeError: AMPR did not reach ST_ON "
-            "(main state: ST_STBY; device state: DS_PSU_ENB; voltage state: VOLTAGE_OK; interlock state: OK)",
-            module.PRINT.ERROR,
-        ),
-    ]
+    assert ui_states == [True]
+    assert controller.main_state == "Shutdown unconfirmed"
+    assert any("cleanup encountered issues" in message for message, _ in logs)
+    assert logs[-1] == (
+        "Failed to toggle AMPR PSU: RuntimeError: AMPR did not reach ST_ON "
+        "(main state: ST_STBY; device state: DS_PSU_ENB; voltage state: VOLTAGE_OK; interlock state: OK)",
+        module.PRINT.ERROR,
+    )
 
 
 def test_shutdown_communication_runs_full_device_shutdown():
@@ -1950,8 +1957,9 @@ def test_shutdown_communication_logs_diagnostics_on_failure():
             module.PRINT.ERROR,
         ),
     ]
-    assert disposed == [True]
-    assert controller.initialized is False
+    assert disposed == []
+    assert isinstance(controller.device, FakeDevice)
+    assert controller.initialized is True
 
 
 def test_update_values_clears_monitor_when_channel_or_device_is_off():

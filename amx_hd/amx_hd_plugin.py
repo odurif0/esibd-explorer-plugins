@@ -1551,19 +1551,33 @@ class AMXHDDevice(Device):
                 self.tree.setColumnHidden(index, not self.advancedAction.state)
 
     def estimateStorage(self) -> None:
+        """Keep timestamps and channel histories on the same nonzero capacity."""
         if self.channels:
             super().estimateStorage()
-            return
+        else:
+            # Channel.__init__ captures this limit before hardware discovery.
+            self.maxDataPoints = 100_000
+            widget = self.pluginManager.Settings.settings[
+                f"{self.name}/{self.MAXDATAPOINTS}"
+            ].getWidget()
+            if widget:
+                widget.setToolTip(
+                    "Storage estimate will be available after the first successful "
+                    "AMX hardware initialization."
+                )
 
-        self.maxDataPoints = 0
-        widget = self.pluginManager.Settings.settings[
-            f"{self.name}/{self.MAXDATAPOINTS}"
-        ].getWidget()
-        if widget:
-            widget.setToolTip(
-                "Storage estimate will be available after the first successful "
-                "AMX hardware initialization."
-            )
+        limit = self.maxDataPoints
+        time_buffer = getattr(self, "time", None)
+        if time_buffer is not None:
+            if time_buffer.size and time_buffer.max_size and time_buffer.max_size > 0:
+                # Storage edits apply to the next history, not an active recording.
+                limit = time_buffer.max_size
+            time_buffer.max_size = limit
+        for channel in self.channels:
+            for name in ("values", "backgrounds"):
+                buffer = getattr(channel, name, None)
+                if buffer is not None:
+                    buffer.max_size = limit
 
     def getDefaultSettings(self) -> dict[str, dict]:
         settings = super().getDefaultSettings()
@@ -3288,6 +3302,8 @@ class AMXHDController(DeviceController):
                 self.closeCommunication()
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if self.main_state == _AMX_SHUTDOWN_UNCONFIRMED_STATE:
+            return  # A late status poll must not erase an unconfirmed shutdown.
         device = self.device
         self.main_state = str(snapshot.get("main_state", {}).get("name", "Unknown"))
         self.device_enabled_state = (
@@ -3525,6 +3541,15 @@ class AMXHDController(DeviceController):
         return shutdown_confirmed
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        if (final_state or self.main_state) == _AMX_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+            self.acquiring = False
+            self.initialized = True
+            self.main_state = _AMX_SHUTDOWN_UNCONFIRMED_STATE
+            self.device_enabled_state = "Unknown"
+            self.device_state_summary = self.controller_state_summary = "Unknown"
+            self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
@@ -3550,6 +3575,8 @@ class AMXHDController(DeviceController):
         self._sync_status_to_gui()
 
     def _update_state(self) -> None:
+        if self.main_state == _AMX_SHUTDOWN_UNCONFIRMED_STATE:
+            return  # Only a new explicit, confirmed OFF may clear this diagnosis.
         device = self.device
         if device is None:
             return  # Preserve the last shutdown/transport-loss diagnosis.

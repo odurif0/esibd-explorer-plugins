@@ -1532,7 +1532,8 @@ def test_controller_shutdown_failure_marks_state_unconfirmed():
     shutdown_confirmed = controller.shutdownCommunication()
 
     assert shutdown_confirmed is False
-    assert controller.device is None
+    assert isinstance(controller.device, FakeDevice)
+    assert controller.initialized
     assert controller.main_state == module._AMX_SHUTDOWN_UNCONFIRMED_STATE
     assert controller.device_enabled_state == "Unknown"
     assert messages == [

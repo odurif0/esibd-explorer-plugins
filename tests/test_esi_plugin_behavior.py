@@ -643,13 +643,18 @@ def test_on_sequence_programs_heat_target_before_activation():
     ]
 
 
-def test_off_sequence_uses_driver_safe_off():
+def test_off_sequence_uses_driver_confirmed_disconnect():
     module = _load_plugin()
     calls = []
 
     class FakeDevice:
-        def force_safe_off(self, timeout_s):
+        def disconnect(self, timeout_s):
             calls.append(timeout_s)
+            self.connected = False
+            return True
+
+        def close(self):
+            pass
 
     parent = types.SimpleNamespace(
         connect_timeout_s=4.0,

@@ -23,7 +23,7 @@ One plugin for one device.
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.2.9.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.2.10.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -58,6 +58,21 @@ delete old plugin folders; the supported standard-AMX identities are now
 The ESI controller requires an additional read-only hardware inventory before
 the plugin is enabled. Follow [`esi/README.md`](esi/README.md) and run the
 bundled `esi_hardware_probe.ipynb` first.
+
+## ON / OFF
+
+- **ON** connects and runs the configured startup sequence. Check each output's
+  readback: ON does not necessarily enable every channel (for example, PSU
+  standby configuration `-1` keeps the outputs disabled).
+- **OFF** requests and verifies shutdown, then closes communication. Success is
+  shown as **Disconnected**; the next ON reconnects.
+- **Shutdown unconfirmed** means shutdown or port closure failed. The button
+  remains ON so the next click retries OFF, and Explorer's closing warning stays
+  active. This button state is not confirmation that outputs are enabled. If a
+  DLL call is blocked, make the instrument safe locally and restart Explorer.
+
+For HV devices, a verified disable is **not proof of complete electrical
+discharge**. Use the device-specific safety procedure before touching hardware.
 
 ## Requirements
 

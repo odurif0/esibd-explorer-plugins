@@ -120,13 +120,17 @@ def test_off_cancels_inflight_output_command(monkeypatch, command, shutdown):
     assert device.target == 0.0
     assert not any(call == ("enable", True) for call in calls)
     assert len([call for call in calls if call[0] in {"target", "heat"}]) == 1
-    assert controller.main_state == ("Disconnected" if shutdown else "Outputs OFF")
+    assert controller.main_state == "Disconnected"
+    assert controller.device is None
+    assert not controller.initialized
     # A queued command after OFF must not write anything either.
     before = list(calls)
     controller.applyValue(channel)
     assert calls == before
     if not shutdown:
-        # Cancellation must not prevent a subsequent explicit ON command.
+        # The next ON reconnects before activating. Old requests stay cancelled.
+        controller.device = device
+        controller.initialized = True
         on = True
         controller.toggleOn()
         assert controller._output_cancel is not cancel
@@ -156,8 +160,9 @@ def test_poisoned_esi_disconnect_and_plugin_shutdown_remain_unconfirmed():
     assert controller.shutdownCommunication() is False
     assert controller.main_state == "Shutdown unconfirmed"
     assert any("HV may remain energized" in message for message in messages)
-    # Disposing the transport must not turn a later close into a confirmation.
-    assert controller.device is None
+    # Retain the poisoned backend and Explorer's close warning, not a false OFF.
+    assert controller.device is device
+    assert controller.initialized
     assert controller.shutdownCommunication() is False
     assert controller.main_state == "Shutdown unconfirmed"
 

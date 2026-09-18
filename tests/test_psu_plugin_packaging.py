@@ -324,7 +324,7 @@ def test_estimate_storage_handles_no_channels_before_hardware_sync():
 
     module.PSUDevice.estimateStorage(device)
 
-    assert device.maxDataPoints == 0
+    assert device.maxDataPoints == 100_000
     assert (
         widget.tooltip
         == "Storage estimate unavailable until PSU channels are synchronized with hardware."
