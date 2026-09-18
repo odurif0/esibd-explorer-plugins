@@ -570,7 +570,7 @@ def test_estimate_storage_handles_empty_pre_initialization_state():
 
     module.AMXDevice.estimateStorage(device)
 
-    assert device.maxDataPoints == 0
+    assert device.maxDataPoints == 100_000
     assert widget.tooltips == [
         "Storage estimate will be available after the first successful "
         "AMX hardware initialization."

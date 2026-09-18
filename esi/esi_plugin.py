@@ -440,7 +440,7 @@ class ESIDevice(Device):
             event=lambda checked=False: self.setOn(on=checked),
             toolTipFalse=f"Turn {self.name} ON.",
             iconFalse=self.makeIcon(_ESI_POWER_ON_ICON),
-            toolTipTrue=f"Turn {self.name} OFF.",
+            toolTipTrue=f"Turn {self.name} OFF and disconnect.",
             iconTrue=self.makeIcon(_ESI_POWER_OFF_ICON),
             before=self.closeCommunicationAction,
             restore=False,
@@ -1570,6 +1570,9 @@ class ESIController(DeviceController):
             self.global_enabled = None
 
     def readNumbers(self) -> None:
+        if self.main_state == "Shutdown unconfirmed":
+            self.initializeValues(reset=True)
+            return
         if self.device is None or not self.initialized:
             self.initializeValues(reset=True)
             return
@@ -1734,9 +1737,7 @@ class ESIController(DeviceController):
                 if not cancel.is_set():
                     self.startAcquisition()
             else:
-                self.device.force_safe_off(timeout_s=timeout)
-                self.main_state = "Outputs OFF"
-                self._sync_status()
+                self._shutdown_communication_unlocked()
         except Exception as exc:
             self.errorCount += 1
             rollback_confirmed, rollback = self._force_safe_off_after_failure()
@@ -1878,8 +1879,16 @@ class ESIController(DeviceController):
                 flag=PRINT.ERROR,
             )
         finally:
-            self._dispose_device()
-            self.initialized = False
+            self.acquiring = False
+            self.initializeValues(reset=True)
+            if confirmed:
+                self._dispose_device()
+                self.initialized = False
+                self._restore_off_ui_state()
+            else:
+                # Keep the backend/port reservation and Explorer's closing warning.
+                self.initialized = True
+                self._restore_on_ui_state()
             self.main_state = "Disconnected" if confirmed else "Shutdown unconfirmed"
             self._sync_status()
         return confirmed
@@ -1890,6 +1899,8 @@ class ESIController(DeviceController):
         self.shutdownCommunication()
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if self.main_state == "Shutdown unconfirmed":
+            return  # A late status poll must not erase an unconfirmed shutdown.
         self.main_state = str(snapshot["main_state"]["name"])
         self.values = {}
         self.currents = {}
@@ -1995,11 +2006,12 @@ class ESIController(DeviceController):
         device = self.device
         self.device = None
         if device is not None:
-            with contextlib.suppress(Exception):
-                device.disconnect(
-                    timeout_s=float(
-                        getattr(self.controllerParent, "connect_timeout_s", 5.0)
+            if getattr(device, "connected", True):
+                with contextlib.suppress(Exception):
+                    device.disconnect(
+                        timeout_s=float(
+                            getattr(self.controllerParent, "connect_timeout_s", 5.0)
+                        )
                     )
-                )
             with contextlib.suppress(Exception):
                 device.close()

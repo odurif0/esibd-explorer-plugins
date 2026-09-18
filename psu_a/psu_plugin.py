@@ -1130,7 +1130,7 @@ class PSUDevice(Device):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.channelType = PSUChannel
-        self.maxDataPoints = 0
+        self.maxDataPoints = 100_000
         self.maxStorage = 0
         self.interval = 1000
 
@@ -1244,24 +1244,38 @@ class PSUDevice(Device):
                     base_estimate_storage()
                 except (KeyError, AttributeError):
                     pass
-            return
-
-        self.maxDataPoints = 0
-        plugin_manager = getattr(self, "pluginManager", None)
-        settings_plugin = getattr(plugin_manager, "Settings", None)
-        settings = getattr(settings_plugin, "settings", None)
-        if not isinstance(settings, dict):
-            return
-        max_points_setting = settings.get(f"{self.name}/{self.MAXDATAPOINTS}")
-        widget = (
-            max_points_setting.getWidget()
-            if max_points_setting is not None and hasattr(max_points_setting, "getWidget")
-            else None
-        )
-        if widget is not None and hasattr(widget, "setToolTip"):
-            widget.setToolTip(
-                "Storage estimate unavailable until PSU channels are synchronized with hardware."
+        else:
+            # Channel.__init__ captures this limit before hardware discovery.
+            self.maxDataPoints = 100_000
+            plugin_manager = getattr(self, "pluginManager", None)
+            settings_plugin = getattr(plugin_manager, "Settings", None)
+            settings = getattr(settings_plugin, "settings", None)
+            max_points_setting = (
+                settings.get(f"{self.name}/{self.MAXDATAPOINTS}")
+                if isinstance(settings, dict) else None
             )
+            widget = (
+                max_points_setting.getWidget()
+                if max_points_setting is not None and hasattr(max_points_setting, "getWidget")
+                else None
+            )
+            if widget is not None and hasattr(widget, "setToolTip"):
+                widget.setToolTip(
+                    "Storage estimate unavailable until PSU channels are synchronized with hardware."
+                )
+
+        limit = self.maxDataPoints
+        time_buffer = getattr(self, "time", None)
+        if time_buffer is not None:
+            if time_buffer.size and time_buffer.max_size and time_buffer.max_size > 0:
+                # Storage edits apply to the next history, not an active recording.
+                limit = time_buffer.max_size
+            time_buffer.max_size = limit
+        for channel in channels:
+            for name in ("values", "backgrounds"):
+                buffer = getattr(channel, name, None)
+                if buffer is not None:
+                    buffer.max_size = limit
 
     com: int
     baudrate: int
@@ -4660,6 +4674,8 @@ class PSUController(DeviceController):
         *,
         refreshed_at: float | None = None,
     ) -> None:
+        if self.main_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE:
+            return  # A status poll cannot confirm that the port has closed.
         self.hardware_main_state = str(
             snapshot.get("main_state", {}).get("name", "Unknown")
         )
@@ -5390,6 +5406,11 @@ class PSUController(DeviceController):
                 shutdown_confirmed, confirmation_reason = self._confirm_shutdown_unlocked(
                     timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
                 )
+                if shutdown_confirmed:
+                    # Physical OFF and port closure are separate confirmations.
+                    shutdown_confirmed = False
+                    confirmation_reason = "port closure was not confirmed"
+                    shutdown_confirmed = device.disconnect(timeout_s=timeout_s) is True
         except TimeoutError:
             confirmation_reason = "controller lock timeout during shutdown"
         except Exception as exc:  # noqa: BLE001
@@ -5425,6 +5446,14 @@ class PSUController(DeviceController):
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
         self._cancel_output_commands()
+        if (final_state or self.main_state) == _PSU_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+            self.acquiring = False
+            self.initialized = True
+            self.main_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
+            self.hardware_main_state = self.output_state_summary = "Unknown"
+            self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
@@ -5455,6 +5484,8 @@ class PSUController(DeviceController):
         self.initialized = False
 
     def _update_state(self) -> None:
+        if self.main_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE:
+            return
         device = self.device
         if device is None:
             return  # Preserve the last shutdown/transport-loss diagnosis.
@@ -5592,7 +5623,8 @@ class PSUController(DeviceController):
         if device is None:
             return
         try:
-            device.disconnect()
+            if getattr(device, "connected", True):
+                device.disconnect()
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             self.print(

@@ -1001,20 +1001,33 @@ class AMPRDevice(Device):
                 self.tree.setColumnHidden(index, not self.advancedAction.state)
 
     def estimateStorage(self) -> None:
-        """Avoid division by zero before the first AMPR channel discovery."""
+        """Keep timestamps and channel histories on the same nonzero capacity."""
         if self.channels:
             super().estimateStorage()
-            return
+        else:
+            # Channel.__init__ captures this limit before hardware discovery.
+            self.maxDataPoints = 100_000
+            widget = self.pluginManager.Settings.settings[
+                f"{self.name}/{self.MAXDATAPOINTS}"
+            ].getWidget()
+            if widget:
+                widget.setToolTip(
+                    "Storage estimate will be available after the first successful "
+                    "AMPR hardware initialization."
+                )
 
-        self.maxDataPoints = 0
-        widget = self.pluginManager.Settings.settings[
-            f"{self.name}/{self.MAXDATAPOINTS}"
-        ].getWidget()
-        if widget:
-            widget.setToolTip(
-                "Storage estimate will be available after the first successful "
-                "AMPR hardware initialization."
-            )
+        limit = self.maxDataPoints
+        time_buffer = getattr(self, "time", None)
+        if time_buffer is not None:
+            if time_buffer.size and time_buffer.max_size and time_buffer.max_size > 0:
+                # Storage edits apply to the next history, not an active recording.
+                limit = time_buffer.max_size
+            time_buffer.max_size = limit
+        for channel in self.channels:
+            for name in ("values", "backgrounds"):
+                buffer = getattr(channel, name, None)
+                if buffer is not None:
+                    buffer.max_size = limit
 
     def getDefaultSettings(self) -> dict[str, dict]:
         settings = super().getDefaultSettings()
@@ -2229,7 +2242,6 @@ class AMPRController(DeviceController):
             float(getattr(self.controllerParent, "ramp_rate_v_s", 0.0)),
         )
         state_updated = False
-        startup_completed = False
         startup_targets: dict[tuple[int, int], float] = {}
 
         try:
@@ -2249,10 +2261,9 @@ class AMPRController(DeviceController):
                         )
                         device.initialize(timeout_s=startup_timeout_s)
                         status = device.NO_ERR
-                        startup_completed = True
                 except TimeoutError:
-                    self._restore_off_ui_state()
-                    return
+                    # Even a timed-out startup may already have enabled the PSU.
+                    raise
                 if status == device.NO_ERR:
                     self._refresh_module_scan()
                     self._update_state()
@@ -2303,10 +2314,7 @@ class AMPRController(DeviceController):
                 return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
-            if startup_completed:
-                self._safe_disable_after_toggle_failure(startup_targets)
-            self._restore_off_ui_state()
-            self._update_state()
+            self._safe_disable_after_toggle_failure(startup_targets)
             self.print(
                 f"Failed to toggle AMPR PSU: {self._format_exception(exc)}"
                 f"{self._runtime_diagnostics(device=device)}",
@@ -2328,12 +2336,12 @@ class AMPRController(DeviceController):
         if self.controllerParent.isOn():
             if self.main_state != "ST_ON":
                 self.errorCount += 1
-                self._restore_off_ui_state()
                 self.print(
                     "AMPR PSU ON sequence ended in an unexpected state: "
                     f"{self.main_state}.{self._runtime_diagnostics(device=device)}",
                     flag=PRINT.ERROR,
                 )
+                self._safe_disable_after_toggle_failure(startup_targets)
                 return
             start_acquisition = getattr(self, "startAcquisition", None)
             if callable(start_acquisition):
@@ -2342,6 +2350,15 @@ class AMPRController(DeviceController):
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
         self._cancel_setpoints()
+        if (final_state or self.main_state) == _AMPR_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+            # Keep both the backend and Explorer's closing warning until OFF succeeds.
+            self.acquiring = False
+            self.initialized = True
+            self.main_state = _AMPR_SHUTDOWN_UNCONFIRMED_STATE
+            self.device_state_summary = self.interlock_state_summary = self.voltage_state_summary = "Unknown"
+            self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
@@ -2541,6 +2558,8 @@ class AMPRController(DeviceController):
             )
 
     def _update_state(self, *, already_acquired: bool = False) -> None:
+        if self.main_state == _AMPR_SHUTDOWN_UNCONFIRMED_STATE:
+            return  # Only a new explicit, confirmed OFF may clear this diagnosis.
         if self.device is None:
             return  # Preserve the last shutdown/transport-loss diagnosis.
 
@@ -2583,7 +2602,8 @@ class AMPRController(DeviceController):
             return
 
         self._clear_transport_failures()
-        if self.device is not device or not getattr(self, "initialized", False):
+        if (self.device is not device or not getattr(self, "initialized", False)
+                or self.main_state == _AMPR_SHUTDOWN_UNCONFIRMED_STATE):
             return
         if status == device.NO_ERR:
             self.main_state = state_name
@@ -2685,7 +2705,8 @@ class AMPRController(DeviceController):
             return
 
         try:
-            device.disconnect()
+            if getattr(device, "connected", True):
+                device.disconnect()
         except Exception:  # noqa: BLE001
             pass
         finally:
@@ -3003,11 +3024,12 @@ class AMPRController(DeviceController):
     def _safe_disable_after_toggle_failure(
         self,
         targets: dict[tuple[int, int], float],
-    ) -> None:
-        """Best-effort cleanup after a failed AMPR startup/ramp sequence."""
+    ) -> bool:
+        """Confirm disable and port closure, or preserve an explicit OFF retry."""
+        self._cancel_setpoints()
         device = self.device
         if device is None:
-            return
+            return False
 
         cleanup_errors: list[str] = []
         zero_targets = {key: 0.0 for key in targets}
@@ -3025,7 +3047,7 @@ class AMPRController(DeviceController):
                         except Exception as cleanup_exc:  # noqa: BLE001
                             cleanup_errors.append(f"zeroing failed: {cleanup_exc}")
                     try:
-                        status, _enabled = device.enable_psu(False)
+                        status, enabled = device.enable_psu(False)
                     except Exception as cleanup_exc:  # noqa: BLE001
                         cleanup_errors.append(f"disable_psu failed: {cleanup_exc}")
                     else:
@@ -3033,6 +3055,14 @@ class AMPRController(DeviceController):
                             cleanup_errors.append(
                                 f"disable_psu failed: {self._format_status(status, device=device)}"
                             )
+                        elif enabled is not False:
+                            cleanup_errors.append("PSU disable was not confirmed")
+                    if not cleanup_errors:
+                        try:
+                            if device.disconnect() is not True:
+                                cleanup_errors.append("port closure was not confirmed")
+                        except Exception as cleanup_exc:
+                            cleanup_errors.append(f"port closure failed: {cleanup_exc}")
         except TimeoutError:
             cleanup_errors.append("lock timeout")
 
@@ -3041,8 +3071,12 @@ class AMPRController(DeviceController):
                 "AMPR startup cleanup encountered issues: " + "; ".join(cleanup_errors),
                 flag=PRINT.WARNING,
             )
-            return
-        self.print("AMPR startup cleanup disabled the PSU after failure.", flag=PRINT.WARNING)
+            self.closeCommunication(final_state=_AMPR_SHUTDOWN_UNCONFIRMED_STATE)
+            return False
+        self.closeCommunication(final_state="Disconnected")
+        self._restore_off_ui_state()
+        self.print("AMPR startup cleanup disabled the PSU and disconnected after failure.", flag=PRINT.WARNING)
+        return True
 
     def _format_exception(self, exc: Exception) -> str:
         message = str(exc).strip()

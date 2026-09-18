@@ -1097,6 +1097,8 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
             except Exception as exc:
                 self._append_shutdown_error(errors, "disable verification", exc)
 
+        # Keep the link available for a later explicit OFF when disable failed.
+        self._raise_shutdown_errors(errors)
         disconnected = self._call_with_optional_timeout(
             self.disconnect,
             timeout_s=timeout_s,

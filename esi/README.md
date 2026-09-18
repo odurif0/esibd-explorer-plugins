@@ -93,6 +93,12 @@ target while the module is in standby, then opens the module gate; OFF uses an
 immediate zero followed by deactivation. If a target transition fails, the
 shutdown path attempts that same immediate zero and deactivation.
 
+Global OFF also verifies shutdown and closes communication; the next ON
+reconnects. If shutdown or port closure fails, `Shutdown unconfirmed` remains
+visible and the button offers another OFF attempt. A blocked DLL requires
+hardware-side safety measures and an Explorer restart. OFF does not certify
+that the HV outputs have fully discharged.
+
 The `ESI_HEAT` channel controls target temperature in degrees Celsius and
 monitors measured heater temperature. Advanced voltage, current, and power
 limit settings use `0` to retain the limits already configured in hardware.

@@ -1176,21 +1176,15 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             self._release_single_instance()
             return True
         timeout = self._resolve_timeout(timeout_s)
-        safe = False
-        try:
-            self.force_safe_off(timeout_s=timeout)
-            self.set_global_active(False, timeout_s=timeout)
-            safe = True
-        finally:
-            if not self._transport_poisoned:
-                status = self._call_locked_with_timeout(
-                    ESIBase.close_port, timeout, "close_port", self
-                )
-                self.connected = False
-                self._release_single_instance()
-                self._raise_on_status(status, "close_port")
-        if not safe:
-            raise RuntimeError("ESI shutdown could not be confirmed.")
+        # Do not discard the only way to retry OFF after a failed verification.
+        self.force_safe_off(timeout_s=timeout)
+        self.set_global_active(False, timeout_s=timeout)
+        status = self._call_locked_with_timeout(
+            ESIBase.close_port, timeout, "close_port", self
+        )
+        self._raise_on_status(status, "close_port")
+        self.connected = False
+        self._release_single_instance()
         return True
 
 

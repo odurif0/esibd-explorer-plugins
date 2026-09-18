@@ -6,6 +6,9 @@ are touched. The host algorithms are extracted rather than reimplemented.
 from __future__ import annotations
 
 import ast
+import importlib.util
+import sys
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +16,34 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
+from test_shutdown_confirmation_regressions import FAMILIES
 
 
-@pytest.fixture
-def rig(monkeypatch):
+HISTORY_PLUGINS = [
+    ("dmmr", "dmmr", "DMMRDevice"),
+    ("ampr_a", "ampr", "AMPRDevice"), ("ampr_b", "ampr", "AMPRDevice"),
+    ("amx_a", "amx", "AMXDevice"), ("amx_b", "amx", "AMXDevice"),
+    ("amx_hd", "amx_hd", "AMXHDDevice"),
+    *((f"psu_{letter}", "psu", "PSUDevice") for letter in "abcde"),
+]
+
+
+@lru_cache
+def _host_tree(path):
+    return ast.parse(path.read_text())
+
+
+@lru_cache
+def _host_code(path, name, parent):
+    tree = _host_tree(path)
+    nodes = tree.body if parent is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == parent).body
+    node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
+    unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
+    return compile(ast.fix_missing_locations(unit), str(path), "exec")
+
+
+@pytest.fixture(params=HISTORY_PLUGINS, ids=lambda spec: spec[0])
+def rig(monkeypatch, request):
     try:
         host = Path(distribution("esibd-explorer").locate_file("esibd"))
     except PackageNotFoundError:
@@ -27,20 +53,26 @@ def rig(monkeypatch):
 
     def extract(filename, name, parent=None):
         path = host / filename
-        tree = ast.parse(path.read_text())
-        nodes = tree.body if parent is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == parent).body
-        node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
-        unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
-        exec(compile(ast.fix_missing_locations(unit), str(path), "exec"), ns)
+        exec(_host_code(path, name, parent), ns)
         return ns[name]
 
     buffer = extract("core.py", "DynamicNp")
     append_value = extract("core.py", "appendValue", "Channel")
     append_data = extract("plugins.py", "appendData", "Device")
     estimate = extract("plugins.py", "estimateStorage", "Device")
-    module = _load_module()
+    folder, family, class_name = request.param
+    module = FAMILIES[family][0]()
+    path = Path(module.__file__)
+    if path.parent.name != folder:
+        spec = importlib.util.spec_from_file_location(
+            f"history_{folder}", path.parent.parent / folder / path.name,
+        )
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
     monkeypatch.setattr(module.Device, "estimateStorage", estimate, raising=False)
-    device = module.DMMRDevice.__new__(module.DMMRDevice)
+    cls = getattr(module, class_name)
+    device = cls.__new__(cls)
     device.channels = []
     device.time = buffer(dtype=np.float64)  # Same allocation as Device.__init__.
     device.maxDataPoints = 100000
@@ -49,7 +81,7 @@ def rig(monkeypatch):
     device.useBackgrounds = False
     device.MAXDATAPOINTS = "Max data points"
     device.pluginManager = SimpleNamespace(Settings=SimpleNamespace(settings={
-        "DMMR/Max data points": SimpleNamespace(getWidget=lambda: None),
+        f"{device.name}/Max data points": SimpleNamespace(getWidget=lambda: None),
     }))
     device.plotableChannels = True
     device.getChannels = lambda: device.channels

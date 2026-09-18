@@ -1100,8 +1100,8 @@ def test_controller_shutdown_failure_marks_state_unconfirmed():
 
     assert shutdown_confirmed is False
     assert controller.main_state == module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
-    assert controller.device is None
-    assert controller.initialized is False
+    assert isinstance(controller.device, FakeDevice)
+    assert controller.initialized is True
 
 
 def test_controller_shutdown_success_marks_state_disconnected():

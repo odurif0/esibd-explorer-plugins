@@ -1623,8 +1623,10 @@ def test_shutdown_with_config_still_forces_safe_disable_before_disconnect():
                 "channels": [],
             }
 
-        def disconnect(self):
+        def disconnect(self, timeout_s=None):
             calls.append(("disconnect",))
+            self.connected = False
+            return True
 
         def close(self):
             calls.append(("close",))
@@ -1669,7 +1671,7 @@ def test_shutdown_with_config_still_forces_safe_disable_before_disconnect():
     ]
 
 
-def test_shutdown_unconfirmed_keeps_attention_state_after_disconnect():
+def test_shutdown_unconfirmed_keeps_backend_without_disconnect():
     module = _load_module()
     calls = []
     printed = []
@@ -1731,13 +1733,12 @@ def test_shutdown_unconfirmed_keeps_attention_state_after_disconnect():
         ("set_output_enabled", False, False, 9.0),
         ("set_device_enabled", False, 9.0),
         ("collect_housekeeping", 2.5),
-        ("disconnect",),
-        ("close",),
     ]
     assert controller.main_state == module._PSU_SHUTDOWN_UNCONFIRMED_STATE
-    assert controller.hardware_main_state == module._PSU_SHUTDOWN_UNCONFIRMED_STATE
+    assert controller.hardware_main_state == "Unknown"
     assert controller.output_state_summary == "Unknown"
-    assert controller.device is None
+    assert isinstance(controller.device, FakeDevice)
+    assert controller.initialized
     assert printed == [
         ("Starting PSU shutdown sequence.", None),
         (

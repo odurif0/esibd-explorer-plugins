@@ -122,7 +122,10 @@ def test_standby_must_not_leave_amx_enabled(family, disable_works):
         with pytest.raises(RuntimeError, match="disable verification"):
             driver.shutdown(standby_config=3, disable_device=False)
     assert ("enable", False) in calls
-    assert calls[-1] == ("disconnect",)
+    if disable_works:
+        assert calls[-1] == ("disconnect",)
+    else:
+        assert ("disconnect",) not in calls
 
 
 @pytest.mark.parametrize("family", ["amx", "amx_hd"])
@@ -208,7 +211,8 @@ def test_dmmr_not_connected_response_is_not_a_confirmed_stop():
     driver.disconnect = lambda: calls.append("disconnect") or True
     with pytest.raises(RuntimeError, match="shutdown incomplete"):
         driver.shutdown()
-    assert calls == ["automatic", "enable", "disconnect"]
+    assert calls == ["automatic", "enable"]
+    assert driver.connected
 
 
 @pytest.mark.parametrize("snapshot", [{}, {"device_enabled": False}, {"output_enabled": (False, False)}])

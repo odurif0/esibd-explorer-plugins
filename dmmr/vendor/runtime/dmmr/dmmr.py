@@ -1558,6 +1558,9 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
                     raise RuntimeError("disable was not confirmed")
             except Exception as exc:
                 errors.append(f"verify {label}: {exc}")
+        # Keep the link available for a later explicit OFF when disable failed.
+        if errors:
+            raise RuntimeError("DMMR shutdown incomplete: " + "; ".join(errors))
         disconnected = self.disconnect()
         if not disconnected:
             errors.append("disconnect failed")

@@ -356,7 +356,6 @@ def test_plugin_runtime_shutdown_attempts_all_outputs_before_raising():
         ("set_module_voltage", 3, 1, 0.0, 1.5),
         ("set_module_voltage", 3, 2, 0.0, 1.5),
         ("enable_psu", False, 1.5),
-        ("disconnect",),
     ]
 
 
@@ -623,7 +622,7 @@ def test_estimate_storage_handles_empty_pre_initialization_state():
 
     module.AMPRDevice.estimateStorage(device)
 
-    assert device.maxDataPoints == 0
+    assert device.maxDataPoints == 100_000
     assert widget.tooltips == [
         "Storage estimate will be available after the first successful "
         "AMPR hardware initialization."
