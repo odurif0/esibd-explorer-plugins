@@ -23,6 +23,7 @@ def _install_esibd_stubs():
     class PARAMETERTYPE(Enum):
         INT = "INT"
         FLOAT = "FLOAT"
+        EXP = "EXP"
         BOOL = "BOOL"
         LABEL = "LABEL"
 
@@ -137,6 +138,7 @@ def _install_esibd_stubs():
     core.Parameter = Parameter
     core.parameterDict = parameterDict
     plugins.Device = Device
+    plugins.LiveDisplay = type("LiveDisplay", (), {})
     plugins.Plugin = Plugin
     sys.modules["esibd"] = esibd
     sys.modules["esibd.core"] = core
@@ -181,12 +183,12 @@ def test_fixed_channel_layout_is_safe_and_stable():
 
     items = module._fixed_channel_items("ESI")
 
-    assert [item["Module"] for item in items] == [1, 2, 0]
+    assert [item["Module"] for item in items] == [1, 2, 0, 1, 2]
     assert [item["Name"] for item in items] == [
-        "ESI_HV1",
-        "ESI_HV2",
-        "ESI_HEAT",
+        "ESI_HV1", "ESI_HV2", "ESI_HEAT", "ESI_HV1_I", "ESI_HV2_I",
     ]
+    assert all(item["Enabled"] is True for item in items[3:])
+    items = items[:3]  # Output-control defaults remain unchanged.
     assert all(item["Enabled"] is False for item in items)
     assert [item["Value"] for item in items] == [0.0, 0.0, 20.0]
     assert all(item["Min"] == 0.0 for item in items)
@@ -213,7 +215,7 @@ def test_default_com_is_generic_and_operator_configurable():
     assert settings["ESI/COM"][module.Parameter.VALUE] == 1
 
 
-def test_missing_config_creates_only_three_fixed_channels(tmp_path):
+def test_missing_config_creates_three_controls_and_two_current_channels(tmp_path):
     module = _load_plugin()
     device = object.__new__(module.ESIDevice)
     config_file = tmp_path / "ESI.ini"
@@ -238,11 +240,9 @@ def test_missing_config_creates_only_three_fixed_channels(tmp_path):
 
     device.loadConfiguration(useDefaultFile=True)
 
-    assert [item["Module"] for item in applied] == [1, 2, 0]
+    assert [item["Module"] for item in applied] == [1, 2, 0, 1, 2]
     assert [item["Name"] for item in applied] == [
-        "ESI_HV1",
-        "ESI_HV2",
-        "ESI_HEAT",
+        "ESI_HV1", "ESI_HV2", "ESI_HEAT", "ESI_HV1_I", "ESI_HV2_I",
     ]
     assert exported == [{"useDefaultFile": True}]
 
@@ -270,8 +270,8 @@ def test_generic_nine_channel_config_is_migrated_to_fixed_layout(tmp_path):
 
     device.ensureFixedChannels(persist=True)
 
-    assert [item["Module"] for item in applied] == [1, 2, 0]
-    assert len(applied) == 3
+    assert [item["Module"] for item in applied] == [1, 2, 0, 1, 2]
+    assert len(applied) == 5
     assert exported == [{"useDefaultFile": True}]
 
 
@@ -305,12 +305,10 @@ def test_polarity_channel_config_migrates_to_safe_module_pairs(tmp_path):
     device.ensureFixedChannels()
 
     assert [item["Name"] for item in applied] == [
-        "ESI_HV1",
-        "ESI_HV2",
-        "ESI_HEAT",
+        "ESI_HV1", "ESI_HV2", "ESI_HEAT", "ESI_HV1_I", "ESI_HV2_I",
     ]
-    assert [item["Value"] for item in applied] == [250.0, 300.0, 80.0]
-    assert all(item["Enabled"] is False for item in applied)
+    assert [item["Value"] for item in applied[:3]] == [250.0, 300.0, 80.0]
+    assert all(item["Enabled"] is False for item in applied[:3])
 
 
 def test_panel_controls_one_target_and_one_output_state_per_module():
@@ -374,7 +372,7 @@ def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypat
         def connect(self, timeout_s):
             raise RuntimeError("open failed")
 
-        def disconnect(self, timeout_s):
+        def disconnect(self, timeout_s, *, on_discharge):
             return True
 
         def close(self):
@@ -536,6 +534,7 @@ def test_enabled_change_forces_hardware_apply():
         channelParent=types.SimpleNamespace(loading=False),
         tree=None,
     )
+    channel.enabled = True
 
     channel.enabledChanged()
 
@@ -648,7 +647,8 @@ def test_off_sequence_uses_driver_confirmed_disconnect():
     calls = []
 
     class FakeDevice:
-        def disconnect(self, timeout_s):
+        def disconnect(self, timeout_s, *, on_discharge):
+            assert callable(on_discharge)
             calls.append(timeout_s)
             self.connected = False
             return True
@@ -961,8 +961,10 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
             calls.append(("global", active))
             raise RuntimeError("activation failed")
 
-        def force_safe_off(self, timeout_s):
-            calls.append(("safe_off", timeout_s))
+        def disconnect(self, timeout_s, *, on_discharge):
+            calls.append(("disconnect", timeout_s))
+            self.connected = False
+            return True
 
     on_action = types.SimpleNamespace(state=True)
     parent = types.SimpleNamespace(
@@ -983,7 +985,7 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
         ("module", 1, False),
         ("module", 2, False),
         ("global", True),
-        ("safe_off", 5.0),
+        ("disconnect", 5.0),
     ]
     assert on_action.state is False
 
@@ -1135,8 +1137,9 @@ def test_dispose_disconnects_before_closing_backend():
     calls = []
 
     class FakeDevice:
-        def disconnect(self, timeout_s):
+        def disconnect(self, timeout_s, *, on_discharge):
             calls.append(("disconnect", timeout_s))
+            return True
 
         def close(self):
             calls.append(("close",))

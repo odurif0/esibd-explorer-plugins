@@ -55,6 +55,9 @@ def probe(family, output):
 
     parent = Parent()
     parent.channels = []
+    parent.getChannels = lambda: parent.channels
+    parent._setting = lambda _name: None
+    parent.FREQUENCY_KHZ = getattr(cls, "FREQUENCY_KHZ", "")
     for name, value in vars(controller.controllerParent).items():
         setattr(parent, name, value)
     controller.controllerParent = parent
@@ -83,8 +86,9 @@ def probe(family, output):
         status.setText(parent.main_state)
 
     parent._update_status_widgets = show_status
-    for method in ("_sync_local_on_action", "_set_on_ui_state", "setOn"):
-        setattr(parent, method, MethodType(getattr(cls, method), parent))
+    for method in ("_sync_local_on_action", "_set_on_ui_state", "setOn", "_finish_setpoint_edits"):
+        if hasattr(cls, method):
+            setattr(parent, method, MethodType(getattr(cls, method), parent))
     path = Path(module.__file__).parent
     icons = [QIcon(str(path / f"switch-medium_{state}.png")) for state in ("on", "off")]
     kwargs = dict(parentPlugin=parent, iconFalse=icons[0], iconTrue=icons[1], restore=False)
@@ -102,9 +106,15 @@ def probe(family, output):
     calls, threads, failures, reconnects = [], [], [], []
     parent.initializeCommunication = lambda: reconnects.append(True)
     backend = SimpleNamespace(connected=True, recover=False, NO_ERR=0)
+    checking, continue_shutdown = threading.Event(), threading.Event()
 
     def shutdown(**kw):
         calls.append("shutdown")
+        if family == "esi":
+            kw["on_discharge"]({"modules": {a: {"positive_v": 15., "negative_v": -12., "measured_a": 1e-9}
+                                           for a in (1, 2)}, "consecutive": 0, "limit_v": 1.})
+            checking.set()
+            assert continue_shutdown.wait(5), "GUI failed to observe discharge check"
         if backend.recover:
             backend.connected = False
         return backend.recover
@@ -153,6 +163,19 @@ def probe(family, output):
         parent.grab().save(str(output / f"{family}-{diagnosis.replace(' ', '-')}.png"))
 
     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    if family == "esi":
+        deadline = time.monotonic() + 4
+        while not checking.is_set() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.002)
+        assert checking.is_set()
+        for _ in range(20):
+            app.processEvents()
+        check(True, module._ESI_STOPPING)
+        assert controller.device is backend and controller.initialized
+        assert controller.discharge_readings[1]["negative_v"] == -12.
+        assert "dispose" not in calls
+        continue_shutdown.set()
     settle()
     check(True, "Shutdown unconfirmed")
     assert controller.initialized and controller.device is backend

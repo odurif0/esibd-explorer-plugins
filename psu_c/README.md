@@ -76,7 +76,8 @@ The manual panel lets the operator:
 - set `Vset`
 - set `Ilim`
 - copy the live controller state into the edit panel
-- apply the edited state immediately
+- validate numeric edits with Enter, Tab, or a click outside the field;
+  intermediate digits are not applied
 - save the current live state into a controller config slot
 
 ## PSU Semantics

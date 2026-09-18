@@ -180,6 +180,45 @@ def _ampr_poisoned_port_guidance(
     return ""
 
 
+def _configure_channel_entry(tree: Any) -> None:
+    """Commit background clicks, but never let a mouse OFF steal editor focus."""
+    if not callable(getattr(tree, "setFocusPolicy", None)) or hasattr(tree, "_ampr_entry_filter"):
+        return
+    from PyQt6.QtCore import QEvent, QObject, Qt
+    from PyQt6.QtWidgets import QAbstractSpinBox, QApplication
+
+    class EntryFilter(QObject):
+        def eventFilter(self, watched: Any, event: Any) -> bool:
+            if event.type() == QEvent.Type.MouseButtonPress:
+                focused = QApplication.focusWidget()
+                if isinstance(focused, QAbstractSpinBox) and tree.isAncestorOf(focused):
+                    focused.clearFocus()
+            return False
+
+    # A NoFocus/TabFocus checkbox otherwise redirects mouse focus to the tree
+    # before its clicked signal, committing the voltage before OFF is known.
+    tree.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    tree._ampr_entry_filter = EntryFilter(tree)
+    tree.viewport().installEventFilter(tree._ampr_entry_filter)
+    tree.header().viewport().installEventFilter(tree._ampr_entry_filter)
+
+
+def _finish_channel_edit(channel: Any) -> None:
+    """Finish editors for an explicit user action, never for a global refresh."""
+    getter = getattr(channel, "getParameterByName", None)
+    if not callable(getter):
+        return
+    for name in (getattr(channel, "VALUE", "Value"), getattr(channel, "RAMP_RATE", "Ramp rate")):
+        parameter = getter(name)
+        widget = getattr(parameter, "spin", None)
+        if widget is not None and getattr(widget, "hasFocus", lambda: False)():
+            blocked = widget.blockSignals(True)
+            try:
+                widget.interpretText()
+            finally:
+                widget.blockSignals(blocked)
+
+
 def _invoke_gui_callback(callback: Any) -> None:
     """Run on the GUI thread; use a direct fallback only without a Qt app."""
     if not callable(callback):
@@ -1076,10 +1115,11 @@ class AMPRDevice(Device):
             minimum=0.0,
             maximum=_AMPR_ABS_VOLTAGE_LIMIT,
             toolTip=(
-                "Software ramp rate used for AMPR global ON/OFF transitions. "
-                "Set to 0 to disable ramping."
+                "Default for channel configurations without a saved ramp speed. "
+                "Each channel's Ramp (V/s) column controls its actual ramp."
             ),
             parameterType=PARAMETERTYPE.FLOAT,
+            advanced=True,
             attr="ramp_rate_v_s",
         )
         settings[f"{self.name}/{self.STATE}"] = parameterDict(
@@ -1342,11 +1382,21 @@ class AMPRDevice(Device):
         """Toggle the AMPR without the generic immediate apply=True jump."""
         controller = self.controller if hasattr(self, "controller") else None
         current_state = self.isOn() if hasattr(self, "onAction") else False
+        requested_on = current_state if on is None else bool(on)
         transition_target = getattr(controller, "transition_target_on", None)
         if controller and (
             getattr(controller, "initializing", False)
             or getattr(controller, "transitioning", False)
         ):
+            if not requested_on:
+                needs_worker = controller._request_off()
+                if hasattr(self, "onAction"):
+                    self.onAction.state = False
+                self._sync_local_on_action()
+                if (needs_worker and not getattr(controller, "initializing", False)
+                        and controller._begin_transition(False)):
+                    controller.toggleOnFromThread(parallel=True)
+                return
             restored_state = current_state if transition_target is None else bool(transition_target)
             if hasattr(self, "onAction"):
                 self.onAction.state = restored_state
@@ -1363,6 +1413,9 @@ class AMPRDevice(Device):
         if getattr(self, "loading", False):
             return
 
+        if self.isOn():
+            for channel in self.getChannels():
+                _finish_channel_edit(channel)
         if getattr(self, "initialized", False):
             begin_transition = getattr(self.controller, "_begin_transition", None) if self.controller else None
             if self.controller and (not callable(begin_transition) or begin_transition(self.isOn())):
@@ -1372,7 +1425,13 @@ class AMPRDevice(Device):
                     if channel.controller:
                         channel.controller.toggleOnFromThread(parallel=True)
         elif hasattr(self, "onAction") and self.isOn():
+            if controller is not None:
+                controller._cancel_ramp = False
             self.initializeCommunication()
+
+
+class _AMPRRampCancelled(Exception):
+    """An explicit OFF interrupted startup/ramp-up; the same worker must stop."""
 
 
 class _AMPRSetpoint:
@@ -1396,6 +1455,7 @@ class AMPRChannel(Channel):
 
     MODULE = "Module"
     ID = "CH"
+    RAMP_RATE = "Ramp rate"
     channelParent: AMPRDevice
 
     def getDefaultChannel(self) -> dict[str, dict]:
@@ -1429,6 +1489,16 @@ class AMPRChannel(Channel):
         channel[self.MAX][_PARAMETER_MIN_KEY] = -_AMPR_ABS_VOLTAGE_LIMIT
         channel[self.MAX][_PARAMETER_MAX_KEY] = _AMPR_ABS_VOLTAGE_LIMIT
         channel[self.MAX][_PARAMETER_EVENT_KEY] = self.maxChanged
+        channel[self.RAMP_RATE] = parameterDict(
+            value=_coerce_float(getattr(self.channelParent, "ramp_rate_v_s", 10.0), 10.0),
+            minimum=0.0,
+            maximum=_AMPR_ABS_VOLTAGE_LIMIT,
+            parameterType=PARAMETERTYPE.FLOAT,
+            header="Ramp (V/s)",
+            advanced=False,
+            attr="ramp_rate_v_s",
+            toolTip="This channel's ON/OFF ramp speed. All channels ramp in parallel. 0 disables this channel's ramp.",
+        )
         channel[self.MODULE] = parameterDict(
             value="0",
             parameterType=PARAMETERTYPE.LABEL,
@@ -1453,6 +1523,7 @@ class AMPRChannel(Channel):
             self.displayedParameters.remove(self.OPTIMIZE)
         if self.DISPLAY in self.displayedParameters:
             self.displayedParameters.remove(self.DISPLAY)
+        self.displayedParameters.insert(self.displayedParameters.index(self.VALUE) + 1, self.RAMP_RATE)
         self.displayedParameters.append(self.MODULE)
         self.displayedParameters.append(self.ID)
         self.displayedParameters.append(self.DISPLAY)
@@ -1461,15 +1532,16 @@ class AMPRChannel(Channel):
         super().initGUI(item)
         self._upgrade_toggle_widget(self.ENABLED, _AMPR_CHANNEL_ON_LABEL, _AMPR_CHANNEL_TOGGLE_MIN_WIDTH)
         self._upgrade_toggle_widget(self.ACTIVE, "Manual", 72)
+        _configure_channel_entry(getattr(self, "tree", None))
         self._sync_enabled_toggle_widget()
         self._sync_monitor_feedback()
         self.scalingChanged()
-        parameter = self.getParameterByName(self.VALUE)
-        if parameter is not None and getattr(parameter, "spin", None) is not None:
-            # Keep programmatic changes immediate, but do not drive hardware
-            # with intermediate digits while the user is still typing.
-            parameter.spin.setKeyboardTracking(False)
-            parameter.spin.editingFinished.connect(self._retry_failed_setpoint)
+        for name in (self.VALUE, self.RAMP_RATE):
+            parameter = self.getParameterByName(name)
+            if parameter is not None and getattr(parameter, "spin", None) is not None:
+                parameter.spin.setKeyboardTracking(False)
+                if name == self.VALUE:
+                    parameter.spin.editingFinished.connect(self._retry_failed_setpoint)
 
     def applyValue(self, apply: bool = False) -> None:
         if not self.real:
@@ -1490,11 +1562,6 @@ class AMPRChannel(Channel):
         parameter = self.getParameterByName(self.VALUE)
         widget = getattr(parameter, "spin", None)
         if widget is not None:
-            style = (_AMPR_MONITOR_ERROR_STYLE if state in {"error", "mismatch"}
-                     else _AMPR_MONITOR_WARN_STYLE if state in {"pending", "sent"}
-                     else "")
-            if widget.styleSheet() != style:
-                widget.setStyleSheet(style)
             tooltip = f"Requested output: {target:.3f} V. {detail}"
             if widget.toolTip() != tooltip:
                 widget.setToolTip(tooltip)
@@ -1573,6 +1640,8 @@ class AMPRChannel(Channel):
         super().realChanged()
 
     def enabledChanged(self) -> None:
+        if self.enabled and not getattr(self.channelParent, "loading", False):
+            _finish_channel_edit(self)
         super().enabledChanged()
         if not self.enabled:
             self.monitor = np.nan
@@ -1591,13 +1660,29 @@ class AMPRChannel(Channel):
         self._log_channel_event(f"Display switched {state}.")
 
     def updateColor(self):
-        """Keep the Display checkbox centered in its column."""
-        color = super().updateColor()
+        """Use the native palette for OFF cells without changing the saved plot colour."""
         try:
             from PyQt6.QtCore import Qt
+            from PyQt6.QtGui import QBrush, QColor
             from PyQt6.QtWidgets import QCheckBox, QSizePolicy
-        except Exception:
-            return color
+        except ImportError:
+            return None
+        self._ampr_colors_active = self._output_enabled()
+        if self._ampr_colors_active:
+            color = super().updateColor()
+        else:
+            color = QColor()
+            for index in range(len(self.parameters) + 1):
+                self.setBackground(index, QBrush())
+            for parameter in self.parameters:
+                widget = parameter.getWidget()
+                if widget is not None:
+                    widget.setStyleSheet("")
+                    container = getattr(widget, "container", None)
+                    if container is not None:
+                        container.setStyleSheet("")
+            self.defaultStyleSheet = ""
+        self._sync_monitor_feedback()
 
         display_param = self.getParameterByName(self.DISPLAY)
         if display_param is None:
@@ -1641,6 +1726,19 @@ class AMPRChannel(Channel):
         if widget is None or not hasattr(widget, "setText"):
             return
         widget.setText(self._enabled_toggle_label())
+        if hasattr(widget, "setFocusPolicy"):
+            from PyQt6.QtCore import Qt
+            # Mouse OFF must not commit a new voltage before requesting zero.
+            # ON explicitly finishes the editor in enabledChanged instead.
+            widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+
+    def _output_enabled(self) -> bool:
+        parent = getattr(self, "channelParent", None)
+        controller = getattr(parent, "controller", None)
+        return (bool(getattr(self, "enabled", False)) and bool(getattr(self, "real", True))
+                and bool(getattr(parent, "isOn", lambda: False)())
+                and getattr(controller, "initialized", True)
+                and getattr(controller, "main_state", "ST_ON") not in {"Disconnected", "ST_STBY"})
 
     def _monitor_feedback_state(self) -> str:
         """Classify monitor accuracy relative to the current setpoint."""
@@ -1672,10 +1770,20 @@ class AMPRChannel(Channel):
         return "error"
 
     def _sync_monitor_feedback(self) -> None:
-        """Apply green/orange/red monitor background based on setpoint tracking accuracy."""
+        """Refresh feedback, but leave all OFF cells neutral (errors remain in tooltips/logs)."""
+        active = self._output_enabled()
+        if getattr(self, "_ampr_colors_active", None) != active and callable(getattr(self, "setBackground", None)):
+            self.updateColor()
         getter = getattr(self, "getParameterByName", None)
         if not callable(getter):
             return
+        value_parameter = getter(getattr(self, "VALUE", "Value"))
+        value_widget = getattr(value_parameter, "spin", None)
+        if value_widget is not None:
+            state = getattr(self, "_ampr_setpoint_state", "confirmed") if active else "stored"
+            style = (_AMPR_MONITOR_ERROR_STYLE if state in {"error", "mismatch"}
+                     else _AMPR_MONITOR_WARN_STYLE if state in {"pending", "sent"} else "")
+            value_widget.setStyleSheet(style)
         try:
             parameter = getter(getattr(self, "MONITOR", "Monitor"))
         except Exception:  # noqa: BLE001
@@ -1685,7 +1793,7 @@ class AMPRChannel(Channel):
         if widget is None or not hasattr(widget, "setStyleSheet"):
             return
 
-        state = self._monitor_feedback_state()
+        state = self._monitor_feedback_state() if active else "default"
         if state == "ok":
             style = _AMPR_MONITOR_OK_STYLE
         elif state == "warn":
@@ -1827,6 +1935,8 @@ class AMPRController(DeviceController):
         self.voltage_state_summary = "n/a"
         self.initialized = False
         self.ramping = False
+        self._cancel_ramp = False
+        self._last_output_targets: dict[tuple[int, int], float] = {}
         self.transitioning = False
         self.transition_target_on: bool | None = None
         self._transition_lock = Lock()
@@ -1940,6 +2050,10 @@ class AMPRController(DeviceController):
             f"AMPR initialized on COM{int(self.controllerParent.com)}. "
             f"State: {self.main_state}. Detected modules: {modules_text}."
         )
+        if getattr(self, "_cancel_ramp", False):
+            if self._begin_transition(False):
+                self.toggleOnFromThread(parallel=True)
+            return
         if self.main_state == "ST_ON":
             start_acquisition = getattr(self, "startAcquisition", None)
             if callable(start_acquisition):
@@ -2007,6 +2121,12 @@ class AMPRController(DeviceController):
                     # Check the request while holding the same hardware lock so
                     # an old frame can never confirm a newer write.
                     self._confirm_setpoints(module, voltages, device)
+                    if not hasattr(self, "_last_output_targets"):
+                        self._last_output_targets = {}
+                    for channel_id, data in voltages.items():
+                        target = data.get("setpoint")
+                        if target is not None and np.isfinite(target):
+                            self._last_output_targets[(module, channel_id)] = float(target)
             except TimeoutError:
                 # Transient controller-lock contention (another operation holds
                 # the lock); skip this module this cycle. A real read fault is
@@ -2049,6 +2169,8 @@ class AMPRController(DeviceController):
             if callable(feedback):
                 feedback("stored", float(channel.value), "Stored only; no active ON command/communication.")
             return
+        if force and channel.enabled:
+            _finish_channel_edit(channel)
         request = _AMPRSetpoint(channel, self.device, self._setpoint_cancel)
         with self._setpoint_lock:
             previous = self._latest_setpoints.get(request.key)
@@ -2129,6 +2251,7 @@ class AMPRController(DeviceController):
                         if _transport_failure_is_fatal(exc):
                             self._handle_transport_loss()
                     else:
+                        self._last_output_targets[key] = request.target
                         self._publish_setpoint(request, "sent", "Sent; awaiting the hardware setpoint readback.")
             except TimeoutError:
                 # Retain every channel's latest request until the poll/ramp
@@ -2237,17 +2360,18 @@ class AMPRController(DeviceController):
                 self.controllerParent.connect_timeout_s,
             )
         )
-        ramp_rate_v_s = max(
-            0.0,
-            float(getattr(self.controllerParent, "ramp_rate_v_s", 0.0)),
-        )
+        rates = getattr(self, "_transition_rates", None)
+        if rates is None:
+            rates = self._channel_ramp_rates()
+        targets = getattr(self, "_transition_targets", None)
+        if targets is None:
+            targets = self._channel_target_voltages(respect_device_state=False)
         state_updated = False
         startup_targets: dict[tuple[int, int], float] = {}
 
         try:
             if self.controllerParent.isOn():
-                with contextlib.suppress(Exception):
-                    self.controllerParent.updateValues(apply=False)
+                self._check_ramp_cancelled()
                 try:
                     with self._controller_lock_section(
                         "Could not acquire lock to toggle the AMPR PSU."
@@ -2256,10 +2380,12 @@ class AMPRController(DeviceController):
                         if device is None:
                             self._restore_off_ui_state()
                             return
+                        self._check_ramp_cancelled()
                         self.print(
                             f"Starting AMPR PSU. Waiting up to {startup_timeout_s:.1f} s for ST_ON."
                         )
                         device.initialize(timeout_s=startup_timeout_s)
+                        self._check_ramp_cancelled()
                         status = device.NO_ERR
                 except TimeoutError:
                     # Even a timed-out startup may already have enabled the PSU.
@@ -2272,9 +2398,7 @@ class AMPRController(DeviceController):
                     export_config = getattr(self.controllerParent, "exportConfiguration", None)
                     if callable(apply_limits) and apply_limits() and callable(export_config):
                         self.controllerParent.exportConfiguration(useDefaultFile=True)
-                    startup_targets = self._channel_target_voltages(
-                        respect_device_state=True
-                    )
+                    startup_targets = dict(targets)
                     if startup_targets:
                         zero_targets = {key: 0.0 for key in startup_targets}
                         self._apply_target_voltages(
@@ -2286,32 +2410,16 @@ class AMPRController(DeviceController):
                         self._ramp_target_voltages(
                             start_targets=zero_targets,
                             end_targets=startup_targets,
-                            rate_v_s=ramp_rate_v_s,
+                            rates_v_s=rates,
                             label="up",
                         )
             else:
-                shutdown_after_ramp_error = False
-                start_targets = self._channel_target_voltages(respect_device_state=False)
-                try:
-                    self._ramp_target_voltages(
-                        start_targets=start_targets,
-                        end_targets={key: 0.0 for key in start_targets},
-                        rate_v_s=ramp_rate_v_s,
-                        label="down",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    shutdown_after_ramp_error = True
-                    self.errorCount += 1
-                    self.print(
-                        f"AMPR ramp-down before shutdown failed: {self._format_exception(exc)}",
-                        flag=PRINT.ERROR,
-                    )
-                shutdown_confirmed = self.shutdownCommunication()
-                if not shutdown_confirmed:
-                    self._restore_on_ui_state()
-                if shutdown_after_ramp_error or not shutdown_confirmed:
-                    return
+                self._ramp_down_and_shutdown(rates)
                 return
+        except _AMPRRampCancelled:
+            self.print("AMPR ramp-up interrupted by OFF; stopping outputs.")
+            self._ramp_down_and_shutdown(rates)
+            return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             self._safe_disable_after_toggle_failure(startup_targets)
@@ -2673,6 +2781,11 @@ class AMPRController(DeviceController):
             )
             if callable(sync_acquisition_controls):
                 sync_acquisition_controls()
+            get_channels = getattr(self.controllerParent, "getChannels", lambda: [])
+            for channel in get_channels():
+                sync_feedback = getattr(channel, "_sync_monitor_feedback", None)
+                if callable(sync_feedback):
+                    sync_feedback()
             update_status_widgets = getattr(self.controllerParent, "_update_status_widgets", None)
             if callable(update_status_widgets):
                 update_status_widgets()
@@ -2701,6 +2814,7 @@ class AMPRController(DeviceController):
         device = self.device
         self.device = None
         self.initialized = False
+        self._last_output_targets = {}
         if device is None:
             return
 
@@ -2834,13 +2948,38 @@ class AMPRController(DeviceController):
                 raise TimeoutError(timeout_message)
             yield
 
+    def _request_off(self) -> bool:
+        """Cancel before waiting for serial I/O; the existing worker performs OFF."""
+        self._cancel_ramp = True
+        self._cancel_setpoints()
+        with self._transition_guard():
+            if self.transitioning:
+                self.transition_target_on = False
+                return False
+            # The previous worker may have just relinquished ownership.
+            return True
+
+    def _check_ramp_cancelled(self) -> None:
+        if getattr(self, "_cancel_ramp", False):
+            raise _AMPRRampCancelled()
+
+    def _channel_ramp_rates(self) -> dict[tuple[int, int], float]:
+        """Capture committed per-channel rates on the GUI thread."""
+        default = float(getattr(self.controllerParent, "ramp_rate_v_s", 10.0))
+        return {(ch.module_address(), ch.channel_number()): float(getattr(ch, "ramp_rate_v_s", default))
+                for ch in getattr(self.controllerParent, "getChannels", lambda: [])() if ch.real}
+
     def _begin_transition(self, target_on: bool) -> bool:
-        """Mark a global AMPR ON/OFF transition as active."""
+        """Capture controls on the GUI thread before starting the one ON/OFF worker."""
         with self._transition_guard():
             if self.transitioning:
                 return False
+            self._transition_targets = self._channel_target_voltages(respect_device_state=False)
+            self._transition_rates = self._channel_ramp_rates()
             self.transitioning = True
             self.transition_target_on = bool(target_on)
+            if target_on:
+                self._cancel_ramp = False
             if not target_on:
                 self._cancel_setpoints()
             elif hasattr(self, "_setpoint_lock"):
@@ -2850,11 +2989,37 @@ class AMPRController(DeviceController):
             return True
 
     def _end_transition(self) -> None:
-        """Clear transition bookkeeping after a global AMPR ON/OFF sequence."""
-        with self._transition_guard():
-            self.transitioning = False
-            self.transition_target_on = None
+        """Do not lose an OFF arriving between the last ramp step and worker exit."""
+        stop_attempted = False
+        while True:
+            with self._transition_guard():
+                must_stop = (not stop_attempted and getattr(self, "_cancel_ramp", False)
+                             and getattr(self, "transition_target_on", None) is False
+                             and self.device is not None
+                             and self.main_state not in {_AMPR_SHUTDOWN_UNCONFIRMED_STATE,
+                                                         _AMPR_COMMUNICATION_LOST_STATE, "Disconnected"})
+                if not must_stop:
+                    self.transitioning = False
+                    self.transition_target_on = None
+                    self._transition_targets = self._transition_rates = None
+                    break
+            stop_attempted = True
+            self._ramp_down_and_shutdown(self._transition_rates or {})
         self._start_setpoint_worker()
+
+    def _ramp_down_and_shutdown(self, rates: dict[tuple[int, int], float]) -> None:
+        """Descend from accepted/read-back targets, never from unfinished GUI text."""
+        try:
+            with self._controller_lock_section("Could not acquire lock before AMPR ramp-down."):
+                reached = {key: value for key, value in getattr(self, "_last_output_targets", {}).items()
+                           if key in rates}
+            self._ramp_target_voltages(start_targets=reached, end_targets=dict.fromkeys(reached, 0.0),
+                                      rates_v_s=rates, label="down")
+        except Exception as exc:  # noqa: BLE001
+            self.errorCount += 1
+            self.print(f"AMPR ramp-down before shutdown failed: {self._format_exception(exc)}", flag=PRINT.ERROR)
+        if not self.shutdownCommunication():
+            self._restore_on_ui_state()
 
     def _channel_target_voltages(
         self,
@@ -2901,18 +3066,29 @@ class AMPRController(DeviceController):
         targets: dict[tuple[int, int], float],
         *,
         device: Any,
+        cancellable: bool = False,
     ) -> None:
-        """Apply a full AMPR target map while the controller lock is held."""
+        """Apply targets serially, checking OFF between channels during ramp-up."""
+        if not hasattr(self, "_last_output_targets"):
+            self._last_output_targets = {}
+        if cancellable:
+            for key, voltage in sorted(targets.items()):
+                self._check_ramp_cancelled()
+                self._apply_target_voltages_locked({key: voltage}, device=device)
+            self._check_ramp_cancelled()
+            return
         for module, module_targets in sorted(self._group_target_voltages(targets).items()):
             voltage_limit = self._module_voltage_limit(module)
             for channel_id, voltage in sorted(module_targets.items()):
-                if abs(float(voltage)) > voltage_limit:
+                if not np.isfinite(voltage) or abs(float(voltage)) > voltage_limit:
                     raise RuntimeError(
                         f"Refusing {float(voltage):.3f} V for module {module} CH{channel_id}: "
                         f"detected module rating is ±{voltage_limit:.0f} V."
                     )
             if hasattr(device, "set_module_voltages"):
                 statuses = device.set_module_voltages(module, module_targets)
+                if set(statuses) != set(module_targets):
+                    raise RuntimeError("AMPR did not acknowledge every channel in the ramp step.")
                 for channel_id, status in statuses.items():
                     if status != device.NO_ERR:
                         raise RuntimeError(
@@ -2920,6 +3096,7 @@ class AMPRController(DeviceController):
                             f"{float(module_targets[channel_id]):.3f} V for module "
                             f"{module} CH{channel_id}: {self._format_status(status, device=device)}"
                         )
+                    self._last_output_targets[(module, channel_id)] = module_targets[channel_id]
                 continue
 
             for channel_id, voltage in sorted(module_targets.items()):
@@ -2930,12 +3107,14 @@ class AMPRController(DeviceController):
                         f"{float(voltage):.3f} V for module "
                         f"{module} CH{channel_id}: {self._format_status(status, device=device)}"
                     )
+                self._last_output_targets[(module, channel_id)] = voltage
 
     def _apply_target_voltages(
         self,
         targets: dict[tuple[int, int], float],
         *,
         timeout_message: str,
+        cancellable: bool = False,
     ) -> None:
         """Apply a full AMPR target map under the controller lock."""
         if not targets:
@@ -2945,80 +3124,82 @@ class AMPRController(DeviceController):
             device = self.device
             if device is None:
                 raise RuntimeError("AMPR device is not available.")
-            self._apply_target_voltages_locked(targets, device=device)
+            self._apply_target_voltages_locked(targets, device=device, cancellable=cancellable)
 
     def _ramp_target_voltages(
         self,
         *,
         start_targets: dict[tuple[int, int], float],
         end_targets: dict[tuple[int, int], float],
-        rate_v_s: float,
+        rates_v_s: dict[tuple[int, int], float],
         label: str,
     ) -> None:
-        """Ramp all AMPR output targets simultaneously."""
-        output_keys = sorted(set(start_targets) | set(end_targets))
-        if not output_keys:
+        """Advance every channel on each tick, using its own speed and elapsed time."""
+        keys = sorted(set(start_targets) | set(end_targets))
+        current = {key: float(start_targets.get(key, 0.0)) for key in keys}
+        targets = {key: float(end_targets.get(key, 0.0)) for key in keys}
+        for key in keys:
+            rate = rates_v_s.get(key, np.nan)
+            if not np.isfinite(rate) or rate < 0.0:
+                raise ValueError(f"Invalid AMPR ramp rate for {key}: {rate}")
+            if not np.isfinite(current[key]) or not np.isfinite(targets[key]):
+                raise ValueError(f"Invalid AMPR ramp voltage for {key}")
+        rising = label == "up"
+        if rising:
+            self._check_ramp_cancelled()
+        if not keys:
             return
-
-        normalized_start = {
-            key: float(start_targets.get(key, 0.0))
-            for key in output_keys
-        }
-        normalized_end = {
-            key: float(end_targets.get(key, 0.0))
-            for key in output_keys
-        }
-        max_delta = max(
-            abs(normalized_end[key] - normalized_start[key]) for key in output_keys
-        )
-        if max_delta <= 0.0:
-            return
-
-        if rate_v_s <= 0.0:
-            self._apply_target_voltages(
-                normalized_end,
-                timeout_message="Could not acquire lock to apply AMPR voltages.",
-            )
-            return
-
-        estimated_duration_s = max_delta / rate_v_s
-        steps = max(1, int(np.ceil(estimated_duration_s / _AMPR_RAMP_STEP_S)))
-        self.print(
-            f"Starting AMPR ramp-{label} at {rate_v_s:.1f} V/s "
-            f"(estimated {estimated_duration_s:.1f} s)."
-        )
-        self._cancel_ramp = False
+        self.print(f"Starting AMPR ramp-{label}: all channels in parallel at their configured speeds.")
         self.ramping = True
+        last_tick = time.monotonic()
         try:
-            for step in range(1, steps + 1):
-                if getattr(self, "_cancel_ramp", False):
-                    self.print(
-                        f"AMPR ramp-{label} cancelled before completion.",
-                        flag=PRINT.WARNING,
-                    )
-                    return
-                fraction = step / steps
-                step_targets = {
-                    key: normalized_start[key]
-                    + (normalized_end[key] - normalized_start[key]) * fraction
-                    for key in output_keys
-                }
-                self._apply_target_voltages(
-                    step_targets,
-                    timeout_message="Could not acquire lock to apply AMPR ramp step.",
-                )
-                if step < steps:
-                    time.sleep(_AMPR_RAMP_STEP_S)
+            while True:
+                if rising:
+                    self._check_ramp_cancelled()
+                    # Only explicitly committed edits may retarget a running ramp.
+                    # The worker never reads a focused Qt editor.
+                    with self._setpoint_lock:
+                        requests = {key: request for key, request in self._pending_setpoints.items()
+                                    if key in targets and request.device is self.device
+                                    and not request.cancel.is_set()}
+                    for key, request in requests.items():
+                        targets[key] = request.target
+                else:
+                    requests = {}
+                immediate = {key: targets[key] for key in keys
+                             if rates_v_s[key] == 0.0 and targets[key] != current[key]}
+                if immediate:
+                    self._apply_target_voltages(immediate,
+                        timeout_message="Could not acquire lock to apply AMPR voltages.", cancellable=rising)
+                    current.update(immediate)
+                # A reached, acknowledged target must not be sent again by the
+                # ordinary setpoint worker when the transition ends.
+                for key, request in requests.items():
+                    if current[key] != request.target:
+                        continue
+                    with self._setpoint_lock:
+                        if self._pending_setpoints.get(key) is not request:
+                            continue
+                        self._pending_setpoints.pop(key)
+                    self._publish_setpoint(request, "sent", "Ramp target sent; awaiting hardware setpoint readback.")
+                if all(current[key] == targets[key] for key in keys):
+                    break
+                time.sleep(max(0.0, _AMPR_RAMP_STEP_S - (time.monotonic() - last_tick)))
+                now = time.monotonic()
+                elapsed, last_tick = now - last_tick, now
+                step_targets = {}
+                for key in keys:
+                    distance = targets[key] - current[key]
+                    if distance == 0.0:
+                        continue
+                    step = rates_v_s[key] * elapsed
+                    step_targets[key] = (targets[key] if abs(distance) <= step + 1e-9
+                                         else current[key] + float(np.sign(distance)) * step)
+                self._apply_target_voltages(step_targets,
+                    timeout_message="Could not acquire lock to apply AMPR ramp step.", cancellable=rising)
+                current.update(step_targets)
         finally:
             self.ramping = False
-        if getattr(self.controllerParent, "isOn", lambda: False)():
-            updated_targets = self._channel_target_voltages(respect_device_state=True)
-            if updated_targets != normalized_end:
-                self.print("Applying updated AMPR targets queued during ramp.")
-                self._apply_target_voltages(
-                    updated_targets,
-                    timeout_message="Could not acquire lock to apply queued AMPR targets.",
-                )
         self.print(f"AMPR ramp-{label} completed.")
 
     def _safe_disable_after_toggle_failure(

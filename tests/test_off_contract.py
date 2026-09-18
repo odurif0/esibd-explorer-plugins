@@ -158,6 +158,7 @@ def test_esi_off_disconnects_and_next_on_uses_reinitialization():
     device.controller, device.onAction, device.loading = controller, parent.onAction, False
     device._sync_local_on_action = lambda: None
     device.isOn = parent.isOn
+    device.getChannels = lambda: []
     device.initializeCommunication = lambda: calls.append("reinitialize")
     module.ESIDevice.setOn(device, True)
     assert calls[-1] == "reinitialize"

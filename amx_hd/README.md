@@ -46,9 +46,10 @@ Toolbar notes:
 
 - `Signal`: saved AMX HD config selector (operator-facing signal/routing shape).
 - `Load now`: immediately loads the selected signal while the device is ON.
-- `Freq`: oscillator frequency in kHz. Changes apply immediately while the
-  device is ON and are reused on the next startup.
+- `Freq`: oscillator frequency in kHz. Validate typed changes with Enter, Tab,
+  or a click outside the field. They apply while ON and are reused on startup.
 - channel rows: choose which timers are ON and set their pulse width in us.
+  Typed widths use the same validation; intermediate digits are not sent.
 
 Runtime timing notes:
 

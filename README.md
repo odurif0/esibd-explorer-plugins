@@ -23,7 +23,7 @@ One plugin for one device.
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.2.10.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.2.11.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -50,14 +50,12 @@ One plugin for one device.
 4. **Select the correct COM port** in the plugin settings for each device
    you want to control. That's it!
 
-When upgrading from a bundle that contained the legacy `amx/` plugin, remove
-that folder before extracting the new bundle. Extracting an archive does not
-delete old plugin folders; the supported standard-AMX identities are now
-`AMX_A` (`amx_a/`) and `AMX_B` (`amx_b/`).
+## Setpoint entry
 
-The ESI controller requires an additional read-only hardware inventory before
-the plugin is enabled. Follow [`esi/README.md`](esi/README.md) and run the
-bundled `esi_hardware_probe.ipynb` first.
+Press Enter, Tab, or click outside a numeric field to apply its contents.
+An action that uses the setpoint also reads the current field text, even if
+it does not move keyboard focus. OFF stops without first applying a new target.
+Acquisition refreshes do not replace text while you are editing it.
 
 ## ON / OFF
 
@@ -72,7 +70,10 @@ bundled `esi_hardware_probe.ipynb` first.
   DLL call is blocked, make the instrument safe locally and restart Explorer.
 
 For HV devices, a verified disable is **not proof of complete electrical
-discharge**. Use the device-specific safety procedure before touching hardware.
+discharge**. ESI additionally checks both HV polarities on each module against
+its 1 V shutdown criterion before disconnecting (see `esi/README.md`). This
+software check is not a safe-access certification. Use the device-specific
+safety procedure before touching hardware.
 
 ## Requirements
 

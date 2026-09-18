@@ -1419,9 +1419,15 @@ def test_toggle_on_does_not_log_success_outside_st_on():
     assert ("AMPR PSU ON sequence ended in an unexpected state: ST_STBY.", module.PRINT.ERROR) in logs
 
 
+def _ramp_clock(module, monkeypatch):
+    clock = types.SimpleNamespace(now=0.)
+    monkeypatch.setattr(module, 'time', types.SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds)))
+
+
 def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
     module = _load_module()
-    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
         real = True
@@ -1469,6 +1475,8 @@ def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
         controller.errorCount = 0
         controller.main_state = "Disconnected"
         controller.ramping = False
+        controller._setpoint_lock = module.Lock()
+        controller._pending_setpoints = {}
         controller.controllerParent = types.SimpleNamespace(
             isOn=lambda: True,
             connect_timeout_s=7.5,
@@ -1495,10 +1503,9 @@ def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
         ("set_module_voltages", 2, {1: 2.0}),
     ]
     assert logs == [
-        ("update:False", None),
         ("Starting AMPR PSU. Waiting up to 12.0 s for ST_ON.", None),
         ("scan", None),
-        ("Starting AMPR ramp-up at 10.0 V/s (estimated 0.2 s).", None),
+        ("Starting AMPR ramp-up: all channels in parallel at their configured speeds.", None),
         ("AMPR ramp-up completed.", None),
         ("AMPR PSU turned ON. State: ST_ON.", None),
     ]
@@ -1506,7 +1513,7 @@ def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
 
 def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
     module = _load_module()
-    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
         real = True
@@ -1555,6 +1562,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
         controller.errorCount = 0
         controller.main_state = "Disconnected"
         controller.ramping = False
+        controller._last_output_targets = {(2, 1): 2.0}
         controller.controllerParent = types.SimpleNamespace(
             isOn=lambda: False,
             connect_timeout_s=7.5,
@@ -1580,7 +1588,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
         "shutdown",
     ]
     assert logs == [
-        ("Starting AMPR ramp-down at 10.0 V/s (estimated 0.2 s).", None),
+        ("Starting AMPR ramp-down: all channels in parallel at their configured speeds.", None),
         ("AMPR ramp-down completed.", None),
         ("Starting AMPR shutdown sequence.", None),
         ("AMPR shutdown sequence completed.", None),
@@ -1591,7 +1599,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
 
 def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
     module = _load_module()
-    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
         real = True
@@ -1660,6 +1668,10 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
         controller.errorCount = 0
         controller.main_state = "Disconnected"
         controller.ramping = False
+        controller._setpoint_lock = module.Lock()
+        controller._pending_setpoints = {}
+        controller._latest_setpoints = {}
+        controller._setpoint_cancel = module.Event()
         controller.transitioning = True
         controller.transition_target_on = True
         controller._sync_status_to_gui = lambda: None
@@ -1693,7 +1705,7 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
     assert controller.transitioning is False
     assert logs == [
         ("Starting AMPR PSU. Waiting up to 12.0 s for ST_ON.", None),
-        ("Starting AMPR ramp-up at 10.0 V/s (estimated 0.2 s).", None),
+        ("Starting AMPR ramp-up: all channels in parallel at their configured speeds.", None),
         ("AMPR startup cleanup disabled the PSU and disconnected after failure.", module.PRINT.WARNING),
         (
             "Failed to toggle AMPR PSU: RuntimeError: AMPR rejected 1.000 V for module 2 CH1: STATUS_123",
@@ -1704,7 +1716,7 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
 
 def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
     module = _load_module()
-    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
         real = True
@@ -1729,6 +1741,8 @@ def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
             return FakeContext()
 
     channel = FakeChannel()
+    channel.VALUE = 'Value'
+    channel.getParameterByName = lambda name: types.SimpleNamespace(displayDecimals=2)
 
     class FakeDevice:
         NO_ERR = 0
@@ -1740,12 +1754,15 @@ def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
             self.calls.append(("set_module_voltages", module, dict(voltages)))
             if dict(voltages) == {1: 1.0}:
                 channel.value = 3.0
+                controller._queue_setpoint(channel)
             return {1: self.NO_ERR}
 
-    controller = object.__new__(module.AMPRController)
+    controller = module.AMPRController(types.SimpleNamespace())
     controller.lock = FakeLock()
     controller.device = FakeDevice()
     controller.errorCount = 0
+    controller.initialized = True
+    controller.main_state = 'ST_ON'
     controller.ramping = False
     controller.transitioning = True
     logs = []
@@ -1759,7 +1776,7 @@ def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
         controller,
         start_targets={(2, 1): 0.0},
         end_targets={(2, 1): 2.0},
-        rate_v_s=10.0,
+        rates_v_s={(2, 1): 10.0},
         label="up",
     )
 
@@ -1769,8 +1786,7 @@ def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
         ("set_module_voltages", 2, {1: 3.0}),
     ]
     assert logs == [
-        ("Starting AMPR ramp-up at 10.0 V/s (estimated 0.2 s).", None),
-        ("Applying updated AMPR targets queued during ramp.", None),
+        ("Starting AMPR ramp-up: all channels in parallel at their configured speeds.", None),
         ("AMPR ramp-up completed.", None),
     ]
 

@@ -239,6 +239,18 @@ def _status_requires_operator_attention(state: Any) -> bool:
     )
 
 
+def _finish_spinbox_edit(widget: Any) -> bool:
+    """Read the focused editor on the GUI thread, without sending commands."""
+    if widget is None or not getattr(widget, "hasFocus", lambda: False)():
+        return False
+    blocked = widget.blockSignals(True)
+    try:
+        widget.interpretText()
+    finally:
+        widget.blockSignals(blocked)
+    return True
+
+
 def _invoke_gui_callback(callback: Any) -> None:
     """Run on the GUI thread; use a direct fallback only without a Qt app."""
     if not callable(callback):
@@ -891,6 +903,7 @@ class AMXHDDevice(Device):
         from PyQt6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox
 
         widget = QDoubleSpinBox()
+        widget.setKeyboardTracking(False)
         widget.setRange(0.001, 10000.0)
         widget.setDecimals(3)
         widget.setSingleStep(0.1)
@@ -1044,6 +1057,10 @@ class AMXHDDevice(Device):
         return True, ""
 
     def _update_config_controls(self) -> None:
+        setting = self._setting(self.FREQUENCY_KHZ)
+        spin = getattr(setting, "spin", None)
+        if spin is not None:
+            spin.setKeyboardTracking(False)
         self._update_config_selector(getattr(self, "standbyConfigCombo", None), "standby_config")
         self._update_config_selector(getattr(self, "operatingConfigCombo", None), "operating_config")
         signal_label = getattr(self, "operatingConfigLabel", None)
@@ -1081,14 +1098,14 @@ class AMXHDDevice(Device):
                 block_signals(True)
             try:
                 set_value = getattr(frequency_widget, "setValue", None)
-                if callable(set_value):
+                if callable(set_value) and not getattr(frequency_widget, "hasFocus", lambda: False)():
                     set_value(float(getattr(self, "frequency_khz", 2.0)))
             finally:
                 if callable(block_signals):
                     block_signals(False)
             frequency_tooltip = (
                 "Oscillator frequency applied to the selected AMX signal. "
-                "Changes are applied immediately while the AMX is ON."
+                "Confirm a typed value with Enter, Tab, or by leaving the field."
             )
             if hasattr(frequency_widget, "setToolTip"):
                 frequency_widget.setToolTip(frequency_tooltip)
@@ -1988,6 +2005,26 @@ class AMXHDDevice(Device):
         self._sync_acquisition_controls()
         self._update_status_widgets()
 
+    def _finish_setpoint_edits(self, channel: Any = None) -> None:
+        setting = self._setting(self.FREQUENCY_KHZ)
+        for widget in (getattr(self, "frequencyWidget", None), getattr(setting, "spin", None)):
+            if _finish_spinbox_edit(widget):
+                loading = getattr(setting, "loading", False)
+                if setting is not None:
+                    setting.loading = True
+                try:
+                    self._set_frequency_setting_value(float(widget.value()))
+                finally:
+                    if setting is not None:
+                        setting.loading = loading
+                save = getattr(setting, "settingEvent", None)
+                if callable(save):
+                    save()
+        for ch in [channel] if channel is not None else self.getChannels():
+            getter = getattr(ch, "getParameterByName", None)
+            parameter = getter(getattr(ch, "VALUE", "Value")) if callable(getter) else None
+            _finish_spinbox_edit(getattr(parameter, "spin", None))
+
     def setOn(self, on: "bool | None" = None) -> None:
         controller = getattr(self, "controller", None)
         current_state = self.isOn() if hasattr(self, "onAction") else False
@@ -2013,6 +2050,8 @@ class AMXHDDevice(Device):
         if getattr(self, "loading", False):
             return
 
+        if self.isOn():
+            self._finish_setpoint_edits()
         if controller and getattr(controller, "initialized", False):
             begin_transition = getattr(controller, "_begin_transition", None)
             can_start = not callable(begin_transition) or begin_transition(self.isOn())
@@ -2159,10 +2198,10 @@ class AMXHDChannel(Channel):
         self._upgrade_toggle_widget(self.ACTIVE, "Manual", 72)
         self._sync_enabled_toggle_widget()
         self._sync_monitor_feedback()
-        self._disable_value_wheel()
+        self._configure_value_editor()
         self.scalingChanged()
 
-    def _disable_value_wheel(self) -> None:
+    def _configure_value_editor(self) -> None:
         getter = getattr(self, "getParameterByName", None)
         if not callable(getter):
             return
@@ -2174,6 +2213,8 @@ class AMXHDChannel(Channel):
             return
         get_widget = getattr(parameter, "getWidget", None)
         widget = get_widget() if callable(get_widget) else getattr(parameter, "check", None)
+        if hasattr(widget, "setKeyboardTracking"):
+            widget.setKeyboardTracking(False)
         _disable_spinbox_wheel(widget)
 
     def scalingChanged(self) -> None:
@@ -3103,10 +3144,15 @@ class AMXHDController(DeviceController):
             )
 
     def applyGlobalSettingsFromThread(self, parallel: bool = True) -> None:
-        if parallel:
-            self._queue_global_settings_apply()
-            return
-        self.applyGlobalSettings()
+        def start() -> None:
+            finish = getattr(self.controllerParent, "_finish_setpoint_edits", None)
+            if callable(finish):
+                finish()
+            if parallel:
+                self._queue_global_settings_apply()
+            else:
+                self.applyGlobalSettings()
+        _invoke_gui_callback(start)
 
     def _queue_global_settings_apply(self) -> None:
         with self._global_apply_state_lock:
@@ -3130,10 +3176,15 @@ class AMXHDController(DeviceController):
             self.applyGlobalSettings()
 
     def applyValueFromThread(self, channel: AMXHDChannel, parallel: bool = True) -> None:
-        if parallel:
-            self._queue_channel_timing_apply(channel)
-            return
-        self.applyValue(channel)
+        def start() -> None:
+            finish = getattr(self.controllerParent, "_finish_setpoint_edits", None)
+            if callable(finish) and channel.enabled:
+                finish(channel)
+            if parallel:
+                self._queue_channel_timing_apply(channel)
+            else:
+                self.applyValue(channel)
+        _invoke_gui_callback(start)
 
     def _queue_channel_timing_apply(self, channel: AMXHDChannel) -> None:
         pulser = channel.pulser_number()
