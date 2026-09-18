@@ -738,6 +738,7 @@ def test_amx_set_on_initializes_communication_when_turning_on():
     device._sync_local_on_action = lambda: None
     device._update_status_widgets = lambda: None
     device.initializeCommunication = lambda: init_calls.append(True)
+    device.getChannels = lambda: []
     device.controller = types.SimpleNamespace(
         initialized=False,
         initializing=False,

@@ -39,8 +39,8 @@ Toolbar notes:
 - `Signal`: saved AMX config selector. This is the operator-facing signal or
   routing shape.
 - `Load now`: immediately loads the selected signal while the AMX is ON.
-- `Freq`: oscillator frequency in kHz. Changes apply immediately while the AMX
-  is ON and are reused on the next startup.
+- `Freq`: oscillator frequency in kHz. Validate typed changes with Enter, Tab,
+  or a click outside the field. They apply while ON and are reused on startup.
 - operator cards: stage each pulser enable request and pulse width in us.
 
 ## Operator Panel
@@ -52,7 +52,8 @@ from controller-register readbacks:
 
 - `On when AMX active` stages whether the width is applied after the global AMX
   reaches its ON state; it is not an independent physical-output measurement
-- `Width` is the requested pulse width in microseconds
+- `Width` is the requested pulse width in microseconds; typed edits also wait
+  for Enter, Tab, or a click outside the field
 - `Duty request` is calculated from the requested width and frequency
 - `Width`, `Duty`, `Delay`, and `Burst` below `CONTROLLER REGISTERS` are derived
   from values read back through the vendor API

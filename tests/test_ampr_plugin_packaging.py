@@ -427,6 +427,7 @@ def test_plugin_enables_monitors_and_hides_optimize_column():
     assert "Optimize" not in channel.displayedParameters
     assert channel.displayedParameters[-3:] == ["Module", "CH", "Display"]
 
+    channel.channelParent = types.SimpleNamespace(ramp_rate_v_s=10.)
     channel_defaults = module.AMPRChannel.getDefaultChannel(channel)
     assert channel_defaults["Enabled"][module.Parameter.ADVANCED] is False
     assert channel_defaults["Enabled"][module.Parameter.HEADER] == "On"
@@ -902,7 +903,7 @@ def test_channel_enabled_toggle_text_becomes_explicitly_off():
     channel.id = "3"
     channel.enabled = False
     channel.monitor = 42.0
-    channel.getParameterByName = lambda name: {"Enabled": FakeParameter(enabled_widget)}[name]
+    channel.getParameterByName = lambda name: {"Enabled": FakeParameter(enabled_widget)}.get(name)
 
     module.AMPRChannel.enabledChanged(channel)
 
@@ -942,7 +943,7 @@ def test_channel_monitor_feedback_uses_relative_color_bands():
     channel.value = 100.0
     channel.monitor = 100.5
     channel.warningState = False
-    channel.getParameterByName = lambda name: {"Monitor": FakeParameter(monitor_widget)}[name]
+    channel.getParameterByName = lambda name: {"Monitor": FakeParameter(monitor_widget)}.get(name)
 
     module.AMPRChannel.monitorChanged(channel)
     assert "#2f855a" in monitor_widget.styles[-1]
@@ -1105,7 +1106,7 @@ def test_set_on_ignores_reentrant_request_while_transition_is_running():
         transition_target_on=True,
     )
 
-    module.AMPRDevice.setOn(device, on=False)
+    module.AMPRDevice.setOn(device, on=True)
 
     assert device.onAction.state is True
     assert device.printed == [

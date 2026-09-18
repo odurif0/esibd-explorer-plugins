@@ -1,200 +1,223 @@
 # ESI Plugin
 
-Controls the CGC ESI electrospray source, two HVPS-3kB modules, and the
-HEAT-CTRL-2410 heater module.
-
-The plugin is self-contained and embeds its private driver runtime, vendor
+Controls the CGC ESI electrospray source with two HVPS-3kB modules and one
+HEAT-CTRL-2410 heater. The plugin includes its private driver runtime, vendor
 header, and 64-bit Windows DLL.
 
 ## Requirements
 
-- ESIBD Explorer `1.0.1`
-- Windows for real hardware communication
+- ESIBD Explorer `1.0.1` on Windows for hardware communication.
 - CGC ESI controller with HEAT-CTRL-2410 at address 0 and HVPS-3kB modules at
-  addresses 1 and 2
+  addresses 1 and 2.
 - Controller firmware `0x0100` dated July 13, 2026, with the matching July 14
-  `COM-ESI-CTRL.dll` bundled by this plugin
+  `COM-ESI-CTRL.dll` bundled by this plugin. Do not substitute the obsolete
+  April DLL: its activation command times out with `-10` on the July firmware.
 
-## Activation
+## Installation
 
 1. Extract the plugin bundle into the ESIBD Explorer `plugins` folder.
-2. Keep ESIBD Explorer and all other ESI applications closed.
-3. From the vendor package's top-level `Software` folder, run this read-only
-   preflight with `ESI-Controller.exe` and its adjacent 32-bit DLL:
+2. Close any notebook or vendor utility using the ESI controller.
+3. Enable the `ESI` plugin in the Plugin Manager.
+4. Set the controller's Windows COM port and baud rate (default: `230400`).
 
-   ```bat
-   ESI-Controller.exe 16 -P -m -u -s -sd -si -sv -sf -st -sn -sp -se -ms1 -ma1 -ml1 -ms2 -ma2 -ml2 -t
-   ```
+No notebook or JSON report is required to enable or use the plugin.
 
-   Change `16` if needed. Do not continue unless the utility identifies the
-   controller and both HV modules without communication errors.
-4. Open `esi/esi_hardware_probe.ipynb` on the Windows controller PC. The
-   validated installation uses `COM16`; update `COM_PORT` if Windows assigns a
-   different port.
-5. Run every cell and confirm that the generated JSON report maps `ESI_HEAT`
-   to address 0, `ESI_HV1` to address 1, `ESI_HV2` to address 2, and reports
-   address 3 as absent.
-6. Confirm that every `safe_zero_target` operation in the report has status `0`
-   before operating connected equipment.
-7. Run `esi/esi_hv_activation_probe.ipynb` with `ARM_NONZERO_TEST = False` and
-   require status `0` from the module activation command plus matching direct
-   and PWM activation readbacks. The notebook also selects, verifies, and reads
-   both voltage ADC polarities at a zero target before restoring the initial
-   selection. A red+green (yellow) module LED is normal at a zero target and
-   does not invalidate this gate test. Keep nonzero output disarmed except for
-   the separately approved guarded `100 V` commissioning run described below.
-8. Restart ESIBD Explorer. Enable the `ESI` plugin and configure the same COM
-   port in its settings.
+Initialization checks the controller type (`0x8ED6`) and module inventory:
+`ESI_HEAT` at address 0 (`0xDB1C`), and `ESI_HV1` / `ESI_HV2` at addresses 1 / 2
+(`0x0A0D`). It rejects missing or mismatched modules and unexpected HV modules.
+It zeros the HV and heater targets, verifies disable, and configures the
+volatile HV maximum-step values described below. Initialization finishes with
+HV and heater outputs OFF; output activation requires an operator command.
 
-To inspect the active manufacturer configuration without changing it, close
-ESIBD Explorer and run:
+## Operation and safety
+
+### HV outputs
+
+Each HV module has one unsigned target magnitude, from 0 to 3000 V, shared by
+its positive and negative connectors. The two modules are independent, but
+**the two connectors of a module cannot be controlled separately**. Activating
+that module also energizes its unused connector; keep it isolated and treat
+it as live.
+
+The `POS` / `NEG` selection changes only the voltage ADC being read. It does
+not switch an output or change its polarity. The displayed voltage is the raw
+ADC readback; negative targets are never passed to the vendor target API.
+
+Apply a typed voltage with Enter, Tab, or a click outside the field. A button
+that uses the target also reads the current field text; OFF stops without
+first applying a new target. Acquisition refreshes leave edits untouched.
+The heater's numeric target uses the same rule.
+
+Initial activation sets and verifies the target while the module is in
+standby, then activates it. Changes to an active target use the software ramp
+(default: 500 V/s). Disabling an HV output requests zero immediately, then
+verifies deactivation. A failed target change attempts the same rollback.
+
+HV generation requires both the controller-wide `SetEnable` state and the
+module's `SetModuleActivationState` state. The driver checks the target and
+both activation states. The panel separates `HW target` from `HV control` and
+`PWM set / measured`: an accepted target does not prove that regulation has
+started. At a nonzero target, an idle control bit or zero PWM set value
+indicates that it has not started.
+
+The panel also shows the reported RGB LED color. Color alone is not a fault
+diagnosis: CGC uses red/blue for positive/negative outputs, and red+green
+(yellow) is normal at a zero target.
+
+### HV current measurements
+
+The cards display the measured current for each HV module. Two read-only
+Explorer channels, `ESI_HV1_I` and `ESI_HV2_I`, provide live traces and recorded
+currents in amperes. They are added automatically to existing configurations
+without replacing the voltage and heater channels or their settings.
+
+The vendor API reports one current per HV module, not separate currents for
+the positive and negative connectors. Voltage, current, and temperature use
+separate plot axes and their own units in HDF recordings. A missing or invalid
+reading is recorded as `NaN`, never as the previous measurement.
+
+These channels reuse the existing diagnostic reads; they send no output
+commands and do not impose a current limit.
+
+### Heater
+
+`ESI_HEAT` controls target temperature in degrees Celsius and monitors measured
+temperature. Advanced voltage, current, and power limits use `0` to retain the
+hardware settings; positive overrides are checked against hardware limits.
+Heating is blocked if the temperature readback is missing, non-finite, below
+0 degC, or above the hardware maximum. A disconnected sensor can report an
+out-of-range temperature even with zero heater power.
+
+### ON / OFF
+
+ON connects and starts operation according to the selected outputs. Review
+their targets and activation states before switching ON.
+
+Global OFF first disables the outputs, then displays `Stopping: checking HV`.
+The port stays open while the driver checks both ADC polarities on both HV
+modules. All four absolute voltages must be **at most 1 V for three consecutive
+fresh measurement rounds** before the port closes. The check has a 60-second
+deadline; a blocked DLL is handled by the transport watchdog.
+
+The ADC selection is switched and checked for each polarity, old samples are
+discarded, and the data-ready flags must clear then signal a new conversion.
+The initial selections are restored unless the transport is unusable. Invalid
+readings, unproven ADC freshness, a timeout, or a failed port closure leave
+`Shutdown unconfirmed`; the controller is retained and the next click retries
+OFF. The button stays ON during checking or uncertainty so OFF remains
+accessible; this does not mean that an output is confirmed active.
+
+The cards show both voltage readings and the current while checking. Current
+readings must be valid, but there is **no current threshold** until its accuracy
+and acceptable zero-current residual are established. After successful OFF,
+the cards and buttons are neutral gray, the state is `Disconnected`, and the
+next ON reconnects. Saved output selections are not changed.
+
+**This 1 V software check does not certify safe access or complete discharge.**
+It cannot verify disconnected loads or replace an independent voltage check.
+If shutdown is unconfirmed, use the physical interlock/front panel and the
+instrument's safety procedure. A blocked DLL requires an Explorer restart.
+
+The cards wrap in narrow panels, with scrollbars when needed. The mouse wheel
+does not edit setpoints.
+
+## Configuration
+
+The driver supports NVM slots `0..1022`; the plugin's `Operating config` setting
+currently accepts `0..255`, or `-1` for no selection. `Available configs` lists
+the slots reported by the controller; `Loaded config` shows the last loaded
+slot. Selecting a number does not load it automatically.
+
+While the device is ON, click `Load config` to load the selected slot into
+volatile memory. The driver forces the outputs OFF before and after loading.
+The plugin never saves NVM slots; use the vendor utility or the driver's
+`save_config` method for that operation.
+
+Initialization and configuration loading set both volatile `HVPSxMaxVoltStep`
+fields to `10.008`. This permits regulation after loading an OFF configuration
+whose maximum step is zero. The driver verifies all 53 configuration bytes
+and checks that targets and activation states remain OFF. It does not save
+these changes to NVM.
+
+## Optional diagnostics and commissioning
+
+Use these tools when investigating hardware, communication, or activation
+problems. They are separate from normal plugin installation. Close Explorer
+and other ESI applications first: the DLL allows only one active connection.
+Run notebooks on the Windows controller PC and set `COM_PORT` to its actual
+port (`16` is the notebook default).
+
+### Inventory notebook
+
+[`esi_hardware_probe.ipynb`](esi_hardware_probe.ipynb) identifies modules and
+records diagnostics in a JSON report. It is **not read-only**: it switches
+module communication with `set_enable`, writes zero HV and heater targets
+(`0 V`, `0 degC`), then attempts to disable operation and close the port.
+Previous targets and activation states are not restored.
+
+Check the inventory, every `safe_zero_target` status, and cleanup results;
+status `0` means the command succeeded. The expected controlled modules are
+HEAT=0, HV1=1, and HV2=2. Keep the physical interlock available and verify HV
+independently. The notebook's low-level DLL calls have no cancellable timeout;
+if a call blocks, make the instrument safe before restarting the kernel.
+
+### Activation notebook
+
+[`esi_hv_activation_probe.ipynb`](esi_hv_activation_probe.ipynb) tests activation
+commands and readbacks. Both `ARM_TEMP_CONFIG` and `ARM_NONZERO_TEST` default
+to `False`. Even with these switches disarmed, it changes activation states,
+zero targets, and ADC selections. It is not a passive inventory.
+
+The zero-target test checks direct and PWM activation readbacks and both ADC
+polarities, then restores the initial ADC selection. Require status `0` and
+matching readbacks before proceeding with commissioning.
+
+For a configuration test, first use `ARM_TEMP_CONFIG=True` with
+`ARM_NONZERO_TEST=False`. This requires an initially verified OFF configuration,
+changes only the selected module's `HVPSxMaxVoltStep` to `10.008`, verifies the
+53-byte readback, and restores the original safe bytes. After a transient
+`SetCurrentConfig` status `-11`, the notebook proceeds only if the immediate
+readback matches exactly; a mismatch aborts the test and triggers restoration.
+
+A nonzero test requires a separate, successful configuration-only run,
+`ARM_NONZERO_TEST=True`, the confirmation `ARM 100 V`, and both external meters.
+It stages `100 V` while the module is OFF, then activates it. The notebook:
+
+- polls target, module state, PWM and the selected ADC with a 50 ms loop delay;
+- allows 10 seconds to reach a `95 V` PWM trigger, then records a 20-second hold;
+- aborts above the approved absolute `150 V` limit, including during the final
+  ADC polarity reads; during continuous polling, it also aborts after more than
+  1.5 seconds without a fresh valid ADC conversion;
+- attempts to return enable, target and module activation to OFF, then waits
+  for PWM and ADC readbacks below `1 V`, with a 60-second timeout, before
+  requesting the external meter readings.
+
+The trigger starts observation, not an accuracy verdict. Evaluate PWM, both
+ADCs and both external meters rather than assuming the setpoint was reached.
+
+For configuration diagnostics, the HV blocks begin at byte 17 with a 12-byte
+stride: signed 32-bit millivolt target and maximum step, ADC selection, current
+range, activation, and padding. Module 1's `10.008` maximum step occupies bytes
+21-24 as `18 27 00 00`. Verify this layout at `0 V` before any nonzero test.
+
+### Vendor utility
+
+From the vendor package's top-level `Software` folder, use `ESI-Controller.exe`
+with its adjacent 32-bit DLL to inspect identification and status. Replace
+`16` with the actual COM port and investigate any communication error before
+running further tests:
+
+```bat
+ESI-Controller.exe 16 -P -m -u -s -sd -si -sv -sf -st -sn -sp -se -ms1 -ma1 -ml1 -ms2 -ma2 -ml2 -t
+```
+
+To export the current manufacturer configuration without changing it:
 
 ```bat
 ESI-Controller.exe 16 -xs ESI-current-before.cfg -t
 ```
 
-The activation notebook also records the 53-byte current configuration. The
-release copy defaults both arm switches to `False`; commissioning requires an
-explicit edit. First use
-`ARM_TEMP_CONFIG=True, ARM_NONZERO_TEST=False`: after confirming that the
-initial configuration is safely OFF, the notebook applies a temporary
-configuration that changes only the selected module's
-`HVPSxMaxVoltStep=10.008`, verifies that every target and gate remains OFF,
-then restores the exact original safe bytes. A later run may also set
-`ARM_NONZERO_TEST=True` to capture the `MS_CTRL_ACT` control bit, PWM
-set/measured voltages, physical module LED RGB state, and both ADC polarities.
-Low targets remain available and their actual PWM, ADC, and external readings
-must be used instead of assuming they equal the setpoint. Nominal-range
-commissioning stages `100 V` while the module is OFF, then activates it under
-the exact confirmation `ARM 100 V`, with both external meters connected. It
-polls target, module state, PWM, and the selected ADC every 50 ms, allows up to
-10 seconds for the PWM measurement to reach `95 V`, then records a 20-second
-hold. The `95 V` threshold starts the hold but is not an automatic accuracy
-verdict. The PWM voltage remains guarded on every poll and during both final
-ADC polarity selections, while the ADC permits at most 1.5 seconds between
-fresh valid conversions, matching the measured firmware update cadence. The
-run aborts above the operator-approved absolute `150 V` limit. Accuracy is
-recorded without an automatic nominal-tolerance verdict. It automatically
-returns global enable, target, and module activation to OFF, then polls until
-both PWM and ADC readbacks fall below `1 V` or a 60-second discharge timeout
-expires before asking for the external readings.
-
-Initialization validates controller type `0x8ED6`, requires HV modules 1 and 2
-to report type `0x0A0D`, requires the heater at address 0 to report type
-`0xDB1C`, writes zero targets, and closes the module gate with
-`SetModuleActivationState(False)` before closing the controller-wide gate with
-`SetEnable(False)`. The operator-facing names
-are `ESI_HV1` (address 1), `ESI_HV2` (address 2), and `ESI_HEAT` (address 0).
-Turning the device or an output ON is always an explicit operator action.
-
-Changes to an already active HV target use a configurable software ramp
-(500 V/s by default). Initial activation instead loads and verifies the final
-target while the module is in standby, then opens the module gate; OFF uses an
-immediate zero followed by deactivation. If a target transition fails, the
-shutdown path attempts that same immediate zero and deactivation.
-
-Global OFF also verifies shutdown and closes communication; the next ON
-reconnects. If shutdown or port closure fails, `Shutdown unconfirmed` remains
-visible and the button offers another OFF attempt. A blocked DLL requires
-hardware-side safety measures and an Explorer restart. OFF does not certify
-that the HV outputs have fully discharged.
-
-The `ESI_HEAT` channel controls target temperature in degrees Celsius and
-monitors measured heater temperature. Advanced voltage, current, and power
-limit settings use `0` to retain the limits already configured in hardware.
-Nonzero overrides are checked against the limits reported by the controller.
-Heating is blocked when the temperature readback is missing, non-finite, below
-0 degC, or above the hardware maximum. A disconnected sensor can report a high
-out-of-range value even while heater power is zero.
-
-The HV cards wrap to fit narrower panels. Scrollbars keep all controls
-accessible when space is limited; the mouse wheel does not edit setpoints.
-
-## Voltage Safety
-
-The HVPS-3kB software target range is 0 to 3000 V. Each module has one shared
-unsigned target magnitude and physically distinct positive and negative
-outputs. The published C API has no independent target or activation command
-for either connector: `SetHVsupplyTargetOutputVoltage(Address, Voltage)` acts
-on the complete module, while `SetHVsupplyMeasRanges(..., VoltNeg, ...)` only
-selects an ADC measurement channel. The plugin therefore presents one honest
-`+/-` output pair per module with one magnitude and one ON/OFF state. Negative
-values are never passed to the vendor target function. The displayed voltage
-is the raw ADC readback currently supplied by the firmware and is prefixed
-`POS` or `NEG` according to the verified `VoltNeg` measurement selection.
-
-The two connectors cannot be targeted, activated, or disabled independently.
-It is possible to connect a load to only one polarity, but activating the module
-still energizes the unused connector; it must remain isolated and be treated as
-live. `SetHVsupplyMeasRanges(..., VoltNeg, ...)` selects only which connector is
-measured. It does not switch either physical output. The two HV modules remain
-independently controllable from each other, but each module always behaves as
-one coupled +/- pair.
-
-The operator panel distinguishes the target register (`HW target`) from the
-internal regulator (`HV control` and `PWM set / measured`) and displays the
-module's reported RGB LED color. A red LED is not treated as an error by color
-alone because CGC also uses red/blue indicators for positive/negative outputs.
-At a nonzero target, an idle control bit or a zero PWM set value means the
-target register accepted the request but regulation did not start.
-
-Output generation requires two independent gates: the controller-wide
-`SetEnable(true)` state and each HV module's
-`SetModuleActivationState(address, true)` HVC toggle. The plugin verifies the
-target with `GetHVsupplyTargetOutputVoltage`, the global gate with `GetEnable`,
-and the module toggle with the `ActivationState` returned by
-`GetHVsupplyParamsPWM`. The July DLL also provides the matching direct
-`GetModuleActivationState` readback. Any nonzero activation status is treated
-as a failure. The obsolete April DLL used a different serial command for this
-same API function and times out with `-10` against the July firmware. Disabled
-module targets are set to zero before their HVC toggle is deactivated.
-
-The supplied manufacturer configurations contain an additional
-`HVPSxMaxVoltStep` value (`10.008` for active HV examples). The individual
-target and activation APIs do not expose this value. After forcing every output
-OFF during initialization, the plugin patches only the two volatile
-`HVPSxMaxVoltStep` fields to `10.008`, verifies all 53 configuration bytes, and
-rechecks both targets and gates before initialization succeeds. This enables HV
-control after an OFF configuration whose maximum step is `0`. The plugin never
-writes an NVM configuration slot.
-
-The explicitly armed diagnostic notebook also calls `SetCurrentConfig` while
-testing and restoring the same volatile configuration.
-If that call returns the observed transient `-11` receive status, the notebook
-does not assume success: it continues only when an immediate 53-byte readback
-matches the requested temporary configuration exactly. Any mismatch aborts the
-probe and triggers the safe restoration path.
-The manufacturer utility serializes each HV configuration block from byte 17
-with a 12-byte stride: target and maximum step are signed 32-bit millivolt
-integers, followed by the voltage-ADC selection, current range, activation, and
-one padding byte. Thus module 1 `HVPS1MaxVoltStep=10.008` occupies bytes 21-24
-as `18 27 00 00` (decimal `10008`). Diagnostic builds must verify this exact
-layout at `0 V` before any later nonzero run.
-
-If a DLL call times out or shutdown cannot be confirmed, treat the HV state as
-unknown and use the physical interlock or front panel before approaching the
-source.
-
-## Configuration Management
-
-The ESI controller stores up to 1023 named configuration slots in NVM. After
-connecting, the plugin queries the controller and populates the `Operating
-config` setting with the available slots.
-
-- **Operating config**: select a slot index from the toolbar. Use `-1` to
-  connect without loading a saved configuration.
-- **Load now**: loads the selected slot into volatile memory while the device
-  is ON. The plugin then automatically re-applies the volatile
-  `HVPSxMaxVoltStep = 10.008` patch because a saved OFF configuration has
-  `MaxVoltStep = 0`, which blocks HV control.
-- **Available configs**: indicator listing the slots reported by the controller.
-- **Loaded config**: indicator showing the last loaded slot.
-
-Configurations can be saved to NVM slots via the vendor `ESI-Controller.exe`
-utility or the `ESI` driver's `save_config` method. The plugin itself only
-loads existing slots and never writes to NVM.
-
-## Portability Note
+## Portability
 
 To copy this plugin to another machine, keep the whole `esi/` directory
 together, including the embedded `vendor/` subtree.

@@ -35,19 +35,32 @@ Each real channel must be configured with:
 
 - `Module`: AMPR module address from `0` to `11`
 - `CH`: channel number from `1` to `4`
+- `Ramp (V/s)`: this channel's speed for global ON/OFF ramps, saved with its
+  configuration; default **10 V/s**, or **0** for no ramp on this channel
 
 The plugin reads measured voltages as channel monitors and applies channel
 setpoints through the AMPR driver.
 
-Validate a voltage edit with Enter, Tab, or a click outside the cell. Typing
-does not send intermediate digits. Communication runs in the background;
-only the latest unsent value per channel is kept. OFF/disconnection cancels
-pending commands.
+Validate a voltage edit with Enter, Tab, or a click outside the cell. Updates
+from other channels do not validate an unfinished edit. An explicit ON action
+uses the current field text even if its button does not remove keyboard focus.
+Communication runs in the background; only the latest unsent request per
+channel is kept. OFF cancels pending requests without submitting a new target.
 
-An orange voltage cell means pending or awaiting hardware readback. Red means
-an error or a different setpoint readback; the tooltip gives details. Revalidate
-the value to retry. The cell returns to normal after matching the readback at
-the displayed precision. `Monitor` remains the measured output voltage.
+While a channel is ON, an orange voltage cell means pending or awaiting
+hardware readback. Red means an error or a different readback; the tooltip
+gives details. Revalidate to retry. `Monitor` is the measured output voltage.
+**OFF cells are neutral**, without changing the saved colours of the curves.
+
+All channels ramp **in parallel**, each at its own speed; serial commands are
+sent in turn. At 10 V/s, targets of 100 V and 200 V from zero take approximately
+10 s and 20 s, not a shared duration or two sequential ramps. Speeds are captured
+at the start of each transition. Older channel files without a speed inherit
+the previous global ramp setting.
+
+OFF during startup or ramp-up interrupts the ascent after the current hardware
+call, then ramps down from the last accepted/read-back targets before verified
+shutdown. It never raises a channel to its unfinished target before stopping.
 
 After a failed startup or ramp, the plugin verifies disable before closing
 the port. If this fails, `Shutdown unconfirmed` stays visible and the next

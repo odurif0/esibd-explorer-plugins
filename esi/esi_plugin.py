@@ -24,7 +24,7 @@ from esibd.core import (
     Parameter,
     parameterDict,
 )
-from esibd.plugins import Device, Plugin
+from esibd.plugins import Device, LiveDisplay, Plugin
 
 
 _RUNTIME_PREFIX = "_esibd_bundled_esi_runtime"
@@ -40,6 +40,7 @@ _ESI_HV_CHANNELS = ((1, 1), (2, 2))
 _ESI_HV_MODULES = (1, 2)
 _ESI_MODULES = (_ESI_HEAT_MODULE, *_ESI_HV_MODULES)
 _ESI_COMMUNICATION_LOST = "Communication lost"
+_ESI_STOPPING = "Stopping: checking HV"
 _PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
 _ESI_POWER_ON_ICON = "switch-medium_on.png"
 _ESI_POWER_OFF_ICON = "switch-medium_off.png"
@@ -49,7 +50,10 @@ _ESI_HEAT_CARD_WIDTH = 2 * _ESI_HV_CARD_WIDTH + _ESI_CARD_SPACING
 
 _ESI_PANEL_CARD_ON = "QFrame { background-color: #162433; border: 1px solid #3182ce; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_CARD_OFF = "QFrame { background-color: #202938; border: 1px solid #64748b; border-radius: 8px; color: #f7fafc; }"
-_ESI_PANEL_CARD_DISC = "QFrame { background-color: #151b26; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; }"
+_ESI_PANEL_CARD_DISC = "QFrame { background-color: #242424; border: 1px solid #555555; border-radius: 8px; color: #dddddd; }"
+_ESI_PANEL_CARD_STOPPING = "QFrame { background-color: #292720; border: 1px solid #d69e2e; border-radius: 8px; color: #f7fafc; }"
+_ESI_BTN_NEUTRAL = "QPushButton { background-color: #393939; color: #aaaaaa; font-weight: 600; border-radius: 4px; }"
+_ESI_PANEL_NEUTRAL = "color: #aaaaaa; font-weight: 600;"
 _ESI_PANEL_CARD_ERR = "QFrame { background-color: #2d1719; border: 1px solid #ef4444; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_CARD_HEAT = "QFrame { background-color: #2d1b0e; border: 1px solid #d97706; border-radius: 8px; color: #f7fafc; }"
 _ESI_PANEL_TITLE = "color: #f8fafc; font-weight: 700; font-size: 14px;"
@@ -90,6 +94,18 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 def _runtime_module_name(plugin_dir: Path) -> str:
     digest = hashlib.sha256(str(plugin_dir.resolve()).encode()).hexdigest()[:12]
     return f"{_RUNTIME_PREFIX}_{digest}"
+
+
+def _finish_spinbox_edit(widget: Any) -> bool:
+    """Read the focused editor on the GUI thread, without sending commands."""
+    if widget is None or not getattr(widget, "hasFocus", lambda: False)():
+        return False
+    blocked = widget.blockSignals(True)
+    try:
+        widget.interpretText()
+    finally:
+        widget.blockSignals(blocked)
+    return True
 
 
 def _invoke_gui_callback(callback: Any) -> None:
@@ -188,8 +204,16 @@ def _get_esi_driver_class() -> type[Any]:
         return _ESI_DRIVER_CLASS
 
 
+_ESI_CURRENT_FUNCTION = "HV current"
+
+
+def _is_current_channel(channel: Any) -> bool:
+    return (getattr(channel, "_current_measurement", False)
+            or getattr(channel, "function", "") == _ESI_CURRENT_FUNCTION)
+
+
 def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
-    """Return the two module-level HV channels plus the heater channel."""
+    """Return three output controls and two read-only HV current channels."""
     channels = [
         {
             "Name": f"{device_name}_HV{number}",
@@ -219,7 +243,64 @@ def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
             "Display": True,
         }
     )
+    channels.extend(
+        {
+            "Name": f"{device_name}_HV{number}_I",
+            "Module": address,
+            "Function": _ESI_CURRENT_FUNCTION,
+            "Enabled": True,
+            "Active": True,
+            "Real": True,
+            "Value": np.nan,
+            "Display": True,
+            "Color": color,
+        }
+        for (number, address), color in zip(_ESI_HV_CHANNELS, ("#3182ce", "#dd6b20"))
+    )
     return channels
+
+
+class _ESILiveDisplay(LiveDisplay):
+    """Keep current, voltage and temperature on separate physical axes."""
+
+    def initFig(self) -> None:
+        super().initFig()
+        for plot in self.livePlotWidgets:
+            item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
+            if getattr(item, "groupLabel", None) is not None and item.legend is not None:
+                item.legend.setOffset((8, 24))  # Keep the unit heading above the traces' legend.
+
+    def getGroups(self):
+        groups = {}
+        for name, channels in super().getGroups().items():
+            units = dict.fromkeys(channel.unit for channel in channels)
+            if len(units) <= 1:
+                groups[name] = channels
+            else:
+                for unit in units:
+                    groups[f"{name} ({unit})"] = [ch for ch in channels if ch.unit == unit]
+        self.channelGroups = groups  # Explorer's plot loop consumes this cache.
+        return groups
+
+    def plotGroup(self, livePlotWidget, timeAxes, channels, apply) -> None:
+        from pyqtgraph import ViewBox
+
+        super().plotGroup(livePlotWidget, timeAxes, channels, apply)
+        if not channels or any(channel.unit != "A" for channel in channels):
+            return
+        view = livePlotWidget if isinstance(livePlotWidget, ViewBox) else livePlotWidget.getViewBox()
+        if view is None or not view.autoRangeEnabled()[1]:
+            return  # Do not replace a manual Y zoom.
+        if any(ch.plotCurve is not None and ch.plotCurve.opts["logMode"][1] for ch in channels):
+            return
+        bounds = view.childrenBounds()[1]
+        if bounds is None or not np.all(np.isfinite(bounds)) or bounds[0] != bounds[1]:
+            return
+        # A constant nanoamp current must not inherit pyqtgraph's default 1 A span.
+        current = float(bounds[0])
+        half_span = 10.0 ** np.floor(np.log10(abs(current))) if current else 1e-12
+        view.setRange(yRange=(current - half_span, current + half_span),
+                      padding=0, disableAutoRange=False)
 
 
 def providePlugins() -> "list[type[Plugin]]":
@@ -307,10 +388,16 @@ def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
 
 def _scrollable_panel(panel: Any) -> Any:
     """Do not propagate the content's minimum size to Explorer's dock area."""
-    from PyQt6.QtCore import QEvent
+    from PyQt6.QtCore import QEvent, Qt
     from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFrame, QScrollArea
 
     class PanelScrollArea(QScrollArea):
+        def mousePressEvent(self, event):
+            # Empty panel space validates an edit; output buttons accept their
+            # own clicks without letting this ancestor steal editor focus.
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            super().mousePressEvent(event)
+
         def eventFilter(self, watched, event):
             if event.type() == QEvent.Type.Wheel and isinstance(watched, (QAbstractSpinBox, QComboBox)):
                 # Scrolling the panel must never edit an output setpoint/range,
@@ -320,6 +407,7 @@ def _scrollable_panel(panel: Any) -> Any:
             return super().eventFilter(watched, event)
 
     scroll = PanelScrollArea()
+    scroll.setFocusPolicy(Qt.FocusPolicy.TabFocus)
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setWidgetResizable(True)
     scroll.setWidget(panel)
@@ -360,6 +448,24 @@ class ESIDevice(Device):
     OPERATING_CONFIG = "Operating config"
     AVAILABLE_CONFIGS = "Available configs"
     LOADED_CONFIG = "Loaded config"
+
+    LiveDisplay = _ESILiveDisplay
+
+    def appendOutputData(self, h5file, useDefaultFile: bool = False) -> None:
+        """Keep Explorer's file schema, but record each channel's physical unit."""
+        from esibd.const import OUTPUTCHANNELS, UNIT
+
+        path = f"{self.name}/{OUTPUTCHANNELS}"
+        previous = set(h5file[path]) if path in h5file else set()
+        super().appendOutputData(h5file, useDefaultFile=useDefaultFile)
+        group = h5file.get(path)
+        if group is None:
+            return
+        for channel in self.getDataChannels():
+            names = (channel.name, channel.name + "_BG") if self.useBackgrounds else (channel.name,)
+            for name in names:
+                if name in group and name not in previous:
+                    group[name].attrs[UNIT] = channel.unit
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -417,6 +523,7 @@ class ESIDevice(Device):
             controller is not None
             and getattr(controller, "initialized", False)
             and getattr(controller, "device", None) is not None
+            and getattr(controller, "main_state", "") not in (_ESI_STOPPING, "Shutdown unconfirmed")
         )
 
     def _load_config_clicked(self) -> None:
@@ -487,6 +594,8 @@ class ESIDevice(Device):
             background = "#2f855a"
         elif state in ("Disconnected",):
             background = "#718096"
+        elif state == _ESI_STOPPING:
+            background = "#975a16"
         elif "lost" in state.lower() or "unconfirmed" in state.lower():
             background = "#c53030"
         else:
@@ -563,6 +672,23 @@ class ESIDevice(Device):
 
         _invoke_gui_callback(_update_gui)
 
+    def _finish_setpoint_edits(self, channel: Any = None) -> None:
+        for ch in [channel] if channel is not None else self.getChannels():
+            if getattr(ch, "is_current_channel", lambda: False)():
+                continue
+            target = (getattr(self, "esiHVCards", {}).get(ch.module_address(), {}) or {}).get("target")
+            if _finish_spinbox_edit(target):
+                loading = getattr(ch, "loading", False)
+                ch.loading = True
+                try:
+                    ch.value = float(target.value())
+                finally:
+                    ch.loading = loading
+            else:
+                getter = getattr(ch, "getParameterByName", None)
+                parameter = getter(getattr(ch, "VALUE", "Value")) if callable(getter) else None
+                _finish_spinbox_edit(getattr(parameter, "spin", None))
+
     def setOn(self, on: "bool | None" = None) -> None:
         if on is not None and hasattr(self, "onAction") and self.onAction.state is not on:
             self.onAction.state = on
@@ -579,6 +705,8 @@ class ESIDevice(Device):
                 flag=PRINT.WARNING,
             )
             return
+        if self.isOn():
+            self._finish_setpoint_edits()
         if controller and getattr(controller, "initialized", False):
             controller.toggleOnFromThread(parallel=True)
         elif hasattr(self, "onAction") and self.isOn():
@@ -590,6 +718,7 @@ class ESIDevice(Device):
             self._update_operator_panel()
             return
         try:
+            from PyQt6.QtCore import Qt
             from PyQt6.QtWidgets import (
                 QButtonGroup,
                 QDoubleSpinBox,
@@ -631,6 +760,9 @@ class ESIDevice(Device):
             sel_row.setSpacing(6)
             btn_on = QPushButton("+/- ON")
             btn_off = QPushButton("OFF")
+            # A mouse click must not commit a pending voltage before OFF.
+            btn_on.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            btn_off.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             for btn in (btn_on, btn_off):
                 btn.setCheckable(True)
                 btn.setFixedHeight(32)
@@ -650,6 +782,7 @@ class ESIDevice(Device):
             target_label = QLabel("Set")
             target_label.setStyleSheet(_ESI_PANEL_NAME)
             target_value = QDoubleSpinBox()
+            target_value.setKeyboardTracking(False)
             target_value.setRange(0.0, _ESI_MAX_VOLTAGE)
             target_value.setDecimals(1)
             target_value.setSingleStep(10.0)
@@ -756,6 +889,7 @@ class ESIDevice(Device):
         heat_btn.setMinimumWidth(80)
         heat_btn.setStyleSheet(_ESI_BTN_OFF_ACTIVE)
         heat_btn.setCheckable(True)
+        heat_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         heat_header.addWidget(heat_title)
         heat_header.addStretch(1)
         heat_header.addWidget(heat_btn)
@@ -787,6 +921,7 @@ class ESIDevice(Device):
         layout.addWidget(heat_row)
 
         self.esiPanel = panel
+        self.esiHeatCard = heat_card
         self.esiHeatButton = heat_btn
         self.esiHeatWidgets = {
             "heat_target": heat_grid.itemAtPosition(0, 1).widget(),
@@ -807,7 +942,8 @@ class ESIDevice(Device):
         if getattr(self, "loading", False):
             return
         for channel in self.getChannels():
-            if channel.module_address() == address and not channel.is_heat_channel():
+            if (channel.module_address() == address and not channel.is_heat_channel()
+                    and not _is_current_channel(channel)):
                 channel.getParameterByName(channel.VALUE).value = float(value)
                 break
         self._update_operator_panel()
@@ -816,9 +952,12 @@ class ESIDevice(Device):
         if getattr(self, "loading", False):
             return
         for channel in self.getChannels():
-            if channel.module_address() == address and not channel.is_heat_channel():
+            if (channel.module_address() == address and not channel.is_heat_channel()
+                    and not _is_current_channel(channel)):
                 want_enabled = gid == 1
                 if channel.enabled != want_enabled:
+                    if want_enabled:
+                        self._finish_setpoint_edits(channel)
                     channel.getParameterByName(channel.ENABLED).value = want_enabled
                 break
         self._update_operator_panel()
@@ -828,6 +967,8 @@ class ESIDevice(Device):
             return
         for channel in self.getChannels():
             if channel.is_heat_channel():
+                if checked:
+                    self._finish_setpoint_edits(channel)
                 channel.getParameterByName(channel.ENABLED).value = checked
         self._update_operator_panel()
 
@@ -847,6 +988,12 @@ class ESIDevice(Device):
         pwm_voltage_measured = getattr(controller, "pwm_voltage_measured", {}) or {}
         measurement_polarity = getattr(controller, "measurement_polarity", {}) or {}
         global_enabled = getattr(controller, "global_enabled", None)
+        state = getattr(controller, "main_state", "Disconnected")
+        stopping = state == _ESI_STOPPING
+        uncertain = state == "Shutdown unconfirmed"
+        inactive = not connected or stopping or uncertain
+        inactive_style = (_ESI_PANEL_CARD_ERR if uncertain else _ESI_PANEL_CARD_STOPPING
+                          if stopping else _ESI_PANEL_CARD_DISC)
 
         for address, widgets in cards.items():
             card = widgets["card"]
@@ -859,15 +1006,18 @@ class ESIDevice(Device):
                 if (
                     channel.module_address() == address
                     and not channel.is_heat_channel()
+                    and not _is_current_channel(channel)
                 ):
                     output_enabled = bool(channel.enabled)
                     target_value = abs(float(channel.value))
                     break
 
-            if not connected:
-                card.setStyleSheet(_ESI_PANEL_CARD_DISC)
+            if inactive:
+                card.setStyleSheet(inactive_style)
                 for btn in (btn_on, btn_off):
                     btn.setEnabled(False)
+                    btn.setStyleSheet(_ESI_BTN_NEUTRAL)
+                btn_off.setChecked(True)
                 for key in (
                     "target",
                     "hardware_target",
@@ -883,9 +1033,25 @@ class ESIDevice(Device):
                     w.setEnabled(False)
                     if hasattr(w, "setText"):
                         w.setText("n/a")
-                        w.setStyleSheet(_ESI_PANEL_OFF)
+                        w.setStyleSheet(_ESI_PANEL_NEUTRAL)
+                if stopping:
+                    readings = getattr(controller, "discharge_readings", {}).get(address, {})
+                    positive = readings.get("positive_v", np.nan)
+                    negative = readings.get("negative_v", np.nan)
+                    measured = [f"{label} {value:.2f} V" if np.isfinite(value) else f"{label} n/a"
+                                for label, value in (("POS", positive), ("NEG", negative))]
+                    widgets["measured"].setText("\n".join(measured))
+                    current = readings.get("measured_a", np.nan)
+                    widgets["current"].setText(f"{current * 1e9:.2f} nA" if np.isfinite(current) else "n/a")
+                    widgets["module_gate"].setText("Stopping")
+                elif uncertain:
+                    widgets["module_gate"].setText("Unconfirmed")
                 continue
 
+            for key, widget in widgets.items():
+                if key not in ("card", "sel_group", "btn_on", "btn_off"):
+                    widget.setEnabled(True)
+                    widget.setStyleSheet(_ESI_PANEL_VALUE)
             for btn in (btn_on, btn_off):
                 btn.setEnabled(True)
             widgets["target"].setEnabled(True)
@@ -926,11 +1092,12 @@ class ESIDevice(Device):
                 btn_off.setChecked(True)
                 btn_on.setStyleSheet(_ESI_BTN_HV_OFF)
                 btn_off.setStyleSheet(_ESI_BTN_OFF_ACTIVE)
-            # Update spinbox without triggering valueChanged
+            # Polling must not replace an uncommitted edit (including its cursor).
             spin = widgets["target"]
-            spin.blockSignals(True)
-            spin.setValue(target_value)
-            spin.blockSignals(False)
+            if not spin.hasFocus():
+                spin.blockSignals(True)
+                spin.setValue(target_value)
+                spin.blockSignals(False)
             widgets["hardware_target"].setText(
                 f"{hardware_target:.1f} V" if np.isfinite(hardware_target) else "n/a"
             )
@@ -1009,7 +1176,10 @@ class ESIDevice(Device):
 
         heat_btn = getattr(self, "esiHeatButton", None)
         heat = getattr(self, "esiHeatWidgets", None)
-        if isinstance(heat, dict) and connected:
+        heat_card = getattr(self, "esiHeatCard", None)
+        if heat_card is not None:
+            heat_card.setStyleSheet(inactive_style if inactive else _ESI_PANEL_CARD_OFF)
+        if isinstance(heat, dict) and not inactive:
             heat_valid = getattr(controller, "heat_readback_valid", False)
             heat_temp = values.get(_ESI_HEAT_MODULE, np.nan)
             heat_enabled = False
@@ -1053,8 +1223,13 @@ class ESIDevice(Device):
         elif isinstance(heat, dict):
             for widget in heat.values():
                 widget.setText("n/a")
-                widget.setStyleSheet(_ESI_PANEL_OFF)
+                widget.setStyleSheet(_ESI_PANEL_NEUTRAL)
             if heat_btn is not None:
+                blocked = heat_btn.blockSignals(True)
+                heat_btn.setChecked(False)
+                heat_btn.blockSignals(blocked)
+                heat_btn.setText("Stopping" if stopping else "Unknown" if uncertain else "OFF")
+                heat_btn.setStyleSheet(_ESI_BTN_NEUTRAL)
                 heat_btn.setEnabled(False)
 
     def getChannels(self) -> "list[ESIChannel]":
@@ -1187,15 +1362,24 @@ class ESIDevice(Device):
         return settings
 
     def ensureFixedChannels(self, *, persist: bool = False) -> None:
-        """Replace the generic bootstrap layout with HV1, HV2, and HEAT."""
+        """Preserve existing output controls and add missing current measurements."""
         channels = self.getChannels()
-        existing_modules = [getattr(channel, "module", None) for channel in channels]
-        expected_modules = [address for _number, address in _ESI_HV_CHANNELS]
-        expected_modules.append(_ESI_HEAT_MODULE)
-        expected_names = [item["Name"] for item in _fixed_channel_items(self.name)]
-        existing_names = [str(getattr(channel, "name", "")) for channel in channels]
-        if existing_modules == expected_modules and existing_names == expected_names:
-            return
+        items = _fixed_channel_items(self.name)
+        outputs = [ch for ch in channels if not _is_current_channel(ch)]
+        currents = [ch for ch in channels if _is_current_channel(ch)]
+        if len(outputs) == 3 and {getattr(ch, "module", None) for ch in outputs} == {1, 2, _ESI_HEAT_MODULE}:
+            existing = {getattr(ch, "module", None) for ch in currents}
+            missing = [item for item in items[3:] if item["Module"] not in existing]
+            if not missing:
+                return
+            add = getattr(self, "addChannel", None)
+            if callable(add):
+                # No rebuild: retain names, targets, enabled states, colors and history.
+                for item in missing:
+                    add(item)
+                if persist:
+                    self.exportConfiguration(useDefaultFile=True)
+                return
         if channels and not all(
             str(getattr(channel, "name", "")).startswith(self.name)
             for channel in channels
@@ -1210,12 +1394,14 @@ class ESIDevice(Device):
         custom_file = getattr(self, "customConfigFile", None)
         if not callable(update) or not callable(custom_file):
             return
-        items = _fixed_channel_items(self.name)
         for item in items:
+            if item["Function"] == _ESI_CURRENT_FUNCTION:
+                continue  # A measurement never inherits a voltage target.
             matching = [
                 channel
                 for channel in channels
                 if getattr(channel, "module", None) == item["Module"]
+                and not _is_current_channel(channel)
             ]
             if not matching:
                 continue
@@ -1241,7 +1427,7 @@ class ESIDevice(Device):
         useDefaultFile: bool = False,
         append: bool = False,
     ) -> None:
-        """Create the fixed three-channel ESI layout instead of nine generic channels."""
+        """Create output controls and current monitors instead of generic channels."""
         if useDefaultFile:
             file = self.customConfigFile(self.confINI)
 
@@ -1268,7 +1454,7 @@ class ESIDevice(Device):
 
 
 class ESIChannel(Channel):
-    """One HVPS-3kB module pair or the HEAT-CTRL-2410 channel."""
+    """An output control or a read-only HV current measurement."""
 
     MODULE = "Module"
     FUNCTION = "Function"
@@ -1315,20 +1501,59 @@ class ESIChannel(Channel):
     def is_heat_channel(self) -> bool:
         return self.module_address() == _ESI_HEAT_MODULE
 
+    def is_current_channel(self) -> bool:
+        return _is_current_channel(self)
+
     @property
     def unit(self) -> str:
         """Return the physical unit for this mixed-function ESI channel."""
+        if self.is_current_channel():
+            return "A"
         return "degC" if getattr(self, "module", 2) == _ESI_HEAT_MODULE else "V"
 
     def getDisplayUnit(self) -> str:
         return self.unit
 
     def initGUI(self, item: dict) -> None:
+        self._current_measurement = item.get(self.FUNCTION) == _ESI_CURRENT_FUNCTION
+        if self.is_current_channel():
+            # Set before Explorer constructs the editors. Current is not a target.
+            for name in (self.VALUE, self.MONITOR):
+                parameter = self.getParameterByName(name)
+                parameter.parameterType = PARAMETERTYPE.EXP
+                parameter.indicator = True
+                parameter.min = parameter.max = None
+            item = {**item, self.VALUE: np.nan}
         super().initGUI(item)
         for parameter_name in (self.VALUE, self.MONITOR):
             self.getParameterByName(parameter_name).unit = self.unit
+        spin = getattr(self.getParameterByName(self.VALUE), "spin", None)
+        if spin is not None:
+            spin.setKeyboardTracking(False)
+
+    def updateMin(self) -> None:
+        if not self.is_current_channel():
+            super().updateMin()
+
+    def updateMax(self) -> None:
+        if not self.is_current_channel():
+            super().updateMax()
+
+    def valueChanged(self) -> None:
+        if not self.is_current_channel():
+            super().valueChanged()
+
+    def applyValue(self, apply: bool = False) -> None:
+        if not self.is_current_channel():
+            if self.enabled:
+                finish = getattr(self.channelParent, "_finish_setpoint_edits", None)
+                if callable(finish):
+                    finish(self)
+            super().applyValue(apply=apply)
 
     def enabledChanged(self) -> None:
+        if self.is_current_channel():
+            return
         super().enabledChanged()
         if not getattr(self.channelParent, "loading", False):
             self.applyValue(apply=True)
@@ -1358,6 +1583,7 @@ class ESIController(DeviceController):
         self.global_enabled: bool | None = None
         self.initialized = False
         self.main_state = "Disconnected"
+        self.discharge_readings: dict[int, dict[str, float]] = {}
         self.interlock_state = "n/a"
         self.detected_modules = "n/a"
         self.heat_status = "n/a"
@@ -1369,8 +1595,10 @@ class ESIController(DeviceController):
         self.loaded_config_text = "n/a"
 
     def runInitialization(self) -> None:
+        if not self._dispose_device():
+            self.initializing = False
+            return  # Never replace an unconfirmed backend/port reservation.
         self.initialized = False
-        self._dispose_device()
         try:
             driver = _get_esi_driver_class()
             self.device = driver(
@@ -1418,14 +1646,16 @@ class ESIController(DeviceController):
             self._apply_snapshot(snapshot)
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:
-            self._restore_off_ui_state()
+            if self.device is None:
+                self._restore_off_ui_state()
+            else:
+                self.shutdownCommunication()
             self.print(
                 f"ESI initialization failed on COM{int(self.controllerParent.com)}: {exc}\n"
                 "Confirm the configured COM port, power the controller, and close "
                 "the hardware probe and vendor control application before retrying.",
                 flag=PRINT.ERROR,
             )
-            self._dispose_device()
         finally:
             self.initializing = False
 
@@ -1570,6 +1800,8 @@ class ESIController(DeviceController):
             self.global_enabled = None
 
     def readNumbers(self) -> None:
+        if self.main_state == _ESI_STOPPING:
+            return  # The shutdown worker owns the ADC mux and publishes readbacks.
         if self.main_state == "Shutdown unconfirmed":
             self.initializeValues(reset=True)
             return
@@ -1579,12 +1811,16 @@ class ESIController(DeviceController):
         if not self.controllerParent.isOn():
             self.initializeValues(reset=True)
             return
+        device = self.device
         try:
-            snapshot = self.device.collect_diagnostics(
+            snapshot = device.collect_diagnostics(
                 timeout_s=float(self.controllerParent.poll_timeout_s)
             )
-            self._apply_snapshot(snapshot)
+            if device is self.device:
+                self._apply_snapshot(snapshot)
         except Exception as exc:
+            if device is not self.device or self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
+                return
             self.errorCount += 1
             self.main_state = _ESI_COMMUNICATION_LOST
             self._sync_status()
@@ -1599,12 +1835,16 @@ class ESIController(DeviceController):
         self.initializeValues(reset=True)
 
     def applyValue(self, channel: ESIChannel) -> None:
+        if _is_current_channel(channel):
+            return
         cancel = self._output_cancel
         with self._output_lock:
             if not cancel.is_set():
                 self._apply_value_unlocked(channel, cancel)
 
     def _apply_value_unlocked(self, channel: ESIChannel, cancel: Event) -> None:
+        if _is_current_channel(channel):
+            return
         if self.device is None or not self.initialized or not self.controllerParent.isOn():
             return
         if not channel.enabled:
@@ -1687,24 +1927,29 @@ class ESIController(DeviceController):
             )
 
     def updateValues(self) -> None:
-        if self.values is None:
-            return
         for channel in self.controllerParent.getChannels():
-            if not (channel.enabled and channel.real):
-                channel.monitor = np.nan
-                continue
-            if channel.is_heat_channel():
-                channel.monitor = self.values.get(channel.module_address(), np.nan)
-            else:
-                channel.monitor = self.values.get(channel.module_address(), np.nan)
+            current = _is_current_channel(channel)
+            readings = self.currents if current else self.values
+            value = (readings.get(channel.module_address(), np.nan)
+                     if readings is not None and channel.enabled and channel.real else np.nan)
+            channel.monitor = value
+            if current:
+                # Explorer may record .value for disabled/non-real IN channels.
+                # It must never fall back to a stale current or a dummy target.
+                channel.value = value
 
     def toggleOn(self) -> None:
         target_on = bool(self.controllerParent.isOn())
+        if target_on and self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
+            self._restore_on_ui_state()
+            self.print("ESI cannot restart until shutdown is confirmed; retry OFF.", flag=PRINT.WARNING)
+            return
         if not target_on:
             self._output_cancel.set()
         with self._output_lock:
             # A newer OFF request takes precedence over a queued ON request.
-            if target_on and not self.controllerParent.isOn():
+            if target_on and (not self.controllerParent.isOn()
+                              or self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed")):
                 return
             if target_on:
                 self._output_cancel = Event()
@@ -1732,7 +1977,7 @@ class ESIController(DeviceController):
                     self.device.set_global_active(True, timeout_s=timeout)
                 )
                 for channel in self.controllerParent.getChannels():
-                    if channel.is_heat_channel() or channel.enabled:
+                    if not _is_current_channel(channel) and (channel.is_heat_channel() or channel.enabled):
                         self.applyValue(channel)
                 if not cancel.is_set():
                     self.startAcquisition()
@@ -1787,16 +2032,11 @@ class ESIController(DeviceController):
         device = self.device
         if device is None:
             return False, " Device is unavailable; all output states are unconfirmed"
-        try:
-            device.force_safe_off(
-                timeout_s=float(self.controllerParent.connect_timeout_s)
-            )
-        except Exception as rollback_exc:
-            return False, (
-                " Global safe OFF also failed; HV/heater state is unconfirmed. "
-                f"Use the hardware interlock before approaching the source: {rollback_exc}"
-            )
-        return True, " All outputs were forced OFF"
+        # A logical disable alone is not an OFF confirmation after failed ON.
+        self._output_cancel.set()
+        if not self._shutdown_communication_unlocked():
+            return False, " Shutdown remains unconfirmed; use the hardware interlock/front panel"
+        return True, " Outputs disabled, HV discharge verified, and port closed"
 
     def _restore_off_ui_state(self) -> None:
         """Keep the UI from claiming ON after a failed transition."""
@@ -1862,13 +2102,35 @@ class ESIController(DeviceController):
         with self._output_lock:
             return self._shutdown_communication_unlocked()
 
+    def _on_discharge_progress(self, report: dict) -> None:
+        # Runs under the runtime's DLL lock, never make another DLL call here.
+        if self.main_state != _ESI_STOPPING:
+            return  # A late return after timeout cannot turn uncertainty into OFF.
+        self.discharge_readings = report["modules"]
+        self.global_enabled = False
+        for address, data in self.discharge_readings.items():
+            self.targets[address] = 0.0
+            self.module_active[address] = False
+            self.values[address] = data.get("negative_v", np.nan)
+            self.currents[address] = data.get("measured_a", np.nan)
+        self._sync_status()
+
     def _shutdown_communication_unlocked(self) -> bool:
         device = self.device
         if device is None:
             return self.main_state == "Disconnected"
         confirmed = False
+        self.acquiring = False
+        self.main_state = _ESI_STOPPING
+        self.initializeValues(reset=True)
+        self.discharge_readings = {}
+        self._restore_on_ui_state()
+        self._sync_status()
         try:
-            result = device.disconnect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            result = device.disconnect(
+                timeout_s=float(self.controllerParent.connect_timeout_s),
+                on_discharge=self._on_discharge_progress,
+            )
             if result is not True:
                 raise RuntimeError("ESI driver did not confirm safe shutdown")
             confirmed = True
@@ -1882,8 +2144,9 @@ class ESIController(DeviceController):
             self.acquiring = False
             self.initializeValues(reset=True)
             if confirmed:
-                self._dispose_device()
+                self._dispose_device(shutdown_confirmed=True)
                 self.initialized = False
+                self.discharge_readings = {}
                 self._restore_off_ui_state()
             else:
                 # Keep the backend/port reservation and Explorer's closing warning.
@@ -1899,8 +2162,8 @@ class ESIController(DeviceController):
         self.shutdownCommunication()
 
     def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
-        if self.main_state == "Shutdown unconfirmed":
-            return  # A late status poll must not erase an unconfirmed shutdown.
+        if self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
+            return  # A late status poll must not erase the shutdown check or uncertainty.
         self.main_state = str(snapshot["main_state"]["name"])
         self.values = {}
         self.currents = {}
@@ -1997,21 +2260,14 @@ class ESIController(DeviceController):
 
         _invoke_gui_callback(update)
 
-    def _dispose_device(self) -> None:
+    def _dispose_device(self, *, shutdown_confirmed: bool = False) -> bool:
         self._output_cancel.set()
         with self._output_lock:
-            self._dispose_device_unlocked()
-
-    def _dispose_device_unlocked(self) -> None:
-        device = self.device
-        self.device = None
-        if device is not None:
-            if getattr(device, "connected", True):
-                with contextlib.suppress(Exception):
-                    device.disconnect(
-                        timeout_s=float(
-                            getattr(self.controllerParent, "connect_timeout_s", 5.0)
-                        )
-                    )
+            if self.device is None:
+                return self.main_state != "Shutdown unconfirmed"
+            if not shutdown_confirmed:
+                return self._shutdown_communication_unlocked()
+            device, self.device = self.device, None
             with contextlib.suppress(Exception):
                 device.close()
+            return True

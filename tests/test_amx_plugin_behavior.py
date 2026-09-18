@@ -189,7 +189,7 @@ def test_amx_channel_width_widget_disables_wheel(monkeypatch):
     channel.getParameterByName = lambda name: FakeParameter() if name == channel.VALUE else None
     monkeypatch.setattr(module, "_disable_spinbox_wheel", disabled_widgets.append)
 
-    module.AMXChannel._disable_value_wheel(channel)
+    module.AMXChannel._configure_value_editor(channel)
 
     assert disabled_widgets == [widget]
 

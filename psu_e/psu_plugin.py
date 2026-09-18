@@ -1074,10 +1074,16 @@ def _create_card_grid(parent: Any, max_columns: int, spacing: int = 12) -> Any:
 
 def _scrollable_panel(panel: Any) -> Any:
     """Do not propagate the content's minimum size to Explorer's dock area."""
-    from PyQt6.QtCore import QEvent
+    from PyQt6.QtCore import QEvent, Qt
     from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFrame, QScrollArea
 
     class PanelScrollArea(QScrollArea):
+        def mousePressEvent(self, event):
+            # Empty panel space validates an edit; output buttons accept their
+            # own clicks without letting this ancestor steal editor focus.
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            super().mousePressEvent(event)
+
         def eventFilter(self, watched, event):
             if event.type() == QEvent.Type.Wheel and isinstance(watched, (QAbstractSpinBox, QComboBox)):
                 # Scrolling the panel must never edit an output setpoint/range,
@@ -1087,6 +1093,7 @@ def _scrollable_panel(panel: Any) -> Any:
             return super().eventFilter(watched, event)
 
     scroll = PanelScrollArea()
+    scroll.setFocusPolicy(Qt.FocusPolicy.TabFocus)
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setWidgetResizable(True)
     scroll.setWidget(panel)
@@ -1411,6 +1418,7 @@ class PSUDevice(Device):
         from PyQt6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox
 
         widget = QDoubleSpinBox()
+        widget.setKeyboardTracking(False)
         widget.setRange(0.0, float(maximum))
         widget.setDecimals(int(decimals))
         widget.setSingleStep(float(step))
@@ -1501,7 +1509,7 @@ class PSUDevice(Device):
             return False, "ON/OFF transition in progress"
         return True, ""
 
-    def _manual_state_from_panel(self) -> dict[str, Any] | None:
+    def _manual_state_from_panel(self, *, finish_edits: bool = True) -> dict[str, Any] | None:
         controls = getattr(self, "manualPanelControls", None)
         if not isinstance(controls, dict):
             return None
@@ -1523,6 +1531,16 @@ class PSUDevice(Device):
                 if _coerce_bool(full_range_supported.get(channel_index, False), False)
                 else False
             )
+            # Read the actual text for this apply, including a toolbar click
+            # which does not transfer focus. Do not submit an edit on OFF.
+            if finish_edits:
+                for widget in (voltage_widget, current_widget):
+                    if getattr(widget, "hasFocus", lambda: False)():
+                        blocked = widget.blockSignals(True)
+                        try:
+                            widget.interpretText()
+                        finally:
+                            widget.blockSignals(blocked)
             voltage_values[channel_index] = float(voltage_widget.value())
             current_limit_values[channel_index] = float(current_widget.value())
         return {
@@ -1532,7 +1550,7 @@ class PSUDevice(Device):
             "current_limit_values": current_limit_values,
         }
 
-    def _manual_panel_changed(self, *_args: Any, debounce: bool = False) -> None:
+    def _manual_panel_changed(self, *_args: Any, debounce: bool = False, finish_edits: bool = True) -> None:
         if getattr(self, "_manualPanelSyncing", False):
             return
         ready, _reason = self._manual_controls_ready()
@@ -1542,13 +1560,13 @@ class PSUDevice(Device):
             self._schedule_manual_panel_apply()
             return
         self._cancel_manual_panel_apply()
-        self._apply_manual_panel_state()
+        self._apply_manual_panel_state(finish_edits=finish_edits)
 
-    def _apply_manual_panel_state(self) -> None:
+    def _apply_manual_panel_state(self, *, finish_edits: bool = True) -> None:
         controller = getattr(self, "controller", None)
         if controller is None:
             return
-        state = self._manual_state_from_panel()
+        state = self._manual_state_from_panel(finish_edits=finish_edits)
         if state is None:
             return
         apply_now = getattr(controller, "applyManualStateFromThread", None)
@@ -1647,8 +1665,8 @@ class PSUDevice(Device):
                 block_signals(False)
 
     def _set_control_value(self, widget: Any, value: float) -> None:
-        if widget is None:
-            return
+        if widget is None or getattr(widget, "hasFocus", lambda: False)():
+            return  # Keep the draft untouched until the user validates it.
         block_signals = getattr(widget, "blockSignals", None)
         if callable(block_signals):
             block_signals(True)
@@ -2029,8 +2047,10 @@ class PSUDevice(Device):
             output_label = QLabel("Output")
             output_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
             output_box = QCheckBox("ON")
+            from PyQt6.QtCore import Qt
+            output_box.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             output_box.toggled.connect(
-                lambda _checked: self._manual_panel_changed(debounce=False)
+                lambda checked: self._manual_panel_changed(debounce=False, finish_edits=checked)
             )
             range_label = QLabel("Range")
             range_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)

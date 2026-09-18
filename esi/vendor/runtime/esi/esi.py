@@ -7,6 +7,7 @@ import logging
 import math
 import struct
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,12 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     HV_MODULE_ADDRESSES = (1, 2)
     CONTROLLED_MODULE_ADDRESSES = (HEAT_MODULE_ADDRESS, *HV_MODULE_ADDRESSES)
     MAX_ABS_VOLTAGE_V = 3000.0
+    # Operational shutdown check, not a touch-safe certification.
+    DISCHARGE_LIMIT_V = 1.0
+    DISCHARGE_SAMPLES = 3
+    DISCHARGE_TIMEOUT_S = 60.0
+    HV_ADC_V_READY = 1 << 4
+    HV_ADC_I_READY = 1 << 6
     HV_CONFIG_BASE_OFFSET = 17
     HV_CONFIG_STRIDE = 12
     HV_CONFIG_MAX_STEP_OFFSET = 4
@@ -1168,7 +1175,111 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             "target_temperature_c": float(target_temperature),
         }
 
-    def disconnect(self, timeout_s: Optional[float] = None) -> bool:
+    def _verify_hv_discharge(self, timeout: float, on_discharge=None) -> None:
+        """Require three fresh low-voltage rounds on all four HV outputs.
+
+        Never enable anything to obtain a reading. The ADC mux is restored,
+        but an unresponsive/poisoned DLL is never called again for cleanup.
+        A ready bit must clear after draining old data and then rise: repeatedly
+        reading a cached zero (even with Valid=True) cannot prove discharge.
+        """
+        def verify():
+            deadline = time.monotonic() + self.DISCHARGE_TIMEOUT_S
+            saved_ranges = {}
+            readings = {address: {"positive_v": math.nan, "negative_v": math.nan,
+                                  "measured_a": math.nan}
+                        for address in self.HV_MODULE_ADDRESSES}
+            consecutive = 0
+            ready_mask = self.HV_ADC_V_READY | self.HV_ADC_I_READY
+
+            def checked(function, *args):
+                self._raise_if_transport_poisoned()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "ESI discharge unconfirmed: fresh ADC voltages on both "
+                        f"polarities did not remain <= {self.DISCHARGE_LIMIT_V:g} V "
+                        f"for {self.DISCHARGE_SAMPLES} consecutive rounds within "
+                        f"{self.DISCHARGE_TIMEOUT_S:g} s. Last readings: {readings}"
+                    )
+                result = function(self, *args)
+                self._raise_if_transport_poisoned()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("ESI discharge unconfirmed: ADC response arrived after the discharge deadline")
+                status = result[0] if isinstance(result, tuple) else result
+                self._raise_on_status(status, function.__name__)
+                return result[1:] if isinstance(result, tuple) else ()
+
+            def notify():
+                if on_discharge is not None:
+                    on_discharge({"modules": {a: dict(v) for a, v in readings.items()},
+                                  "consecutive": consecutive,
+                                  "limit_v": self.DISCHARGE_LIMIT_V})
+
+            try:
+                for address in self.HV_MODULE_ADDRESSES:
+                    saved_ranges[address] = checked(ESIBase.get_hv_supply_meas_ranges, address)
+                while consecutive < self.DISCHARGE_SAMPLES:
+                    for negative in (False, True):
+                        for address, (_old_negative, high_current) in saved_ranges.items():
+                            checked(ESIBase.set_hv_supply_meas_ranges, address, negative, high_current)
+                            observed = checked(ESIBase.get_hv_supply_meas_ranges, address)
+                            if observed != (negative, high_current):
+                                raise RuntimeError(f"ESI ADC polarity selection failed for module {address}")
+                            # A conversion buffered before the mux change is not
+                            # evidence for the newly selected polarity.
+                            checked(ESIBase.get_hv_supply_output_voltage, address)
+                            checked(ESIBase.get_hv_supply_output_current, address)
+                        armed = {address: 0 for address in saved_ranges}
+                        pending = set(saved_ranges)
+                        while pending:
+                            for address in sorted(pending):
+                                flags, = checked(ESIBase.get_module_data_ready_flags, address)
+                                armed[address] |= ~flags & ready_mask
+                                if flags & armed[address] & ready_mask == ready_mask:
+                                    observed = checked(ESIBase.get_hv_supply_meas_ranges, address)
+                                    if observed != (negative, saved_ranges[address][1]):
+                                        raise RuntimeError(f"ESI ADC polarity changed on module {address}")
+                                    valid_v, voltage = checked(ESIBase.get_hv_supply_output_voltage, address)
+                                    valid_i, current = checked(ESIBase.get_hv_supply_output_current, address)
+                                    if not (valid_v and valid_i and math.isfinite(voltage) and math.isfinite(current)):
+                                        raise RuntimeError(f"ESI invalid ADC voltage/current on module {address}; discharge unconfirmed")
+                                    readings[address]["negative_v" if negative else "positive_v"] = float(voltage)
+                                    readings[address]["measured_a"] = float(current)
+                                    pending.remove(address)
+                                    notify()
+                                else:
+                                    # Drain a bit which has not been observed
+                                    # clear. A stuck-ready flag can never pass.
+                                    if flags & self.HV_ADC_V_READY and not armed[address] & self.HV_ADC_V_READY:
+                                        checked(ESIBase.get_hv_supply_output_voltage, address)
+                                    if flags & self.HV_ADC_I_READY and not armed[address] & self.HV_ADC_I_READY:
+                                        checked(ESIBase.get_hv_supply_output_current, address)
+                                    cleared, = checked(ESIBase.get_module_data_ready_flags, address)
+                                    armed[address] |= ~cleared & ready_mask
+                            if pending:
+                                time.sleep(min(.1, max(0., deadline - time.monotonic())))
+                    below_limit = all(abs(data[key]) <= self.DISCHARGE_LIMIT_V
+                                      for data in readings.values()
+                                      for key in ("positive_v", "negative_v"))
+                    consecutive = consecutive + 1 if below_limit else 0
+                    notify()
+                self.logger.info(f"HV discharge verified: {readings}")
+            finally:
+                self._hv_measurement_requests.clear()
+                if not self._transport_poisoned:
+                    for address, selection in saved_ranges.items():
+                        self._raise_if_transport_poisoned()
+                        status = ESIBase.set_hv_supply_meas_ranges(self, address, *selection)
+                        self._raise_if_transport_poisoned()
+                        self._raise_on_status(status, f"restore ADC selection({address})")
+
+        # Keep the DLL lock throughout the mux/ready/read sequence: a background
+        # diagnostic must not consume the samples used for shutdown confirmation.
+        self._call_locked_with_timeout(
+            verify, self.DISCHARGE_TIMEOUT_S + timeout, "verify_hv_discharge"
+        )
+
+    def disconnect(self, timeout_s: Optional[float] = None, *, on_discharge=None) -> bool:
         # A timeout also sets connected=False, but says nothing about the
         # physical outputs. Never report a confirmed shutdown in that case.
         self._raise_if_transport_poisoned()
@@ -1179,6 +1290,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         # Do not discard the only way to retry OFF after a failed verification.
         self.force_safe_off(timeout_s=timeout)
         self.set_global_active(False, timeout_s=timeout)
+        self._verify_hv_discharge(timeout, on_discharge=on_discharge)
         status = self._call_locked_with_timeout(
             ESIBase.close_port, timeout, "close_port", self
         )
