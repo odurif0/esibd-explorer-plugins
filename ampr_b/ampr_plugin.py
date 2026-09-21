@@ -47,6 +47,7 @@ _CHANNELS_PER_MODULE_OPTIONS = {2, 4}
 _AMPR_ABS_VOLTAGE_LIMIT = 1000.0
 _AMPR_MIN_ROW_HEIGHT = 28
 _AMPR_RAMP_STEP_S = 0.1
+_AMPR_MONITOR_INTERVAL_S = 1.0
 _AMPR_COMMUNICATION_LOST_STATE = "Communication lost"
 _AMPR_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
 _AMPR_TRANSPORT_FAILURE_THRESHOLD = 3
@@ -1142,6 +1143,9 @@ class AMPRDevice(Device):
             restore=False,
         )
         settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
+        settings[f"{self.name}/Interval"][_PARAMETER_TOOLTIP_KEY] = (
+            "Recording interval in ms. Monitor and Status read back voltages once per second, including during ramps."
+        )
         settings[f"{self.name}/{self.MAXDATAPOINTS}"][Parameter.VALUE] = 100000
         return settings
 
@@ -1467,9 +1471,12 @@ class AMPRChannel(Channel):
         channel[self.VALUE][_PARAMETER_MIN_KEY] = -_AMPR_ABS_VOLTAGE_LIMIT
         channel[self.VALUE][_PARAMETER_MAX_KEY] = _AMPR_ABS_VOLTAGE_LIMIT
         channel[self.ENABLED][_PARAMETER_ADVANCED_KEY] = False
-        channel[self.ENABLED][Parameter.HEADER] = "On"
+        channel[self.ENABLED][Parameter.HEADER] = "Status"
         channel[self.ENABLED][_PARAMETER_TOOLTIP_KEY] = (
-            "Enable this AMPR output channel. Disabled channels are held at 0 V."
+            "Enable this AMPR output channel. Disabled channels are held at 0 V. "
+            "Colour compares Monitor with the target (zero during global ramp-down): "
+            "green within 1%, orange within 10%, red beyond; reference floor 1 V. "
+            "This is voltage tracking feedback, not confirmation of safe discharge."
         )
         channel[self.ACTIVE][Parameter.HEADER] = "Manual"
         channel[self.ACTIVE][_PARAMETER_TOOLTIP_KEY] = (
@@ -1523,7 +1530,7 @@ class AMPRChannel(Channel):
             self.displayedParameters.remove(self.OPTIMIZE)
         if self.DISPLAY in self.displayedParameters:
             self.displayedParameters.remove(self.DISPLAY)
-        self.displayedParameters.insert(self.displayedParameters.index(self.VALUE) + 1, self.RAMP_RATE)
+        self.displayedParameters.insert(self.displayedParameters.index(self.MONITOR) + 1, self.RAMP_RATE)
         self.displayedParameters.append(self.MODULE)
         self.displayedParameters.append(self.ID)
         self.displayedParameters.append(self.DISPLAY)
@@ -1733,32 +1740,39 @@ class AMPRChannel(Channel):
             widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
 
     def _output_enabled(self) -> bool:
+        """Gate cell colours, not hardware state or confirmation of shutdown."""
+        if not getattr(self, "enabled", False) or not getattr(self, "real", False):
+            return False
         parent = getattr(self, "channelParent", None)
         controller = getattr(parent, "controller", None)
-        return (bool(getattr(self, "enabled", False)) and bool(getattr(self, "real", True))
-                and bool(getattr(parent, "isOn", lambda: False)())
-                and getattr(controller, "initialized", True)
-                and getattr(controller, "main_state", "ST_ON") not in {"Disconnected", "ST_STBY"})
+        # Explorer restores channels before creating the controller (initGUI)
+        # and onAction (finalizeInit). Its isOn() requires that action to exist.
+        if not getattr(controller, "initialized", False) or getattr(parent, "onAction", None) is None:
+            return False
+        state = getattr(controller, "main_state", None)
+        # Missing state is not ON. An explicit Shutdown unconfirmed, however,
+        # must retain feedback while the controller/action are kept for retry.
+        transitioning = getattr(controller, "transitioning", False) or getattr(controller, "ramping", False)
+        return bool(state and state not in {"Disconnected", "ST_STBY"} and (parent.isOn() or transitioning))
 
     def _monitor_feedback_state(self) -> str:
         """Classify monitor accuracy relative to the current setpoint."""
-        if not getattr(self, "enabled", False) or not getattr(self, "real", True):
+        if not self._output_enabled():
             return "default"
-        if getattr(self, "waitToStabilize", False):
-            return "default"
-        if getattr(self, "_ampr_setpoint_state", "confirmed") != "confirmed":
-            return "default"
-
-        channel_parent = getattr(self, "channelParent", None)
-        controller = getattr(channel_parent, "controller", None)
-        if controller is None or not getattr(controller, "acquiring", False):
-            return "default"
-        if not callable(getattr(channel_parent, "isOn", None)) or not channel_parent.isOn():
-            return "default"
+        controller = self.channelParent.controller
+        if controller.main_state == _AMPR_SHUTDOWN_UNCONFIRMED_STATE:
+            return "error"
+        transitioning = getattr(controller, "transitioning", False) or getattr(controller, "ramping", False)
+        if not transitioning:
+            if getattr(self, "_ampr_setpoint_state", "confirmed") != "confirmed":
+                return "default"
+            if not getattr(controller, "acquiring", False):
+                return "default"
 
         monitor_value = _coerce_float(getattr(self, "monitor", np.nan), np.nan)
-        target_value = _coerce_float(getattr(self, "value", np.nan), np.nan)
-        if _is_nan(monitor_value) or _is_nan(target_value):
+        target_value = (0.0 if transitioning and getattr(controller, "transition_target_on", None) is False
+                        else _coerce_float(getattr(self, "value", np.nan), np.nan))
+        if not np.isfinite(monitor_value) or not np.isfinite(target_value):
             return "default"
 
         reference = max(abs(target_value), _AMPR_MONITOR_RELATIVE_FLOOR_V)
@@ -1784,12 +1798,14 @@ class AMPRChannel(Channel):
             style = (_AMPR_MONITOR_ERROR_STYLE if state in {"error", "mismatch"}
                      else _AMPR_MONITOR_WARN_STYLE if state in {"pending", "sent"} else "")
             value_widget.setStyleSheet(style)
-        try:
-            parameter = getter(getattr(self, "MONITOR", "Monitor"))
-        except Exception:  # noqa: BLE001
-            return
-        widget_getter = getattr(parameter, "getWidget", None)
-        widget = widget_getter() if callable(widget_getter) else getattr(parameter, "widget", None)
+        # Keep the measured value readable with the native palette. Its tracking
+        # feedback belongs to the clickable Status control, not the numeric cell.
+        for name in (getattr(self, "MONITOR", "Monitor"), getattr(self, "ENABLED", "Enabled")):
+            parameter = getter(name)
+            widget_getter = getattr(parameter, "getWidget", None)
+            widget = widget_getter() if callable(widget_getter) else getattr(parameter, "widget", None)
+            if widget is not None and hasattr(widget, "setStyleSheet"):
+                widget.setStyleSheet("")
         if widget is None or not hasattr(widget, "setStyleSheet"):
             return
 
@@ -2067,18 +2083,21 @@ class AMPRController(DeviceController):
     def runAcquisition(self) -> None:
         """Poll AMPR readbacks while reusing the acquisition-loop lock."""
         while self.acquiring:
+            started = time.monotonic()
             try:
                 with self._controller_lock_section(
                     "Could not acquire lock to acquire AMPR data.",
                     timeout_s=1.0,
                     log_timeout=False,
                 ):
+                    if not self.acquiring:
+                        break  # A ramp/OFF may have taken over while this thread waited.
                     self.readNumbers(already_acquired=True)
                     self.signalComm.updateValuesSignal.emit()
             except TimeoutError:
                 continue
             finally:
-                time.sleep(self.controllerParent.interval / 1000)
+                time.sleep(max(0.0, _AMPR_MONITOR_INTERVAL_S - (time.monotonic() - started)))
 
     def readNumbers(self, *, already_acquired: bool = False) -> None:
         if self.device is None or not getattr(self, "initialized", False):
@@ -2330,9 +2349,14 @@ class AMPRController(DeviceController):
 
         self._sync_status_to_gui()
         device_is_on = self.controllerParent.isOn()
+        transitioning = getattr(self, "transitioning", False) or getattr(self, "ramping", False)
+        monitoring = (getattr(self, "initialized", False) and self.main_state == "ST_ON"
+                      and (device_is_on or transitioning))
         for channel in self.controllerParent.getChannels():
-            if channel.enabled and channel.real and device_is_on:
-                channel.monitor = np.nan if channel.waitToStabilize else self.values.get(
+            if channel.enabled and channel.real and monitoring:
+                # A settling output is still a valid measurement. Do not hide
+                # it (or the last queued ramp sample) behind a stabilization timer.
+                channel.monitor = self.values.get(
                     (channel.module_address(), channel.channel_number()),
                     np.nan,
                 )
@@ -3152,6 +3176,7 @@ class AMPRController(DeviceController):
         self.print(f"Starting AMPR ramp-{label}: all channels in parallel at their configured speeds.")
         self.ramping = True
         last_tick = time.monotonic()
+        next_monitor = last_tick
         try:
             while True:
                 if rising:
@@ -3182,7 +3207,19 @@ class AMPRController(DeviceController):
                             continue
                         self._pending_setpoints.pop(key)
                     self._publish_setpoint(request, "sent", "Ramp target sent; awaiting hardware setpoint readback.")
-                if all(current[key] == targets[key] for key in keys):
+                reached = all(current[key] == targets[key] for key in keys)
+                now = time.monotonic()
+                if reached or now + 1e-9 >= next_monitor:
+                    # The normal poller is stopped during transitions. Read in
+                    # this same worker, under the same lock as voltage writes:
+                    # no concurrent DLL calls and no target masquerading as a measurement.
+                    with self._controller_lock_section("Could not acquire lock to read AMPR ramp voltages."):
+                        self.readNumbers(already_acquired=True)
+                        self.signalComm.updateValuesSignal.emit()
+                    next_monitor = now + _AMPR_MONITOR_INTERVAL_S
+                    if rising:
+                        self._check_ramp_cancelled()
+                if reached:
                     break
                 time.sleep(max(0.0, _AMPR_RAMP_STEP_S - (time.monotonic() - last_tick)))
                 now = time.monotonic()

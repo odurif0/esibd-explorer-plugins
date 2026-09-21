@@ -729,7 +729,10 @@ def test_update_values_clears_monitor_styles_when_device_turns_off():
     channel.waitToStabilize = False
     channel.monitor = 12.0
     channel.MONITOR = "Monitor"
-    channel.getParameterByName = lambda _name: FakeParameter(widget)
+    monitor_widget = FakeWidget()
+    channel.getParameterByName = lambda name: {
+        "Monitor": FakeParameter(monitor_widget), "Enabled": FakeParameter(widget)
+    }.get(name)
 
     controller = object.__new__(module.AMPRController)
     controller.values = {(2, 1): 11.0}
@@ -747,6 +750,7 @@ def test_update_values_clears_monitor_styles_when_device_turns_off():
 
     assert np.isnan(channel.monitor)
     assert widget.style == module._AMPR_MONITOR_NEUTRAL_STYLE
+    assert monitor_widget.style == ""
 
 
 def test_update_values_reapplies_monitor_styles_while_device_is_on():
@@ -769,7 +773,8 @@ def test_update_values_reapplies_monitor_styles_while_device_is_on():
     channel = object.__new__(module.AMPRChannel)
     widget = FakeWidget()
     channel.channelParent = types.SimpleNamespace(
-        controller=types.SimpleNamespace(acquiring=True),
+        controller=types.SimpleNamespace(acquiring=True, initialized=True, main_state="ST_ON"),
+        onAction=types.SimpleNamespace(state=True),
         isOn=lambda: True,
     )
     channel.enabled = True
@@ -780,9 +785,13 @@ def test_update_values_reapplies_monitor_styles_while_device_is_on():
     channel.module = 2
     channel.id = 1
     channel.MONITOR = "Monitor"
-    channel.getParameterByName = lambda _name: FakeParameter(widget)
+    monitor_widget = FakeWidget()
+    channel.getParameterByName = lambda name: {
+        "Monitor": FakeParameter(monitor_widget), "Enabled": FakeParameter(widget)
+    }.get(name)
 
     controller = object.__new__(module.AMPRController)
+    controller.initialized = True
     controller.values = {(2, 1): 11.0}
     controller.main_state = "ST_ON"
     controller.detected_modules_text = "2"
@@ -798,6 +807,7 @@ def test_update_values_reapplies_monitor_styles_while_device_is_on():
 
     assert channel.monitor == 11.0
     assert widget.style == module._AMPR_MONITOR_WARN_STYLE
+    assert monitor_widget.style == ""
 
 
 def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch):
@@ -1423,6 +1433,11 @@ def _ramp_clock(module, monkeypatch):
     clock = types.SimpleNamespace(now=0.)
     monkeypatch.setattr(module, 'time', types.SimpleNamespace(
         monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds)))
+    # These tests isolate command order/failure recovery. Full readback timing
+    # and publication (including read errors) are tested in test_ampr_live_monitors.
+    monkeypatch.setattr(module.AMPRController, 'readNumbers', lambda self, **kw: None)
+    monkeypatch.setattr(module.AMPRController, 'signalComm', types.SimpleNamespace(
+        updateValuesSignal=types.SimpleNamespace(emit=lambda: None)), raising=False)
 
 
 def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
