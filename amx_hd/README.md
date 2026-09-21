@@ -44,12 +44,17 @@ including the AMX HD driver files and the vendor `COM-HVAMX4EDH.dll`.
 
 Toolbar notes:
 
-- `Signal`: saved AMX HD config selector (operator-facing signal/routing shape).
+- `Signal`: saved AMX HD configuration selector (routing and timing).
 - `Load now`: immediately loads the selected signal while the device is ON.
 - `Freq`: oscillator frequency in kHz. Validate typed changes with Enter, Tab,
-  or a click outside the field. They apply while ON and are reused on startup.
+  or a click outside the field. They apply while ON, until the next config load.
 - channel rows: choose which timers are ON and set their pulse width in us.
   Typed widths use the same validation; intermediate digits are not sent.
+
+ON and `Load now` load the selected configuration's saved timing and update
+frequency, widths and enable requests from the hardware readback. Previous
+setpoints and unfinished edits are replaced, not sent back to the device.
+Channels return to manual mode; equation text is retained for explicit reuse.
 
 Runtime timing notes:
 

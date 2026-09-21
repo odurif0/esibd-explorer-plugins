@@ -18,6 +18,7 @@ def rig(request, monkeypatch):
     # Do not patch the shared time module used by threading/pytest.
     module.time = SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)
     channels = [SimpleNamespace(real=True, enabled=True, value=target, ramp_rate_v_s=rate,
+                    VALUE='Value', getParameterByName=lambda name: SimpleNamespace(displayDecimals=2),
                     module_address=lambda: 2, channel_number=lambda n=n: n)
                 for n, target, rate in [(1, 100., 10.), (2, -200., 10.), (3, 50., 5.)]]
     on = SimpleNamespace(state=True)

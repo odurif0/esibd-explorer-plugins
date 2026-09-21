@@ -191,6 +191,7 @@ def probe(folder, surface, output, *, actions=False):
         refresh = device._update_config_controls
         get_committed = lambda: device.frequency_khz
     elif surface == "width":
+        device.advancedAction = SimpleNamespace(state=True)
         device._ensure_operator_panel()
         spin = device.amxPanelCards[0]["width"]
         refresh = device._update_operator_panel

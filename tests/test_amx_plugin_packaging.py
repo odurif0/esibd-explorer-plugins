@@ -1328,9 +1328,9 @@ def test_config_controls_show_available_slots_loaded_status_and_load_now_action(
     ]
     assert device.operatingConfigCombo.currentIndex() == 2
     assert "Available AMX configs:" in device.operatingConfigCombo.tooltips[-1]
-    assert "signal/routing shape" in device.operatingConfigCombo.tooltips[-1]
+    assert "frequency and pulse widths" in device.operatingConfigCombo.tooltips[-1]
     assert "Loaded: 9:Static:Out0-3=Hi-Z [memory]" in device.loadedConfigValueLabel.tooltips[-1]
-    assert device.frequencyLabel.text == "Freq:"
+    assert device.frequencyLabel.text == "Osc:"
     assert device.frequencyWidget.value == 2.0
     assert device.loadOperatingConfigButton.enabled is True
     assert not hasattr(device, "standbyConfigCombo")

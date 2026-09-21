@@ -156,15 +156,17 @@ def test_off_cancels_waiting_commands_even_after_a_new_on(rig):
     submit(rig, 0, 50.0)
     assert rig.controller._begin_transition(False)
     rig.controller._end_transition()
+    # The next ON captures the current fields, not the cancelled 50 V request.
+    rig.channels[0].value = 0.
     assert rig.controller._begin_transition(True)
     rig.controller._end_transition()
     rig.controller.lock.release()
     wait_idle(rig.controller)
-    assert rig.device.calls == []
-    # Only a freshly requested value belongs to the new ON session.
+    assert sorted(rig.device.calls) == [(0, 1, 0.), (0, 2, 0.)]
     submit(rig, 0, 55.0)
     wait_idle(rig.controller)
-    assert rig.device.calls == [(0, 1, 55.0)]
+    assert rig.device.calls[-1] == (0, 1, 55.0)
+    assert all(call[2] != 50. for call in rig.device.calls)
 
 
 def test_edits_wait_for_startup_without_being_discarded(rig):
@@ -174,7 +176,8 @@ def test_edits_wait_for_startup_without_being_discarded(rig):
     assert rig.device.calls == []
     rig.controller._end_transition()
     wait_idle(rig.controller)
-    assert rig.device.calls == [(0, 1, 65.0)]
+    # The other channel keeps its captured startup target (zero).
+    assert sorted(rig.device.calls) == [(0, 1, 65.0), (0, 2, 0.0)]
 
 
 def test_failure_is_visible_and_can_be_explicitly_retried(rig):
