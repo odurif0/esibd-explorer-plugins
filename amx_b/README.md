@@ -1,7 +1,7 @@
 # AMX_B Plugin
 
-Drives AMX frequency and pulser timing from ESIBD Explorer and monitors live
-pulser readbacks.
+Drives AMX timing from ESIBD Explorer and shows the expected signals on
+CH0–CH3 from controller-register readbacks.
 
 The plugin is self-contained: it embeds the minimal private runtime it needs,
 including the AMX driver files and vendor DLL.
@@ -36,43 +36,46 @@ including the AMX driver files and vendor DLL.
 
 Toolbar notes:
 
-- `Signal`: saved AMX config selector. This is the operator-facing signal or
-  routing shape.
+- `Signal`: saved AMX configuration selector (routing and timing).
 - `Load now`: immediately loads the selected signal while the AMX is ON.
-- `Freq`: oscillator frequency in kHz. Validate typed changes with Enter, Tab,
-  or a click outside the field. They apply while ON and are reused on startup.
-- operator cards: stage each pulser enable request and pulse width in us.
+- `Osc`: internal oscillator frequency in kHz, not necessarily each output's
+  frequency. Validate typed changes with Enter, Tab,
+  or a click outside the field. They apply while ON, until the next config load.
+- `Advanced`: pulser enable/width controls, equations and channel metadata.
+
+ON and `Load now` load the selected configuration's saved timing and update
+frequency, widths and enable requests from the hardware readback. Previous
+setpoints and unfinished edits are replaced, not sent back to the device.
+Channels return to manual mode; equation text is retained for explicit reuse.
 
 ## Operator Panel
 
-The default view contains cards for pulsers `P0` through `P3`. Cards wrap to
-fit narrower panels, with scrollbars when needed; the mouse wheel does not
-edit pulse widths. Each card separates the requested channel configuration
-from controller-register readbacks:
+The default view is a compact CH0–CH3 table: signal type, frequency, rail
+selection, time at Vpos/Vneg, and timing relative to the first periodic output.
+For the original config 79, all four outputs switch at 500 kHz with 1 µs at
+each level: CH0/CH2 together, CH1/CH3 opposite. P1–P3 being stopped does not
+mean that CH1–CH3 are disabled. Stopping P0 can leave outputs at a fixed rail.
 
-- `On when AMX active` stages whether the width is applied after the global AMX
-  reaches its ON state; it is not an independent physical-output measurement
-- `Width` is the requested pulse width in microseconds; typed edits also wait
-  for Enter, Tab, or a click outside the field
-- `Duty request` is calculated from the requested width and frequency
-- `Width`, `Duty`, `Delay`, and `Burst` below `CONTROLLER REGISTERS` are derived
-  from values read back through the vendor API
+These are **expected dual-level switch signals**, not measured waveforms.
+Vpos/Vneg voltage values are **unknown**: the AMX API reports internal supply
+rails, not the external HV amplitudes. On trilevel hardware, each pair CH0/1
+or CH2/3 controls one physical output; the dual-level voltage interpretation
+does not apply. See the [CGC controller manual](https://www.cgc-instruments.com/en/Products/Switches/19AMX/Modules/AMX-CTRL-4ED), pp. 14–15 and 20–27.
 
-`REGISTERS APPLIED` means the oscillator-period and pulser-width registers match
-what the existing write path should produce. It does not prove the waveform at
-a physical connector. A zero width register is shown as `stopped`, matching the
-vendor API sentinel. A positive request below the representable hardware minimum
-is driven at one tick and remains amber as `MINIMUM WIDTH`. Use `Advanced` to
-show the original channel table for equations, manual/equation mode changes, and
-channel metadata. Width editing in the operator card is disabled while a channel
-is controlled by an equation.
+The view uses live trigger/enable selections, pulser sources, controller flags
+and mapping-enable readbacks, never the config name or slot number. External
+signals, bursts, chained triggers, active/missing mapping and potentially
+skipped triggers remain explicitly unknown rather than inheriting oscillator
+frequency. Nonzero or unread switch edge delays suppress exact dwell/phase
+claims. Failed reads, writes awaiting readback, transitions and disconnection
+invalidate the displayed signal. Hi-Z does not mean 0 V or a discharged output.
 
-Runtime timing notes:
-
-- switch trigger `rise` and `fall` delays are coarse AMX controller ticks in
-  the range `0..15`
-- switch enable delay is also limited to `0..15`
-- values outside that hardware range are rejected by the AMX wrapper on purpose
+`Advanced` contains P0–P3 controls and the channel table within the same
+scrollable panel. Cards separate requests from register readbacks; a green
+`REGISTERS APPLIED` confirms matching registers, not a physical waveform.
+Typed widths wait for Enter, Tab or focus-out; scrolling never edits them.
+Equation-controlled widths are read-only in the cards. The switch delay
+register range remains `0..15`; values outside it are rejected.
 
 ## AMX Configurations
 
@@ -127,8 +130,8 @@ Example observed on one AMX controller on April 14, 2026:
 - `106`: `5MHz->SwitchSym+DIO0,Osc->DIO1`
 - `109`: `5000x1MHz->SwitchSym+DIO0,Pause->Vneg+DIO1`
 
-The plugin keeps a fixed 4-channel pulser layout matching the AMX hardware.
-Each channel exposes:
+The Advanced view and recorded data keep the fixed P0–P3 pulser layout.
+Each pulser exposes:
 
 - requested pulse width in microseconds
 - duty request calculated from the width and oscillator frequency

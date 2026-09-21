@@ -116,6 +116,9 @@ def probe(folder, output):
         panel = device.channelPanel
         cards = [entry["card"] for entry in device.channelPanelCards.values()]
     elif family == "amx":
+        # Output rows are the default view; exercise the existing pulser controls
+        # in Advanced as well (default/narrow output view has dedicated Qt tests).
+        device.advancedAction = SimpleNamespace(state=True)
         device._ensure_operator_panel()
         panel = device.amxPanel
         cards = [entry["card"] for entry in device.amxPanelCards.values()]

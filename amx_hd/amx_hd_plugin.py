@@ -307,6 +307,35 @@ def _invoke_gui_callback(callback: Any) -> None:
         )
 
 
+def _set_config_spinbox(widget: Any, value: float) -> None:
+    """Replace even a focused draft on explicit config load, without commands."""
+    if widget is None:
+        return
+    blocked = widget.blockSignals(True)
+    try:
+        # A saved config may exceed the previous editor bounds (e.g. external
+        # triggering). Display its actual value rather than silently clamping it.
+        widget.setRange(min(widget.minimum(), value), max(widget.maximum(), value))
+        widget.setValue(value)
+    finally:
+        widget.blockSignals(blocked)
+
+
+def _set_config_parameter(owner: Any, attr: str, parameter: Any, value: Any) -> None:
+    """Adopt a readback without Parameter events sending it back to hardware."""
+    loading = getattr(parameter, "loading", False)
+    if parameter is not None:
+        parameter.loading = True
+    try:
+        if parameter is not None:
+            _set_config_spinbox(getattr(parameter, "spin", None), value)
+            parameter.setValueWithoutEvents(value)
+        setattr(owner, attr, value)
+    finally:
+        if parameter is not None:
+            parameter.loading = loading
+
+
 def _disable_spinbox_wheel(widget: Any) -> None:
     """Prevent accidental mouse-wheel edits on hardware-facing spinboxes."""
     install_filter = getattr(widget, "installEventFilter", None)
@@ -863,7 +892,7 @@ class AMXHDDevice(Device):
         setting = self._setting(setting_name)
         tooltip = str(getattr(setting, "toolTip", "") or "").strip() if setting is not None else ""
         lines = [tooltip] if tooltip else []
-        lines.append("Choose the saved AMX signal/routing shape to load.")
+        lines.append("Load a saved AMX configuration, including its frequency and pulse widths.")
         lines.append("Available AMX configs:")
         available = str(getattr(self, "available_configs_text", "") or "n/a")
         for entry in available.split(";"):
@@ -1084,7 +1113,7 @@ class AMXHDDevice(Device):
         self._set_action_enabled(button, ready)
         if button is not None and hasattr(button, "setToolTip"):
             tooltip = (
-                "Load the selected AMX config immediately and reapply runtime timing. "
+                "Load the selected AMX config and adopt its saved timing in the interface. "
                 "This action is only available while the AMX is ON."
             )
             if not ready and reason:
@@ -1654,7 +1683,7 @@ class AMXHDDevice(Device):
             value=2.0,
             minimum=0.001,
             maximum=10000.0,
-            toolTip="Oscillator frequency applied in kilohertz after startup.",
+            toolTip="Oscillator frequency in kilohertz. Loading a config replaces this value with its saved frequency.",
             parameterType=PARAMETERTYPE.FLOAT,
             attr="frequency_khz",
             event=self.frequencyChanged,
@@ -2801,16 +2830,67 @@ class AMXHDController(DeviceController):
         no-op for backward compatibility with tests that call it directly.
         """
 
-    def _apply_runtime_settings(self, timeout_s: float) -> None:
+    def _sync_loaded_config_to_gui(self, snapshot: dict[str, Any]) -> None:
+        """The loaded hardware config, not the previous GUI, owns the timing."""
         device = self.device
-        if device is None:
-            return
-        device.set_frequency_khz(
-            float(getattr(self.controllerParent, "frequency_khz", 2.0)),
-            timeout_s=timeout_s,
-        )
-        for channel in self.controllerParent.getChannels():
-            self._apply_channel_timing(channel, timeout_s)
+        period = _coerce_int(snapshot.get("oscillator", {}).get("period"), -1)
+        widths = {
+            _coerce_int(p.get("pulser"), -1): _coerce_int(p.get("width_ticks"), -1)
+            for p in snapshot.get("pulsers", [])
+        }
+        channels = [ch for ch in self.controllerParent.getChannels() if ch.real]
+        if period < 0 or any(widths.get(ch.pulser_number(), -1) < 0 for ch in channels):
+            raise RuntimeError("Loaded AMX config timing readback is incomplete.")
+        clock_hz = float(_safe_device_attr(device, "CLOCK", 100e6))
+        frequency_khz = clock_hz / (period + _safe_device_attr(device, "OSC_OFFSET", 2)) / 1000.0
+        width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2)
+        self._pending_config_snapshot = snapshot
+
+        def adopt() -> None:
+            if self.device is not device or getattr(self, "_pending_config_snapshot", None) is not snapshot:
+                return  # OFF, disconnect or a newer config invalidated this readback.
+            parent = self.controllerParent
+            loading = getattr(parent, "loading", False)
+            parent.loading = True
+            setting = None
+            try:
+                cancel = getattr(parent, "_cancel_runtime_apply_timers", None)
+                if callable(cancel):
+                    cancel()
+                getter = getattr(parent, "_setting", None)
+                if callable(getter):
+                    setting = getter(parent.FREQUENCY_KHZ)
+                _set_config_parameter(parent, "frequency_khz", setting, frequency_khz)
+                _set_config_spinbox(getattr(parent, "frequencyWidget", None), frequency_khz)
+                for channel in channels:
+                    ticks = widths[channel.pulser_number()]
+                    width_us = (ticks + width_offset) / clock_hz * 1e6 if ticks else 0.0
+                    getter = getattr(channel, "getParameterByName", None)
+                    for attr, name, value in (
+                        ("value", getattr(channel, "VALUE", "Value"), width_us),
+                        ("enabled", getattr(channel, "ENABLED", "Enabled"), ticks > 0),
+                        ("active", getattr(channel, "ACTIVE", "Active"), True),
+                    ):
+                        parameter = getter(name) if callable(getter) else None
+                        _set_config_parameter(channel, attr, parameter, value)
+                    # Keep the equation text, but require an explicit return to
+                    # equation mode instead of immediately undoing the config.
+                    channel.lastAppliedValue = channel.value
+                    for name in ("activeChanged", "_update_duty_label", "_sync_enabled_toggle_widget"):
+                        refresh = getattr(channel, name, None)
+                        if callable(refresh):
+                            refresh()
+                    card = getattr(parent, "amxPanelCards", {}).get(channel.pulser_number(), {})
+                    _set_config_spinbox(card.get("width"), width_us)
+            finally:
+                parent.loading = loading
+            save = getattr(setting, "settingEvent", None)
+            if callable(save):
+                save()
+            self._pending_config_snapshot = None
+            self._sync_status_to_gui()
+
+        _invoke_gui_callback(adopt)
 
     def _startup_snapshot_timeout_s(self) -> float:
         return float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
@@ -2942,9 +3022,6 @@ class AMXHDController(DeviceController):
             started_s = time.monotonic()
             self._refresh_loaded_config_status()
             self._print_if_slow("AMX loaded-config refresh", started_s)
-        started_s = time.monotonic()
-        self._apply_runtime_settings(timeout_s)
-        self._print_if_slow("AMX runtime settings apply", started_s)
         is_standby = self._config_entry_is_standby_like(
             self._config_entry_by_index(config_index)
         )
@@ -2955,10 +3032,15 @@ class AMXHDController(DeviceController):
             device.set_device_enabled(True, timeout_s=timeout_s)
             self._print_if_slow("AMX set_device_enabled(ON)", started_s)
         try:
-            return self._wait_for_startup_ready_snapshot(
+            self._wait_for_startup_ready_snapshot(
                 config_index=config_index,
                 settle_timeout_s=timeout_s,
             )
+            # Keep the readiness poll lightweight, then read timing once.
+            snapshot = device.collect_housekeeping(timeout_s=self._startup_snapshot_timeout_s())
+            self._apply_snapshot(snapshot)
+            self._sync_loaded_config_to_gui(snapshot)
+            return snapshot
         except Exception:
             if not is_standby:
                 with contextlib.suppress(Exception):
@@ -2996,7 +3078,7 @@ class AMXHDController(DeviceController):
         restart_acquisition: bool = False,
         lock_timeout_s: float | None = None,
     ) -> None:
-        """Load the selected operating config, apply runtime settings, and enable AMX."""
+        """Load the selected config, preserve its timing, and enable AMX."""
         if lock_timeout_s is None:
             lock_timeout_s = (
                 float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
@@ -3126,7 +3208,9 @@ class AMXHDController(DeviceController):
                 "Could not acquire lock to apply AMX frequency."
             ):
                 device = self.device
-                if device is None:
+                if (device is None or getattr(self, "transitioning", False)
+                        or getattr(self, "_pending_config_snapshot", None) is not None
+                        or not self.controllerParent.isOn()):
                     return
                 device.set_frequency_khz(
                     float(getattr(self.controllerParent, "frequency_khz", 2.0)),
@@ -3211,6 +3295,7 @@ class AMXHDController(DeviceController):
                 self.applyValue(channel)
 
     def _discard_pending_runtime_applies(self) -> None:
+        self._pending_config_snapshot = None
         with self._global_apply_state_lock:
             self._global_apply_pending = False
         with self._channel_apply_state_lock:
@@ -3420,7 +3505,9 @@ class AMXHDController(DeviceController):
                 f"Could not acquire lock to apply AMX P{channel.pulser_number()}."
             ):
                 device = self.device
-                if device is None:
+                if (device is None or getattr(self, "transitioning", False)
+                        or getattr(self, "_pending_config_snapshot", None) is not None
+                        or not self.controllerParent.isOn()):
                     return
                 self._apply_channel_timing(channel, timeout_s)
         except TimeoutError:

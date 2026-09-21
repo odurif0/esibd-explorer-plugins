@@ -181,6 +181,9 @@ class AMXBase:
             "COM_HVAMX4ED_SetPulserDelay": ([word, ctypes.c_uint, dword], ctypes.c_int),
             "COM_HVAMX4ED_GetPulserWidth": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
             "COM_HVAMX4ED_SetPulserWidth": ([word, ctypes.c_uint, dword], ctypes.c_int),
+            "COM_HVAMX4ED_GetPulserConfig": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
+            "COM_HVAMX4ED_GetSwitchTriggerMappingEnable": ([word, ptr(ctypes.c_bool)], ctypes.c_int),
+            "COM_HVAMX4ED_GetSwitchEnableMappingEnable": ([word, ptr(ctypes.c_bool)], ctypes.c_int),
             "COM_HVAMX4ED_GetPulserBurst": ([word, ctypes.c_uint, ptr(dword)], ctypes.c_int),
             "COM_HVAMX4ED_SetPulserBurst": ([word, ctypes.c_uint, dword], ctypes.c_int),
             "COM_HVAMX4ED_GetSwitchTriggerConfig": ([word, ctypes.c_uint, ptr(byte)], ctypes.c_int),
@@ -477,6 +480,33 @@ class AMXBase:
         return self.amx_dll.COM_HVAMX4ED_SetPulserBurst(
             self.port, pulser_no, ctypes.c_uint32(burst)
         )
+
+    def get_pulser_config(self, config_no: int):
+        """Read trigger/stop selections: P0=0/1, P1=2/3, P2=4, P3=5."""
+        config_no = int(config_no)
+        if not 0 <= config_no < 6:
+            raise ValueError(f"Invalid pulser configuration number: {config_no}")
+        config = ctypes.c_ubyte()
+        status = self.amx_dll.COM_HVAMX4ED_GetPulserConfig(
+            self.port, config_no, ctypes.byref(config)
+        )
+        return status, config.value
+
+    def get_switch_trigger_mapping_enable(self):
+        """Read whether trigger signals are remapped (C++ bool, not BOOL)."""
+        enabled = ctypes.c_bool()
+        status = self.amx_dll.COM_HVAMX4ED_GetSwitchTriggerMappingEnable(
+            self.port, ctypes.byref(enabled)
+        )
+        return status, enabled.value
+
+    def get_switch_enable_mapping_enable(self):
+        """Read whether enable signals are remapped (C++ bool, not BOOL)."""
+        enabled = ctypes.c_bool()
+        status = self.amx_dll.COM_HVAMX4ED_GetSwitchEnableMappingEnable(
+            self.port, ctypes.byref(enabled)
+        )
+        return status, enabled.value
 
     def get_switch_trigger_config(self, switch_no: int):
         """Get one switch trigger configuration byte."""

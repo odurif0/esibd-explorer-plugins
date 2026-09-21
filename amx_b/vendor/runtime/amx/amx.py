@@ -928,6 +928,24 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
         oscillator_status, oscillator_period = AMXBase.get_oscillator_period(self)
         self._raise_on_status(oscillator_status, "get_oscillator_period")
 
+        def optional_routing_read(export, getter, *args):
+            # Older DLLs may omit these exports. Missing is UNKNOWN, not disabled.
+            if not hasattr(self.amx_dll, export):
+                return None
+            status, value = getter(self, *args)
+            self._raise_on_status(status, export)
+            return value
+
+        switch_mapping = {
+            "trigger_enabled": optional_routing_read(
+                "COM_HVAMX4ED_GetSwitchTriggerMappingEnable",
+                AMXBase.get_switch_trigger_mapping_enable,
+            ),
+            "enable_enabled": optional_routing_read(
+                "COM_HVAMX4ED_GetSwitchEnableMappingEnable",
+                AMXBase.get_switch_enable_mapping_enable,
+            ),
+        }
         pulsers = []
         for pulser in range(self.PULSER_NUM):
             delay_status, delay_ticks = AMXBase.get_pulser_delay(self, pulser)
@@ -945,6 +963,13 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
                     "delay_ticks": delay_ticks,
                     "width_ticks": width_ticks,
                     "burst": burst,
+                    "trigger_config": optional_routing_read(
+                        "COM_HVAMX4ED_GetPulserConfig", AMXBase.get_pulser_config,
+                        pulser * 2 if pulser < self.PULSER_BURST_NUM else pulser + self.PULSER_BURST_NUM,
+                    ),
+                    "stop_config": optional_routing_read(
+                        "COM_HVAMX4ED_GetPulserConfig", AMXBase.get_pulser_config, pulser * 2 + 1,
+                    ) if pulser < self.PULSER_BURST_NUM else None,
                 }
             )
 
@@ -1026,6 +1051,7 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
             },
             "pulsers": pulsers,
             "switches": switches,
+            "switch_mapping": switch_mapping,
         }
 
     def collect_housekeeping(self, timeout_s: Optional[float] = None) -> dict:

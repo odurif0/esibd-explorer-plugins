@@ -3010,6 +3010,22 @@ class AMPRController(DeviceController):
                 with self._setpoint_lock:
                     if self._setpoint_cancel.is_set():
                         self._setpoint_cancel = Event()
+                    # Startup targets need the same ACK/readback tracking as
+                    # later edits. Otherwise their GUI state can stay "stored"
+                    # after the ramp and suppress the normal Status feedback.
+                    requests = [
+                        _AMPRSetpoint(channel, self.device, self._setpoint_cancel)
+                        for channel in self.controllerParent.getChannels()
+                        if channel.real and (channel.module_address(), channel.channel_number())
+                        in self._transition_targets
+                    ]
+                    for request in requests:
+                        self._latest_setpoints[request.key] = request
+                        self._pending_setpoints[request.key] = request
+                for request in requests:
+                    self._publish_setpoint(request, "pending", "Startup target awaiting ramp and hardware setpoint readback.")
+                # No separate write worker: the ramp consumes each request at
+                # its target, and its existing readbacks confirm it.
             return True
 
     def _end_transition(self) -> None:

@@ -841,7 +841,8 @@ def test_controller_toggle_on_refreshes_loaded_config_after_initialize():
 
     assert controller.device.connect_calls == []
     assert controller.device.load_calls == [(9, 7.5)]
-    assert controller.device.frequency_calls == [(2.0, 7.5)]
+    assert controller.device.frequency_calls == []
+    assert parent.frequency_khz == pytest.approx(100e3 / 100002)
     assert controller.device.enable_calls == [(True, 7.5)]
     assert controller.loaded_config_text == "9:Operate [memory]"
     assert parent.loaded_config_text == "9:Operate [memory]"
@@ -937,8 +938,6 @@ def test_controller_toggle_on_enables_before_config_load_and_width_remains_writa
         ("enable", True, 7.5),
         ("load", 9, 7.5),
         ("status",),
-        ("frequency", 2.0, 7.5),
-        ("width", 2, 1248, 7.5),
         ("snapshot", 2.5),
     ]
     assert controller.main_state == "STATE_ON"
@@ -1067,7 +1066,8 @@ def test_controller_toggle_on_waits_for_state_on_after_enable():
 
     assert controller.device.connect_calls == []
     assert controller.device.load_calls == [(9, 7.5)]
-    assert controller.device.frequency_calls == [(2.0, 7.5)]
+    assert controller.device.frequency_calls == []
+    assert parent.frequency_khz == pytest.approx(100e3 / 100002)
     assert controller.device.enable_calls == [(True, 7.5)]
     assert messages == [("AMX timing enabled.", None)]
     assert controller.main_state == "STATE_ON"

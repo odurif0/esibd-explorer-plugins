@@ -17,13 +17,13 @@ One plugin for one device.
 | `psu_e`  | Controls PSU_E power-supply modules |
 | `dmmr`   | Monitors DMMR picoammeter modules |
 | `esi`    | Controls ESI heater and paired +/- HVPS-3kB modules |
-| `amx_a`  | Controls AMX_A frequency and pulser modules |
-| `amx_b`  | Controls AMX_B frequency and pulser modules |
+| `amx_a`  | Controls AMX_A timing and displays expected CH0–CH3 signals |
+| `amx_b`  | Controls AMX_B timing and displays expected CH0–CH3 signals |
 | `amx_hd` | Controls AMX HD frequency and timer modules |
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.2.12.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.2.13.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
