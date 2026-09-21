@@ -94,6 +94,7 @@ def _install_esibd_stubs() -> None:
         REAL = "Real"
         ENABLED = "Enabled"
         VALUE = "Value"
+        MONITOR = "Monitor"
         SCALING = "Scaling"
         MIN = "Min"
         MAX = "Max"
@@ -107,6 +108,9 @@ def _install_esibd_stubs() -> None:
             self.displayedParameters = [
                 self.NAME,
                 self.VALUE,
+                self.MONITOR,
+                self.MIN,
+                self.MAX,
                 self.ACTIVE,
                 self.REAL,
                 self.OPTIMIZE,
@@ -430,10 +434,11 @@ def test_plugin_enables_monitors_and_hides_optimize_column():
     channel.channelParent = types.SimpleNamespace(ramp_rate_v_s=10.)
     channel_defaults = module.AMPRChannel.getDefaultChannel(channel)
     assert channel_defaults["Enabled"][module.Parameter.ADVANCED] is False
-    assert channel_defaults["Enabled"][module.Parameter.HEADER] == "On"
-    assert channel_defaults["Enabled"][module.Parameter.TOOLTIP] == (
-        "Enable this AMPR output channel. Disabled channels are held at 0 V."
-    )
+    assert channel_defaults["Enabled"][module.Parameter.HEADER] == "Status"
+    tooltip = channel_defaults["Enabled"][module.Parameter.TOOLTIP]
+    assert tooltip.startswith("Enable this AMPR output channel. Disabled channels are held at 0 V.")
+    assert "reference floor 1 V" in tooltip
+    assert "not confirmation of safe discharge" in tooltip
     assert channel_defaults["Active"][module.Parameter.HEADER] == "Manual"
     assert channel_defaults["Active"][module.Parameter.TOOLTIP] == (
         "If enabled, this channel uses its manual voltage setpoint. "
@@ -932,9 +937,11 @@ def test_channel_monitor_feedback_uses_relative_color_bands():
             return self.widget
 
     monitor_widget = FakeWidget()
+    status_widget = FakeWidget()
     channel = object.__new__(module.AMPRChannel)
     channel.channelParent = types.SimpleNamespace(
-        controller=types.SimpleNamespace(acquiring=True),
+        controller=types.SimpleNamespace(acquiring=True, initialized=True, main_state="ST_ON"),
+        onAction=types.SimpleNamespace(state=True),
         isOn=lambda: True,
     )
     channel.enabled = True
@@ -943,22 +950,25 @@ def test_channel_monitor_feedback_uses_relative_color_bands():
     channel.value = 100.0
     channel.monitor = 100.5
     channel.warningState = False
-    channel.getParameterByName = lambda name: {"Monitor": FakeParameter(monitor_widget)}.get(name)
+    channel.getParameterByName = lambda name: {
+        "Monitor": FakeParameter(monitor_widget), "Enabled": FakeParameter(status_widget)
+    }.get(name)
 
     module.AMPRChannel.monitorChanged(channel)
-    assert "#2f855a" in monitor_widget.styles[-1]
+    assert "#2f855a" in status_widget.styles[-1]
 
     channel.monitor = 108.0
     module.AMPRChannel.monitorChanged(channel)
-    assert "#dd6b20" in monitor_widget.styles[-1]
+    assert "#dd6b20" in status_widget.styles[-1]
 
     channel.monitor = 125.0
     module.AMPRChannel.monitorChanged(channel)
-    assert "#c53030" in monitor_widget.styles[-1]
+    assert "#c53030" in status_widget.styles[-1]
 
     channel.monitor = np.nan
     module.AMPRChannel.monitorChanged(channel)
-    assert monitor_widget.styles[-1] == ""
+    assert status_widget.styles[-1] == ""
+    assert set(monitor_widget.styles) == {""}
 
 
 def test_init_gui_rewires_close_action_to_shutdown():

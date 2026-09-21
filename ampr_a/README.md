@@ -50,7 +50,16 @@ channel is kept. OFF cancels pending requests without submitting a new target.
 While a channel is ON, an orange voltage cell means pending or awaiting
 hardware readback. Red means an error or a different readback; the tooltip
 gives details. Revalidate to retry. `Monitor` is the measured output voltage.
-**OFF cells are neutral**, without changing the saved colours of the curves.
+The first column, `Status`, keeps its ON/OFF button and shows voltage tracking:
+green within 1% of the target, orange within 10%, red beyond (1 V reference
+floor). During global ramp-down the reference is zero, not the saved target.
+The coloured feedback is on `Status`, not `Monitor`; `Ramp (V/s)` is between
+`Monitor` and `Min`. **OFF cells are neutral**, without changing plot colours.
+
+Hardware voltages and `Status` are refreshed every second, including during
+both ramps. Ramp commands and readings use the same serialized worker; slow
+hardware responses can reduce the refresh rate. The Explorer acquisition
+interval controls recording, not this monitoring cadence.
 
 All channels ramp **in parallel**, each at its own speed; serial commands are
 sent in turn. At 10 V/s, targets of 100 V and 200 V from zero take approximately

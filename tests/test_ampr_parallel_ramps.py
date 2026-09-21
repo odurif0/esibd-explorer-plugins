@@ -23,21 +23,30 @@ def rig(request, monkeypatch):
     on = SimpleNamespace(state=True)
     parent = SimpleNamespace(name='AMPR_A', isOn=lambda: on.state, onAction=on,
                              getChannels=lambda: channels, connect_timeout_s=5., ramp_rate_v_s=10.,
-                             _sync_local_on_action=lambda: None, initialized=True, loading=False)
+                             _sync_local_on_action=lambda: None, initialized=True, loading=False,
+                             getConfiguredModules=lambda: [2])
     controller = module.AMPRController(parent)
     parent.controller = controller
     controller.initialized = True
     controller.errorCount = 0
     controller.lock = threading.Lock()
     controller._sync_status_to_gui = lambda: None
+    controller.signalComm = SimpleNamespace(updateValuesSignal=SimpleNamespace(emit=lambda: None))
     logs, writes = [], []
+    accepted = {ch.channel_number(): 0. for ch in channels}
     controller.print = parent.print = lambda message, **kwargs: logs.append(message)
     class Device:
         NO_ERR = 0
         connected = True
         def set_module_voltages(self, module_id, values):
             writes.append((clock.now, dict(values)))
+            accepted.update(values)
             return dict.fromkeys(values, 0)
+        def get_state(self):
+            return (0, 0, 'ST_ON')
+        def get_module_voltages(self, module_id):
+            return {number: {'setpoint': value, 'measured': value}
+                    for number, value in accepted.items()}
     controller.device = Device()
     return SimpleNamespace(module=module, controller=controller, parent=parent, channels=channels,
                            on=on, clock=clock, writes=writes, logs=logs)
@@ -139,7 +148,7 @@ def test_one_worker_handles_off_from_startup_through_ramp_completion(rig, when, 
     rig.module.DeviceController.toggleOn = lambda self: None
     c._refresh_module_scan = lambda: None
     c._apply_module_voltage_limits = lambda: None
-    c._update_state = lambda: setattr(c, 'main_state', 'ST_ON')
+    c._update_state = lambda **kwargs: setattr(c, 'main_state', 'ST_ON')
     c.startAcquisition = lambda: pytest.fail('Acquisition must not start after OFF')
     hw.close = lambda: None
     def stop():
@@ -224,7 +233,7 @@ def test_ramp_retarget_does_not_jump_to_the_new_value(rig):
     assert curve[-1] == pytest.approx((15., 150.))
     assert all(abs(value) <= 10. * t + 1e-8 for t, value in curve)
     assert not c._pending_setpoints
-    assert c._latest_setpoints[(2, 1)].state == 'sent'
+    assert c._latest_setpoints[(2, 1)].state == 'confirmed'
 
 
 def test_channel_column_defaults_to_previous_global_setting():
