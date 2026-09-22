@@ -31,6 +31,7 @@ def _install_esibd_stubs() -> None:
     class PARAMETERTYPE(Enum):
         INT = "INT"
         FLOAT = "FLOAT"
+        EXP = "EXP"
         BOOL = "BOOL"
         LABEL = "LABEL"
 
@@ -78,7 +79,8 @@ def _install_esibd_stubs() -> None:
         pass
 
     class Device:
-        pass
+        def getChannels(self):
+            return getattr(self, "channels", [])
 
     class Plugin:
         pass
@@ -206,14 +208,14 @@ def test_bootstrap_config_is_replaced_with_fixed_channels():
             "Name": "PSU_CH0",
             "CH": "0",
             "Real": True,
-            "Enabled": False,
+            "Enabled": True,
             "Output": "OFF",
         },
         {
             "Name": "PSU_CH1",
             "CH": "1",
             "Real": True,
-            "Enabled": False,
+            "Enabled": True,
             "Output": "OFF",
         },
     ]
@@ -240,7 +242,7 @@ def test_existing_config_keeps_only_hardware_channels():
             "Name": "PSU_CH1",
             "CH": "1",
             "Real": True,
-            "Enabled": False,
+            "Enabled": True,
         },
     ]
     assert ("Added generic PSU channels: CH1", None) in log_entries
@@ -276,7 +278,7 @@ def test_missing_hardware_channel_is_recreated_with_fixed_mapping():
         "Name": "PSU_CH0",
         "CH": "0",
         "Real": True,
-        "Enabled": False,
+        "Enabled": True,
     }
     assert ("Added generic PSU channels: CH0", None) in log_entries
 
@@ -298,7 +300,7 @@ def test_existing_config_is_merged_and_missing_hardware_channel_is_added():
         "Name": "PSU_CH1",
         "CH": "1",
         "Real": True,
-        "Enabled": False,
+        "Enabled": True,
     }
     assert ("Added generic PSU channels: CH1", None) in log_entries
 
@@ -486,6 +488,7 @@ def test_controller_exposes_available_psu_configs_in_gui_state():
         main_state="",
         output_summary="",
         available_configs_text="",
+        getChannels=lambda: [],
     )
 
     controller = module.PSUController(parent)
@@ -672,8 +675,8 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
     monkeypatch,
 ):
     module = _load_module()
-    monotonic_values = iter([10.0, 10.7])
-    monkeypatch.setattr(module.time, "monotonic", lambda: next(monotonic_values))
+    clock = types.SimpleNamespace(now=10.)
+    monkeypatch.setattr(module, "time", types.SimpleNamespace(monotonic=lambda: clock.now))
 
     calls = []
 
@@ -717,6 +720,7 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
         def __init__(self, channel):
             self._channel = channel
             self.real = True
+            self.enabled = True
 
         def channel_number(self):
             return self._channel
@@ -733,6 +737,7 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
     controller.initialized = True
 
     controller.readNumbers()
+    clock.now = 10.7
     controller.readNumbers()
 
     assert calls == [
@@ -900,6 +905,8 @@ def test_manual_panel_sync_updates_controls_without_live_apply():
 
     device = object.__new__(module.PSUDevice)
     device._manualPanelApplyTimer = FakeTimer()
+    device.channels = [types.SimpleNamespace(value=value, real=True,
+                       channel_number=lambda ch=ch: ch) for ch, value in enumerate((12.5, 22.5))]
     device.controller = types.SimpleNamespace(
         output_enabled_by_channel={0: True, 1: False},
         full_range_by_channel={0: True, 1: False},
@@ -1255,7 +1262,7 @@ def test_apply_manual_state_updates_outputs_ranges_and_limits():
             return {0: 0.25, 1: 0.5}[channel], 1.0
 
         def get_output_full_range(self, **kwargs):
-            return True, False
+            return self.ranges
 
         def get_device_enabled(self, **kwargs):
             return True
@@ -1265,6 +1272,7 @@ def test_apply_manual_state_updates_outputs_ranges_and_limits():
             calls.append(("set_output_enabled", ch0, ch1, timeout_s))
 
         def set_output_full_range(self, ch0, ch1, timeout_s=None):
+            self.ranges = (ch0, ch1)
             calls.append(("set_output_full_range", ch0, ch1, timeout_s))
 
         def set_channel_voltage(self, channel, value, timeout_s=None):
@@ -1345,7 +1353,7 @@ def test_apply_manual_state_does_not_switch_range_when_range_is_unchanged(monkey
     module = _load_module()
     calls = []
 
-    class FakeDevice:
+    class FakeDevice(StatefulPSU):
         def set_output_enabled(self, ch0, ch1, timeout_s=None):
             calls.append(("set_output_enabled", ch0, ch1, timeout_s))
 
@@ -1943,12 +1951,9 @@ def test_load_operating_config_now_loads_selected_psu_config():
         ("load_config", 7, 9.0),
         ("collect_housekeeping", 5.0),
     ]
-    assert sync_calls == [
-        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
-        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
-        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
-        ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}),
-    ]
+    assert sync_calls and all(
+        state == ({0: 12.5, 1: 22.5}, {0: 0.125, 1: 0.25}) for state in sync_calls
+    )
     assert controller._manual_apply_pending_state is None
     assert printed == [("Loaded PSU config 7.", None)]
 

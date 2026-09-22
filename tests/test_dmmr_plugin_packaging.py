@@ -37,6 +37,7 @@ def _install_esibd_stubs() -> None:
         LABEL = "LABEL"
         TEXT = "TEXT"
         BOOL = "BOOL"
+        COMBO = "COMBO"
 
     class _PluginTypeValue:
         def __init__(self, value):
@@ -59,6 +60,7 @@ def _install_esibd_stubs() -> None:
         PARAMETER_TYPE = "PARAMETER_TYPE"
 
     class Channel:
+        range_mode = "Auto"
         COLLAPSE = "Collapse"
         NAME = "Name"
         ACTIVE = "Active"
@@ -601,7 +603,7 @@ def test_dmmr_channel_keeps_active_parameter_for_core_init():
             module.Channel.setDisplayedParameters = original_set_displayed
 
     assert "Active" in channel.displayedParameters
-    assert channel.displayedParameters[-2:] == ["Module", "Display"]
+    assert channel.displayedParameters[-3:] == ["Module", "Range mode", "Display"]
 
 
 def test_dmmr_channel_marks_reference_as_advanced_only():

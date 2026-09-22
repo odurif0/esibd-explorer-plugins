@@ -190,15 +190,17 @@ def test_config_load_reapplies_interlock_setting(setup):
     assert device.interlocks == (True, True)
 
 
-def test_manual_apply_requires_disable_before_changing_setpoints(setup):
+def test_manual_apply_requires_disable_before_reconfiguring_range(setup):
     _module, controller, device, messages = setup
     device.enabled = True
     device.outputs = (True, False)
     device.set_output_enabled = lambda *a, **kw: None  # ACK, but command ignored.
-    controller.applyManualState(manual())
+    state = manual()
+    state["full_range_enabled"][0] = True
+    controller.applyManualState(state)
     assert not any(call[0] in {"voltage", "current", "range"} for call in device.calls)
     assert ("global", True) not in device.calls
-    assert any("not confirmed disabled before changing setpoints" in msg for msg in messages)
+    assert any("not confirmed disabled before reconfiguration" in msg for msg in messages)
 
 
 def test_manual_mode_requires_channel_disable_before_global_enable(setup):

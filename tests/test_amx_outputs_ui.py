@@ -93,11 +93,66 @@ def probe(folder, output):
     assert table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     assert all(text(i, 2) == "500 kHz" and text(i, 4) == "1 / 1" for i in range(4))
     assert [text(i, 5) for i in range(4)] == ["Reference", "Opposite to CH0", "Same as CH0", "Opposite to CH0"]
-    assert "voltages: unknown" in " ".join(label.text() for label in host.findChildren(QLabel) if label.isVisible())
+    assert "Voltages from linked PSUs" in " ".join(label.text() for label in host.findChildren(QLabel) if label.isVisible())
+    assert all(text(i, 6) == "—" and text(i, 3) == "Vneg ↔ Vpos" for i in range(4))
     assert "trilevel" in table.toolTip()
     assert table.verticalScrollBar().maximum() == 0
     assert table.horizontalScrollBar().maximum() == 0
     window.grab().save(str(output / f"{folder}-outputs.png"))
+
+    # Real PSU controller publication -> public plugin API -> actual AMX widgets.
+    # Only the device transport is simulated. Refresh must not need AMX polling.
+    from test_psu_channels import make_psu, snapshot
+    from test_amx_psu_links import register_sources
+    psu_module, psu, psu_controller = make_psu("psu_a")
+    other_module, other, other_controller = make_psu("psu_e")
+    clock = SimpleNamespace(now=100.)
+    for source_module in (psu_module, other_module):
+        source_module.time = SimpleNamespace(monotonic=lambda: clock.now)
+    psu_controller._apply_snapshot(snapshot(123.4, 120.5), refreshed_at=clock.now)
+    other_controller._apply_snapshot(snapshot(50., 45.), refreshed_at=clock.now)
+    register_sources(parent, parent, psu, other)
+    from test_amx_psu_links import install_real_settings
+    settings_window = QWidget()
+    settings_window.setWindowTitle("AMX PSU settings")
+    settings = install_real_settings(module, parent, QVBoxLayout(settings_window))
+    positive_pair = settings.settings[f"{parent.name}/{parent.PSU_CH01}"]
+    negative_pair = settings.settings[f"{parent.name}/{parent.PSU_CH23}"]
+    positive_pair.combo.setCurrentText(psu.name)
+    negative_pair.combo.setCurrentText(other.name)
+    assert parent.psu_ch01 == psu.name and parent.psu_ch23 == other.name
+    assert text(0, 3) == "-120.5 V ↔ +123.4 V", "Settings change was not immediate"
+    saved = {key: parameter.value for key, parameter in settings.settings.items()}
+    parent.psu_ch01 = parent.psu_ch23 = "None"
+    for key, value in saved.items():
+        settings.settings[key].value = value
+    assert parent.psu_ch01 == psu.name and parent.psu_ch23 == other.name
+    QTest.qWait(650)
+    assert [text(i, 6) for i in range(4)] == ["PSU_A", "PSU_A", "PSU_E", "PSU_E"]
+    assert [text(i, 3) for i in range(4)] == ["-120.5 V ↔ +123.4 V"] * 2 + ["-45 V ↔ +50 V"] * 2
+    assert "relative to its reference" in table.item(0, 3).toolTip()
+    assert "external offset not included" in table.item(0, 3).toolTip()
+    assert all(row["levels"] == "Vneg ↔ Vpos" for row in controller.output_rows)
+    window.grab().save(str(output / f"{folder}-linked-psu.png"))
+    clock.now += 2.1
+    psu_controller.updateValues()
+    other_controller.updateValues()
+    QTest.qWait(650)
+    assert all(text(i, 3) == "Vneg ↔ Vpos" for i in range(4)), "Old PSU readings remained visible"
+    assert "expired" in table.item(0, 3).toolTip()
+    psu_controller._apply_snapshot(snapshot(0., 120.5, (True, False)), refreshed_at=clock.now)
+    other_controller._apply_snapshot(snapshot(50., 45.), refreshed_at=clock.now)
+    QTest.qWait(650)
+    assert text(0, 3) == "Vneg ↔ 0 V", "Disabled rail became zero or used its previous value"
+    assert text(2, 3) == "-45 V ↔ +50 V"
+    parent.psu_ch01 = other.name  # Remapping does not reconnect or control a PSU.
+    QTest.qWait(650)
+    assert text(0, 3) == text(2, 3) == "-45 V ↔ +50 V"
+    other_controller._cancel_output_commands()
+    QTest.qWait(650)
+    assert all(text(i, 3) == "Vneg ↔ Vpos" for i in range(4))
+    parent.psu_ch01, parent.psu_ch23 = "None", "None"
+    parent._update_output_table()
 
     # Unknown custom routing arrives from the real worker-to-Qt callback.
     external = config79_snapshot()
@@ -124,7 +179,7 @@ def probe(folder, output):
     assert table.horizontalScrollBar().maximum() > 0
     assert table.verticalScrollBar().maximum() == 0
     table.horizontalScrollBar().setValue(table.horizontalScrollBar().maximum())
-    assert table.visualItemRect(table.item(3, 5)).intersects(table.viewport().rect())
+    assert table.visualItemRect(table.item(3, table.columnCount() - 1)).intersects(table.viewport().rect())
     window.resize(1260, 260)
     QTest.qWait(50)
     scroll = host.findChild(QScrollArea)
@@ -152,6 +207,7 @@ def probe(folder, output):
     parent._update_operator_panel()
     assert text(0, 1) == "Disconnected"
     assert controller.device.timing_writes == []
+    settings_window.close()
     window.close()
     return 0
 

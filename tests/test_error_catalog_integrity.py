@@ -3,10 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from conftest import PLUGIN_SPECS
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ERROR_CATALOG = Path("vendor/runtime/error_codes.json")
 CANONICAL_FOLDER = "amx_a"
+# MScan is a scan, not a device: it has no vendor runtime or error catalog.
 EXPECTED_CATALOG_COUNT = 12
 EXPECTED_DEBUG_OUTPUT_MESSAGE = "Error opening the file for debugging output"
 
@@ -72,6 +75,7 @@ def assert_catalog_matches_canonical(
 
 
 def test_authoritative_error_catalog_list_is_complete() -> None:
+    assert set(PLUGIN_FOLDERS) == {s.folder for s in PLUGIN_SPECS if s.runtime_family is not None}
     paths = catalog_paths()
     assert len(paths) == EXPECTED_CATALOG_COUNT
     assert [path.relative_to(REPO_ROOT).as_posix() for path in paths] == [

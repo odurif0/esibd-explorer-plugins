@@ -42,6 +42,7 @@ def _install_esibd_stubs() -> None:
     plugins = types.ModuleType("esibd.plugins")
 
     class PARAMETERTYPE(Enum):
+        COMBO = "COMBO"
         INT = "INT"
         FLOAT = "FLOAT"
         LABEL = "LABEL"

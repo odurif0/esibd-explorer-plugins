@@ -197,10 +197,15 @@ def probe(folder, surface, output, *, actions=False):
         refresh = device._update_operator_panel
         get_committed = lambda: device.channels[0].value
     else:
+        device.controller.current_limit_values = {0: 0., 1: 0.}
         device._ensure_channel_panel()
         spin = device.manualPanelControls[0][surface]
         key = "voltage_values" if surface == "voltage" else "current_limit_values"
-        device.controller.applyManualStateFromThread = lambda state, **kw: calls.append(state[key][0])
+        # Focus-out on another editor may submit its own (unchanged) setting.
+        # Unlike reconfiguration requests, per-field edits have no other keys.
+        device.controller.applyManualStateFromThread = lambda state, **kw: (
+            calls.append(state[key][0]) if 0 in state.get(key, {}) else None
+        )
         refresh = device._sync_manual_panel_from_controller
         get_committed = spin.value
 

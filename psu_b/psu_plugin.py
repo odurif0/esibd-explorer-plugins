@@ -750,7 +750,7 @@ def _build_generic_channel_item(
     item[_CHANNEL_NAME_KEY] = _generic_channel_name(device_name, channel_id)
     item[_PSU_CHANNEL_KEY] = str(channel_id)
     item[_CHANNEL_REAL_KEY] = True
-    item[_CHANNEL_ENABLED_KEY] = False
+    item[_CHANNEL_ENABLED_KEY] = True
     return item
 
 
@@ -1229,8 +1229,9 @@ class PSUDevice(Device):
             self.refreshPanelSignal.emit()
 
     def _apply_panel_refresh(self) -> None:
-        self._update_channel_panel()
-        self._update_status_widgets()
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.updateValues()
 
     def getChannels(self) -> "list[PSUChannel]":
         return cast("list[PSUChannel]", super().getChannels())
@@ -1303,7 +1304,10 @@ class PSUDevice(Device):
         return [channel.asDict() for channel in self.getChannels()]
 
     def _default_channel_item(self) -> dict[str, Any]:
-        return self.channelType(channelParent=self, tree=None).asDict()
+        # A template Channel has not run initGUI: asDict() reads empty Qt
+        # widgets (notably Max=0 and Active=False), not the declared defaults.
+        return {name: definition[Parameter.VALUE]
+                for name, definition in self._default_channel_template().items()}
 
     def _default_channel_template(self) -> dict[str, dict[str, Any]]:
         return self.channelType(channelParent=self, tree=None).getSortedDefaultChannel()
@@ -1418,6 +1422,9 @@ class PSUDevice(Device):
         from PyQt6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox
 
         widget = QDoubleSpinBox()
+        widget.lineEdit().textEdited.connect(
+            lambda _text: setattr(widget, "_psu_setpoint_edited", True)
+        )
         widget.setKeyboardTracking(False)
         widget.setRange(0.0, float(maximum))
         widget.setDecimals(int(decimals))
@@ -1541,14 +1548,35 @@ class PSUDevice(Device):
                             widget.interpretText()
                         finally:
                             widget.blockSignals(blocked)
-            voltage_values[channel_index] = float(voltage_widget.value())
-            current_limit_values[channel_index] = float(current_widget.value())
+            channel = self._channel_by_number(channel_index)
+            voltage_values[channel_index] = self._manual_setpoint_value(
+                voltage_widget, getattr(channel, "value", None),
+                edited=finish_edits and getattr(voltage_widget, "_psu_setpoint_edited", False),
+            )
+            current_limit_values[channel_index] = self._manual_setpoint_value(
+                current_widget, (getattr(controller, "current_limit_values", {}) or {}).get(channel_index),
+                edited=finish_edits and getattr(current_widget, "_psu_setpoint_edited", False),
+            )
         return {
             "output_enabled": output_enabled,
             "full_range_enabled": full_range_enabled,
             "voltage_values": voltage_values,
             "current_limit_values": current_limit_values,
         }
+
+    @staticmethod
+    def _manual_setpoint_value(widget: Any, readback: Any, *, edited: bool = False) -> float:
+        value = float(widget.value())
+        decimals = getattr(widget, "decimals", None)
+        # An untouched field may display fewer decimals than the hardware
+        # readback. Preserve that setpoint rather than rewriting the other rail
+        # (or rounding its small current limit to zero) when Vset is edited.
+        if (
+            not edited and readback is not None and np.isfinite(readback) and callable(decimals)
+            and round(readback, decimals()) == value
+        ):
+            return float(readback)
+        return value
 
     def _manual_panel_changed(self, *_args: Any, debounce: bool = False, finish_edits: bool = True) -> None:
         if getattr(self, "_manualPanelSyncing", False):
@@ -1569,6 +1597,53 @@ class PSUDevice(Device):
         state = self._manual_state_from_panel(finish_edits=finish_edits)
         if state is None:
             return
+        self._submit_manual_panel_state(state)
+
+    def _manual_numeric_changed(self, channel_index: int, field: str) -> None:
+        """A validated Vset/Ilim field commands only that setting on that rail."""
+        if getattr(self, "_manualPanelSyncing", False) or not self._manual_controls_ready()[0]:
+            return
+        channel = self._channel_by_number(channel_index)
+        if channel is None:
+            return
+        widget = self.manualPanelControls[channel_index][field]
+        controller = self.controller
+        if field == "voltage":
+            key, readback = "voltage_values", channel.value
+        else:
+            key = "current_limit_values"
+            readback = controller.current_limit_values.get(channel_index)
+        target = self._manual_setpoint_value(
+            widget, readback, edited=getattr(widget, "_psu_setpoint_edited", False),
+        )
+        self._cancel_manual_panel_apply()
+        state = {"setpoints_only": True, key: {channel_index: target}}
+        self._submit_manual_panel_state(state)
+        # Reflect any coercion by the standard Channel's user-defined limits,
+        # including on Enter (which keeps focus in the validated field).
+        if field == "voltage" and widget.value() != channel.value:
+            blocked = widget.blockSignals(True)
+            try:
+                widget.setValue(channel.value)
+            finally:
+                widget.blockSignals(blocked)
+
+    def _submit_manual_panel_state(self, state: dict[str, Any]) -> None:
+        controller = self.controller
+        # Commit the panel's draft to the same requested values used by UCM and
+        # scans. Suppress only hardware dispatch, not Parameter.extraEvents.
+        syncing = getattr(self, "_channelValueSyncing", False)
+        self._channelValueSyncing = True
+        try:
+            for channel in self.getChannels():
+                ch = channel.channel_number()
+                if ch in state.get("voltage_values", {}):
+                    channel.value = state["voltage_values"][ch]
+                    # Use the value accepted by Explorer, never bypass its limits.
+                    channel.lastAppliedValue = channel.value
+                    state["voltage_values"][ch] = float(channel.value)
+        finally:
+            self._channelValueSyncing = syncing
         apply_now = getattr(controller, "applyManualStateFromThread", None)
         if callable(apply_now):
             apply_now(state, parallel=True)
@@ -1614,7 +1689,6 @@ class PSUDevice(Device):
                 return
             output_enabled = getattr(controller, "output_enabled_by_channel", {}) or {}
             full_range_enabled = getattr(controller, "full_range_by_channel", {}) or {}
-            voltage_values = getattr(controller, "voltage_setpoint_values", {}) or {}
             current_limit_values = getattr(controller, "current_limit_values", {}) or {}
             self._manualPanelSyncing = True
             try:
@@ -1635,9 +1709,10 @@ class PSUDevice(Device):
                         finally:
                             if callable(block):
                                 block(False)
+                    channel = self._channel_by_number(channel_index)
                     self._set_control_value(
                         widgets.get("voltage"),
-                        _coerce_float(voltage_values.get(channel_index), 0.0),
+                        _coerce_float(getattr(channel, "value", None), 0.0),
                     )
                     self._set_control_value(
                         widgets.get("current_limit"),
@@ -1647,6 +1722,11 @@ class PSUDevice(Device):
                 self._manualPanelSyncing = False
 
         _invoke_gui_callback(_sync)
+
+    def _sync_channel_voltage(self, channel: "PSUChannel") -> None:
+        controls = getattr(self, "manualPanelControls", {}) or {}
+        widgets = controls.get(channel.channel_number(), {})
+        self._set_control_value(widgets.get("voltage"), float(channel.value))
 
     def _set_control_checked(self, widget: Any, checked: bool) -> None:
         if widget is None:
@@ -1676,6 +1756,7 @@ class PSUDevice(Device):
                 set_value(float(value))
             else:
                 widget.value = float(value)
+            widget._psu_setpoint_edited = False
         finally:
             if callable(block_signals):
                 block_signals(False)
@@ -2024,7 +2105,7 @@ class PSUDevice(Device):
             header_layout.setContentsMargins(0, 0, 0, 0)
             header_layout.setSpacing(8)
 
-            title_label = QLabel(f"CH{channel_index}")
+            title_label = QLabel(f"CH{channel_index} ({'+' if channel_index == 0 else '−'})")
             title_label.setStyleSheet(_PSU_PANEL_TITLE_STYLE)
             display_box = QCheckBox("Display")
             display_box.toggled.connect(
@@ -2071,7 +2152,7 @@ class PSUDevice(Device):
                 maximum=10000.0,
             )
             voltage_widget.editingFinished.connect(
-                lambda: self._manual_panel_changed(debounce=False)
+                lambda ch=channel_index: self._manual_numeric_changed(ch, "voltage")
             )
             current_label = QLabel("Ilim")
             current_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
@@ -2082,7 +2163,7 @@ class PSUDevice(Device):
                 maximum=10000.0,
             )
             current_widget.editingFinished.connect(
-                lambda: self._manual_panel_changed(debounce=False)
+                lambda ch=channel_index: self._manual_numeric_changed(ch, "current_limit")
             )
 
             control_layout.addWidget(output_label, 0, 0)
@@ -2317,9 +2398,9 @@ class PSUDevice(Device):
             != "Disconnected"
         )
         output_enabled = getattr(controller, "output_enabled_by_channel", {}) or {}
-        voltage_monitors = getattr(controller, "values", {}) or {}
+        voltage_monitors = {channel_index: getattr(channel, "monitor", np.nan)}
         current_monitors = getattr(controller, "current_values", {}) or {}
-        voltage_setpoints = getattr(controller, "voltage_setpoints", {}) or {}
+        voltage_setpoints = {channel_index: _format_voltage_text(getattr(channel, "value", np.nan))}
         current_setpoints = getattr(controller, "current_setpoints", {}) or {}
 
         output_state = (
@@ -2337,7 +2418,7 @@ class PSUDevice(Device):
         readback_available = psu_actually_enabled is True and ch_output_on
 
         return {
-            "title": f"CH{channel_index}",
+            "title": f"CH{channel_index} ({'+' if channel_index == 0 else '−'})",
             "output_state": output_state,
             "output_style": _psu_output_state_badge_style(output_state),
             "card_style": _psu_panel_card_style(
@@ -2725,9 +2806,10 @@ class PSUDevice(Device):
         output_enabled = getattr(controller, "output_enabled_by_channel", {}) or {}
         full_range_by_channel = getattr(controller, "full_range_by_channel", {}) or {}
         full_range_supported = getattr(controller, "full_range_supported_by_channel", {}) or {}
-        voltage_monitors = getattr(controller, "values", {}) or {}
+        channel = self._channel_by_number(channel_index)
+        measured_voltage = getattr(channel, "monitor", np.nan)
+        requested_voltage = getattr(channel, "value", np.nan)
         current_monitors = getattr(controller, "current_values", {}) or {}
-        voltage_set_values = getattr(controller, "voltage_setpoint_values", {}) or {}
         current_limit_values = getattr(controller, "current_limit_values", {}) or {}
         adc_temperatures = getattr(controller, "adc_temperatures", {}) or {}
         dropout_values = getattr(controller, "dropout_values", {}) or {}
@@ -2741,10 +2823,13 @@ class PSUDevice(Device):
         )
         return "\n".join(
             (
-                f"CH{channel_index}",
+                f"CH{channel_index} ({'+' if channel_index == 0 else '−'}): "
+                f"{'positive' if channel_index == 0 else 'negative'} rail relative to the PSU reference.",
+                "Vset and Vget are magnitudes, not signed voltages to earth.",
                 f"Output: {'ON' if output_enabled.get(channel_index, False) else 'OFF'}",
-                f"Vset: {_format_voltage_text(voltage_set_values.get(channel_index, np.nan))}",
-                f"Vget: {_format_voltage_text(voltage_monitors.get(channel_index, np.nan))}",
+                f"Vset: {_format_voltage_text(requested_voltage)}",
+                f"Vget: {_format_voltage_text(measured_voltage)}",
+                str(getattr(channel, "readback_status", "PSU voltage unavailable.")),
                 f"Ilim: {_format_current_text(current_limit_values.get(channel_index, np.nan))}",
                 f"Iget: {_format_current_text(current_monitors.get(channel_index, np.nan))}",
                 diagnostics,
@@ -2927,7 +3012,8 @@ class PSUDevice(Device):
     def _status_summary_text(self) -> str:
         """Return the compact PSU runtime summary displayed in the toolbar."""
         controller = getattr(self, "controller", None)
-        measured_voltages = getattr(controller, "values", {}) or {}
+        measured_voltages = {ch.channel_number(): getattr(ch, "monitor", np.nan)
+                             for ch in self.getChannels() if ch.real}
         measured_currents = getattr(controller, "current_values", {}) or {}
         output_enabled = getattr(controller, "output_enabled_by_channel", {}) or {}
         channel_summaries = [
@@ -3032,23 +3118,24 @@ class PSUDevice(Device):
         )
 
     def _update_channel_column_visibility(self) -> None:
-        """Hide framework-only PSU columns and keep key readbacks resizable."""
+        """Keep standard Vset visible; expose channel controls in Advanced."""
         if self.tree is None or not self.channels:
             return
 
         parameter_names = list(self.channels[0].getSortedDefaultChannel())
-        for hidden_name in (
-            getattr(Channel, "COLLAPSE", "Collapse"),
-            getattr(Channel, "REAL", "Real"),
-            getattr(Channel, "ACTIVE", "Active"),
-            getattr(Channel, "ENABLED", "Enabled"),
-            getattr(Channel, "VALUE", "Value"),
-            getattr(Channel, "EQUATION", "Equation"),
-            getattr(Channel, "MIN", "Min"),
-            getattr(Channel, "MAX", "Max"),
+        advanced = bool(getattr(getattr(self, "advancedAction", None), "state", False))
+        for parameter_name, hidden in (
+            (getattr(Channel, "COLLAPSE", "Collapse"), True),
+            (getattr(Channel, "REAL", "Real"), True),
+            (getattr(Channel, "VALUE", "Value"), False),
+            *[(name, not advanced) for name in (
+                getattr(Channel, "ACTIVE", "Active"), getattr(Channel, "ENABLED", "Enabled"),
+                getattr(Channel, "EQUATION", "Equation"), getattr(Channel, "MIN", "Min"),
+                getattr(Channel, "MAX", "Max"), self.channelType.READBACK_STATUS,
+            )],
         ):
-            if hidden_name in parameter_names:
-                self.tree.setColumnHidden(parameter_names.index(hidden_name), True)
+            if parameter_name in parameter_names:
+                self.tree.setColumnHidden(parameter_names.index(parameter_name), hidden)
 
         header = self.tree.header()
         if header is None:
@@ -3058,7 +3145,7 @@ class PSUDevice(Device):
             (getattr(Channel, "MONITOR", "Monitor"), 88),
             (self.channelType.ID, 44),
             (self.channelType.OUTPUT_STATE, 58),
-            (self.channelType.VOLTAGE_SET, 90),
+            (getattr(Channel, "VALUE", "Value"), 90),
             (self.channelType.CURRENT_SET, 90),
             (self.channelType.CURRENT_MONITOR, 92),
         ):
@@ -3632,7 +3719,7 @@ class PSUChannel(Channel):
 
     ID = "CH"
     OUTPUT_STATE = "Output"
-    VOLTAGE_SET = "Voltage set"
+    READBACK_STATUS = "Readback status"
     CURRENT_SET = "Current set"
     CURRENT_MONITOR = "Current monitor"
     channelParent: PSUDevice
@@ -3640,17 +3727,21 @@ class PSUChannel(Channel):
     def getDefaultChannel(self) -> dict[str, dict]:
         self.id: int
         self.output_state: str
-        self.voltage_set: str
+        self.readback_status: str
         self.current_set: str
         self.current_monitor: str
 
         channel = super().getDefaultChannel()
-        channel[self.VALUE][Parameter.HEADER] = "Reference"
-        channel[self.VALUE][_PARAMETER_ADVANCED_KEY] = True
+        channel[self.VALUE][Parameter.HEADER] = "Vset"
+        # UCM rebuilds widgets from parameterType, not their custom decimals.
+        # EXP preserves float precision across relays (the panel stays decimal).
+        channel[self.VALUE][Parameter.PARAMETER_TYPE] = PARAMETERTYPE.EXP
         channel[self.VALUE][_PARAMETER_TOOLTIP_KEY] = (
-            "Unused by the PSU plugin. Operator controls live in the fixed PSU panel; "
-            "this hidden table field is kept only for framework compatibility."
+            "Requested PSU voltage magnitude in V. Shared by the panel, UCM, "
+            "scans and equations; editing it never enables a disabled output."
         )
+        channel[self.MIN][Parameter.VALUE] = 0.
+        channel[self.MAX][Parameter.VALUE] = 10000.
         channel[self.ENABLED][_PARAMETER_ADVANCED_KEY] = True
         channel[self.ACTIVE][_PARAMETER_ADVANCED_KEY] = True
         channel[self.DISPLAY][Parameter.HEADER] = "Display"
@@ -3658,6 +3749,7 @@ class PSUChannel(Channel):
         channel[self.SCALING][Parameter.VALUE] = "normal"
         monitor_name = getattr(self, "MONITOR", "Monitor")
         if monitor_name in channel:
+            channel[monitor_name][Parameter.PARAMETER_TYPE] = PARAMETERTYPE.EXP
             channel[monitor_name][Parameter.HEADER] = "Vget"
             channel[monitor_name][_PARAMETER_TOOLTIP_KEY] = (
                 "Internal PSU voltage measured by GetPSUData. This does not verify "
@@ -3680,14 +3772,10 @@ class PSUChannel(Channel):
             attr="output_state",
             toolTip="Latest PSU output enable readback for this channel.",
         )
-        channel[self.VOLTAGE_SET] = parameterDict(
-            value="n/a",
-            parameterType=PARAMETERTYPE.LABEL,
-            advanced=False,
-            indicator=True,
-            header="Vset",
-            attr="voltage_set",
-            toolTip="Configured PSU voltage setpoint read back from the controller.",
+        channel[self.READBACK_STATUS] = parameterDict(
+            value="PSU disconnected.", parameterType=PARAMETERTYPE.LABEL,
+            advanced=True, indicator=True, restore=False, attr="readback_status",
+            toolTip="Validity of Channel.monitor. Unavailable measurements are NaN.",
         )
         channel[self.CURRENT_SET] = parameterDict(
             value="n/a",
@@ -3721,13 +3809,13 @@ class PSUChannel(Channel):
             getattr(self, "SELECT", "Select"),
             self.NAME,
             self.OUTPUT_STATE,
-            self.VOLTAGE_SET,
+            self.VALUE,
             getattr(self, "MONITOR", "Monitor"),
             self.CURRENT_SET,
             self.CURRENT_MONITOR,
             self.ID,
+            self.READBACK_STATUS,
             self.ENABLED,
-            self.VALUE,
             getattr(self, "EQUATION", "Equation"),
             self.ACTIVE,
             self.REAL,
@@ -3744,6 +3832,27 @@ class PSUChannel(Channel):
         self.displayedParameters = list(dict.fromkeys(displayed))
 
     def initGUI(self, item: dict) -> None:
+        # Explorer passes case-insensitive ConfigParser sections for INI files.
+        # Canonicalize keys before copying: dict(SectionProxy) alone loses that
+        # behaviour and would drop names/IDs or fail to remove legacy fields.
+        defaults = self.getSortedDefaultChannel()
+        names = {name.casefold(): name for name in defaults}
+        names["voltage set"] = "Voltage set"
+        item = {names.get(key.casefold(), key): value for key, value in item.items()}
+        # Before the Channel integration, Enabled stored the HV gate and Value
+        # was an unused reference. Migrate once, without enabling any hardware.
+        if "Voltage set" in item:
+            item.pop("Voltage set")
+            item[self.ENABLED], item[self.ACTIVE] = True, True
+            item[self.VALUE], item[self.MIN], item[self.MAX] = 0., 0., 10000.
+        elif (all(_coerce_float(item.get(key), np.nan) == 0. for key in (self.MIN, self.MAX))
+              and not _coerce_bool(item.get(self.ACTIVE), True)
+              and not str(item.get(self.EQUATION, "")).strip()):
+            # Repair the unusable signature produced by the old template
+            # factory, including files already saved without "Voltage set".
+            # Preserve intentional limits/equations and Explorer-disabled rows.
+            for key in (self.MIN, self.MAX, self.ACTIVE):
+                item[key] = defaults[key][Parameter.VALUE]
         # Legacy PSU channel configs may not have initialized framework flags yet.
         # Seed the attributes used by core.Channel.updateColor() before the base init runs.
         if not hasattr(self, "active"):
@@ -3762,6 +3871,10 @@ class PSUChannel(Channel):
         if not hasattr(self, "max"):
             self.max = _coerce_float(item.get(getattr(self, "MAX", "Max")), 0.0)
         super().initGUI(item)
+        parameter = self.getParameterByName(self.VALUE)
+        widget = parameter.getWidget() if parameter is not None else None
+        if widget is not None and hasattr(widget, "setKeyboardTracking"):
+            widget.setKeyboardTracking(False)
         self._sync_output_state_widget()
         self.monitorChanged()
         self.scalingChanged()
@@ -3783,7 +3896,19 @@ class PSUChannel(Channel):
             self.tree.scheduleDelayedItemsLayout()
 
     def channel_number(self) -> int:
-        return _coerce_int(self.id, 0)
+        return _coerce_int(self.id, -1)
+
+    def valueChanged(self) -> None:
+        if self.loading or getattr(self.channelParent, "_channelValueSyncing", False):
+            return
+        self.channelParent._sync_channel_voltage(self)
+        super().valueChanged()
+
+    def applyValue(self, apply: bool = False) -> None:
+        if (self.loading or not self.enabled
+                or getattr(self.channelParent, "_channelValueSyncing", False)):
+            return
+        super().applyValue(apply=apply)
 
     def _set_parameter_value_without_events(self, parameter_name: str, value: Any) -> bool:
         getter = getattr(self, "getParameterByName", None)
@@ -3850,7 +3975,7 @@ class PSUChannel(Channel):
                 self.ID,
                 getattr(self, "MONITOR", "Monitor"),
                 self.OUTPUT_STATE,
-                self.VOLTAGE_SET,
+                self.VALUE,
                 self.CURRENT_SET,
                 self.CURRENT_MONITOR,
             ):
@@ -3870,9 +3995,6 @@ class PSUChannel(Channel):
     def setOutputStateText(self, text: str) -> None:
         self._set_parameter_value_without_events(self.OUTPUT_STATE, text)
         self._sync_output_state_widget()
-
-    def setVoltageSetText(self, text: str) -> None:
-        self._set_parameter_value_without_events(self.VOLTAGE_SET, text)
 
     def setCurrentSetText(self, text: str) -> None:
         self._set_parameter_value_without_events(self.CURRENT_SET, text)
@@ -3925,7 +4047,7 @@ class PSUChannel(Channel):
             getattr(self, "MONITOR", "Monitor"),
             self.DISPLAY,
             self.ID,
-            self.VOLTAGE_SET,
+            self.VALUE,
             self.CURRENT_SET,
             self.CURRENT_MONITOR,
         ):
@@ -3973,12 +4095,86 @@ class PSUController(DeviceController):
         self.rail_summaries: dict[int, str] = {}
         self._last_live_readback_refresh_monotonic = 0.0
         self._last_housekeeping_refresh_monotonic = 0.0
+        # Worker-side acquisition buffer. Channel.monitor is the public data
+        # interface; no separate signed-voltage API is maintained.
+        self._hv_readback: dict[str, Any] | None = None
+        self._hv_expiry_sample: dict[str, Any] | None = None
+        self._hv_readback_invalidated_at = 0.0
+        self._hv_config_loading = False
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
         # earlier in this session and is therefore still locked in-process.
         self._poisoned_com: int | None = None
 
+    def _invalidate_hv_readback(self) -> None:
+        # Reject late reads started before OFF / a write, and notify all Channel
+        # consumers of NaN even when acquisition/recording is not running.
+        self._hv_readback_invalidated_at = time.monotonic()
+        self._hv_readback = None
+        self.updateValues()
+
+    def _publish_hv_readback(
+        self, values: dict[int, Any], enabled: dict[int, bool],
+        device_enabled: Any, observed_at: float,
+    ) -> None:
+        """Capture a coherent worker sample for publication through Channel.monitor."""
+        interval_s = _coerce_float(getattr(self.controllerParent, "interval", 1000), 1000.) / 1000
+        max_age_s = max(2., 2 * interval_s) if np.isfinite(interval_s) else 2.
+        self._hv_readback = {
+            "values": values, "enabled": enabled, "device_enabled": device_enabled,
+            "observed_at": observed_at, "max_age_s": max_age_s, "device": self.device,
+        }
+
+    def _hv_readback_status(self, sample: dict[str, Any] | None) -> str:
+        """Empty means usable; validation belongs to the producer, not the AMX."""
+        device = self.device
+        if (getattr(self.controllerParent, "controller", self) is not self
+                or device is None or not self.initialized or not getattr(device, "connected", False)):
+            return "PSU disconnected."
+        if getattr(device, "_transport_poisoned", False):
+            return "PSU communication unavailable."
+        if any(bool(getattr(self, flag, False)) for flag in (
+            "initializing", "transitioning", "_manual_apply_active",
+            "_manual_apply_worker_running", "_hv_config_loading",
+        )):
+            return "PSU updating."
+        if self._output_cancel.is_set() or _normalize_runtime_state(self.main_state) != "ST_ON":
+            return f"PSU not confirmed ON ({self.main_state})."
+        if (sample is None or sample["device"] is not device
+                or sample["observed_at"] < self._hv_readback_invalidated_at):
+            return "Awaiting PSU voltage readback."
+        age = time.monotonic() - sample["observed_at"]
+        if not np.isfinite(age) or age < 0 or age >= sample["max_age_s"]:
+            return "PSU voltage readback expired."
+        return ""
+
+    def _schedule_readback_expiry(self, sample: dict[str, Any] | None) -> None:
+        if sample is None or self._hv_expiry_sample is sample:
+            return
+        delay_s = sample["observed_at"] + sample["max_age_s"] - time.monotonic()
+        if not np.isfinite(delay_s) or delay_s <= 0:
+            return
+        try:
+            from PyQt6.QtCore import QTimer
+            from PyQt6.QtWidgets import QApplication
+            if QApplication.instance() is None:
+                return
+        except ImportError:
+            return
+        self._hv_expiry_sample = sample
+
+        def expire() -> None:
+            if self._hv_readback is sample:
+                # Qt's coarse timer may fire slightly early. Allow publication
+                # to schedule the remaining delay instead of keeping a stale
+                # monitor forever when no further polling occurs.
+                self._hv_expiry_sample = None
+                self.updateValues()
+
+        QTimer.singleShot(int(delay_s * 1000) + 1, expire)
+
     def initializeValues(self, reset: bool = False) -> None:
         if getattr(self, "values", None) is None or reset:
+            self._invalidate_hv_readback()
             self.values = {
                 channel.channel_number(): np.nan
                 for channel in self.controllerParent.getChannels()
@@ -4122,6 +4318,12 @@ class PSUController(DeviceController):
             getattr(self.controllerParent, "interlock_monitoring", False), default=False
         )
         device.set_interlock_enabled(enabled, enabled, timeout_s=timeout_s)
+        self._verify_interlock_setting_unlocked(device, timeout_s=timeout_s)
+
+    def _verify_interlock_setting_unlocked(self, device, *, timeout_s: float) -> None:
+        enabled = _coerce_bool(
+            getattr(self.controllerParent, "interlock_monitoring", False), default=False
+        )
         actual = device.get_interlock_enabled(timeout_s=timeout_s)
         if tuple(actual) != (enabled, enabled):
             raise RuntimeError(
@@ -4556,6 +4758,7 @@ class PSUController(DeviceController):
         now_monotonic = time.monotonic()
         snapshot: dict[str, Any] | None = None
         live_readbacks: dict[str, Any] | None = None
+        live_read_failed = False
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to read PSU housekeeping.",
@@ -4569,6 +4772,7 @@ class PSUController(DeviceController):
                     try:
                         live_readbacks = self._read_live_readbacks(timeout_s=timeout_s)
                     except Exception as exc:  # noqa: BLE001
+                        live_read_failed = True
                         self.print(
                             "Failed to refresh PSU live readbacks after housekeeping: "
                             f"{self._format_exception(exc)}",
@@ -4591,7 +4795,9 @@ class PSUController(DeviceController):
             # falsely declare the PSU lost (3 strikes) and raise the HV
             # "outputs may remain energized" alarm merely because a range
             # switch was in progress. Skip this poll cycle and keep the last
-            # readbacks instead of wiping them.
+            # readbacks instead of wiping them. Linked-device values, however,
+            # must not present these retained readings as a new valid sample.
+            self._invalidate_hv_readback()
             return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
@@ -4617,6 +4823,8 @@ class PSUController(DeviceController):
                     live_readbacks,
                     refreshed_at=now_monotonic,
                 )
+            if live_read_failed:
+                self._invalidate_hv_readback()
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
             self.print(
@@ -4627,13 +4835,74 @@ class PSUController(DeviceController):
             return
 
     def updateValues(self) -> None:
-        super().updateValues()
-        update_panel = getattr(self.controllerParent, "_update_channel_panel", None)
-        if callable(update_panel):
-            update_panel()
-        update_status = getattr(self.controllerParent, "_update_status_widgets", None)
-        if callable(update_status):
-            update_status()
+        # Explorer's default zip(channels, self.values) treats dict keys as
+        # voltages and assumes channel order. Map by physical ID instead.
+        def update() -> None:
+            self._update_channel_values()
+            update_status = getattr(self.controllerParent, "_update_status_widgets", None)
+            if callable(update_status):
+                update_status()
+
+        _invoke_gui_callback(update)
+
+    def _update_channel_values(self, *, sync_setpoints: bool = False) -> None:
+        """Publish on the GUI thread, including Parameter.extraEvents (UCM)."""
+        parent = self.controllerParent
+        if getattr(parent, "controller", self) not in (None, self):
+            return  # An old controller callback cannot overwrite its replacement.
+        sample = self._hv_readback
+        reason = self._hv_readback_status(sample)
+        busy = any(bool(getattr(self, flag, False)) for flag in (
+            "initializing", "transitioning", "_manual_apply_active",
+            "_manual_apply_worker_running", "_hv_config_loading",
+        ))
+        syncing = getattr(parent, "_channelValueSyncing", False)
+        parent._channelValueSyncing = True
+        try:
+            for channel in parent.getChannels():
+                ch = channel.channel_number()
+                detail = reason
+                value = np.nan
+                if not channel.real or not channel.enabled:
+                    detail = "Explorer channel disabled or virtual."
+                elif not detail and sample is not None:
+                    if sample["device_enabled"] is not True or sample["enabled"].get(ch) is not True:
+                        detail = f"CH{ch} output disabled or unavailable."
+                    else:
+                        value = _coerce_float(sample["values"].get(ch), np.nan)
+                        if not np.isfinite(value) or value < 0:
+                            value = np.nan
+                            detail = f"CH{ch} voltage readback invalid."
+                if getattr(channel, "waitToStabilize", False):
+                    value = np.nan
+                    detail = "Waiting for channel to stabilize."
+                channel.readback_status = detail or "Measured PSU voltage."
+                channel.monitor = value
+                for method, text in (
+                    ("setCurrentMonitorText", _format_current_text(
+                        self.current_values.get(ch, np.nan) if not detail else np.nan)),
+                    ("setOutputStateText", "ON" if self.output_enabled_by_channel.get(ch) else "OFF"),
+                    ("setCurrentSetText", self.current_setpoints.get(ch, "n/a")),
+                ):
+                    setter = getattr(channel, method, None)
+                    if callable(setter):
+                        setter(text)
+                # A hardware readback is an observation, not a new command.
+                # Never replace a queued request, an equation or an active edit.
+                if sync_setpoints and not busy and channel.real and getattr(channel, "active", True):
+                    target = _coerce_float(self.voltage_setpoint_values.get(ch), np.nan)
+                    getter = getattr(channel, "getParameterByName", None)
+                    parameter = getter(getattr(channel, "VALUE", "Value")) if callable(getter) else None
+                    widget = getattr(parameter, "getWidget", lambda: None)()
+                    if np.isfinite(target) and not getattr(widget, "hasFocus", lambda: False)():
+                        if getattr(channel, "value", None) != target:
+                            channel.value = target
+                        # An observation must not dispatch a later command if
+                        # Explorer's user limits coerced the displayed value.
+                        channel.lastAppliedValue = channel.value
+        finally:
+            parent._channelValueSyncing = syncing
+        self._schedule_readback_expiry(sample)
 
     def _apply_live_readbacks(
         self,
@@ -4641,6 +4910,8 @@ class PSUController(DeviceController):
         *,
         refreshed_at: float | None = None,
     ) -> None:
+        if self.main_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE:
+            return
         output_enabled = tuple(
             bool(value) for value in readbacks.get("output_enabled", (False, False))
         )
@@ -4685,6 +4956,10 @@ class PSUController(DeviceController):
             self.output_enabled_by_channel = output_enabled_map
         self._last_live_readback_refresh_monotonic = (
             time.monotonic() if refreshed_at is None else float(refreshed_at)
+        )
+        self._publish_hv_readback(
+            readbacks.get("values", {}) or {}, output_enabled_map,
+            readbacks.get("device_enabled"), self._last_live_readback_refresh_monotonic,
         )
         self._sync_status_to_gui(sync_manual_panel=bool(output_enabled_map))
 
@@ -4797,6 +5072,12 @@ class PSUController(DeviceController):
         refresh_time = time.monotonic() if refreshed_at is None else float(refreshed_at)
         self._last_housekeeping_refresh_monotonic = refresh_time
         self._last_live_readback_refresh_monotonic = refresh_time
+        self._publish_hv_readback(
+            measured_voltages,
+            {ch: enabled and ch < len(output_enabled) and output_enabled[ch]
+             for ch, enabled in output_enabled_map.items()},
+            snapshot.get("device_enabled"), refresh_time,
+        )
         self._sync_status_to_gui(sync_manual_panel=True)
 
     def loadOperatingConfigNowFromThread(self, parallel: bool = True) -> None:
@@ -4835,6 +5116,8 @@ class PSUController(DeviceController):
 
         cancel = self._output_cancel
         self._discard_pending_manual_state_apply()
+        self._hv_config_loading = True
+        self._invalidate_hv_readback()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
             with self._controller_lock_section(
@@ -4842,6 +5125,7 @@ class PSUController(DeviceController):
             ):
                 if cancel.is_set() or self.device is not device:
                     return
+                self._invalidate_hv_readback()
                 self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
                 if cancel.is_set():
                     return
@@ -4869,85 +5153,32 @@ class PSUController(DeviceController):
             )
             self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
         finally:
+            self._hv_config_loading = False
             self._sync_status_to_gui(sync_manual_panel=True)
-        if self.values is None:
-            return
 
-        self._sync_status_to_gui(sync_manual_panel=True)
-        channels = list(self.controllerParent.getChannels())
+    def applyValueFromThread(self, channel: PSUChannel) -> None:
+        # Capture widget-backed values on Qt, then send an immutable command to
+        # the same worker as the panel. A voltage edit cannot toggle a gate.
+        def request() -> None:
+            parent = self.controllerParent
+            if (parent.loading or getattr(parent, "_channelValueSyncing", False)
+                    or not channel.real or not channel.enabled
+                    or not self.initialized or self.device is None
+                    or self._output_cancel.is_set()
+                    or any(bool(getattr(self, flag, False)) for flag in (
+                        "initializing", "transitioning", "_hv_config_loading"))):
+                return
+            ch, target = channel.channel_number(), float(channel.value)
+            if ch not in _PSU_CHANNEL_IDS or not np.isfinite(target) or target < 0:
+                return
+            self.applyManualStateFromThread({
+                "setpoints_only": True, "voltage_values": {ch: target},
+            })
 
-        # Plain-Python attribute updates are safe on this background thread.
-        for channel in channels:
-            channel_no = channel.channel_number()
-            channel.monitor = (
-                self.values.get(channel_no, np.nan) if channel.real else np.nan
-            )
+        _invoke_gui_callback(request)
 
-        # QWidget mutations must run on the GUI thread; dispatch them via the
-        # queued callback used elsewhere (e.g. _sync_status_to_gui).
-        def _apply_channel_widget_updates() -> None:
-            for channel in channels:
-                channel_no = channel.channel_number()
-                if channel.real:
-                    channel.setCurrentMonitorText(
-                        _format_current_text(self.current_values.get(channel_no, np.nan))
-                    )
-                    channel.setOutputStateText(
-                        "ON"
-                        if self.output_enabled_by_channel.get(channel_no, False)
-                        else "OFF"
-                    )
-                    channel.setVoltageSetText(
-                        self.voltage_setpoints.get(channel_no, "n/a")
-                    )
-                    channel.setCurrentSetText(
-                        self.current_setpoints.get(channel_no, "n/a")
-                    )
-                    channel._set_parameter_value_without_events(
-                        channel.ENABLED,
-                        self.output_enabled_by_channel.get(channel_no, False),
-                    )
-                    style_setter = getattr(channel, "_set_parameter_widget_style", None)
-                    if callable(style_setter):
-                        output_enabled = self.output_enabled_by_channel.get(
-                            channel_no, False
-                        )
-                        style_setter(
-                            getattr(channel, "MONITOR", "Monitor"),
-                            _psu_feedback_style(
-                                _voltage_feedback_state(
-                                    enabled=output_enabled,
-                                    measured_v=self.values.get(channel_no, np.nan),
-                                    set_v=self.voltage_setpoint_values.get(
-                                        channel_no,
-                                        np.nan,
-                                    ),
-                                )
-                            ),
-                        )
-                        style_setter(
-                            channel.CURRENT_MONITOR,
-                            _psu_feedback_style(
-                                _current_limit_feedback_state(
-                                    enabled=output_enabled,
-                                    measured_a=self.current_values.get(
-                                        channel_no, np.nan
-                                    ),
-                                    limit_a=self.current_limit_values.get(
-                                        channel_no,
-                                        np.nan,
-                                    ),
-                                )
-                            ),
-                        )
-                else:
-                    channel.setCurrentMonitorText("n/a")
-                    channel.setOutputStateText("n/a")
-                    channel.setVoltageSetText("n/a")
-                    channel.setCurrentSetText("n/a")
-                    channel._set_parameter_value_without_events(channel.ENABLED, False)
-
-        _invoke_gui_callback(_apply_channel_widget_updates)
+    def applyValue(self, channel: PSUChannel) -> None:
+        self.applyValueFromThread(channel)
 
     def applyManualStateFromThread(self, manual_state: dict[str, Any], parallel: bool = True) -> None:
         if parallel:
@@ -4963,9 +5194,16 @@ class PSUController(DeviceController):
 
     def _queue_manual_state_apply(self, manual_state: dict[str, Any]) -> None:
         with self._manual_apply_state_lock:
-            self._manual_apply_pending_state = (
-                self._copy_manual_state(manual_state), self._output_cancel
-            )
+            state = self._copy_manual_state(manual_state)
+            pending = self._manual_apply_pending_state
+            if state.get("setpoints_only") and pending is not None and pending[1] is self._output_cancel:
+                # Coalesce independent Vset/Ilim edits without losing either
+                # rail, including edits following a queued panel reconfiguration.
+                previous = self._copy_manual_state(pending[0])
+                for key in ("voltage_values", "current_limit_values"):
+                    previous.setdefault(key, {}).update(state.get(key, {}))
+                state = previous
+            self._manual_apply_pending_state = (state, self._output_cancel)
             if self._manual_apply_worker_running:
                 return
             self._manual_apply_worker_running = True
@@ -4990,6 +5228,7 @@ class PSUController(DeviceController):
         with self._manual_apply_state_lock:
             self._output_cancel.set()
             self._manual_apply_pending_state = None
+        self._invalidate_hv_readback()
 
     def _manual_state_apply_worker(self) -> None:
         while True:
@@ -4998,7 +5237,9 @@ class PSUController(DeviceController):
                 self._manual_apply_pending_state = None
                 if pending is None:
                     self._manual_apply_worker_running = False
-                    return
+            if pending is None:
+                self._sync_status_to_gui(sync_manual_panel=True)
+                return
             manual_state, cancel = pending
             self.applyManualState(manual_state, cancel=cancel)
 
@@ -5042,21 +5283,22 @@ class PSUController(DeviceController):
         )
 
     def _ramp_channel_voltage(
-        self, device, channel: int, target_v: float, *, timeout_s: float, cancel: Event
+        self, device, channel: int, target_v: float, *, timeout_s: float, cancel: Event,
+        start_v: float = 0.0,
     ) -> bool:
-        """Step one channel's voltage from 0 up to target_v in bounded increments.
+        """Step from the confirmed setpoint to the target, in either direction.
 
-        Limits dV/dt inrush on capacitive/inductive HV loads after the output is
-        enabled. Step size and cadence are conservative defaults; tune
-        _PSU_VOLTAGE_RAMP_STEP_V / _PSU_VOLTAGE_RAMP_STEP_S on the real hardware.
+        Cold starts use zero; edits on an enabled output use its hardware
+        setpoint, never an assumed zero or the potentially stale GUI value.
+        Step size/cadence bound commanded increments, not measured output slew.
         """
-        steps = max(1, int(np.ceil(target_v / _PSU_VOLTAGE_RAMP_STEP_V)))
+        delta_v = target_v - start_v
+        steps = max(1, int(np.ceil(abs(delta_v) / _PSU_VOLTAGE_RAMP_STEP_V)))
         for i in range(1, steps + 1):
             if cancel.is_set():
                 return False
-            device.set_channel_voltage(
-                channel, target_v * i / steps, timeout_s=timeout_s
-            )
+            voltage_v = target_v if i == steps else start_v + delta_v * i / steps
+            device.set_channel_voltage(channel, voltage_v, timeout_s=timeout_s)
             if cancel.wait(_PSU_VOLTAGE_RAMP_STEP_S):
                 return False
         return True
@@ -5076,10 +5318,12 @@ class PSUController(DeviceController):
             return
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         self._manual_apply_active = True
+        self._invalidate_hv_readback()
         try:
             with self._controller_lock_section("Could not acquire lock to apply PSU manual values."):
                 if cancel.is_set() or self.device is not device:
                     return
+                self._invalidate_hv_readback()
                 try:
                     applied = self._apply_manual_state_unlocked(device, manual_state, timeout_s, cancel)
                 except Exception:
@@ -5109,6 +5353,27 @@ class PSUController(DeviceController):
     def _apply_manual_state_unlocked(
         self, device, manual_state: dict[str, Any], timeout_s: float, cancel: Event
     ) -> bool:
+        if manual_state.get("setpoints_only"):
+            targets = dict(manual_state.get("voltage_values") or {})
+            currents = dict(manual_state.get("current_limit_values") or {})
+            if (not (targets or currents)
+                    or any(ch not in _PSU_CHANNEL_IDS or not np.isfinite(v) or v < 0
+                           for values in (targets, currents) for ch, v in values.items())):
+                raise ValueError("PSU channel setpoints must be finite and non-negative.")
+            # Read enable/range states under the lock. An individual Vset/Ilim
+            # edit never asks to reconfigure them or touch another setting.
+            outputs = tuple(device.get_output_enabled(timeout_s=timeout_s))
+            ranges = tuple(device.get_output_full_range(timeout_s=timeout_s))
+            if cancel.is_set():
+                return False
+            if (len(outputs) != 2 or len(ranges) != 2
+                    or device.get_device_enabled(timeout_s=timeout_s) != any(outputs)):
+                raise RuntimeError("PSU output state is inconsistent; refusing setpoint-only update.")
+            return self._apply_setpoints_in_place_unlocked(
+                device, voltage_targets=targets, current_limits=currents,
+                output_enabled=outputs, full_range_enabled=ranges,
+                timeout_s=timeout_s, cancel=cancel,
+            )
         output_enabled = tuple(
             bool((manual_state.get("output_enabled") or {}).get(ch, False))
             for ch in _PSU_CHANNEL_IDS
@@ -5128,15 +5393,28 @@ class PSUController(DeviceController):
         if any(not np.isfinite(v) or v < 0 for v in (*voltage_targets.values(), *current_limits.values())):
             raise ValueError("PSU setpoints must be finite and non-negative.")
 
+        # An edit of Vset/Ilim is not an output restart. Decide from fresh
+        # readbacks under the lock, not the GUI or housekeeping cache.
+        actual_range = tuple(device.get_output_full_range(timeout_s=timeout_s))
+        if cancel.is_set():
+            return False
+        range_changes = actual_range != full_range_enabled
+        if (
+            not range_changes
+            and device.get_device_enabled(timeout_s=timeout_s) == any(output_enabled)
+            and tuple(device.get_output_enabled(timeout_s=timeout_s)) == output_enabled
+        ):
+            return self._apply_setpoints_in_place_unlocked(
+                device, voltage_targets=voltage_targets, current_limits=current_limits,
+                output_enabled=output_enabled, full_range_enabled=full_range_enabled,
+                timeout_s=timeout_s, cancel=cancel,
+            )
+
         device.set_output_enabled(False, False, timeout_s=timeout_s)
         if cancel.is_set():
             return False
         if tuple(device.get_output_enabled(timeout_s=timeout_s)) != (False, False):
-            raise RuntimeError("PSU outputs were not confirmed disabled before changing setpoints.")
-        range_changes = any(
-            bool(self.full_range_by_channel.get(ch, False)) != full_range_enabled[ch]
-            for ch in _PSU_CHANNEL_IDS
-        )
+            raise RuntimeError("PSU outputs were not confirmed disabled before reconfiguration.")
         if range_changes:
             self._await_discharge_before_range_switch(device, timeout_s=timeout_s, cancel=cancel)
             if cancel.is_set():
@@ -5189,6 +5467,80 @@ class PSUController(DeviceController):
                 current_limit_values=current_limits, full_range_enabled=full_range_enabled,
                 timeout_s=timeout_s,
             )
+        return not cancel.is_set()
+
+    def _apply_setpoints_in_place_unlocked(
+        self, device, *, voltage_targets: dict[int, float], current_limits: dict[int, float],
+        output_enabled: tuple[bool, bool], full_range_enabled: tuple[bool, bool],
+        timeout_s: float, cancel: Event,
+    ) -> bool:
+        """Update only changed setpoints, leaving gates and the other channel alone."""
+        voltages: dict[int, float] = {}
+        currents: dict[int, float] = {}
+        voltage_targets = dict(voltage_targets)
+        current_limits = dict(current_limits)
+        for ch in _PSU_CHANNEL_IDS:
+            if cancel.is_set():
+                return False
+            voltages[ch], voltage_limit = device.get_channel_voltage_limits(ch, timeout_s=timeout_s)
+            currents[ch], current_limit = device.get_channel_current_limits(ch, timeout_s=timeout_s)
+            # Missing targets belong to untouched channels/settings. Preserve
+            # their fresh hardware readback, not a rounded/stale panel value.
+            voltage_targets.setdefault(ch, voltages[ch])
+            current_limits.setdefault(ch, currents[ch])
+            if any(not np.isfinite(v) or v < 0 for v in (voltages[ch], currents[ch])):
+                raise RuntimeError(f"CH{ch} setpoint readback is invalid.")
+            if voltage_targets[ch] > 0 and (
+                voltage_limit is None or not np.isfinite(voltage_limit)
+                or voltage_limit < voltage_targets[ch]
+            ):
+                raise RuntimeError(f"CH{ch} voltage target exceeds a verified hardware limit.")
+            if current_limits[ch] > 0 and (
+                current_limit is None or not np.isfinite(current_limit) or current_limit < 0
+            ):
+                raise RuntimeError(f"CH{ch} current hardware limit is invalid.")
+        if cancel.is_set():
+            return False
+        if any(output_enabled):
+            self._verify_interlock_setting_unlocked(device, timeout_s=timeout_s)
+
+        for ch in _PSU_CHANNEL_IDS:
+            if cancel.is_set():
+                return False
+            if currents[ch] != current_limits[ch]:
+                device.set_channel_current(ch, current_limits[ch], timeout_s=timeout_s)
+        if cancel.is_set():
+            return False
+        # Confirm limits before moving any voltage; a failed check is handled by
+        # applyManualState's locked safety recovery, never by a cold-start retry.
+        self._verify_manual_state_unlocked(
+            device=device, voltage_values=voltages, current_limit_values=current_limits,
+            full_range_enabled=full_range_enabled, timeout_s=timeout_s,
+            voltage_targets=voltage_targets,
+        )
+        for ch in _PSU_CHANNEL_IDS:
+            if cancel.is_set():
+                return False
+            if voltages[ch] == voltage_targets[ch]:
+                continue
+            if output_enabled[ch]:
+                if not self._ramp_channel_voltage(
+                    device, ch, voltage_targets[ch], start_v=voltages[ch],
+                    timeout_s=timeout_s, cancel=cancel,
+                ):
+                    return False
+            else:
+                device.set_channel_voltage(ch, voltage_targets[ch], timeout_s=timeout_s)
+        if cancel.is_set():
+            return False
+        self._verify_manual_state_unlocked(
+            device=device, voltage_values=voltage_targets, current_limit_values=current_limits,
+            full_range_enabled=full_range_enabled, timeout_s=timeout_s,
+        )
+        self._verify_output_enable_state_unlocked(
+            device=device, any_output_enabled=any(output_enabled),
+            output_enabled=output_enabled, timeout_s=timeout_s,
+        )
         return not cancel.is_set()
 
     def saveCurrentConfigFromThread(
@@ -5510,12 +5862,14 @@ class PSUController(DeviceController):
         if device is None:
             return  # Preserve the last shutdown/transport-loss diagnosis.
 
+        read_started = time.monotonic()
         try:
             timeout_s = float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
             snapshot = device.collect_housekeeping(
                 timeout_s=timeout_s
             )
         except Exception:
+            self._invalidate_hv_readback()
             try:
                 self.hardware_main_state = str(
                     device.get_status().get("connected", False)
@@ -5530,16 +5884,22 @@ class PSUController(DeviceController):
             self.output_state_summary = "Unknown"
             return
 
-        self._apply_snapshot(snapshot)
-        live_readbacks = None
-        with contextlib.suppress(Exception):
+        self._apply_snapshot(snapshot, refreshed_at=read_started)
+        live_started = time.monotonic()
+        try:
             live_readbacks = self._read_live_readbacks(timeout_s=timeout_s)
-        if live_readbacks is not None:
-            self._apply_live_readbacks(live_readbacks)
+        except Exception:
+            self._invalidate_hv_readback()
+        else:
+            if live_readbacks is not None:
+                self._apply_live_readbacks(live_readbacks, refreshed_at=live_started)
 
     def _sync_status_to_gui(self, *, sync_manual_panel: bool = False) -> None:
         # ESIBD setting attributes are widget-backed properties, not plain data.
         def _refresh_gui() -> None:
+            if getattr(self.controllerParent, "controller", self) not in (None, self):
+                return
+            self._update_channel_values(sync_setpoints=sync_manual_panel)
             self.controllerParent.main_state = self.main_state
             self.controllerParent.hardware_main_state = self.hardware_main_state
             self.controllerParent.output_summary = self.output_state_summary
@@ -5631,6 +5991,7 @@ class PSUController(DeviceController):
             emit()
 
     def _dispose_device(self) -> None:
+        self._invalidate_hv_readback()
         device = self.device
         self.device = None
         self.initialized = False
@@ -5723,6 +6084,7 @@ class PSUController(DeviceController):
             if self.transitioning:
                 return False
             self.transitioning = True
+            self._invalidate_hv_readback()
             self.transition_target_on = bool(target_on)
             return True
 

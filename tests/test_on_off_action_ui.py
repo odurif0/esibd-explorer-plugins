@@ -10,8 +10,11 @@ from types import MethodType
 
 import pytest
 
+from conftest import PLUGIN_SPECS
+
 ROOT = Path(__file__).resolve().parents[1]
-ENTRYPOINTS = sorted(ROOT.glob("*/*plugin.py"))
+# A scan has recording controls, not a device ON/OFF action.
+ENTRYPOINTS = [ROOT / spec.folder / spec.entrypoint for spec in PLUGIN_SPECS if spec.runtime_family]
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.parent.name)

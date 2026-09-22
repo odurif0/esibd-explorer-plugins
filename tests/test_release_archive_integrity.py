@@ -25,6 +25,8 @@ def member_segments(member: str) -> tuple[str, ...]:
 
 def required_members(spec: PluginSpec) -> frozenset[str]:
     root = spec.folder
+    if spec.runtime_family is None:
+        return frozenset({f"{root}/{spec.entrypoint}", f"{root}/{spec.icon_stem}.png", f"{root}/LICENSE"})
     runtime = f"{root}/vendor/runtime"
     device = f"{runtime}/{spec.runtime_family}"
     vendor = f"{device}/vendor"

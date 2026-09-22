@@ -118,7 +118,7 @@ assert not (log_dir / "unused").exists()
 '''
 
 
-@pytest.mark.parametrize("spec", PLUGIN_SPECS, ids=lambda spec: spec.folder)
+@pytest.mark.parametrize("spec", [s for s in PLUGIN_SPECS if s.runtime_family], ids=lambda spec: spec.folder)
 @pytest.mark.parametrize("handlers", ["available", "missing"])
 def test_runtime_import_and_log_rotation_without_optional_stdlib(spec, handlers, tmp_path):
     result = subprocess.run(

@@ -13,11 +13,11 @@ class PluginSpec:
     manager_name: str
     title_name: str
     entrypoint: str
-    runtime_family: str
+    runtime_family: str | None
     icon_stem: str
     sibling_family: str | None
-    header: str
-    dll: str
+    header: str | None
+    dll: str | None
 
 
 PLUGIN_SPECS: tuple[PluginSpec, ...] = (
@@ -98,6 +98,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "COM-ESI-CTRL.h",
         "COM-ESI-CTRL.dll",
     ),
+    PluginSpec("mscan", "MScan", "MScan", "mscan_plugin.py", None, "mscan", None, None, None),
     PluginSpec(
         "psu_a",
         "PSU_A",

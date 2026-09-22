@@ -1101,6 +1101,8 @@ class AMXDevice(Device):
     STANDBY_CONFIG = "Standby config"
     OPERATING_CONFIG = "Operating config"
     FREQUENCY_KHZ = "Frequency (kHz)"
+    PSU_CH01 = "PSU for CH0-CH1"
+    PSU_CH23 = "PSU for CH2-CH3"
     STATE = "State"
     DEVICE_ENABLED = "Device enabled"
     AVAILABLE_CONFIGS = "Available configs"
@@ -1153,6 +1155,8 @@ class AMXDevice(Device):
     standby_config: int
     operating_config: int
     frequency_khz: float
+    psu_ch01: str
+    psu_ch23: str
     main_state: str
     device_enabled_state: str
     available_configs: list[dict[str, Any]]
@@ -2057,7 +2061,7 @@ class AMXDevice(Device):
         if not callable(getattr(self, "addContentWidget", None)):
             return
         try:
-            from PyQt6.QtCore import Qt
+            from PyQt6.QtCore import Qt, QTimer
             from PyQt6.QtWidgets import (
                 QAbstractItemView,
                 QAbstractSpinBox,
@@ -2100,16 +2104,17 @@ class AMXDevice(Device):
         layout.addLayout(header)
 
         notice = QLabel(
-            "Expected signals from live registers, not waveform measurements. "
-            "Vneg / Vpos voltages: unknown (not reported by the AMX)."
+            "Expected signals, not waveform measurements. Voltages from linked PSUs, "
+            "relative to their reference (external offset not included). "
+            "Assign each pair's PSU in Settings."
         )
         notice.setWordWrap(True)
         notice.setStyleSheet(_AMX_PANEL_NOTICE_STYLE)
         layout.addWidget(notice)
 
-        table = QTableWidget(4, 6)
+        table = QTableWidget(4, 7)
         table.setHorizontalHeaderLabels([
-            "Output", "Signal", "Frequency", "Levels", "Time (µs)\nVpos / Vneg", "Relative timing",
+            "Output", "Signal", "Frequency", "Levels", "Time (µs)\nVpos / Vneg", "Relative timing", "PSU",
         ])
         table.verticalHeader().hide()
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -2119,9 +2124,10 @@ class AMXDevice(Device):
         table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         table.setMinimumWidth(0)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         for row in range(4):
-            for column in range(6):
+            for column in range(7):
                 table.setItem(row, column, QTableWidgetItem(f"CH{row}" if column == 0 else "—"))
         table.resizeRowsToContents()
         table.setFixedHeight(
@@ -2136,6 +2142,12 @@ class AMXDevice(Device):
         )
         self.amxOutputTable = table
         layout.addWidget(table)
+        # PSU changes and stale readings must reach the view even if AMX polling
+        # has stopped. This only reads cached data; the panel owns the Qt timer.
+        self.amxOutputRefreshTimer = QTimer(panel)
+        self.amxOutputRefreshTimer.setInterval(500)
+        self.amxOutputRefreshTimer.timeout.connect(self._update_output_table)
+        self.amxOutputRefreshTimer.start()
 
         cards_host = QWidget()
         self.amxPulserControls = cards_host
@@ -2392,6 +2404,55 @@ class AMXDevice(Device):
             if callable(blocker):
                 blocker(False)
 
+    def _linked_psu_readback(self, name: str) -> dict[str, Any]:
+        """Read Explorer Channels only; never poll or command another device."""
+        unavailable = {"vpos": None, "vneg": None, "detail": "No PSU assigned; voltages unavailable."}
+        if name == "None":
+            return unavailable
+        manager = getattr(self, "pluginManager", None)
+        matches = [p for p in getattr(manager, "plugins", []) if getattr(p, "name", None) == name]
+        if len(matches) != 1:
+            return {**unavailable, "detail": f"{name} unavailable (plugin absent or ambiguous)."}
+        device_manager = getattr(manager, "DeviceManager", None)
+        lookup = getattr(device_manager, "getChannelByName", None)
+        channels = getattr(matches[0], "getChannels", None)
+        if not callable(lookup) or not callable(channels):
+            return {**unavailable, "detail": f"{name}: Explorer channels unavailable."}
+        result = dict(unavailable)
+        reasons = []
+        try:
+            sources = list(channels())
+            registered = list(device_manager.channels())
+            for ch, key, sign in ((0, "vpos", 1), (1, "vneg", -1)):
+                candidates = [c for c in sources if _coerce_int(getattr(c, "id", -1), -1) == ch]
+                if len(candidates) != 1:
+                    reasons.append(f"{name} CH{ch} missing or ambiguous.")
+                    continue
+                source = candidates[0]
+                # Resolve the current name, not a hard-coded PSU_A_CH0 name:
+                # user renames/reordering must not change physical rail mapping.
+                same_name = [c for c in registered
+                             if c.name.strip().lower() == source.name.strip().lower()]
+                if len(same_name) != 1 or lookup(source.name) is not source:
+                    reasons.append(f"{name} CH{ch} not uniquely registered in Explorer.")
+                    continue
+                # Old PSU plugins did not maintain monitor validity. Do not
+                # silently accept their stale/incorrect monitor values.
+                if not hasattr(source, "readback_status"):
+                    reasons.append(f"{name}: update the PSU plugin for Channel readbacks.")
+                    continue
+                value = _coerce_float(source.monitor, np.nan)
+                if (source.real and source.enabled and source.initialized
+                        and source.useMonitors and source.unit == "V"
+                        and np.isfinite(value) and value >= 0):
+                    result[key] = sign * value  # PSU_POS / PSU_NEG magnitudes.
+                else:
+                    reasons.append(f"{name} CH{ch}: {source.readback_status}")
+            result["detail"] = " ".join(reasons) or "Measured PSU voltages from Explorer Channels."
+            return result
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return {**unavailable, "detail": f"{name} Channel readback unavailable."}
+
     def _update_output_table(self) -> None:
         table = getattr(self, "amxOutputTable", None)
         if table is None:
@@ -2412,11 +2473,27 @@ class AMXDevice(Device):
                 text = state if state != "STATE_ON" else "Awaiting readback"
             rows = [dict(channel=f"CH{i}", state=text, frequency="—", levels="Unknown", dwell="—", relation="—",
                          detail="No current output waveform inferred. This is not confirmation of zero voltage.") for i in range(4)]
-        for index, row in enumerate(rows):
-            for column, key in enumerate(("channel", "state", "frequency", "levels", "dwell", "relation")):
+        sources = [str(getattr(self, attr, "None") or "None") for attr in ("psu_ch01", "psu_ch23")]
+        readbacks = {name: self._linked_psu_readback(name) for name in set(sources)}
+        for index, original in enumerate(rows):
+            row = dict(original)  # Never alter the controller's routing summary.
+            name = sources[index // 2]
+            readback = readbacks[name]
+            levels = {}
+            for rail, key in (("Vpos", "vpos"), ("Vneg", "vneg")):
+                value = readback[key]
+                levels[rail] = rail if value is None else (f"{value:+.6g} V" if value else "0 V")
+            row["levels"] = row["levels"].replace("Vpos", levels["Vpos"]).replace("Vneg", levels["Vneg"])
+            row["psu"] = "—" if name == "None" else name
+            detail = row["detail"] + "\n" + readback["detail"]
+            if name != "None":
+                detail += (f"\n{name}: Vpos = {levels['Vpos']}, Vneg = {levels['Vneg']}. "
+                           "Measured at the PSU, relative to its reference; external offset not included. "
+                           "The association describes wiring only: it never controls the PSU.")
+            for column, key in enumerate(("channel", "state", "frequency", "levels", "dwell", "relation", "psu")):
                 item = table.item(index, column)
                 item.setText(row[key])
-                item.setToolTip(row["detail"])
+                item.setToolTip(detail)
 
     def _update_operator_panel(self) -> None:
         self._update_output_table()
@@ -2815,6 +2892,22 @@ class AMXDevice(Device):
             attr="frequency_khz",
             event=self.frequencyChanged,
         )
+        for label, attr in ((self.PSU_CH01, "psu_ch01"), (self.PSU_CH23, "psu_ch23")):
+            settings[f"{self.name}/{label}"] = parameterDict(
+                value="None",
+                items="None,PSU_A,PSU_B,PSU_C,PSU_D,PSU_E",
+                fixedItems=True,
+                parameterType=PARAMETERTYPE.COMBO,
+                attr=attr,
+                event=self._update_output_table,
+                toolTip=(
+                    "PSU physically feeding this AMX output pair. Read-only association: "
+                    "PSU CH0 (+) supplies Vpos; CH1 (−) supplies Vneg. "
+                    "Uses measured voltages relative to the PSU reference, not to earth; "
+                    "never connects or controls the PSU. Missing, OFF or stale PSU readings "
+                    "leave the rail voltage unavailable."
+                ),
+            )
         settings[f"{self.name}/{self.STATE}"] = parameterDict(
             value="Disconnected",
             toolTip="Latest AMX controller state reported by the driver.",

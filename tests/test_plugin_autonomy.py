@@ -17,6 +17,8 @@ PLUGIN_FOLDERS = tuple(spec.folder for spec in PLUGIN_SPECS)
 
 
 def required_paths(spec: PluginSpec, plugin_root: Path) -> tuple[Path, ...]:
+    if spec.runtime_family is None:
+        return (plugin_root / spec.entrypoint, plugin_root / f"{spec.icon_stem}.png", plugin_root / "LICENSE")
     runtime_root = plugin_root / "vendor" / "runtime"
     device_root = runtime_root / spec.runtime_family
     vendor_root = device_root / "vendor"

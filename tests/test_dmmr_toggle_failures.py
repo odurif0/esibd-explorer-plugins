@@ -62,6 +62,10 @@ class FaultingDMMR:
             return -12
         return 0
 
+    def get_module_meas_range(self, address, **kwargs):
+        self.calls.append(("range_readback", address))
+        return self.NO_ERR, 0, True
+
     def _get_gate(self, name, value):
         self.calls.append(("read", name))
         result = self.readback.get(name, (0, value))
