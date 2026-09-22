@@ -115,6 +115,12 @@ def probe(folder, output):
         device._ensure_channel_panel()
         panel = device.channelPanel
         cards = [entry["card"] for entry in device.channelPanelCards.values()]
+        if family == "psu":
+            device._update_channel_panel()
+            for i, sign in ((0, "+"), (1, "−")):
+                title = device.channelPanelCards[i]["title"]
+                assert title.text() == f"CH{i} ({sign})"
+                assert "magnitudes, not signed voltages to earth" in title.toolTip()
     elif family == "amx":
         # Output rows are the default view; exercise the existing pulser controls
         # in Advanced as well (default/narrow output view has dedicated Qt tests).

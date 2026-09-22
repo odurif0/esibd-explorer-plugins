@@ -20,8 +20,11 @@ from typing import Any
 
 import pytest
 
+from conftest import PLUGIN_SPECS
+
 ROOT = Path(__file__).resolve().parents[1]
-ENTRYPOINTS = sorted(ROOT.glob("*/*plugin.py"))
+# Device dispatchers only; MScan's separate Qt bridge is covered in test_mscan_ui.
+ENTRYPOINTS = [ROOT / spec.folder / spec.entrypoint for spec in PLUGIN_SPECS if spec.runtime_family]
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda p: p.parent.name)
@@ -131,6 +134,7 @@ def probe(path):
         detected_modules_text="modules", detected_modules="modules", device_state_summary="OK",
         interlock_state_summary="OK", voltage_state_summary="OK", temperature_state_summary="OK",
         interlock_state="OK", heat_status="OK",
+        _update_channel_values=lambda **kw: on_gui(),
     )
     sync = ns.get("_sync_status_to_gui", ns.get("_sync_status"))
     in_worker(lambda: sync(controller))

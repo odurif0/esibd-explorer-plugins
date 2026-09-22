@@ -54,7 +54,8 @@ def setup(request, monkeypatch):
         COM_HVPSU2D_GetPSUEnable=get_outputs,
         COM_HVPSU2D_GetPSUData=get_data,
     )
-    channels = [types.SimpleNamespace(real=True, channel_number=lambda ch=ch: ch) for ch in (0, 1)]
+    channels = [types.SimpleNamespace(real=True, enabled=True, active=True, monitor=float("nan"),
+                                     value=0., channel_number=lambda ch=ch: ch) for ch in (0, 1)]
     parent = types.SimpleNamespace(getChannels=lambda: channels, poll_timeout_s=0.5)
     controller = module.PSUController(parent)
     controller.device = driver

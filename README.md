@@ -2,7 +2,7 @@
 
 Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIBD-Explorer).
 
-One plugin for one device.
+12 device plugins and one standalone scan plugin.
 
 ## Available Plugins
 
@@ -20,10 +20,11 @@ One plugin for one device.
 | `amx_a`  | Controls AMX_A timing and displays expected CH0–CH3 signals |
 | `amx_b`  | Controls AMX_B timing and displays expected CH0–CH3 signals |
 | `amx_hd` | Controls AMX HD frequency and timer modules |
+| `mscan`  | Scans quadrupole amplitude through AMX-linked PSU channels |
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.2.13.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.2.14.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -42,13 +43,17 @@ One plugin for one device.
    ├── esi/
    ├── amx_a/
    ├── amx_b/
-   └── amx_hd/
+   ├── amx_hd/
+   └── mscan/
    ```
 
 3. **Enable** the plugins you need in the Plugin Manager.
 
 4. **Select the correct COM port** in the plugin settings for each device
    you want to control. That's it!
+
+For amplitude scans, see [MScan](mscan/README.md). Its axis is in volts, without
+m/z calibration. **Stopping a scan does not turn the HV outputs off.**
 
 ## Setpoint entry
 

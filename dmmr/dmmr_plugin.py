@@ -49,6 +49,9 @@ _PARAMETER_ADVANCED_KEY = getattr(Parameter, "ADVANCED", "Advanced")
 _PARAMETER_TOOLTIP_KEY = getattr(Parameter, "TOOLTIP", "Tooltip")
 _PARAMETER_EVENT_KEY = getattr(Parameter, "EVENT", "Event")
 _DMMR_MODULE_KEY = "Module"
+# COM_DMMR_8_MEAS_RANGE_NUM in the bundled CGC header.
+_DMMR_RANGE_MODES = ("Auto", "0", "1", "2", "3", "4")
+_DMMR_RANGE_GROUP = "Measurement ranges"
 _DMMR_INITIAL_HISTORY_POINTS = 100_000
 _DMMR_MIN_ROW_HEIGHT = 28
 _DMMR_COMMUNICATION_LOST_STATE = "Communication lost"
@@ -110,6 +113,10 @@ _DMMR_PANEL_BADGE_OFF_STYLE = "color: #a8b3c4; font-size: 11px;"
 _DMMR_PANEL_EMPTY_STYLE = "color: #718096; font-style: italic; padding: 8px 0px;"
 _DMMR_PANEL_CARD_MIN_WIDTH = 180
 _DMMR_PANEL_CARD_MAX_WIDTH = 210
+
+
+def _valid_measurement_range(value: Any) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, bool) and 0 <= value < 5
 
 
 def _is_nan(value: Any) -> bool:
@@ -1109,6 +1116,36 @@ class DMMRDevice(Device):
         editor.setStyleSheet(_DMMR_PANEL_LABEL_STYLE)
         editor.setToolTip(_DMMR_PANEL_LABEL_TOOLTIP)
 
+    def _range_selection_enabled(self) -> bool:
+        # Channel loading builds the cards before Explorer's finalizeInit creates
+        # onAction. Its isOn() getter is not valid until that action exists.
+        if getattr(self, "onAction", None) is None:
+            return False
+        controller = getattr(self, "controller", None)
+        return not (
+            self.isOn()
+            or getattr(controller, "transitioning", False)
+            or getattr(controller, "initializing", False)
+            or _state_requires_operator_attention(str(getattr(self, "main_state", "")))
+        )
+
+    def _channel_panel_range_changed(self, module: int, mode: str) -> None:
+        channel = self._channel_by_module(module)
+        if channel is None or not self._range_selection_enabled() or mode not in _DMMR_RANGE_MODES:
+            self._update_channel_panel()
+            return
+        previous = getattr(channel, "range_mode", "Auto")
+        if mode != previous:
+            channel.range_mode = mode
+            channel._requested_range_mode = mode
+            try:
+                self.exportConfiguration(useDefaultFile=True)
+            except Exception as exc:
+                channel.range_mode = previous
+                channel._requested_range_mode = previous
+                self.print(f"Could not save Module {module} range: {exc}", flag=PRINT.ERROR)
+        self._update_channel_panel()
+
     def _channel_panel_read_toggled(self, module: int, checked: bool) -> None:
         channel = self._channel_by_module(module)
         if channel is None:
@@ -1137,11 +1174,14 @@ class DMMRDevice(Device):
         is_on = getattr(self, "isOn", None)
         device_on = connected and callable(is_on) and bool(is_on())
         read_checked = self._channel_enabled_checked(channel)
-        current_value = (
-            (getattr(controller, "values", {}) or {}).get(module, np.nan)
-            if device_on and read_checked
-            else np.nan
-        )
+        snapshot = getattr(controller, "measurementSnapshot", None)
+        if callable(snapshot):
+            values, ranges, _token = snapshot()
+        else:
+            values = getattr(controller, "values", {}) or {}
+            ranges = getattr(controller, "meas_ranges", {}) or {}
+        current_value = values.get(module, np.nan) if device_on and read_checked else np.nan
+        used_range = ranges.get(module, np.nan) if np.isfinite(current_value) else np.nan
         current_text, raw_text = _format_si_current(current_value)
         if not device_on:
             state_text = "OFF" if connected else "Disconnected"
@@ -1165,6 +1205,9 @@ class DMMRDevice(Device):
             ),
             "current_text": current_text,
             "current_tooltip": raw_text,
+            "range_mode": getattr(channel, "range_mode", "Auto"),
+            "range_enabled": channel is not None and self._range_selection_enabled(),
+            "range_text": f"Used: {int(used_range)}" if _valid_measurement_range(used_range) else "Used: —",
             "read_checked": read_checked,
             "read_enabled": channel is not None,
             "display_checked": self._channel_display_checked(channel),
@@ -1180,6 +1223,7 @@ class DMMRDevice(Device):
         from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import (
             QCheckBox,
+            QComboBox,
             QFrame,
             QHBoxLayout,
             QLabel,
@@ -1258,6 +1302,26 @@ class DMMRDevice(Device):
             current_value.setStyleSheet(_DMMR_PANEL_CURRENT_VALUE_STYLE)
             card_layout.addWidget(current_value)
 
+            range_layout = QHBoxLayout()
+            range_layout.setSpacing(8)
+            range_combo = QComboBox()
+            range_combo.installEventFilter(self.channelPanelScroll)
+            for mode in _DMMR_RANGE_MODES:
+                range_combo.addItem("Auto" if mode == "Auto" else f"Fixed {mode}", mode)
+            range_combo.setAccessibleName(f"Measurement range for module {module}")
+            range_combo.setToolTip("Measurement range index (0–4). Change while OFF; applied and verified at the next ON.")
+            range_combo.activated.connect(
+                lambda index, module=module, combo=range_combo:
+                    self._channel_panel_range_changed(module, combo.itemData(index))
+            )
+            range_value = QLabel("Used: —")
+            range_value.setStyleSheet(_DMMR_PANEL_BADGE_READ_STYLE)
+            range_value.setToolTip("Range returned with this current reading, not the requested range.")
+            range_layout.addWidget(range_combo)
+            range_layout.addStretch(1)
+            range_layout.addWidget(range_value)
+            card_layout.addLayout(range_layout)
+
             controls_layout = QHBoxLayout()
             controls_layout.setContentsMargins(0, 0, 0, 0)
             controls_layout.setSpacing(8)
@@ -1298,6 +1362,8 @@ class DMMRDevice(Device):
                 "label_edit": label_edit,
                 "state_badge": state_badge,
                 "current_value": current_value,
+                "range_combo": range_combo,
+                "range_value": range_value,
                 "read_button": read_button,
                 "display_box": display_box,
                 "color_button": color_button,
@@ -1329,7 +1395,8 @@ class DMMRDevice(Device):
             self.channelPanelGrid = grid
             self.channelPanelCards = {}
             self.channelPanelSignature = None
-            self.addContentWidget(_scrollable_panel(panel))
+            self.channelPanelScroll = _scrollable_panel(panel)
+            self.addContentWidget(self.channelPanelScroll)
 
         signature = tuple(channel.module_address() for channel in self._panel_channels())
         if getattr(self, "channelPanelSignature", None) != signature:
@@ -1493,6 +1560,13 @@ class DMMRDevice(Device):
                     editor.setToolTip(_DMMR_PANEL_LABEL_TOOLTIP)
                 elif not editor.hasFocus() and not editor.isModified() and editor.text() != snapshot["label"]:
                     editor.setText(snapshot["label"])
+            range_combo = widgets.get("range_combo")
+            if range_combo is not None:
+                range_combo.blockSignals(True)
+                range_combo.setCurrentIndex(range_combo.findData(snapshot["range_mode"]))
+                range_combo.setEnabled(snapshot["range_enabled"])
+                range_combo.blockSignals(False)
+                widgets["range_value"].setText(snapshot["range_text"])
             current_widget = widgets.get("current_value")
             if current_widget is not None and hasattr(current_widget, "setToolTip"):
                 current_widget.setToolTip(str(snapshot["current_tooltip"]))
@@ -1595,11 +1669,19 @@ class DMMRDevice(Device):
     def _apply_channel_items(self, items: list[dict[str, Any]], *, file: "Path | None" = None, append: bool = False) -> None:
         """Apply a rebuilt channel configuration using the standard ESIBD flow."""
         config_file = file or self.customConfigFile(self.confINI)
+        histories = {
+            (channel.name, channel.module_address()): channel.range_history
+            for channel in self.getChannels() if hasattr(channel, "range_history")
+        }
         self.loading = True
         if self.tree is not None:
             self.tree.setUpdatesEnabled(False)
         try:
             self.updateChannelConfig(items, config_file, append=append)
+            for channel in self.getChannels():
+                history = histories.get((channel.name, channel.module_address()))
+                if history is not None and history.size == channel.values.size:
+                    channel.range_history = history
             if self.channels and self.tree is not None:
                 self.tree.setHeaderLabels(
                     [
@@ -1767,8 +1849,8 @@ class DMMRDevice(Device):
                 group = source[self.name]
                 items = [{} for _ in group["Name"]]
                 for key in self._default_channel_template():
-                    # Label is optional in files saved by earlier plugin versions.
-                    if key == DMMRChannel.LABEL and key not in group:
+                    # New settings are optional in files saved by earlier versions.
+                    if key in {DMMRChannel.LABEL, DMMRChannel.RANGE_MODE} and key not in group:
                         continue
                     values = group[key][:]
                     if len(values) != len(items):
@@ -1817,9 +1899,22 @@ class DMMRDevice(Device):
         self._ensure_channel_panel()
 
     def estimateStorage(self) -> None:
-        """Keep time and current buffers on the same, nonzero history limit."""
+        """Keep time, current and range buffers on the same nonzero limit."""
         if self.channels:
             super().estimateStorage()
+            # The host budgets 4 bytes per current/background point. Include
+            # another 4 per range and 8 per timestamp in our payload estimate.
+            current_bytes = 4 * len(self.channels) * (2 if self.useBackgrounds else 1)
+            point_bytes = current_bytes + 4 * len(self.channels) + 8
+            self.maxDataPoints = max(1, int(self.maxDataPoints * current_bytes / point_bytes))
+            widget = self.pluginManager.Settings.settings[
+                f"{self.name}/{self.MAXDATAPOINTS}"
+            ].getWidget()
+            if widget:
+                widget.setToolTip(
+                    f"{self.maxDataPoints:,} points including timestamps, currents, ranges and any backgrounds. "
+                    "Storage changes apply to the next cleared/restarted history."
+                )
         else:
             # Channel.__init__ captures this setting in DynamicNp(max_size=...).
             # Zero means thin on EVERY append, not an unknown/unlimited capacity.
@@ -1842,10 +1937,66 @@ class DMMRDevice(Device):
                 limit = time_buffer.max_size
             time_buffer.max_size = limit
         for channel in self.channels:
-            for name in ("values", "backgrounds"):
+            for name in ("values", "backgrounds", "range_history"):
                 buffer = getattr(channel, name, None)
                 if buffer is not None:
                     buffer.max_size = limit
+
+    def appendOutputData(self, h5file, useDefaultFile: bool = False) -> None:
+        """Keep Explorer's current datasets and add a parallel range history."""
+        from esibd.const import INPUTCHANNELS, OUTPUTCHANNELS
+
+        time_path = f"{self.name}/{INPUTCHANNELS}/{self.TIME}"
+        already_saved = time_path in h5file
+        output_path = f"{self.name}/{OUTPUTCHANNELS}"
+        existing = set(h5file[output_path]) if output_path in h5file else set()
+        super().appendOutputData(h5file, useDefaultFile=useDefaultFile)
+        if already_saved or time_path not in h5file:
+            return
+        # Match the host's selection exactly, including its full-history fallback
+        # when either endpoint is zero. Never crop ranges differently to currents.
+        selection = slice(None)
+        time_axis = self.time.get()
+        if not useDefaultFile and time_axis.size and self.liveDisplay.livePlotWidgets:
+            t_min, t_max = self.liveDisplay.livePlotWidgets[0].getAxis("bottom").range
+            i_min = int(np.argmin(np.abs(time_axis - t_min)))
+            i_max = int(np.argmin(np.abs(time_axis - t_max)))
+            if i_min and i_max:
+                selection = slice(i_min, i_max)
+        group = h5file[self.name].require_group(_DMMR_RANGE_GROUP)
+        group.attrs["Description"] = "CGC range index returned with each current; NaN means unknown or no measurement."
+        for channel in self.getDataChannels():
+            if channel.name in existing:
+                continue
+            data = channel._range_buffer().get()[selection]
+            current = h5file[output_path][channel.name]
+            if data.shape != current.shape or data.size != h5file[time_path].size:
+                raise ValueError(f"DMMR range history is not aligned for {channel.name}.")
+            dataset = group.create_dataset(channel.name, data=data, dtype=np.float32)
+            dataset.attrs["Current dataset"] = current.name
+            dataset.attrs["Time dataset"] = time_path
+            current.attrs["Measurement range dataset"] = dataset.name
+
+    def restoreOutputData(self) -> None:
+        from esibd.core import DynamicNp
+        import h5py
+
+        super().restoreOutputData()
+        file = Path(self.pluginManager.Settings.configPath) / self.confh5.strip("_")
+        if not file.exists():
+            return
+        with h5py.File(file, "r") as saved:
+            for channel in self.getChannels():
+                values = np.full(channel.values.size, np.nan, dtype=np.float32)
+                path = f"{self.name}/{_DMMR_RANGE_GROUP}/{channel.name}"
+                if path in saved:
+                    candidate = saved[path][:]
+                    valid = np.isnan(candidate) | (np.isfinite(candidate) & (candidate >= 0) & (candidate < 5) & (candidate == np.floor(candidate)))
+                    if candidate.shape == values.shape and valid.all():
+                        values = candidate
+                    else:
+                        self.print(f"Ignoring invalid range history for {channel.name}.", flag=PRINT.WARNING)
+                channel.range_history = DynamicNp(initialData=values, max_size=channel.values.max_size)
 
     def getDefaultSettings(self) -> dict[str, dict]:
         settings = super().getDefaultSettings()
@@ -2175,7 +2326,11 @@ class DMMRChannel(Channel):
 
     MODULE = "Module"
     LABEL = "Label"
+    RANGE_MODE = "Range mode"
     label: str
+    range_mode: str
+    _requested_range_mode = "Auto"
+    measurement_range = np.nan
     channelParent: DMMRDevice
 
     def getDefaultChannel(self) -> dict[str, dict]:
@@ -2209,6 +2364,12 @@ class DMMRChannel(Channel):
             value="", parameterType=PARAMETERTYPE.LABEL, attr="label",
             toolTip="Human-readable module label; does not rename recorded channels.",
         )
+        channel[self.RANGE_MODE] = parameterDict(
+            value="Auto", parameterType=PARAMETERTYPE.COMBO, attr="range_mode",
+            items=",".join(_DMMR_RANGE_MODES), fixedItems=True,
+            event=self.rangeChanged,
+            toolTip="Auto or fixed measurement range index (0–4); applied and verified at ON.",
+        )
         channel[self.MODULE] = parameterDict(
             value="0",
             parameterType=PARAMETERTYPE.LABEL,
@@ -2227,10 +2388,16 @@ class DMMRChannel(Channel):
             self.displayedParameters.remove(self.DISPLAY)
         self.displayedParameters.append(self.LABEL)
         self.displayedParameters.append(self.MODULE)
+        self.displayedParameters.append(self.RANGE_MODE)
         self.displayedParameters.append(self.DISPLAY)
+
+    def rangeChanged(self) -> None:
+        # Cache on the GUI thread: the ON worker must not read a QComboBox.
+        self._requested_range_mode = self.range_mode
 
     def initGUI(self, item: dict) -> None:
         super().initGUI(item)
+        self.rangeChanged()
         if callable(getattr(self, "getParameterByName", None)):
             self._upgrade_monitor_widget()
         self._upgrade_toggle_widget(self.ENABLED, "Read", 52)
@@ -2436,6 +2603,45 @@ class DMMRChannel(Channel):
 
         return color
 
+    def _range_buffer(self):
+        from esibd.core import DynamicNp
+
+        if not hasattr(self, "range_history"):
+            # Existing/legacy values have unknown ranges, never inferred ones.
+            self.range_history = DynamicNp(
+                initialData=np.full(self.values.size, np.nan, dtype=np.float32),
+                max_size=self.values.max_size,
+            )
+        return self.range_history
+
+    def appendValue(self, lenT: int, nan: bool = False) -> None:
+        ranges = self._range_buffer()
+        used_range = np.nan
+        if self.real:
+            token = getattr(self, "_measurement_token", None)
+            repeated = token is not None and token is getattr(self, "_last_recorded_token", None)
+            current = getattr(self, "monitor", np.nan)
+            valid = (token is not None and not nan and not repeated
+                     and self.enabled and current is not None and np.isfinite(current))
+            self.values.add(x=current if valid else np.nan, lenT=lenT)
+            if valid and _valid_measurement_range(self.measurement_range):
+                used_range = self.measurement_range
+            self._last_recorded_token = token
+            if nan:
+                self.monitor = np.nan
+            if self.useBackgrounds:
+                self.backgrounds.add(x=self.background, lenT=lenT)
+        else:
+            super().appendValue(lenT=lenT, nan=nan)
+        ranges.add(x=used_range, lenT=lenT)
+
+    def clearHistory(self) -> None:
+        previous = getattr(self, "values", None)
+        super().clearHistory()
+        if self.values is not previous:
+            self.__dict__.pop("range_history", None)
+            self._range_buffer()
+
     def module_address(self) -> int:
         """Return the configured DMMR module address as an integer."""
         return _coerce_int(self.module, 0)
@@ -2501,18 +2707,60 @@ class DMMRController(DeviceController):
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
         # earlier in this session and is therefore still locked in-process.
         self._poisoned_com: int | None = None
+        self._sample_lock = RLock()
+        self.meas_ranges: dict[int, float] = {}
+        self._sample_token = object()
 
     def initializeValues(self, reset: bool = False) -> None:
-        if getattr(self, "values", None) is None or reset:
-            get_channels = getattr(self.controllerParent, "getChannels", None)
-            if not callable(get_channels):
-                self.values = {}
-                return
-            self.values = {
-                channel.module_address(): np.nan
-                for channel in get_channels()
-                if channel.real
-            }
+        with self._sample_lock:
+            if getattr(self, "values", None) is None or reset:
+                get_channels = getattr(self.controllerParent, "getChannels", None)
+                self.values = {
+                    channel.module_address(): np.nan
+                    for channel in (get_channels() if callable(get_channels) else [])
+                    if channel.real
+                }
+                self.meas_ranges = dict.fromkeys(self.values, np.nan)
+                self._sample_token = object()
+
+    def measurementSnapshot(self):
+        """Copy paired readings without ever waiting for a hardware/DLL call."""
+        with self._sample_lock:
+            return dict(self.values or {}), dict(self.meas_ranges), self._sample_token
+
+    def _store_current(self, values, ranges, module, current, meas_range) -> None:
+        if not np.isfinite(current) or not _valid_measurement_range(meas_range):
+            self.errorCount += 1
+            self.print(f"Invalid DMMR sample for module {module}: current={current!r}, range={meas_range!r}", flag=PRINT.ERROR)
+            return
+        values[module] = float(current)
+        ranges[module] = int(meas_range)
+
+    def _configure_module_ranges(self, device, modules, timeout_s: float) -> None:
+        requested = {
+            channel.module_address(): getattr(channel, "_requested_range_mode", "Auto")
+            for channel in self.controllerParent.getChannels() if channel.real
+        }
+        for module in modules:
+            mode = requested.get(module, "Auto")
+            if mode not in _DMMR_RANGE_MODES:
+                raise ValueError(f"Invalid range mode for module {module}: {mode!r}")
+            auto = mode == "Auto"
+            status = device.set_module_auto_range(module, auto, timeout_s=timeout_s)
+            if status != device.NO_ERR:
+                raise RuntimeError(f"set_module_auto_range({module}, {auto}) failed: {self._format_status(status, device=device)}")
+            if not auto:
+                status = device.set_module_meas_range(module, int(mode), timeout_s=timeout_s)
+                if status != device.NO_ERR:
+                    raise RuntimeError(f"set_module_meas_range({module}, {mode}) failed: {self._format_status(status, device=device)}")
+            status, used_range, auto_readback = device.get_module_meas_range(module, timeout_s=timeout_s)
+            if (status != device.NO_ERR or auto_readback is not auto
+                    or not _valid_measurement_range(used_range)
+                    or (not auto and used_range != int(mode))):
+                raise RuntimeError(
+                    f"Range not confirmed for module {module}: requested {mode}, "
+                    f"read range={used_range!r}, auto={auto_readback!r}, status={self._format_status(status, device=device)}"
+                )
 
     def _measurement_modules(self) -> list[int]:
         configured_modules_getter = getattr(self.controllerParent, "getConfiguredModules", None)
@@ -2715,6 +2963,7 @@ class DMMRController(DeviceController):
             return
 
         new_values = dict(self.values)
+        new_ranges = dict.fromkeys(new_values, np.nan)
         poll_modules = self._measurement_modules()
 
         for module in poll_modules:
@@ -2730,7 +2979,7 @@ class DMMRController(DeviceController):
                     device = self.device
                     if device is None:
                         return
-                    status, measured_current, _meas_range = device.get_module_current(
+                    status, measured_current, meas_range = device.get_module_current(
                         module,
                         timeout_s=float(self.controllerParent.poll_timeout_s),
                     )
@@ -2750,7 +2999,7 @@ class DMMRController(DeviceController):
                 continue
 
             if status == getattr(device, "NO_ERR", status):
-                new_values[module] = float(measured_current)
+                self._store_current(new_values, new_ranges, module, measured_current, meas_range)
                 continue
 
             if self._wrong_command_status(status, device=device):
@@ -2768,12 +3017,12 @@ class DMMRController(DeviceController):
                             device=device,
                         )
                         if recovered:
-                            status, measured_current, _meas_range = device.get_module_current(
+                            status, measured_current, meas_range = device.get_module_current(
                                 module,
                                 timeout_s=float(self.controllerParent.poll_timeout_s),
                             )
                     if status == getattr(device, "NO_ERR", status):
-                        new_values[module] = float(measured_current)
+                        self._store_current(new_values, new_ranges, module, measured_current, meas_range)
                         continue
                 except Exception as exc:  # noqa: BLE001
                     self.errorCount += 1
@@ -2791,7 +3040,10 @@ class DMMRController(DeviceController):
                 flag=PRINT.ERROR,
             )
 
-        self.values = new_values
+        with self._sample_lock:
+            self.values = new_values
+            self.meas_ranges = new_ranges
+            self._sample_token = object()
 
     def fakeNumbers(self) -> None:
         self.initializeValues(reset=True)
@@ -2804,18 +3056,23 @@ class DMMRController(DeviceController):
         if self.values is None:
             return
 
-        self._sync_status_to_gui()
-        device_is_on = self.controllerParent.isOn()
-        for channel in self.controllerParent.getChannels():
-            if channel.enabled and channel.real and device_is_on:
-                channel.monitor = self.values.get(channel.module_address(), np.nan)
-            else:
-                channel.monitor = np.nan
-            sync_monitor = getattr(channel, "_sync_monitor_widget", None)
-            if callable(sync_monitor):
-                # updateValues() runs on the acquisition thread; route widget
-                # updates through the GUI dispatcher.
-                _invoke_gui_callback(sync_monitor)
+        def update_gui():
+            # A queued callback reads the latest complete pair, never a current
+            # from one polling cycle and a range from the next.
+            values, ranges, token = self.measurementSnapshot()
+            device_is_on = self.controllerParent.isOn()
+            for channel in self.controllerParent.getChannels():
+                valid = channel.enabled and channel.real and device_is_on
+                address = channel.module_address()
+                channel.measurement_range = ranges.get(address, np.nan) if valid else np.nan
+                channel._measurement_token = token
+                channel.monitor = values.get(address, np.nan) if valid else np.nan
+                sync_monitor = getattr(channel, "_sync_monitor_widget", None)
+                if callable(sync_monitor):
+                    sync_monitor()
+            self._sync_status_to_gui()
+
+        _invoke_gui_callback(update_gui)
 
     def _report_startup_diagnostics(self, device: Any, *, start: bool) -> None:
         method = getattr(device, "begin_startup_diagnostics" if start else "end_startup_diagnostics", None)
@@ -2869,19 +3126,10 @@ class DMMRController(DeviceController):
                         timeout_s=float(self.controllerParent.connect_timeout_s),
                         device=device,
                     )
-                    set_module_auto_range = getattr(device, "set_module_auto_range", None)
-                    if callable(set_module_auto_range):
-                        for module in measurement_modules:
-                            auto_range_status = set_module_auto_range(
-                                module,
-                                True,
-                                timeout_s=float(self.controllerParent.connect_timeout_s),
-                            )
-                            if auto_range_status != device.NO_ERR:
-                                raise RuntimeError(
-                                    f"set_module_auto_range({module}, True) failed: "
-                                    f"{self._format_status(auto_range_status, device=device)}"
-                                )
+                    self._configure_module_ranges(
+                        device, measurement_modules,
+                        timeout_s=float(self.controllerParent.connect_timeout_s),
+                    )
                 if not self._update_state():
                     raise RuntimeError("Could not confirm the DMMR state after startup.")
                 self._report_startup_diagnostics(diagnostics_device, start=False)

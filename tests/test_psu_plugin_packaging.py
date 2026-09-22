@@ -32,6 +32,7 @@ def _install_esibd_stubs() -> None:
     class PARAMETERTYPE(Enum):
         INT = "INT"
         FLOAT = "FLOAT"
+        EXP = "EXP"
         BOOL = "BOOL"
         LABEL = "LABEL"
 
@@ -103,6 +104,9 @@ def _install_esibd_stubs() -> None:
                 self.OPTIMIZE,
             ]
 
+        def getParameterByName(self, name):
+            return None
+
         def initGUI(self, item):
             self.super_init_gui_called = item
             self.updateColor()
@@ -124,6 +128,9 @@ def _install_esibd_stubs() -> None:
 
     class Device:
         MAXDATAPOINTS = "Max data points"
+
+        def getChannels(self):
+            return getattr(self, "channels", [])
 
     class Plugin:
         pass
@@ -569,7 +576,7 @@ def test_channel_panel_snapshot_formats_psu_readbacks_for_fixed_channels():
 
     display_parameter = types.SimpleNamespace(value=True)
     channel = types.SimpleNamespace(
-        real=True,
+        real=True, value=350., monitor=345.6,
         display=True,
         DISPLAY="Display",
         channel_number=lambda: 1,
@@ -590,7 +597,7 @@ def test_channel_panel_snapshot_formats_psu_readbacks_for_fixed_channels():
 
     snapshot = module.PSUDevice._channel_panel_snapshot(device, 1)
 
-    assert snapshot["title"] == "CH1"
+    assert snapshot["title"] == "CH1 (−)"
     assert snapshot["output_state"] == "ON"
     assert snapshot["display_enabled"] is True
     assert snapshot["display_checked"] is True
@@ -996,13 +1003,14 @@ def test_status_widgets_show_hardware_state_when_psu_state_is_harmonized():
     module.PSUDevice._ensure_status_widgets(device)
 
     assert device.statusBadgeLabel.text == "ST_STBY"
-    assert device.statusSummaryLabel.text == "CH0 ON 12 V / 120 mA | CH1 OFF 0 V / 0 mA"
+    # No Channel measurements: never display the old controller voltage cache.
+    assert device.statusSummaryLabel.text == "CH0 ON n/a / 120 mA | CH1 OFF n/a / 0 mA"
     assert "Temp:" in device.diagnosticsSummaryLabel.text
     assert "CH0" in device.diagnosticsSummaryLabel.text
     tooltip = device.statusBadgeLabel.tooltips[-1]
     assert "State: ST_STBY" in tooltip
     assert "Hardware state: STATE_ERR_PSU_DIS" in tooltip
-    assert "Readbacks: CH0 ON 12 V / 120 mA | CH1 OFF 0 V / 0 mA" in tooltip
+    assert "Readbacks: CH0 ON n/a / 120 mA | CH1 OFF n/a / 0 mA" in tooltip
     assert "#b7791f" in device.statusBadgeLabel.styles[-1]
 
 
@@ -1248,7 +1256,7 @@ def test_channel_display_order_prioritizes_psu_readbacks():
         "Select",
         "Name",
         "Output",
-        "Voltage set",
+        "Value",
         "Monitor",
         "Current set",
         "Current monitor",
@@ -1316,7 +1324,6 @@ def test_device_column_visibility_hides_internal_columns_and_enables_manual_resi
                 "Max": {},
                 "CH": {},
                 "Output": {},
-                "Voltage set": {},
                 "Current set": {},
                 "Current monitor": {},
             }
@@ -1331,7 +1338,7 @@ def test_device_column_visibility_hides_internal_columns_and_enables_manual_resi
     assert set(device.tree.hidden_columns) == {
         (0, True),
         (2, True),
-        (4, True),
+        (4, False),
         (7, True),
         (8, True),
         (9, True),
@@ -1342,18 +1349,25 @@ def test_device_column_visibility_hides_internal_columns_and_enables_manual_resi
         (5, "Interactive"),
         (12, "Interactive"),
         (13, "Interactive"),
+        (4, "Interactive"),
         (14, "Interactive"),
         (15, "Interactive"),
-        (16, "Interactive"),
     ]
     assert device.tree._header.resized == [
         (5, 88),
         (12, 44),
         (13, 58),
+        (4, 90),
         (14, 90),
-        (15, 90),
-        (16, 92),
+        (15, 92),
     ]
+    device.advancedAction = types.SimpleNamespace(state=True)
+    device.tree.hidden_columns.clear()
+    module.PSUDevice._update_channel_column_visibility(device)
+    assert set(device.tree.hidden_columns) == {
+        (0, True), (8, True), (4, False), (2, False),
+        (7, False), (9, False), (10, False), (11, False),
+    }
 
 
 def test_device_toggle_advanced_reapplies_column_visibility():
@@ -1397,7 +1411,7 @@ def test_channel_real_changed_skips_framework_handler_until_enabled_exists():
     channel = object.__new__(module.PSUChannel)
     channel.ID = "CH"
     channel.OUTPUT_STATE = "Output"
-    channel.VOLTAGE_SET = "Vset"
+    channel.VALUE = "Value"
     channel.CURRENT_SET = "Iset"
     channel.CURRENT_MONITOR = "Iget"
     channel.ENABLED = "Enabled"
@@ -1406,7 +1420,7 @@ def test_channel_real_changed_skips_framework_handler_until_enabled_exists():
     parameters = {
         channel.ID: FakeParameter(),
         channel.OUTPUT_STATE: FakeParameter(),
-        channel.VOLTAGE_SET: FakeParameter(),
+        channel.VALUE: FakeParameter(),
         channel.CURRENT_SET: FakeParameter(),
         channel.CURRENT_MONITOR: FakeParameter(),
     }
@@ -1416,7 +1430,7 @@ def test_channel_real_changed_skips_framework_handler_until_enabled_exists():
 
     assert parameters[channel.ID].visible is True
     assert parameters[channel.OUTPUT_STATE].visible is True
-    assert parameters[channel.VOLTAGE_SET].visible is True
+    assert parameters[channel.VALUE].visible is True
     assert parameters[channel.CURRENT_SET].visible is True
     assert parameters[channel.CURRENT_MONITOR].visible is True
     assert not hasattr(channel, "base_real_changed_called")

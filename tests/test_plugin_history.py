@@ -111,7 +111,12 @@ def rig(monkeypatch, request):
             append_data(device, nan=gap)
 
     def small_limit(limit):
-        monkeypatch.setattr(module.Device, "estimateStorage", lambda self: setattr(self, "maxDataPoints", limit))
+        native_limit = limit
+        if device.name == "DMMR":
+            # DMMR adjusts the host estimate to budget its extra range series.
+            current_bytes = 4 * len(device.channels) * (2 if device.useBackgrounds else 1)
+            native_limit = int(np.ceil(limit * (current_bytes + 4 * len(device.channels) + 8) / current_bytes))
+        monkeypatch.setattr(module.Device, "estimateStorage", lambda self: setattr(self, "maxDataPoints", native_limit))
         device.estimateStorage()
 
     return SimpleNamespace(module=module, device=device, buffer=buffer,

@@ -31,6 +31,7 @@ def _install_esibd_stubs() -> None:
         LABEL = "LABEL"
         TEXT = "TEXT"
         BOOL = "BOOL"
+        COMBO = "COMBO"
 
     class _PluginTypeValue:
         def __init__(self, value):
@@ -240,7 +241,7 @@ def test_controller_read_numbers_polls_module_currents():
             return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
 
         def get_module_current(self, module, timeout_s=None):
-            return self.NO_ERR, module * 1e-12, module + 10
+            return self.NO_ERR, module * 1e-12, module
 
     class FakeChannel:
         def __init__(self, module):
@@ -305,7 +306,7 @@ def test_controller_read_numbers_does_not_block_on_zero_ready_flags():
 
         def get_module_current(self, module, timeout_s=None):
             self.current_calls.append((module, timeout_s))
-            return self.NO_ERR, module * 1e-12, module + 10
+            return self.NO_ERR, module * 1e-12, module
 
     class FakeChannel:
         def __init__(self, module):
@@ -374,7 +375,7 @@ def test_controller_read_numbers_recovers_from_automatic_current_mode():
             self.current_calls.append((module, timeout_s, self.automatic_current))
             if self.automatic_current:
                 return self.ERR_COMMAND_WRONG, np.nan, 0
-            return self.NO_ERR, module * 1e-12, module + 10
+            return self.NO_ERR, module * 1e-12, module
 
     class FakeChannel:
         def __init__(self, module):
@@ -467,6 +468,7 @@ def test_controller_toggle_on_enables_measurement():
 
     controller = module.DMMRController(parent)
     controller.device = FakeDevice()
+    parent.getChannels = lambda: []
 
     controller.toggleOn()
 
@@ -491,6 +493,10 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
         def set_module_auto_range(self, module, enabled, timeout_s=None):
             calls.append(("set_module_auto_range", module, enabled, timeout_s))
             return self.NO_ERR
+
+        def get_module_meas_range(self, module, timeout_s=None):
+            calls.append(("get_module_meas_range", module, timeout_s))
+            return self.NO_ERR, 0, True
 
         def set_automatic_current(self, enabled, timeout_s=None):
             calls.append(("set_automatic_current", enabled, timeout_s))
@@ -527,6 +533,7 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
     controller = module.DMMRController(parent)
     controller.device = FakeDevice()
     controller.detected_module_ids = [1, 2, 3]
+    parent.getChannels = lambda: []
 
     controller.toggleOn()
 
@@ -534,7 +541,9 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
         ("set_enable", True, 7.0),
         ("set_automatic_current", False, 7.0),
         ("set_module_auto_range", 1, True, 7.0),
+        ("get_module_meas_range", 1, 7.0),
         ("set_module_auto_range", 3, True, 7.0),
+        ("get_module_meas_range", 3, 7.0),
     ]
     assert controller.acquiring is True
 
@@ -737,7 +746,7 @@ def test_controller_read_numbers_acquires_lock_for_state_and_module_polling():
 
         def get_module_current(self, module, timeout_s=None):
             self.calls.append((module, timeout_s))
-            return self.NO_ERR, 3.2e-12, 13
+            return self.NO_ERR, 3.2e-12, 3
 
     class FakeTimeoutLock:
         def __init__(self):
@@ -906,7 +915,7 @@ def test_controller_read_numbers_keeps_partial_results_on_timeout():
             self.calls.append((module, timeout_s))
             if module == 2:
                 raise TimeoutError("module read timed out")
-            return self.NO_ERR, module * 1e-12, module + 10
+            return self.NO_ERR, module * 1e-12, module
 
     class FakeChannel:
         def __init__(self, module):
@@ -1466,7 +1475,7 @@ def test_update_values_marshals_monitor_widget_updates(monkeypatch):
             raise AssertionError("must not run directly from updateValues")
 
     channels = [FakeChannel()]
-    controller = object.__new__(module.DMMRController)
+    controller = module.DMMRController(controllerParent=None)
     controller.values = {1: 1.5e-12}
     controller.controllerParent = types.SimpleNamespace(
         isOn=lambda: True,
@@ -1477,5 +1486,8 @@ def test_update_values_marshals_monitor_widget_updates(monkeypatch):
     controller.updateValues()
 
     assert len(dispatched) == 1
-    assert dispatched[0].__name__ == "_sync_monitor_widget"
+    # Even the monitor's Parameter setter must wait for the GUI dispatcher.
+    assert channels[0].monitor is None
+    channels[0]._sync_monitor_widget = lambda: None
+    dispatched[0]()
     assert channels[0].monitor == 1.5e-12

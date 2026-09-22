@@ -33,6 +33,9 @@ including the AMX driver files and vendor DLL.
 - `Available configs`: live list of config slots reported by the connected AMX.
 - `Frequency (kHz)`: oscillator frequency. The same value is exposed directly
   in the plugin toolbar for routine operation.
+- `PSU for CH0-CH1` / `PSU for CH2-CH3`: select the PSU physically feeding each
+  output pair (`None` by default). This is an optional read-only association:
+  it does not connect, enable or change the PSU.
 
 Toolbar notes:
 
@@ -57,10 +60,25 @@ each level: CH0/CH2 together, CH1/CH3 opposite. P1–P3 being stopped does not
 mean that CH1–CH3 are disabled. Stopping P0 can leave outputs at a fixed rail.
 
 These are **expected dual-level switch signals**, not measured waveforms.
-Vpos/Vneg voltage values are **unknown**: the AMX API reports internal supply
-rails, not the external HV amplitudes. On trilevel hardware, each pair CH0/1
-or CH2/3 controls one physical output; the dual-level voltage interpretation
-does not apply. See the [CGC controller manual](https://www.cgc-instruments.com/en/Products/Switches/19AMX/Modules/AMX-CTRL-4ED), pp. 14–15 and 20–27.
+The AMX itself does not report the external HV voltages. With a linked PSU,
+`Levels` uses `monitor` (Vget) from its standard Explorer channels, resolved
+via `DeviceManager.getChannelByName()`: PSU CH0 supplies Vpos (+), CH1 supplies
+Vneg (−). The `PSU` column identifies the source for each pair. Values are
+relative to the **PSU reference**, not necessarily earth: an external offset
+is not included. The association assumes this physical wiring; it cannot
+detect a wrong cable or measure the waveform at the AMX output.
+
+Missing, OFF, busy, faulty or stale PSU readings leave the affected rail as
+`Vpos`/`Vneg`, never a fabricated 0 V or a fallback to `Vset`. The tooltip
+explains why. Readings expire after two PSU polling intervals (minimum 2 s);
+the PSU invalidates its channels to NaN and the display reads them every 500 ms
+without additional hardware reads. Renaming a channel does not change its rail
+mapping; missing or ambiguous channel names are rejected.
+Use current PSU plugins for this interface; standalone AMX operation remains
+available without them.
+
+On trilevel hardware, each pair CH0/1 or CH2/3 controls one physical output;
+the dual-level voltage interpretation does not apply. See the [CGC controller manual](https://www.cgc-instruments.com/en/Products/Switches/19AMX/Modules/AMX-CTRL-4ED), pp. 14–15 and 20–27.
 
 The view uses live trigger/enable selections, pulser sources, controller flags
 and mapping-enable readbacks, never the config name or slot number. External

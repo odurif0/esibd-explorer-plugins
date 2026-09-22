@@ -35,6 +35,9 @@ is incomplete.
 Each real channel must be configured with:
 
 - `Module`: DMMR module address from `0` to `7`
+- `Range mode`: `Auto` (default) or fixed range index `0`–`4`. Choose it in the
+  module card while OFF. ON applies the saved choice and verifies its readback;
+  a failed write or readback aborts startup and triggers verified shutdown.
 
 The plugin auto-discovers installed modules, creates one channel per detected
 module, reads live current measurements as channel monitors, and exposes a
@@ -57,9 +60,22 @@ scrollbars when space is limited. Edit the label below the module number;
 Enter or leaving the field saves it, Escape cancels the edit. Labels are
 stored by module address without renaming recorded channels.
 
-Time and current histories share the same capacity, including before module
-discovery. At the storage limit, older values and timestamps are thinned
-together so each retained measurement keeps its original time.
+`Used` shows the range returned with the current, not the requested range.
+No full-scale values are inferred from these indices. Currents stay uncorrected:
+no offset subtraction or filtering of range transitions is applied.
+
+Time, current and range histories share the same capacity. At the storage
+limit, all three are thinned together. HDF5 exports keep the existing current
+channels and add `DMMR/Measurement ranges/<channel>`, aligned with each current
+and timestamp. Dataset attributes link the three series. Unknown ranges and
+missing readings are NaN; old recordings load without inventing their ranges.
+
+The recording timer no longer repeats a polling result when acquisition is
+slower than recording; it leaves a NaN gap instead. Identical currents from
+separate polling cycles are kept. This does **not** establish fresh ADC
+conversions: manual polling has no conversion timestamp, and the firmware's
+ready-flag behavior still needs a hardware check. Recorded times are Explorer
+recording times, not simultaneous conversion times for all modules.
 
 ## Startup Diagnostics
 
@@ -72,6 +88,18 @@ Capture stops before continuous polling. The raw file in `dmmr/logs/` is reused
 on each attempt and trimmed to 64 KiB after closing. A blocked DLL is never
 closed concurrently: any partial capture is reported, and Explorer must be
 restarted. An unavailable capture is explicitly reported, not silently omitted.
+
+## Optional Zero Check
+
+[`dmmr_zero_check.ipynb`](dmmr_zero_check.ipynb) runs outside Explorer: close
+Explorer first and check the notebook's COM port (default COM15). It records
+all eight modules for 15 minutes in fixed range 0, without offset correction,
+and reports time traces, per-minute means and standard deviations. A completed
+run also reports the final five minutes, without assuming they are stable.
+
+Keep `raw.csv`, `report.json` and `native_startup.log` from the run directory.
+Open inputs can pick up interference; this check does not certify conformance
+or test gain and linearity without a reference current source.
 
 ## Portability Note
 

@@ -82,6 +82,10 @@ class Device:
         self.calls.append(("auto_range", address, enabled))
         return -12 if address == self.auto_range_failure else self.NO_ERR
 
+    def get_module_meas_range(self, address, **kwargs):
+        self.calls.append(("range_readback", address))
+        return self.NO_ERR, 0, True
+
     def get_state(self, **kwargs):
         self.calls.append(("state",))
         return self.NO_ERR, "0x0000", "ST_OVERLOAD"

@@ -22,13 +22,14 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "esibd.const", const)
     types = module.PARAMETERTYPE
     kinds = {"Name": types.TEXT, "Module": types.INT, "Label": types.LABEL,
-             "Color": types.TEXT, "Display": types.BOOL, "Enabled": types.BOOL, "Value": types.FLOAT}
+             "Color": types.TEXT, "Display": types.BOOL, "Enabled": types.BOOL, "Value": types.FLOAT,
+             "Range mode": types.COMBO}
 
     class Channel:
         real = True
         def __init__(self, values):
             self.data = {"Name": "DMMR_M00", "Module": 0, "Label": "", "Color": "#bb4477",
-                         "Display": True, "Enabled": True, "Value": 1.5e-12}
+                         "Display": True, "Enabled": True, "Value": 1.5e-12, "Range mode": "Auto"}
             self.data.update({key: values[key] for key in kinds if key in values})
             self.name = self.data["Name"]
         def asDict(self, **kwargs): return dict(self.data)
@@ -109,6 +110,38 @@ def test_configuration_without_labels_remains_loadable(rig, extension):
     rig.device.loadConfiguration(file=file)
     assert [c.data["Label"] for c in rig.device.channels] == ["", ""]
     assert [c.name for c in rig.device.channels] == ["DMMR_M00", "DMMR_M01"]
+
+
+@pytest.mark.parametrize("extension", [".ini", ".h5"])
+@pytest.mark.parametrize("mode", ["Auto", "0", "1", "2", "3", "4"])
+def test_range_choices_survive_save_reload_and_discovery(rig, extension, mode):
+    rig.device.channels[0].data["Range mode"] = mode
+    file = rig.tmp / ("ranges" + extension)
+    rig.device.exportConfiguration(file=file)
+    rig.device.loadConfiguration(file=file)
+    assert [ch.data["Range mode"] for ch in rig.device.channels] == [mode, "Auto"]
+    planned, _ = rig.module._plan_channel_sync(rig.device._current_channel_items(), [1, 0, 3], "DMMR",
+                                               default_item=rig.Channel({}).asDict())
+    assert {int(item["Module"]): item["Range mode"] for item in planned} == {0: mode, 1: "Auto", 3: "Auto"}
+
+
+@pytest.mark.parametrize("extension", [".ini", ".h5"])
+def test_legacy_configuration_defaults_to_auto(rig, extension):
+    file = rig.tmp / ("legacy_range" + extension)
+    rig.device.exportConfiguration(file=file)
+    if extension == ".ini":
+        config = configparser.ConfigParser()
+        config.read(file, encoding="utf-8")
+        for section in ("Channel_000", "Channel_001"):
+            del config[section]["Range mode"]
+        with file.open("w", encoding="utf-8") as out:
+            config.write(out)
+    else:
+        h5py = pytest.importorskip("h5py")
+        with h5py.File(file, "a") as data:
+            del data["DMMR/Range mode"]
+    rig.device.loadConfiguration(file=file)
+    assert [ch.data["Range mode"] for ch in rig.device.channels] == ["Auto", "Auto"]
 
 
 def test_labels_stay_attached_to_module_addresses_when_discovery_reorders_them(rig):
