@@ -712,6 +712,23 @@ def _get_amx_driver_class() -> type[Any]:
         return _AMX_DRIVER_CLASS
 
 
+# While waiting between polls, re-check OFF this often; always leave the
+# controller lock free for at least the minimum gap between two cycles.
+_POLL_STOP_CHECK_S = 0.05
+_POLL_MIN_GAP_S = 0.02
+
+
+def _wait_for_next_poll(controller: Any, started: float) -> None:
+    """Hold the configured cadence (not interval + read time); return promptly on OFF."""
+    deadline = max(started + controller.controllerParent.interval / 1000,
+                   time.monotonic() + _POLL_MIN_GAP_S)
+    while controller.acquiring:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, _POLL_STOP_CHECK_S))
+
+
 def providePlugins() -> "list[type[Plugin]]":
     return [AMXHDDevice]
 
@@ -3402,6 +3419,7 @@ class AMXHDController(DeviceController):
         monitors and the status badge frozen at their startup snapshot.
         """
         while self.acquiring:
+            started = time.monotonic()
             try:
                 with self._controller_lock_section(
                     "Could not acquire lock to acquire AMX data.",
@@ -3424,7 +3442,7 @@ class AMXHDController(DeviceController):
                         "write is in progress). Readings resume when it completes.",
                         flag=PRINT.WARNING,
                     )
-            time.sleep(self.controllerParent.interval / 1000)
+            _wait_for_next_poll(self, started)
 
     def readNumbers(self, *, already_acquired: bool = False) -> None:
         if self.device is None or not getattr(self, "initialized", False):

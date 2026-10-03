@@ -28,6 +28,15 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   power cycle. Inspect missing/off gauges without unplugging a powered gauge.
   Invalid channels must remain NaN/dashes while valid ones continue. Keep logs
   from any NAK/timeout; the reported intermittence is not physically explained yet.
+  A single NAK/timeout must now cost one sample (NaN gap, "recovered" log), and
+  three consecutive failures must still stop acquisition.
+- **AMPR:** at a safe low voltage and slow ramp, press OFF, then click ON/OFF again
+  during the descent: outputs must go to 0 V at once and the PSU be disabled.
+- **PSU:** check the `Ramp step (V)` / `Ramp step interval (s)` defaults against
+  the measured output slew before relying on them.
+- **Explorer 1.0.1 data files:** save ESI and DMMR data (Ctrl+S and on closing)
+  and reopen them; with Explorer 1.0.1 the ESI export previously failed. Check that
+  the DMMR history length now matches its configured storage.
 - **DMMR:** verify all eight addresses and ranges, OFF/ON and a power cycle between
   connections. Save Explorer and `dmmr_protocol_com*.jsonl*` logs for receive errors.
   For the zero check, document open/grounded inputs and shielding, leave gain/bias

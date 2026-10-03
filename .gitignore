@@ -12,3 +12,4 @@ logs/
 
 # local agent tooling artifacts
 .omo/
+.venv*/

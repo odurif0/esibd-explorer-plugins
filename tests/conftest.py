@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
+import os
 
 import pytest
+
+import explorer_host
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,3 +168,43 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
 @pytest.fixture(scope="session")
 def plugin_specs() -> tuple[PluginSpec, ...]:
     return PLUGIN_SPECS
+
+
+_HOSTS = explorer_host.hosts()
+
+
+def pytest_report_header(config):
+    described = ", ".join(f"{where} {version or 'absent'}" for where, version in _HOSTS)
+    return f"ESIBD Explorer hosts: {described} (plugins target {explorer_host.TARGET_VERSION})"
+
+
+def pytest_sessionstart(session):
+    wrong = explorer_host.mismatches(_HOSTS)
+    if wrong and os.environ.get("ESIBD_REQUIRE_TARGET_HOST") == "1":
+        pytest.exit(f"Real-Explorer tests need ESIBD Explorer {explorer_host.TARGET_VERSION}; found "
+                    + "; ".join(wrong), returncode=4)
+
+
+def pytest_terminal_summary(terminalreporter):
+    wrong = explorer_host.mismatches(_HOSTS)
+    if wrong:
+        terminalreporter.write_line(
+            f"WARNING: real-Explorer tests ran against {'; '.join(wrong)}, not the targeted "
+            f"{explorer_host.TARGET_VERSION}: they do not validate the release host "
+            "(see README, Running Tests).", yellow=True)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Mark tests that start a subprocess (real Explorer/Qt probes) as slow."""
+    sources: dict = {}
+    for item in items:
+        function = getattr(item, "function", None)
+        if function is None:
+            continue
+        if function not in sources:
+            try:
+                sources[function] = "subprocess.run(" in inspect.getsource(function)
+            except (OSError, TypeError):
+                sources[function] = False
+        if sources[function]:
+            item.add_marker(pytest.mark.slow)

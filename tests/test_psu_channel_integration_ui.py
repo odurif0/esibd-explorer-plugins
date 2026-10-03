@@ -62,6 +62,8 @@ def real_framework():
 
     for name in ("INOUT", "PARAMETERTYPE", "PRINT", "PLUGINTYPE", "makeWrapper"):
         extract("const.py", name)
+    from explorer_host import add_const_names
+    add_const_names(root, ns)  # e.g. Explorer 1.0.1's valid_chars / validateText
     for name in ("DynamicNp", "ParameterWidget", "LabviewSpinBox", "LabviewDoubleSpinBox", "LabviewSciSpinBox",
                  "Label", "ColorButton", "CheckBox", "ToolButton", "LineEdit", "Parameter", "parameterDict", "RelayChannel", "Channel"):
         extract("core.py", name)
@@ -76,7 +78,7 @@ def real_framework():
     Device.getChannels = lambda self: self.channels
     Device.initialized = property(lambda self: bool(self.controller and self.controller.initialized))
     Device.subtractBackgroundActive = lambda self: False
-    Device.getIcon = lambda self: QtGui.QIcon()
+    Device.getIcon = lambda self, *args, **kwargs: QtGui.QIcon()  # 1.0.1 passes desaturate=
     device_node = next(n for n in trees["plugins.py"].body if isinstance(n, ast.ClassDef) and n.name == "Device")
     for name in ("updateValues", "applyValues"):
         setattr(Device, name, extract("plugins.py", name, device_node))
@@ -128,6 +130,7 @@ def probe(folder, output, configuration="bootstrap"):
     manager = ns["DeviceManager"]()
     plugin_manager = SimpleNamespace(
         Device=ns["Device"], ChannelManager=ns["Device"], DeviceManager=manager,
+        Settings=SimpleNamespace(loading=False, settings={}),  # Explorer 1.0.1 Channel.__init__
         loading=True, closing=False, plugins=[parent], connectAllSources=lambda: None,
         reconnectSource=lambda *a: None,
     )

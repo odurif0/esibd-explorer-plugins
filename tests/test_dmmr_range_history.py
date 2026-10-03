@@ -36,6 +36,10 @@ def rig(tmp_path, monkeypatch):
     ns["PRINT"] = module.PRINT
     monkeypatch.setattr(module.Channel, "appendValue", host_append, raising=False)
     monkeypatch.setattr(module.Channel, "clearHistory", host_clear, raising=False)
+    if "def clearHistoryInternal" in (host / "core.py").read_text():  # Explorer 1.0.1
+        monkeypatch.setattr(module.Channel, "clearHistoryInternal",
+                            extract("core.py", "clearHistoryInternal", "Channel"), raising=False)
+    monkeypatch.setattr(module.Channel, "getRecordedParameters", lambda self: [], raising=False)
     monkeypatch.setattr(module.Device, "appendOutputData", exporter, raising=False)
     monkeypatch.setattr(module.Device, "restoreOutputData", restore, raising=False)
     monkeypatch.setattr(module.Device, "estimateStorage", estimate, raising=False)
@@ -46,6 +50,7 @@ def rig(tmp_path, monkeypatch):
     device = module.DMMRDevice.__new__(module.DMMRDevice)
     device.channels = []
     device.time = buffer(dtype=np.float64, max_size=1000)
+    device.defaultChannel = SimpleNamespace(getRecordedParameters=lambda: [])  # Explorer 1.0.1
     device.maxDataPoints = 1000
     device.MAXDATAPOINTS = "Max data points"
     device.maxStorage = 50

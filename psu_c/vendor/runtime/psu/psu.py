@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -69,6 +70,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         self._dll_port_claimed = False
         self._transport_poisoned = False
         self._transport_error = None
+        self._setpoint_limit_cache: Optional[dict] = None
 
         self.thread_lock = thread_lock or threading.Lock()
 
@@ -535,6 +537,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
 
     def load_config(self, config_number: int, timeout_s: Optional[float] = None) -> None:
         """Load and apply one PSU configuration stored in controller NVM."""
+        self._forget_setpoint_limits()
         self._require_connected()
         self.logger.info(f"Loading PSU config {config_number}")
         timeout_s = self._resolve_io_timeout(timeout_s)
@@ -630,6 +633,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         timeout_s: Optional[float] = None,
     ) -> None:
         """Set the PSU device enable flag."""
+        self._forget_setpoint_limits()
         self._require_connected()
         timeout_s = self._resolve_io_timeout(timeout_s)
         status = self._call_locked_with_timeout(
@@ -708,6 +712,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         timeout_s: Optional[float] = None,
     ) -> None:
         """Set the full-range state for the two PSU channels."""
+        self._forget_setpoint_limits()
         self._require_connected()
         timeout_s = self._resolve_io_timeout(timeout_s)
         status = self._call_locked_with_timeout(
@@ -771,8 +776,31 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         self._raise_on_status(status, "get_interlock_enable")
         return connector_output, connector_bnc
 
+    @contextlib.contextmanager
+    def cached_setpoint_limits(self):
+        """Reuse each verified setpoint limit within one serialized command sequence.
+
+        A software ramp sends many setpoints on the same channel and range;
+        reading the limit before every step doubles serial traffic. The cache
+        ends with the block and is dropped by any config, range or enable change.
+        """
+        previous = getattr(self, "_setpoint_limit_cache", None)
+        self._setpoint_limit_cache = {} if previous is None else previous
+        try:
+            yield
+        finally:
+            self._setpoint_limit_cache = previous
+
+    def _forget_setpoint_limits(self) -> None:
+        cache = getattr(self, "_setpoint_limit_cache", None)
+        if cache is not None:
+            cache.clear()
+
     def _read_device_limit(self, channel: int, quantity: str, timeout_s) -> Optional[float]:
         """Read the device-reported setpoint limit (V or A), or return None."""
+        cache = getattr(self, "_setpoint_limit_cache", None)
+        if cache is not None and (channel, quantity) in cache:
+            return cache[(channel, quantity)]
         try:
             if quantity == "voltage":
                 _setpoint, limit = self.get_channel_voltage_limits(
@@ -784,6 +812,8 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
                 )
         except Exception:
             return None
+        if cache is not None and limit is not None and math.isfinite(limit) and limit >= 0:
+            cache[(channel, quantity)] = limit
         return limit
 
     def _bounded_setpoint(

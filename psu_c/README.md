@@ -84,6 +84,9 @@ Validating `Vset` or `Ilim` sends only that setting for that channel; other
 fields are not reapplied. An enabled channel moves from its current hardware
 setpoint to the new voltage without being switched OFF or passing through zero;
 the other channel is left unchanged. Larger changes are stepped in either direction.
+The advanced settings `Ramp step (V)` (default 100 V) and `Ramp step interval (s)`
+(default 0.05 s) set the step size and pause; tune them on the real hardware.
+Each step adds its serial round trips, so the actual rate is below step / interval.
 Reconfiguration retains the disable/verification sequence, and range switching
 still requires measured discharge. A failed check triggers output-disable recovery.
 

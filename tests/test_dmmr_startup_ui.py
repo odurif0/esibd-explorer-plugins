@@ -75,7 +75,7 @@ def probe(legacy, output):
     parent.useDisplays, parent.useBackgrounds, parent.logY = True, False, False
     parent.convertDataDisplay = parent.liveDisplay = None
     parent.controller = None
-    parent.recording, parent.maxDataPoints = False, 100000
+    parent.recording, parent.maxDataPoints, parent.maxStorage = False, 100000, 50
     parent.MAXDATAPOINTS = "Max data points"
     parent.main_state = "Disconnected"
     parent.confINI, parent.UTF8 = "DMMR.ini", "utf-8"
@@ -87,7 +87,8 @@ def probe(legacy, output):
     parent.advancedAction = SimpleNamespace(state=False)
     parent.pluginManager = SimpleNamespace(
         Device=ns["Device"], ChannelManager=ns["Device"], loading=True, closing=False,
-        Settings=SimpleNamespace(settings={"DMMR/Max data points": SimpleNamespace(getWidget=lambda: None)}),
+        Settings=SimpleNamespace(loading=False,
+                                 settings={"DMMR/Max data points": SimpleNamespace(getWidget=lambda: None)}),
         DeviceManager=SimpleNamespace(globalUpdate=lambda **kwargs: None),
         reconnectSource=lambda *args: None,
     )

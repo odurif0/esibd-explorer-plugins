@@ -72,6 +72,7 @@ def inject_reconnect_range_failure(device):
     device.set_module_meas_range, device.get_state, device.purge = write_range, read_state, resynchronize
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize('scenario', ['overnight', 'overnight_receive_error',
     'overnight_range_setup_error', 'overnight_matching_ranges', 'twelve_short_runs'])
 def test_full_campaign_timing_and_disconnected_pauses(ns, campaign, scenario):

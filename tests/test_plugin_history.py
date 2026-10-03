@@ -75,6 +75,8 @@ def rig(monkeypatch, request):
     device = cls.__new__(cls)
     device.channels = []
     device.time = buffer(dtype=np.float64)  # Same allocation as Device.__init__.
+    # Explorer 1.0.1 budgets recorded Parameters through Device.defaultChannel.
+    device.defaultChannel = SimpleNamespace(getRecordedParameters=lambda: [])
     device.maxDataPoints = 100000
     device.maxStorage = 50
     device.interval = 1000
@@ -96,6 +98,9 @@ def rig(monkeypatch, request):
         monitor = 0.0
         appendValue = append_value
 
+        def getRecordedParameters(self):  # Explorer 1.0.1 records extra Parameters
+            return []
+
     def add_channel():
         channel = Channel()
         # Channel.__init__ and Channel.clearHistory both capture this setting.
@@ -111,12 +116,11 @@ def rig(monkeypatch, request):
             append_data(device, nan=gap)
 
     def small_limit(limit):
-        native_limit = limit
         if device.name == "DMMR":
-            # DMMR adjusts the host estimate to budget its extra range series.
-            current_bytes = 4 * len(device.channels) * (2 if device.useBackgrounds else 1)
-            native_limit = int(np.ceil(limit * (current_bytes + 4 * len(device.channels) + 8) / current_bytes))
-        monkeypatch.setattr(module.Device, "estimateStorage", lambda self: setattr(self, "maxDataPoints", native_limit))
+            # DMMR budgets its own payload (time, current, range) from maxStorage.
+            point_bytes = 4 * len(device.channels) * (3 if device.useBackgrounds else 2) + 8
+            device.maxStorage = (limit * point_bytes + 8.5) / 1024**2
+        monkeypatch.setattr(module.Device, "estimateStorage", lambda self: setattr(self, "maxDataPoints", limit))
         device.estimateStorage()
 
     return SimpleNamespace(module=module, device=device, buffer=buffer,

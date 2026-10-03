@@ -48,8 +48,8 @@ def test_off_cancels_inflight_output_command(monkeypatch, command, shutdown):
         def set_hv_module_target(self, address, target, **kwargs):
             self.target = target
             calls.append(("target", target))
-            if command == "hv":
-                pause()
+            if command in {"hv", "ramp"}:
+                pause()  # OFF arrives while this (ramp step) command is in flight.
             return target
 
         def set_heater_temperature(self, target, **kwargs):
@@ -86,7 +86,6 @@ def test_off_cancels_inflight_output_command(monkeypatch, command, shutdown):
         enabled=True, value=300.0, module_address=lambda: 0 if command == "heat" else 1,
         is_heat_channel=lambda: command == "heat", name="test",
     )
-    monkeypatch.setattr(module, "time", types.SimpleNamespace(sleep=lambda _: pause()))
 
     def guarded(fn):
         try:

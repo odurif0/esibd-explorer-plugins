@@ -54,6 +54,9 @@ def probe(folder, action, output):
               PARAMETERTYPE=Enum('PARAMETERTYPE', 'COMBO INTCOMBO FLOATCOMBO TEXT INT FLOAT EXP BOOL COLOR LABEL PATH'))
     for qt in (QtCore, QtGui, QtWidgets):
         ns.update({name: getattr(qt, name) for name in dir(qt) if name.startswith('Q')})
+    ns.update(pyqtSignal=QtCore.pyqtSignal, pyqtSlot=QtCore.pyqtSlot)  # Explorer 1.0.1 Parameter
+    from explorer_host import add_const_names
+    add_const_names(host.parent, ns)
     tree = ast.parse(host.read_text())
 
     def extract(name, parent=None):

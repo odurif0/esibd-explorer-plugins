@@ -57,6 +57,8 @@ def probe(case, output):
     app = QApplication([])
     ns = dict(np=np, pg=pg, Qt=Qt, QTimer=QTimer, pyqtSignal=pyqtSignal, QFont=QFont, Path=Path,
               colors=types.SimpleNamespace(fg="#202020", bg="#ffffff"), cast=lambda _, obj: obj)
+    from explorer_host import add_const_names
+    add_const_names(host, ns)  # e.g. getTestMode, used by Explorer 1.0.1 plot widgets
 
     def extract(path, name, parent=None):
         tree = ast.parse(path.read_text())
@@ -73,6 +75,9 @@ def probe(case, output):
         name: extract(host / "plugins.py", name, "LiveDisplay")
         for name in ("plotGroup", "plotChannel")
     })
+    from explorer_host import has_method
+    if has_method(host, "Plugin", "getQtPen"):  # Explorer 1.0.1 plotGroup builds pens through it
+        host_live.getQtPen = extract(host / "plugins.py", "getQtPen", "Plugin")
 
     from test_dmmr_plugin_behavior import _install_esibd_stubs
     _install_esibd_stubs()
@@ -114,6 +119,9 @@ def probe(case, output):
         logY = False
         plotCurve = None
         appendValue = append
+        def getRecordedParameters(self): return []  # Explorer 1.0.1 recorded Parameters
+        legendName = property(lambda self: self.name)  # Explorer 1.0.1 plotGroup
+        def getDisplayUnit(self): return self.unit  # Explorer 1.0.1 plotGroup
         def __init__(self, number):
             self.number = number
             self.name = f"DMMR_M{number:02}"
@@ -226,6 +234,7 @@ def probe(case, output):
         ns.update(time=types.SimpleNamespace(time=lambda: clock.now), INOUT=types.SimpleNamespace(IN=1, OUT=2))
         device.channels = []
         device.time = dynamic_np(dtype=np.float64)
+        device.defaultChannel = types.SimpleNamespace(getRecordedParameters=lambda: [])  # Explorer 1.0.1
         device.maxDataPoints, device.maxStorage, device.interval = 100000, 50, 1000
         device.useBackgrounds = False
         device.MAXDATAPOINTS = "Max data points"

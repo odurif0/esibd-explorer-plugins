@@ -658,6 +658,23 @@ def _get_dmmr_driver_class() -> type[Any]:
         return _DMMR_DRIVER_CLASS
 
 
+# While waiting between polls, re-check OFF this often; always leave the
+# controller lock free for at least the minimum gap between two cycles.
+_POLL_STOP_CHECK_S = 0.05
+_POLL_MIN_GAP_S = 0.02
+
+
+def _wait_for_next_poll(controller: Any, started: float) -> None:
+    """Hold the configured cadence (not interval + read time); return promptly on OFF."""
+    deadline = max(started + controller.controllerParent.interval / 1000,
+                   time.monotonic() + _POLL_MIN_GAP_S)
+    while controller.acquiring:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, _POLL_STOP_CHECK_S))
+
+
 def providePlugins() -> "list[type[Plugin]]":
     """Return the plugins provided by this module."""
     return [DMMRDevice]
@@ -1900,12 +1917,16 @@ class DMMRDevice(Device):
     def estimateStorage(self) -> None:
         """Keep time, current and range buffers on the same nonzero limit."""
         if self.channels:
-            super().estimateStorage()
-            # The host budgets 4 bytes per current/background point. Include
-            # another 4 per range and 8 per timestamp in our payload estimate.
-            current_bytes = 4 * len(self.channels) * (2 if self.useBackgrounds else 1)
-            point_bytes = current_bytes + 4 * len(self.channels) + 8
-            self.maxDataPoints = max(1, int(self.maxDataPoints * current_bytes / point_bytes))
+            super().estimateStorage()  # host tooltip and bookkeeping
+            # Budget the whole payload directly; host formulas differ (1.0.1
+            # already counts the timestamp and recorded Parameters, 0.8.2 does not).
+            # Per point: float32 current (+ background, + recorded Parameters),
+            # float32 range, float64 timestamp.
+            default_channel = getattr(self, "defaultChannel", None)
+            recorded = getattr(default_channel, "getRecordedParameters", None)
+            series = (2 if self.useBackgrounds else 1) + (len(recorded()) if callable(recorded) else 0) + 1
+            point_bytes = 4 * len(self.channels) * series + 8
+            self.maxDataPoints = max(1, int((self.maxStorage * 1024**2 - 8) // point_bytes))
             widget = self.pluginManager.Settings.settings[
                 f"{self.name}/{self.MAXDATAPOINTS}"
             ].getWidget()
@@ -3045,6 +3066,7 @@ class DMMRController(DeviceController):
     def runAcquisition(self) -> None:
         """Own the polling lock once, as in the AMPR/AMX acquisition loops."""
         while self.acquiring:
+            started = time.monotonic()
             try:
                 with self._controller_lock_section(
                     "Could not acquire lock to acquire DMMR data.",
@@ -3061,7 +3083,7 @@ class DMMRController(DeviceController):
                 # sample must not be recorded again as a fresh measurement.
                 self.initializeValues(reset=True)
             self.signalComm.updateValuesSignal.emit()
-            time.sleep(self.controllerParent.interval / 1000)
+            _wait_for_next_poll(self, started)
 
     def readNumbers(self, *, already_acquired: bool = False) -> None:
         # A new sample starts unknown: only a successful read may populate it.

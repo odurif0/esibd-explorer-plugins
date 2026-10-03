@@ -11,7 +11,7 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure",
+CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure", "transient_nak",
          "simulation", "history", "settings", "reconnect", "render", "export", "pause", "queued_events", "statuses", "persistence", "pending_close", "pending_close_failure", "isolation", "negative", "global_action", "discovery", "port_names", "power_switch", "connection_diagnostics", "read_diagnostics", "open_diagnostics", "cards")
 
 
@@ -163,6 +163,13 @@ def probe(case, output):
             port.fail_close = True
         if case == "read_failure":
             port.responses["PRX"] = "garbage"
+        if case == "transient_nak":
+            def nak_second_prx(data):
+                if port.ack == b"\x15\r\n":
+                    port.ack = b"\x06\r\n"
+                if data == b"PRX\r" and port.writes.count(b"PRX\r") == 2:
+                    port.ack = b"\x15\r\n"
+            port.on_write = nak_second_prx
         if case == "negative":
             from test_tpg366_protocol import frame
             port.responses["PRX"] = frame(values=["-1.0000E-03"] * 6)
@@ -353,7 +360,8 @@ def probe(case, output):
             assert not device.isOn()
             return 0
         if case in {"connection_diagnostics", "read_diagnostics", "open_diagnostics"}:
-            wait(lambda: "error — disconnected" in device.main_state)
+            # A persistent read fault stops after the bounded resynchronization attempts.
+            wait(lambda: "error — disconnected" in device.main_state, 10)
             text = "\n".join(str(entry) for entry in logs)
             assert "ON requested" in text and "TEST-USB" in text and "9600 baud" in text and "8N1" in text, text
             assert "OFF requested" not in text, text  # A spontaneous error is not a user OFF.
@@ -380,10 +388,28 @@ def probe(case, output):
             return 0
         if case == "read_failure":
             wait(lambda: "error — disconnected" in device.main_state)
+            text = "\n".join(str(entry) for entry in logs)
+            assert text.count("Pressure sample missed") == module._READ_FAILURE_LIMIT - 1, text
+            assert ports[0].writes.count(b"PRX\r") == module._READ_FAILURE_LIMIT
             assert all(math.isnan(ch.value) for ch in device.channels)
             assert not device.recording and not device.isOn() and not device.initialized
             assert_channel_colors(False)
             assert ports[0].close_count == 1
+            return 0
+        if case == "transient_nak":
+            wait(lambda: bool(ports) and ports[0].writes.count(b"PRX\r") >= 3 and all(math.isfinite(ch.value) for ch in device.channels), 8)
+            text = "\n".join(str(entry) for entry in logs)
+            assert "Pressure sample missed" in text and "PRX [waiting for ACK]" in text and "NAK" in text, text
+            assert "recovered after 1 failed" in text, text
+            assert device.main_state == "Acquiring" and device.initialized and device.recording
+            assert len(ports) == 1 and ports[0].close_count == 0
+            assert ports[0].writes.count(b"AYT\r") == 2  # one initial, one resynchronization
+            times = device.time.get()
+            assert np.all(np.diff(times) > 0), times.tolist()
+            for channel in device.channels:
+                history = channel.values.get()
+                assert np.isnan(history).any(), "the lost packet must be recorded as a gap"
+                assert np.isfinite(history[-1])
             return 0
         wait(lambda: all(math.isfinite(ch.value) for ch in device.channels))
         if case == "simulation":
