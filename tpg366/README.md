@@ -36,8 +36,13 @@ A failed port close leaves **Disconnect unconfirmed**; click OFF again to retry.
 - Underrange, overrange, sensor errors, switched-off or missing gauges, and
   identification errors appear separately in **Status**, with **NaN** data
   rather than zero or an old pressure. Other valid channels keep updating.
-- USB/protocol errors invalidate current readings and stop acquisition.
-  Previously recorded data is retained. ON reconnects after a confirmed close.
+- A NAK, timeout or corrupt frame costs that sample only: readings show NaN,
+  the lost packet is recorded as a gap, and the plugin resynchronizes with the
+  same read-only handshake as ON (ETX, `AYT`, `TID`; same controller required).
+  Three consecutive failed transactions, a unit change, an unsupported unit or
+  an open/close error stop acquisition. Previously recorded data is retained.
+  ON reconnects after a confirmed close. The pressure–temperature notebook keeps
+  its stricter rule: the first pressure read error stops its heating protocol.
 - Explorer's test mode generates explicitly labelled **simulation** data without
   opening a serial port. Disable test mode for real measurements.
 

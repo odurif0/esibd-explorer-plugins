@@ -477,13 +477,16 @@ class ESIDevice(Device):
 
     LiveDisplay = _ESILiveDisplay
 
-    def appendOutputData(self, h5file, useDefaultFile: bool = False) -> None:
+    def appendOutputData(self, h5file, useAllHistory: bool | None = None, *, useDefaultFile: bool = False) -> None:
         """Keep Explorer's file schema, but record each channel's physical unit."""
         from esibd.const import OUTPUTCHANNELS, UNIT
 
+        # Explorer 1.0.1 calls this with useAllHistory=; 0.8.x used useDefaultFile=.
+        # The host's second positional parameter has the same meaning in both.
+        full_history = useDefaultFile if useAllHistory is None else useAllHistory
         path = f"{self.name}/{OUTPUTCHANNELS}"
         previous = set(h5file[path]) if path in h5file else set()
-        super().appendOutputData(h5file, useDefaultFile=useDefaultFile)
+        super().appendOutputData(h5file, full_history)
         group = h5file.get(path)
         if group is None:
             return
@@ -1464,8 +1467,9 @@ class ESIDevice(Device):
             minimum=0.0,
             maximum=_ESI_MAX_VOLTAGE,
             toolTip=(
-                "Software ramp rate for normal target changes and ON/OFF "
-                "transitions. Set to 0 for an immediate change."
+                "Software ramp rate for changes to an active HV target. Initial "
+                "activation uses the module's own voltage steps; disabling requests "
+                "zero immediately. Set to 0 for an immediate change."
             ),
             parameterType=PARAMETERTYPE.FLOAT,
             attr="ramp_rate_v_s",
@@ -2541,8 +2545,8 @@ class ESIController(DeviceController):
                 value,
                 timeout_s=float(self.controllerParent.poll_timeout_s),
             )
-            if step < steps:
-                time.sleep(step_interval_s)
+            if step < steps and cancel.wait(step_interval_s):
+                return False
         return not cancel.is_set()
 
     def shutdownCommunication(self) -> bool:

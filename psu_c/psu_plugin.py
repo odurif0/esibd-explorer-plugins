@@ -157,7 +157,8 @@ _PSU_RANGE_SWITCH_SAFE_V = 5.0
 _PSU_RANGE_SWITCH_SETTLE_S = 2.0
 # Software voltage ramp to limit dV/dt inrush on enabled channels. Channels
 # enabled with a target above the threshold are held at 0 V pre-enable and
-# stepped up after enable. TUNE THESE ON THE REAL HARDWARE.
+# stepped up after enable. Step and interval are only defaults for the advanced
+# "Ramp step" settings: tune them on the real hardware.
 _PSU_VOLTAGE_RAMP_THRESHOLD_V = 50.0
 _PSU_VOLTAGE_RAMP_STEP_V = 100.0
 _PSU_VOLTAGE_RAMP_STEP_S = 0.05
@@ -1137,6 +1138,8 @@ class PSUDevice(Device):
     OUTPUTS = "Outputs"
     AVAILABLE_CONFIGS = "Available configs"
     INTERLOCK_MONITORING = "Interlock monitoring"
+    RAMP_STEP = "Ramp step (V)"
+    RAMP_STEP_INTERVAL = "Ramp step interval (s)"
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -3405,6 +3408,30 @@ class PSUDevice(Device):
             advanced=True,
             event=self._interlock_monitoring_changed,
         )
+        settings[f"{self.name}/{self.RAMP_STEP}"] = parameterDict(
+            value=_PSU_VOLTAGE_RAMP_STEP_V,
+            minimum=1.0,
+            maximum=1000.0,
+            toolTip=(
+                "Largest voltage increment of the software ramp on an enabled output "
+                "(cold starts above 50 V and Vset edits). Tune on the real hardware."
+            ),
+            parameterType=PARAMETERTYPE.FLOAT,
+            attr="ramp_step_v",
+            advanced=True,
+        )
+        settings[f"{self.name}/{self.RAMP_STEP_INTERVAL}"] = parameterDict(
+            value=_PSU_VOLTAGE_RAMP_STEP_S,
+            minimum=0.01,
+            maximum=5.0,
+            toolTip=(
+                "Pause after each software ramp step. Nominal rate = step / interval; "
+                "serial round trips add to each step. OFF interrupts the pause."
+            ),
+            parameterType=PARAMETERTYPE.FLOAT,
+            attr="ramp_step_interval_s",
+            advanced=True,
+        )
         if f"{self.name}/Interval" in settings:
             settings[f"{self.name}/Interval"][Parameter.VALUE] = 1000
         if f"{self.name}/{self.MAXDATAPOINTS}" in settings:
@@ -5368,16 +5395,31 @@ class PSUController(DeviceController):
         setpoint, never an assumed zero or the potentially stale GUI value.
         Step size/cadence bound commanded increments, not measured output slew.
         """
+        step_v, step_s = self._ramp_profile()
         delta_v = target_v - start_v
-        steps = max(1, int(np.ceil(abs(delta_v) / _PSU_VOLTAGE_RAMP_STEP_V)))
-        for i in range(1, steps + 1):
-            if cancel.is_set():
-                return False
-            voltage_v = target_v if i == steps else start_v + delta_v * i / steps
-            device.set_channel_voltage(channel, voltage_v, timeout_s=timeout_s)
-            if cancel.wait(_PSU_VOLTAGE_RAMP_STEP_S):
-                return False
+        steps = max(1, int(np.ceil(abs(delta_v) / step_v)))
+        cached_limits = getattr(device, "cached_setpoint_limits", None)
+        # The controller lock is held: one verified limit read per ramp, not per step.
+        with cached_limits() if callable(cached_limits) else contextlib.nullcontext():
+            for i in range(1, steps + 1):
+                if cancel.is_set():
+                    return False
+                voltage_v = target_v if i == steps else start_v + delta_v * i / steps
+                device.set_channel_voltage(channel, voltage_v, timeout_s=timeout_s)
+                if cancel.wait(step_s):
+                    return False
         return True
+
+    def _ramp_profile(self) -> tuple[float, float]:
+        """Return the operator-tuned (step V, step interval s), else the defaults."""
+        parent = self.controllerParent
+        step_v = _coerce_float(getattr(parent, "ramp_step_v", _PSU_VOLTAGE_RAMP_STEP_V), np.nan)
+        step_s = _coerce_float(getattr(parent, "ramp_step_interval_s", _PSU_VOLTAGE_RAMP_STEP_S), np.nan)
+        if not np.isfinite(step_v) or step_v <= 0:
+            step_v = _PSU_VOLTAGE_RAMP_STEP_V
+        if not np.isfinite(step_s) or step_s <= 0:
+            step_s = _PSU_VOLTAGE_RAMP_STEP_S
+        return step_v, step_s
 
     def applyManualState(
         self, manual_state: dict[str, Any], *, cancel: Event | None = None

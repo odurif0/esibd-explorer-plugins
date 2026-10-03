@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+import time
 from enum import Enum
 from pathlib import Path
 
@@ -697,6 +698,26 @@ def test_normal_target_change_is_ramped_in_bounded_steps(monkeypatch):
         (1, 500.0 / 3.0, 2.0),
         (1, 250.0, 2.0),
     ]
+
+
+def test_ramp_wait_yields_to_off_without_another_step():
+    module = _load_plugin()
+    calls = []
+    parent = types.SimpleNamespace(ramp_rate_v_s=10.0, poll_timeout_s=2.0)
+    controller = module.ESIController(parent)
+
+    class FakeDevice:
+        def set_hv_module_target(self, address, value, timeout_s):
+            calls.append(value)
+            controller._output_cancel.set()  # OFF arrives during the first step
+
+    controller.device = FakeDevice()
+    started = time.monotonic()
+
+    assert controller._ramp_target(1, 0.0, 100.0) is False
+
+    assert calls == [1.0]
+    assert time.monotonic() - started < 0.05, "OFF must not wait for the step interval"
 
 
 def test_active_hv_target_change_uses_configured_ramp(monkeypatch):

@@ -96,6 +96,9 @@ def probe(case, output):
         name: extract("plugins.py", name, "LiveDisplay")
         for name in ("getGroups", "initFig", "updateStackedViews", "updateMouseEnabled", "plot", "plotGroup", "plotChannel")
     })
+    from explorer_host import has_method
+    if has_method(host, "Plugin", "getQtPen"):  # Explorer 1.0.1 plotGroup builds pens through it
+        plugins.LiveDisplay.getQtPen = extract("plugins.py", "getQtPen", "Plugin")
     constants = types.ModuleType("esibd.const")
     for node in trees["const.py"].body:
         if isinstance(node, ast.Assign):
@@ -107,6 +110,10 @@ def probe(case, output):
     for name in ("appendOutputData", "appendData"):
         setattr(plugins.Device, name, extract("plugins.py", name, "Device"))
     core.Channel.appendValue = extract("core.py", "appendValue", "Channel")
+    if not hasattr(core.Channel, "getRecordedParameters"):  # used by Explorer 1.0.1 appendValue
+        core.Channel.getRecordedParameters = lambda self: []
+    if not hasattr(core.Channel, "legendName"):  # used by Explorer 1.0.1 plotGroup
+        core.Channel.legendName = property(lambda self: self.name)
     spec = importlib.util.spec_from_file_location("esi_current_ui_probe", ROOT / "esi/esi_plugin.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -121,6 +128,7 @@ def probe(case, output):
     device.getChannels = lambda: device.channels
     device.getDataChannels = device.getChannels
     device.getActiveChannels = device.getChannels
+    device.getActiveChannelsAndParameters = device.getChannels  # Explorer 1.0.1 getGroups
     device.isOn = lambda: True
     device.subtractBackgroundActive = lambda: False
     device.print = lambda *args, **kw: None

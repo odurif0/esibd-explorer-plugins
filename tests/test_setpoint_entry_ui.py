@@ -106,6 +106,9 @@ def probe(folder, surface, output, *, actions=False):
                   PARAMETERTYPE=Enum("PARAMETERTYPE", "COMBO INTCOMBO FLOATCOMBO TEXT INT FLOAT EXP BOOL COLOR LABEL PATH"))
         for qt in (QtCore, QtGui, QtWidgets):
             ns.update({name: getattr(qt, name) for name in dir(qt) if name.startswith("Q")})
+        ns.update(pyqtSignal=QtCore.pyqtSignal, pyqtSlot=QtCore.pyqtSlot)  # Explorer 1.0.1 Parameter
+        from explorer_host import add_const_names
+        add_const_names(host.parent, ns)
         tree = ast.parse(host.read_text())
         for name in ("ParameterWidget", "LabviewSpinBox", "LabviewDoubleSpinBox", "LabviewSciSpinBox", "Parameter"):
             node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name)

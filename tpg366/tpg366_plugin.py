@@ -67,6 +67,20 @@ def _load_panel():
     return module.PressurePanel
 
 
+# A NAK, timeout or corrupt frame costs one sample, then a resynchronization.
+# This many consecutive failed transactions (reads or resyncs) stop acquisition.
+_READ_FAILURE_LIMIT = 3
+_RESYNC_PAUSE_S = 0.2
+_TRANSIENT_FRAME_ERRORS = ("Expected six status/pressure pairs", "Unknown gauge status", "Invalid pressure")
+
+
+def _transient_read_error(exc):
+    """Serial transaction or frame-format failure; unit errors stay fatal."""
+    text = str(exc)
+    return text.startswith(tuple(f"{command} [" for command in _protocol.READ_COMMANDS)) or text.startswith(
+        _TRANSIENT_FRAME_ERRORS)
+
+
 def _serial_port_name(value):
     """Accept Windows COM numbers like the CGC plugins, retaining explicit paths."""
     port = str(value).strip()
@@ -224,8 +238,9 @@ class TPG366(Device):
             self.closeCommunication()
 
     def initializeCommunication(self):
-        if self.controller.initializeCommunication():
-            self.appendData(nan=True)  # Do not interpolate across a disconnected interval.
+        # Do not interpolate across a disconnected interval. The gap must be
+        # timestamped before the worker can deliver (and record) its first packet.
+        if self.controller.initializeCommunication(before_start=lambda: self.appendData(nan=True)):
             self.startRecording()
 
     def startRecording(self):
@@ -258,6 +273,13 @@ class TPG366(Device):
         # Pending initialization / unconfirmed port closure must not disappear
         # from Explorer's "communication still active" closing check.
         return self.controller.initialized or self.controller.initializing
+
+
+class _MissedReading:
+    """A lost packet: only its PC timestamp is recorded, with NaN pressures."""
+
+    def __init__(self, received_at):
+        self.received_at = received_at
 
 
 class PressureChannel(Channel):
@@ -340,7 +362,7 @@ class PressureController(DeviceController):
         self.interval_s = 1.0
         self.initialized = self.initializing = self.acquiring = False
 
-    def initializeCommunication(self):
+    def initializeCommunication(self, before_start=None):
         if self.initialized or self.initializing or (self._worker is not None and self._worker.is_alive()):
             return False  # A finished worker may still have a close result queued for Qt.
         if self._retained_port is not None:
@@ -367,6 +389,8 @@ class PressureController(DeviceController):
         self._worker = Thread(target=self._run, args=(self._generation, self._stop, port, baudrate, self._simulation),
                               name="TPG366 USB", daemon=True)
         self.initThread = self.acquisitionThread = self._worker
+        if before_start is not None:
+            before_start()
         self._worker.start()
         return True
 
@@ -389,12 +413,35 @@ class PressureController(DeviceController):
             link = _protocol.TPG366Link(port, stop)
             phase = "initialization"
             link.initialize()
+            identification = link.identification
             self.update.emit((generation, "ready", (link.identification, link.gauges)))
-            phase = "pressure acquisition"
+            failures, resync = 0, False
             while not stop.is_set():
                 started = time.monotonic()
-                reading = link.read_pressures()
-                self.update.emit((generation, "sample", reading))
+                try:
+                    if resync:
+                        phase = "resynchronization"
+                        if stop.wait(_RESYNC_PAUSE_S):
+                            break
+                        link.initialize()  # ETX, AYT synchronization and TID; read-only.
+                        if link.identification != identification:
+                            raise RuntimeError(f"Controller identification changed: {link.identification!r}.")
+                        self.update.emit((generation, "resynchronized", link.gauges))
+                        resync = False
+                    phase = "pressure acquisition"
+                    reading = link.read_pressures()
+                except _protocol.ProtocolError as exc:
+                    failures += 1
+                    if failures >= _READ_FAILURE_LIMIT or not _transient_read_error(exc):
+                        raise
+                    resync = True
+                    self.update.emit((generation, "missed", (
+                        f"{port_name}, {baudrate} baud, 8N1; {phase}: {type(exc).__name__}: {exc}", time.time())))
+                else:
+                    if failures:
+                        self.update.emit((generation, "recovered", failures))
+                    failures = 0
+                    self.update.emit((generation, "sample", reading))
                 stop.wait(max(0, self.interval_s - (time.monotonic() - started)))
         except _protocol.Cancelled:
             pass
@@ -471,7 +518,7 @@ class PressureController(DeviceController):
         if generation != self._generation:
             return
         parent = self.controllerParent
-        if kind in {"ready", "sample", "error"} and self._stop.is_set():
+        if kind in {"ready", "sample", "error", "missed", "resynchronized", "recovered"} and self._stop.is_set():
             return  # No queued sample/initialization can revive an OFF request.
         if kind == "ready":
             identification, gauges = payload
@@ -500,6 +547,19 @@ class PressureController(DeviceController):
                 update_panel()
             if parent.recording:
                 parent.recordReading(payload)
+        elif kind == "missed":
+            message, missed_at = payload
+            self._invalidate("Read error — resynchronizing")
+            if parent.recording:
+                # Record the lost packet as a gap, never as the previous pressure.
+                parent.recordReading(_MissedReading(missed_at))
+            parent._set_state("Read error — resynchronizing", True)  # also refreshes the cards
+            self.print(f"Pressure sample missed, resynchronizing: {message}", flag=PRINT.WARNING)
+        elif kind == "resynchronized":
+            self.gauges = payload
+        elif kind == "recovered":
+            parent._set_state("Simulation — no hardware" if self._simulation else "Acquiring", True)
+            self.print(f"TPG366 communication recovered after {payload} failed transaction(s).")
         elif kind == "error":
             self._invalidate("Communication error")
             parent.recording = False

@@ -125,8 +125,23 @@ Explorer. Standalone notebooks are not included in the plugin release ZIP.
 Development checks run from the repository root:
 
 ```bash
-python3 -m pytest -q
+python3 -m pytest -q                     # everything (~20 min)
+python3 -m pytest -q -m "not slow"       # without real Explorer/Qt subprocesses
 ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
+
+The real-Explorer tests use the installed `esibd-explorer` (or
+`ESIBD_EXPLORER_SOURCE` / `ESIBD_QT_PYTHON`). They validate the release host only
+when that is Explorer `1.0.1`; the session header shows the host and the summary
+warns otherwise. Use a dedicated environment, and require it for release checks:
+
+```bash
+python3 -m venv .venv-explorer && .venv-explorer/bin/pip install "esibd-explorer==1.0.1" pytest
+ESIBD_REQUIRE_TARGET_HOST=1 .venv-explorer/bin/python -m pytest -q
+```
+
+Sibling plugins (`ampr_b`, `amx_b`, `psu_b`–`psu_e`) are copies of their
+canonical plugin. Edit the canonical one, then run
+`python3 tools/sync_family_siblings.py` (`--check` reports drift only).
 
 Tests remain in this repository's `tests/` directory. They are not part of plugin folders or release archives.

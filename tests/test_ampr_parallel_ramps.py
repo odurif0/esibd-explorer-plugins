@@ -197,6 +197,61 @@ def test_one_worker_handles_off_from_startup_through_ramp_completion(rig, when, 
         assert len(nonzero) == 1, 'Never finish the upward frame after OFF'
 
 
+def test_click_during_ramp_down_skips_the_rest_of_the_descent(rig):
+    c = rig.controller
+    assert c._begin_transition(False)
+    original = c.device.set_module_voltages
+    def write(*args):
+        result = original(*args)
+        if len(rig.writes) == 3:
+            rig.on.state = True  # the operator clicks the (OFF) button again
+            rig.module.AMPRDevice.setOn(rig.parent)
+        return result
+    c.device.set_module_voltages = write
+    ramp(rig, down=True)
+    assert len(rig.writes) == 3, 'no further descent step after the second click'
+    assert rig.clock.now < 1.
+    assert not rig.on.state, 'a click during the descent must never request ON'
+    assert any('skipping the remaining descent' in message for message in rig.logs)
+
+
+def test_second_off_during_descent_runs_the_verified_shutdown_at_once(rig):
+    c, hw = rig.controller, rig.controller.device
+    stops = []
+    hw.close = lambda: None
+    def stop():
+        stops.append(rig.clock.now)
+        hw.connected = False
+        hw._dll_port_claimed = False
+        return True
+    hw.shutdown = stop
+    rates = {(2, ch.channel_number()): ch.ramp_rate_v_s for ch in rig.channels}
+    c._last_output_targets = {(2, ch.channel_number()): ch.value for ch in rig.channels}
+    assert c._begin_transition(False)
+    c.toggleOnFromThread = lambda **kw: pytest.fail('A further OFF must not start another worker')
+    original = hw.set_module_voltages
+    def write(*args):
+        result = original(*args)
+        if len(rig.writes) == 2:
+            rig.module.AMPRDevice.setOn(rig.parent, on=False)
+        return result
+    hw.set_module_voltages = write
+    c._ramp_down_and_shutdown(rates)
+    assert len(stops) == 1 and stops[0] < 1., 'shutdown must not wait for the 20 s descent'
+    assert len(rig.writes) == 2
+    assert c.main_state == 'Disconnected'
+
+
+def test_a_new_transition_clears_the_fast_off_request(rig):
+    c = rig.controller
+    assert c._begin_transition(False)
+    assert c._request_fast_off()
+    c.transitioning = False
+    assert c._begin_transition(True)
+    assert not c._abort_ramp_down
+    assert not c._request_fast_off(), 'only an OFF transition can be accelerated'
+
+
 def test_off_request_after_old_worker_exit_starts_new_off_worker(rig):
     # The busy check and _request_off are not atomic: simulate completion in between.
     c = rig.controller

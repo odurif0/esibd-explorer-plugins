@@ -21,6 +21,15 @@ The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, d
 - `amx`: canonical `amx_a`, sibling `amx_b`
 - `psu`: canonical `psu_a`, siblings `psu_b`, `psu_c`, `psu_d`, `psu_e`
 - `amx_hd` and `dmmr` are standalone
+- Edit only the canonical plugin, then run `python3 tools/sync_family_siblings.py`
+  (`--check` reports drift). Siblings differ only by the Device `name` literal.
+
+## Validated bundles
+
+Notebooks pin SHA-256 hashes of runtime files (`_driver_common.py`, the ESI and
+DMMR runtimes, `tpg366/_runtime/_tpg366.py`). Changing one invalidates a validated
+notebook bundle: prefer changes in the plugin entrypoints, or update notebook and
+runtime together on purpose.
 
 ## Autonomy constraints
 
@@ -51,10 +60,14 @@ Run the smallest check that covers the change, then widen only if needed.
 
 ```bash
 python3 -m pytest -q
+python3 -m pytest -q -m "not slow"
 python3 -m pytest -q tests/test_plugin_family_parity.py
 python3 -m pytest -q 'tests/test_plugin_family_parity.py::test_sibling_family_matches_canonical[amx]'
 ESIBD_RELEASE_ZIP=/path/to/file.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
+
+Real-Explorer tests validate the installed host only; the plugins target Explorer
+1.0.1 (`tests/explorer_host.py`). `ESIBD_REQUIRE_TARGET_HOST=1` fails on another host.
 
 ## Release archive behavior
 

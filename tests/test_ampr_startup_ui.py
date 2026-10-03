@@ -122,6 +122,8 @@ def probe(folder, legacy, output, *, exercise=None):
               wraps=wraps, getLogLevel=lambda: 0)
     for qt in (QtCore, QtGui, QtWidgets):
         ns.update({name: getattr(qt, name) for name in dir(qt) if name.startswith("Q")})
+    from explorer_host import add_const_names
+    add_const_names(host, ns)  # e.g. Explorer 1.0.1's valid_chars
     sources = {filename: ast.parse((host / filename).read_text())
                for filename in ("const.py", "core.py", "plugins.py")}
 
@@ -234,6 +236,7 @@ def probe(folder, legacy, output, *, exercise=None):
     parent.advancedAction = state_action(toolTipFalse="Show advanced", toolTipTrue="Hide advanced")
     parent.pluginManager = SimpleNamespace(
         loading=True, ChannelManager=manager_type, Device=manager_type,
+        Settings=SimpleNamespace(loading=False, settings={}),  # Explorer 1.0.1 Channel.__init__
         DeviceManager=SimpleNamespace(addStateAction=state_action, aboutAction=None,
                                       globalUpdate=lambda **kw: None, updateStaticPlot=lambda: None),
         reconnectSource=lambda *_: None,

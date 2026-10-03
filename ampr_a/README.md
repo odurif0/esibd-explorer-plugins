@@ -70,6 +70,9 @@ the previous global ramp setting.
 OFF during startup or ramp-up interrupts the ascent after the current hardware
 call, then ramps down from the last accepted/read-back targets before verified
 shutdown. It never raises a channel to its unfinished target before stopping.
+A further click on ON/OFF (or another OFF) **during the ramp-down** skips the
+rest of the descent: the verified shutdown then sets every channel to 0 V and
+disables the PSU at once. Such a click never turns the outputs back on.
 
 If the initial port opening fails, shutdown or closing communication cleans
 up that opening without output commands. `Connection pending` stays visible

@@ -221,6 +221,8 @@ def test_ascii_configuration_matches_explorer_schema(rig, extension):
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(host), "exec"), ns)
     rig.device.channels[0].data["Label"] = "Collecteur"
     rig.device.channels[1].data["Label"] = "Entrance"
+    # Explorer 1.0.1 takes the HDF schema from Device.defaultChannel (same channel type).
+    rig.device.defaultChannel = rig.device.channels[0]
     reference, result = (rig.tmp / (name + extension) for name in ("host", "plugin"))
     ns["exportConfiguration"](rig.device, file=reference)
     rig.device.exportConfiguration(file=result)

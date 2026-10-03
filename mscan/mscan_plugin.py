@@ -708,9 +708,8 @@ class MScan(Scan):
         values = np.asarray(c.getValues(subtractBackground=False))
         if len(times) != len(values):
             raise ScanError(f'{c.name}: DMMR timestamps and values are misaligned.')
-        if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
-            raise ScanError(f'{c.name}: invalid DMMR timestamps.')
-        valid_times = times[np.isfinite(values) & (times > since)][-21:]
+        self._require_monotonic(device, times, f'{c.name}: invalid DMMR timestamps.')
+        valid_times = self._last_finite_times(times, values, since, 21)
         if len(valid_times) < 2:
             reason = 'after DMMR interval change' if math.isfinite(since) else 'to determine Time step'
             raise ScanError(f'{c.name}: waiting for two valid recorded DMMR samples {reason}.')
@@ -724,6 +723,40 @@ class MScan(Scan):
         return dict(configured_interval_s=configured, typical_interval_s=float(np.median(intervals)),
             largest_interval_s=largest, minimum_time_step_s=((micros + 999) // 1000) / 1000,
             last_sample_time=float(valid_times[-1]), sample_count=len(valid_times))
+
+    def _require_monotonic(self, device, times, message):
+        """Require finite, strictly increasing timestamps over the whole history.
+
+        Called on Qt every poll: rescan only samples appended since the last
+        validated prefix. Thinning or clearing changes the prefix endpoints and
+        forces a full rescan, so the result equals a full validation.
+        """
+        cache = getattr(self, '_validated_times', None)
+        if cache is None:
+            cache = self._validated_times = {}
+        key, first = id(device.time), 0
+        known = cache.get(key)
+        if known is not None:
+            start, count, end = known
+            if 0 < count <= len(times) and times[0] == start and times[count - 1] == end:
+                first = count - 1
+        tail = times[first:]
+        if not np.isfinite(tail).all() or np.any(np.diff(tail) <= 0):
+            cache.pop(key, None)
+            raise ScanError(message)
+        if len(times):
+            cache[key] = (float(times[0]), len(times), float(times[-1]))
+
+    @staticmethod
+    def _last_finite_times(times, values, since, count):
+        """Last ``count`` timestamps after ``since`` with a finite value (sorted times)."""
+        lower = int(np.searchsorted(times, since, side='right'))
+        found, end, chunk = [], len(times), 256
+        while end > lower and sum(map(len, found)) < count:
+            begin = max(lower, end - chunk)
+            found.insert(0, times[begin:end][np.isfinite(values[begin:end])])
+            end, chunk = begin, chunk * 4
+        return np.concatenate(found)[-count:] if found else times[:0]
 
     def _require_time_step(self, c, duration, window_start=None):
         cadence = self._detector_cadence(c)
@@ -1356,12 +1389,11 @@ class MScan(Scan):
                 raise ScanError(f'{c.name}: detector history reset or timestamps misaligned.')
             if baseline is not None and (not len(times) or times[0] > baseline):
                 raise ScanError(f'{c.name}: history buffer truncated during averaging.')
-            if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
-                raise ScanError(f'{c.name}: invalid or nonmonotonic timestamps.')
+            self._require_monotonic(c.getDevice(), times, f'{c.name}: invalid or nonmonotonic timestamps.')
             if closed and (not len(times) or times[-1] < end):
                 return None  # wait for a sample closing the acquisition window
-            selected = (times > start) & (times <= end)
-            results.append((times[selected], values[selected]))
+            lo, hi = np.searchsorted(times, (start, end), side='right')
+            results.append((times[lo:hi], values[lo:hi]))
         return results
 
     @staticmethod

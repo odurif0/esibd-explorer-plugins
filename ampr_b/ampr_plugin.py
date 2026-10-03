@@ -1408,6 +1408,10 @@ class AMPRDevice(Device):
             if hasattr(self, "onAction"):
                 self.onAction.state = restored_state
             self._sync_local_on_action()
+            # During a ramp-down the button already shows OFF: a further click
+            # never restarts the outputs, it skips the remaining descent.
+            if transition_target is False and controller._request_fast_off():
+                return
             self.print(
                 f"{self.name} ON/OFF transition already in progress; ignoring additional request.",
                 flag=PRINT.WARNING,
@@ -3051,10 +3055,31 @@ class AMPRController(DeviceController):
                 raise TimeoutError(timeout_message)
             yield
 
+    def _request_fast_off(self) -> bool:
+        """A further OFF during the ramp-down skips the rest of the descent.
+
+        The worker leaves the descent at its next tick and runs the normal
+        verified shutdown, which zeroes every channel and disables the PSU.
+        """
+        with self._transition_guard():
+            if not (self.transitioning and self.transition_target_on is False):
+                return False
+            if getattr(self, "_abort_ramp_down", False):
+                return True
+            self._abort_ramp_down = True
+        self.print(
+            "Further OFF during AMPR ramp-down: skipping the remaining descent; "
+            "all outputs are set to 0 V and the PSU is disabled now.",
+            flag=PRINT.WARNING,
+        )
+        return True
+
     def _request_off(self) -> bool:
         """Cancel before waiting for serial I/O; the existing worker performs OFF."""
         self._cancel_ramp = True
         self._cancel_setpoints()
+        if self._request_fast_off():
+            return False
         with self._transition_guard():
             if self.transitioning:
                 self.transition_target_on = False
@@ -3079,6 +3104,7 @@ class AMPRController(DeviceController):
                 return False
             self._transition_targets = self._channel_target_voltages(respect_device_state=False)
             self._transition_rates = self._channel_ramp_rates()
+            self._abort_ramp_down = False
             self.transitioning = True
             self.transition_target_on = bool(target_on)
             if target_on:
@@ -3285,6 +3311,9 @@ class AMPRController(DeviceController):
                     for key, request in requests.items():
                         targets[key] = request.target
                 else:
+                    if getattr(self, "_abort_ramp_down", False):
+                        self.print("AMPR ramp-down skipped by a further OFF.", flag=PRINT.WARNING)
+                        return
                     requests = {}
                 immediate = {key: targets[key] for key in keys
                              if rates_v_s[key] == 0.0 and targets[key] != current[key]}
