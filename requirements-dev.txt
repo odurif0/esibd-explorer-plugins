@@ -1,0 +1,6 @@
+# Test dependencies (the plugins themselves only need ESIBD Explorer).
+esibd-explorer==1.0.2
+pytest
+pandas
+pyserial
+pillow
