@@ -8,7 +8,7 @@
 
 ## Pressure versus capillary temperature
 
-[`pressure_temperature.ipynb`](pressure_temperature.ipynb) uses ESI (COM16, 230400 baud) and TPG366 (COM21, configurable baud; default 9600). Keep `notebooks/` beside `esi/` and `tpg366/`, or set `PLUGINS_DIR` once. Windows, Python 64-bit, `pyserial`, `matplotlib` and a fresh Jupyter kernel are required. The matched ESI/TPG366 source fingerprints are checked before import, then the actual ESI controller source is checked before construction/connection. Cached ESI namespaces are refused; do not edit the hashes to bypass a mismatch. Update the notebook and plugins together.
+[`pressure_temperature.ipynb`](pressure_temperature.ipynb) uses ESI (COM16, 230400 baud) and TPG366 (COM21, configurable baud; default 9600). Keep `notebooks/` beside `esi/` and `tpg366/`, or set `PLUGINS_DIR` once. Windows, Python 64-bit, `pyserial`, `matplotlib` and a fresh Jupyter kernel are required. Before construction/connection the notebook checks that the loaded ESI controller provides the heater safety methods; cached ESI namespaces are refused. The SHA-256 of the runtime files used is recorded in the run metadata (traceability, not a version lock).
 
 The single executable cell is disarmed by default. Review the COM ports and TPG USB baud, keep the PC awake with sleep/hibernation disabled, and supervise the run before setting `ARM_HEATING=True`. Close Explorer, CGC utilities and former instrument-owning kernels. TPG366 only measures pressure; 9600 baud is its software default, not a verified hardware setting.
 

@@ -218,7 +218,7 @@ supervised test of the original CGC heater, with HV gates OFF and zero targets
 verified. Use a fresh 64-bit Windows kernel and check `ESI_COM`.
 **`ARM_HEATING=True` by default: running the cell requests real heating.**
 Set it to `False` for a no-hardware check. Existing unfinished-run guards still
-block activation. A matched runtime/DLL is required; do not edit validated hashes.
+block activation. The SHA-256 of the runtime/DLL used is recorded with each run.
 
 The fixed trial envelope is at most **22 V / 10 A / 50 W**, further bounded by
 fresh hardware maxima and rounded down to verified native codes using the shared

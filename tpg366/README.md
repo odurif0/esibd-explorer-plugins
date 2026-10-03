@@ -29,8 +29,9 @@ A failed port close leaves **Disconnect unconfirmed**; click OFF again to retry.
 ## Data
 
 - Pressures are converted to **mbar**, regardless of whether the controller uses
-  hPa/mbar, Torr, Pa or micron. Voltage units are rejected. `UNI` is read before
-  and after each `PRX` packet; a detected unit change stops acquisition.
+  hPa/mbar, Torr, Pa or micron. Voltage units are rejected. `UNI` is read at
+  connection and after each `PRX` packet (two transactions per poll); a unit
+  differing from the previous reading discards the frame and stops acquisition.
 - Each six-channel packet is recorded once, timestamped on receipt by the PC.
   Curves use Explorer's logarithmic pressure display and standard data export.
 - Underrange, overrange, sensor errors, switched-off or missing gauges, and

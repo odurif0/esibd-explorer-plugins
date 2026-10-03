@@ -11,7 +11,7 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure", "transient_nak",
+CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure", "transient_nak", "resync_unit_change",
          "simulation", "history", "settings", "reconnect", "render", "export", "pause", "queued_events", "statuses", "persistence", "pending_close", "pending_close_failure", "isolation", "negative", "global_action", "discovery", "port_names", "power_switch", "connection_diagnostics", "read_diagnostics", "open_diagnostics", "cards")
 
 
@@ -163,12 +163,14 @@ def probe(case, output):
             port.fail_close = True
         if case == "read_failure":
             port.responses["PRX"] = "garbage"
-        if case == "transient_nak":
+        if case in {"transient_nak", "resync_unit_change"}:
             def nak_second_prx(data):
                 if port.ack == b"\x15\r\n":
                     port.ack = b"\x06\r\n"
                 if data == b"PRX\r" and port.writes.count(b"PRX\r") == 2:
                     port.ack = b"\x15\r\n"
+                    if case == "resync_unit_change":
+                        port.responses["UNI"] = "1"  # front panel changed during the outage
             port.on_write = nak_second_prx
         if case == "negative":
             from test_tpg366_protocol import frame
@@ -395,6 +397,13 @@ def probe(case, output):
             assert not device.recording and not device.isOn() and not device.initialized
             assert_channel_colors(False)
             assert ports[0].close_count == 1
+            return 0
+        if case == "resync_unit_change":
+            wait(lambda: "error — disconnected" in device.main_state, 8)
+            text = "\n".join(str(entry) for entry in logs)
+            assert "Pressure unit changed during resynchronization" in text, text
+            assert ports[0].writes.count(b"PRX\r") == 2, "no frame may be read in the new unit"
+            assert not device.initialized and ports[0].close_count == 1
             return 0
         if case == "transient_nak":
             wait(lambda: bool(ports) and ports[0].writes.count(b"PRX\r") >= 3 and all(math.isfinite(ch.value) for ch in device.channels), 8)

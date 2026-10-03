@@ -413,7 +413,7 @@ class PressureController(DeviceController):
             link = _protocol.TPG366Link(port, stop)
             phase = "initialization"
             link.initialize()
-            identification = link.identification
+            identification, unit = link.identification, link.unit
             self.update.emit((generation, "ready", (link.identification, link.gauges)))
             failures, resync = 0, False
             while not stop.is_set():
@@ -426,6 +426,8 @@ class PressureController(DeviceController):
                         link.initialize()  # ETX, AYT synchronization and TID; read-only.
                         if link.identification != identification:
                             raise RuntimeError(f"Controller identification changed: {link.identification!r}.")
+                        if link.unit != unit:  # never adopt a unit change silently
+                            raise _protocol.ProtocolError("Pressure unit changed during resynchronization. Reconnect to continue.")
                         self.update.emit((generation, "resynchronized", link.gauges))
                         resync = False
                     phase = "pressure acquisition"

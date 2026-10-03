@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import math
 import struct
@@ -41,6 +40,11 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
     HV_CONFIG_MAX_STEP_OFFSET = 4
     HV_CONFIG_ENABLE_OFFSET = 10
     DEFAULT_HV_MAX_VOLTAGE_STEP_V = 10.008
+    # Heater safety contract the heater notebooks require (instead of a source
+    # hash): limits/temperature validated before ON, direct activation readback,
+    # cancellable heater reads. Keep it in later versions; bump it if the
+    # contract changes incompatibly.
+    HEATER_SAFETY_CONTRACT = 1
     _active_connections_lock = threading.Lock()
     _active_connections: dict[int, dict[str, object]] = {}
 

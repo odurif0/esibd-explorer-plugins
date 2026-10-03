@@ -123,6 +123,24 @@ def test_unknown_or_voltage_units_cannot_be_presented_as_pressure(unit):
         link(FakeSerial(unit=unit)).read_pressures()
 
 
+def test_later_polls_use_two_transactions():
+    driver = link()
+    driver.initialize()
+    driver.read_pressures()
+    driver.port.writes.clear()
+    driver.read_pressures()
+    assert driver.port.writes == [b"PRX\r", b"\x05", b"UNI\r", b"\x05"]
+
+
+def test_unit_change_between_polls_discards_the_next_frame():
+    driver = link()
+    driver.initialize()
+    driver.read_pressures()
+    driver.port.responses["UNI"] = "1"  # changed on the front panel between two polls
+    with pytest.raises(protocol.ProtocolError, match="changed"):
+        driver.read_pressures()
+
+
 def test_front_panel_unit_change_invalidates_entire_frame():
     port = FakeSerial()
     port.units.extend(["0", "1"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import os
+from pathlib import Path
 
 import pytest
 
@@ -187,17 +188,29 @@ def pytest_sessionstart(session):
 
 def pytest_terminal_summary(terminalreporter):
     wrong = explorer_host.mismatches(_HOSTS)
-    if wrong:
+    if wrong and _USES_HOST:
         terminalreporter.write_line(
             f"WARNING: real-Explorer tests ran against {'; '.join(wrong)}, not the targeted "
             f"{explorer_host.TARGET_VERSION}: they do not validate the release host "
             "(see README, Running Tests).", yellow=True)
 
 
+_HOST_MARKERS = ('distribution("esibd-explorer")', "distribution('esibd-explorer')",
+                 "ESIBD_EXPLORER_SOURCE", "from esibd import")
+_USES_HOST = []
+
+
 def pytest_collection_modifyitems(config, items):
     """Mark tests that start a subprocess (real Explorer/Qt probes) as slow."""
     sources: dict = {}
+    modules: dict = {}
     for item in items:
+        path = Path(str(item.fspath))
+        if path not in modules:
+            text = path.read_text(encoding="utf-8") if path.suffix == ".py" else ""
+            modules[path] = any(marker in text for marker in _HOST_MARKERS)
+        if modules[path] and not _USES_HOST:
+            _USES_HOST.append(path)
         function = getattr(item, "function", None)
         if function is None:
             continue

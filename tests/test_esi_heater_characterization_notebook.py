@@ -42,21 +42,28 @@ def namespace():
     return ns
 
 
-@pytest.mark.parametrize('damage', ['missing', 'changed', 'cached_hash'])
-def test_pure_limit_import_is_hash_checked(tmp_path, monkeypatch, damage):
+@pytest.mark.parametrize('damage', ['missing', 'cached_hash'])
+def test_pure_limit_import_refuses_missing_or_stale_helper(tmp_path, monkeypatch, damage):
     ns = namespace()
     path = tmp_path / '_heater_limits.py'
     if damage != 'missing':
         path.write_bytes((ROOT / 'esi/_heater_limits.py').read_bytes())
-    if damage == 'changed':
-        path.write_text('raise AssertionError("Unverified code must never execute")')
-    elif damage == 'cached_hash':
+    if damage == 'cached_hash':
         module = ns['load_pure_helper'](tmp_path, path.name)
         assert module.bounded_limit(10.) <= 10.
         assert not module.__name__.startswith('_esibd_bundled_')
         monkeypatch.setattr(module, '_source_sha256', 'wrong')
     with pytest.raises((FileNotFoundError, RuntimeError)):
         ns['load_pure_helper'](tmp_path, path.name)
+
+
+def test_updated_pure_helper_is_loaded_not_refused(tmp_path):
+    # Plugins and notebooks evolve independently: no version pin on helper files.
+    ns = namespace()
+    source = (ROOT / 'esi/_heater_limits.py').read_text(encoding='utf-8')
+    (tmp_path / '_heater_limits.py').write_text(source + '\nUPDATED = True\n', encoding='utf-8')
+    module = ns['load_pure_helper'](tmp_path, '_heater_limits.py')
+    assert module.UPDATED is True and module.bounded_limit(10.) <= 10.
 
 
 def test_pure_helper_loader_cannot_load_instrument_runtime():
@@ -128,7 +135,7 @@ def test_moved_notebook_preserves_legacy_plugin_guard(tmp_path, configured, lock
     marker.write_bytes(b'{}')  # Incomplete old evidence must remain blocking.
     ns.update(NOTEBOOK_DIR=notebook_dir, OUTPUT_DIR=notebook_dir / 'logs/esi_heater_characterization',
               sys=SimpleNamespace(platform='win32', maxsize=2**63 - 1, modules={}))
-    ns['verify_bundle'] = lambda path: {}  # Fake bundle, no DLL access.
+    ns['runtime_fingerprints'] = lambda path: {}  # Fake plugin folder, no DLL access.
     ns['load_private'] = lambda *args, **kwargs: pytest.fail('Guard must block before runtime import')
     ns['input'] = lambda *args: pytest.fail('Missing evidence must not prompt')
     helper = install_test_guard(ns, tmp_path)
@@ -674,7 +681,6 @@ def test_native_quantization_evidence_is_from_matched_dll():
     ns = namespace()
     path = ROOT / 'esi/vendor/runtime/esi/vendor/x64/COM-ESI-CTRL.dll'
     blob = path.read_bytes()
-    assert hashlib.sha256(blob).hexdigest() == ns['_BUNDLE_SHA256'][str(path.relative_to(ROOT / 'esi'))]
     pe = struct.unpack_from('<I', blob, 0x3c)[0]
     sections, optional_size = struct.unpack_from('<H', blob, pe + 6)[0], struct.unpack_from('<H', blob, pe + 20)[0]
     def offset(rva):
@@ -983,16 +989,18 @@ def test_stale_namespace_is_refused_before_import():
         sys.modules.pop(name)
 
 
-def test_bundle_matches_and_change_refused(tmp_path):
+def test_runtime_fingerprints_record_any_version(tmp_path):
     ns = namespace()
-    assert ns['verify_bundle'](ROOT / 'esi') == ns['_BUNDLE_SHA256']
-    for path in ns['_BUNDLE_SHA256']:
+    recorded = ns['runtime_fingerprints'](ROOT / 'esi')
+    assert set(recorded) == set(ns['_RUNTIME_FILES'])
+    for path in ns['_RUNTIME_FILES']:
         out = tmp_path / path
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes((ROOT / 'esi' / path).read_bytes())
-    (tmp_path / 'vendor/runtime/esi/esi.py').write_text('# stale')
-    with pytest.raises(RuntimeError, match='differ'):
-        ns['verify_bundle'](tmp_path)
+    (tmp_path / 'vendor/runtime/esi/esi.py').write_text('# updated runtime')
+    updated = ns['runtime_fingerprints'](tmp_path)  # recorded, never refused
+    assert updated['vendor/runtime/esi/esi.py'] == hashlib.sha256(b'# updated runtime').hexdigest()
+    assert updated['vendor/runtime/esi/esi_base.py'] == recorded['vendor/runtime/esi/esi_base.py']
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX real SIGINT injection; simulated calls only')
@@ -1178,7 +1186,7 @@ def test_cross_notebook_uncertain_shutdown_guard(tmp_path):
     guard.parent.mkdir(parents=True)
     guard.write_text('{}')
     ns['load_private'] = lambda *a, **kw: pytest.fail('No import or hardware access')
-    ns['verify_bundle'] = lambda _: {}
+    ns['runtime_fingerprints'] = lambda _: {}
     install_test_guard(ns, tmp_path)
     with pytest.raises(RuntimeError, match='Unfinished'):
         ns['main']()
@@ -1369,7 +1377,7 @@ def test_restart_competitor_process_cannot_acquire_ownership(restart_case):
 def test_armed_main_operator_restart_runs_complete_simulated_protocol(restart_case):
     c = restart_case
     c.guard.abandon_before_hardware()  # Main obtains its own ownership; original marker stays.
-    c.ns.update(OUTPUT_DIR=c.directory, find_plugin=lambda _: c.root, verify_bundle=lambda _: {})
+    c.ns.update(OUTPUT_DIR=c.directory, find_plugin=lambda _: c.root, runtime_fingerprints=lambda _: {})
     fake, clock = FakeESI(), Clock()
     original = c.ns['Experiment']
     c.ns['Experiment'] = lambda *a, **kw: original(*a, **kw, clock=clock, sleep=clock.sleep,
@@ -1382,7 +1390,7 @@ def test_armed_main_operator_restart_runs_complete_simulated_protocol(restart_ca
         return fake
     runtime = SimpleNamespace(__name__='fake_runtime', ESI=construct)
     c.ns['load_private'] = lambda *a, **kw: runtime
-    c.ns['require_safe_esi'] = lambda _: None  # Fake runtime; real capability/hash checks have separate tests.
+    c.ns['require_safe_esi'] = lambda _: None  # Fake runtime; the real capability check has separate tests.
     c.ns['sys'].modules['fake_runtime.esi.esi_base'] = SimpleNamespace(ESIBase=None)
     run = c.ns['main']()
     assert run.metadata['outcome'] == 'reached_100_no_hold'
@@ -1447,3 +1455,18 @@ def test_missing_shared_guard_never_constructs(tmp_path):
 
 if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == 'interrupt':
     interrupt_probe(sys.argv[2], sys.argv[3])
+
+
+def test_capability_guard_refuses_an_old_runtime_without_the_safety_contract(tmp_path):
+    ns = namespace()
+    # Both method names existed in an unsafe intermediate version without the contract.
+    (tmp_path / "old.py").write_text("class Controller:\n    def _set_heat_module_active_unlocked(self): pass\n"
+                                     "    def _validate_heat_operating_state_unlocked(self): pass\n")
+    init = tmp_path / "__init__.py"
+    init.write_text("from .old import Controller\n")
+    runtime = ns['load_private'](init, package=True)
+    runtime.ESI = SimpleNamespace(_PROCESS_CONTROLLER_CLASS=runtime.Controller)
+    with pytest.raises(RuntimeError, match='heater safety'):
+        ns['require_safe_esi'](runtime)
+    runtime.Controller.HEATER_SAFETY_CONTRACT = 1  # a later version keeping the contract
+    ns['require_safe_esi'](runtime)
