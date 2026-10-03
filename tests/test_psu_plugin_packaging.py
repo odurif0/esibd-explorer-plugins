@@ -196,7 +196,7 @@ def test_psu_plugin_exposes_expected_metadata():
     assert ICON_PATH.exists()
     assert module.providePlugins() == [module.PSUDevice]
     assert module.PSUDevice.name == "PSU_A"
-    assert module.PSUDevice.supportedVersion == "1.0.1"
+    assert module.PSUDevice.supportedVersion == "1.0.2"
     assert module.PSUDevice.unit == "V"
     assert module.PSUDevice.useMonitors is True
     assert module.PSUDevice.useOnOffLogic is True

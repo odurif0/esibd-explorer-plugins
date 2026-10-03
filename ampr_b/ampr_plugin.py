@@ -637,7 +637,7 @@ class AMPRDevice(Device):
 
     name = "AMPR_B"
     version = "0.1.0"
-    supportedVersion = "1.0.1"
+    supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = "V"
     useMonitors = True
@@ -653,6 +653,13 @@ class AMPRDevice(Device):
     RAMP_RATE = "Ramp rate (V/s)"
     STATE = "State"
     DETECTED_MODULES = "Detected modules"
+
+    def exportConfigurationIfChanged(self) -> None:
+        """Explorer 1.0.2 also runs this periodic save from a worker thread, but the
+        export refreshes Explorer's file tree (Qt GUI work): run it on the GUI thread."""
+        base = getattr(super(), "exportConfigurationIfChanged", None)
+        if callable(base):
+            _invoke_gui_callback(base)
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)

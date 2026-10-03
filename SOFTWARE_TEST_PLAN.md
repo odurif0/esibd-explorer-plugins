@@ -34,8 +34,8 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   during the descent: outputs must go to 0 V at once and the PSU be disabled.
 - **PSU:** check the `Ramp step (V)` / `Ramp step interval (s)` defaults against
   the measured output slew before relying on them.
-- **Explorer 1.0.1 data files:** save ESI and DMMR data (Ctrl+S and on closing)
-  and reopen them; with Explorer 1.0.1 the ESI export previously failed. Check that
+- **Explorer 1.0.2 data files:** save ESI and DMMR data (Ctrl+S and on closing)
+  and reopen them; the ESI export failed with Explorer 1.0.1 before v0.3.0. Check that
   the DMMR history length now matches its configured storage.
 - **DMMR:** verify all eight addresses and ranges, OFF/ON and a power cycle between
   connections. Save Explorer and `dmmr_protocol_com*.jsonl*` logs for receive errors.

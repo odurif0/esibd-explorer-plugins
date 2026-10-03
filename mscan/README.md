@@ -5,7 +5,7 @@ Enable the `MScan` plugin in Explorer's Plugin Manager. Its panel is titled
 **msScan — AMX/PSU**, distinct from the built-in **msScan** that expects
 `AMP_Q1`/`AMP_Q2`. Those historical channels are not used here.
 
-Requires Explorer 1.0.1 and the PSU A–E, AMX A–B and DMMR plugins from the same
+Requires Explorer 1.0.2 and the PSU A–E, AMX A–B and DMMR plugins from the same
 bundle. The plugin uses Explorer's plotting, channel services and HDF5 format,
 but has its own interface and scan protocol. No DLL or bundled runtime.
 

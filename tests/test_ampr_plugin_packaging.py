@@ -1293,8 +1293,8 @@ def test_ampr_a_and_ampr_b_load_as_distinct_autonomous_plugins(monkeypatch):
 
     assert module_a.AMPRDevice.name == "AMPR_A"
     assert module_b.AMPRDevice.name == "AMPR_B"
-    assert module_a.AMPRDevice.supportedVersion == "1.0.1"
-    assert module_b.AMPRDevice.supportedVersion == "1.0.1"
+    assert module_a.AMPRDevice.supportedVersion == "1.0.2"
+    assert module_b.AMPRDevice.supportedVersion == "1.0.2"
     assert module_a._BUNDLED_RUNTIME_DIRNAME == "runtime"
     assert module_b._BUNDLED_RUNTIME_DIRNAME == "runtime"
     assert VENDOR_A_ROOT.name == "runtime"

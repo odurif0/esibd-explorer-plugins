@@ -192,7 +192,7 @@ def test_amx_hd_plugin_exposes_expected_metadata():
     assert ICON_HD_PATH.exists()
     assert module.providePlugins() == [module.AMXHDDevice]
     assert module.AMXHDDevice.name == "AMX_HD"
-    assert module.AMXHDDevice.supportedVersion == "1.0.1"
+    assert module.AMXHDDevice.supportedVersion == "1.0.2"
     assert module.AMXHDDevice.iconFile == "amx_hd.png"
 
 

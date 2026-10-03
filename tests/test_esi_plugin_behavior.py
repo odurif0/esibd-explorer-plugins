@@ -169,7 +169,7 @@ def test_esi_plugin_metadata_and_private_runtime():
 
     assert module.providePlugins() == [module.ESIDevice]
     assert module.ESIDevice.name == "ESI"
-    assert module.ESIDevice.supportedVersion == "1.0.1"
+    assert module.ESIDevice.supportedVersion == "1.0.2"
     assert module.ESIDevice.unit == "V"
     assert module.ESIDevice.useMonitors is True
     assert module.ESIDevice.useOnOffLogic is True

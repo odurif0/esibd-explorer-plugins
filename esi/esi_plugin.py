@@ -451,7 +451,7 @@ class ESIDevice(Device):
     )
     name = "ESI"
     version = "0.1.0"
-    supportedVersion = "1.0.1"
+    supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = "V"
     useMonitors = True
@@ -495,6 +495,13 @@ class ESIDevice(Device):
             for name in names:
                 if name in group and name not in previous:
                     group[name].attrs[UNIT] = channel.unit
+
+    def exportConfigurationIfChanged(self) -> None:
+        """Explorer 1.0.2 also runs this periodic save from a worker thread, but the
+        export refreshes Explorer's file tree (Qt GUI work): run it on the GUI thread."""
+        base = getattr(super(), "exportConfigurationIfChanged", None)
+        if callable(base):
+            _invoke_gui_callback(base)
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)

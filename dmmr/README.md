@@ -7,7 +7,7 @@ including the DMMR driver files and vendor DLL.
 
 ## Requirements
 
-- ESIBD Explorer `1.0.1`
+- ESIBD Explorer `1.0.2`
 - Windows for real hardware communication
 - No separate `ESIBD_core` installation is required for the plugin itself
 
@@ -72,7 +72,7 @@ limit, all three are thinned together. HDF5 exports keep the existing current
 channels and add `DMMR/Measurement ranges/<channel>`, aligned with each current
 and timestamp. Dataset attributes link the three series. Unknown ranges and
 missing readings are NaN; old recordings load without inventing their ranges.
-Full-history and visible-window exports remain aligned with Explorer 1.0.1.
+Full-history and visible-window exports remain aligned with Explorer 1.0.1 and 1.0.2.
 
 The recording timer no longer repeats a polling result when acquisition is
 slower than recording; it leaves a NaN gap instead. Identical currents from

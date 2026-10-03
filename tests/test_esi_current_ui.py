@@ -114,6 +114,8 @@ def probe(case, output):
         core.Channel.getRecordedParameters = lambda self: []
     if not hasattr(core.Channel, "legendName"):  # used by Explorer 1.0.1 plotGroup
         core.Channel.legendName = property(lambda self: self.name)
+    if not hasattr(core.Channel, "toggleExtraContextActions"):  # called by Explorer 1.0.2 Channel.initGUI
+        core.Channel.toggleExtraContextActions = lambda self: None
     spec = importlib.util.spec_from_file_location("esi_current_ui_probe", ROOT / "esi/esi_plugin.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

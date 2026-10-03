@@ -212,7 +212,7 @@ def test_amx_plugin_exposes_expected_metadata():
     assert ICON_PATH.exists()
     assert module.providePlugins() == [module.AMXDevice]
     assert module.AMXDevice.name == "AMX_A"
-    assert module.AMXDevice.supportedVersion == "1.0.1"
+    assert module.AMXDevice.supportedVersion == "1.0.2"
     assert module.AMXDevice.unit == "%"
     assert module.AMXDevice.useMonitors is True
     assert module.AMXDevice.useOnOffLogic is True
@@ -231,8 +231,8 @@ def test_amx_a_and_amx_b_load_as_distinct_autonomous_plugins(monkeypatch):
 
     assert module_a.AMXDevice.name == "AMX_A"
     assert module_b.AMXDevice.name == "AMX_B"
-    assert module_a.AMXDevice.supportedVersion == "1.0.1"
-    assert module_b.AMXDevice.supportedVersion == "1.0.1"
+    assert module_a.AMXDevice.supportedVersion == "1.0.2"
+    assert module_b.AMXDevice.supportedVersion == "1.0.2"
     assert module_a.AMXDevice.iconFile == "amx.png"
     assert module_b.AMXDevice.iconFile == "amx.png"
     assert module_a.providePlugins() == [module_a.AMXDevice]
