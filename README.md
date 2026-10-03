@@ -136,7 +136,7 @@ when that is Explorer `1.0.2`; the session header shows the host and the summary
 warns otherwise. Use a dedicated environment, and require it for release checks:
 
 ```bash
-python3 -m venv .venv-explorer && .venv-explorer/bin/pip install "esibd-explorer==1.0.2" pytest pandas
+python3 -m venv .venv-explorer && .venv-explorer/bin/pip install -r requirements-dev.txt
 ESIBD_REQUIRE_TARGET_HOST=1 .venv-explorer/bin/python -m pytest -q
 ```
 
