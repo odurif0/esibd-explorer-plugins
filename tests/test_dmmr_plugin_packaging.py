@@ -179,7 +179,7 @@ def test_dmmr_plugin_exposes_expected_metadata():
     assert ICON_PATH.exists()
     assert module.providePlugins() == [module.DMMRDevice]
     assert module.DMMRDevice.name == "DMMR"
-    assert module.DMMRDevice.supportedVersion == "1.0.1"
+    assert module.DMMRDevice.supportedVersion == "1.0.2"
     assert module.DMMRDevice.unit == "A"
     assert module.DMMRDevice.useMonitors is True
     assert module.DMMRDevice.useOnOffLogic is True

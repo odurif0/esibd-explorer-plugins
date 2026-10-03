@@ -6,7 +6,7 @@ header, and 64-bit Windows DLL.
 
 ## Requirements
 
-- ESIBD Explorer `1.0.1` on Windows for hardware communication.
+- ESIBD Explorer `1.0.2` on Windows for hardware communication.
 - CGC ESI controller with HEAT-CTRL-2410 at address 0 and HVPS-3kB modules at
   addresses 1 and 2.
 - Controller firmware `0x0100` dated July 13, 2026, with the matching July 14

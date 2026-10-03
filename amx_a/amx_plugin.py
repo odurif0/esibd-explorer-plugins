@@ -1110,7 +1110,7 @@ class AMXDevice(Device):
 
     name = "AMX_A"
     version = "0.1.0"
-    supportedVersion = "1.0.1"
+    supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = "%"
     useMonitors = True
@@ -1132,6 +1132,13 @@ class AMXDevice(Device):
     DEVICE_ENABLED = "Device enabled"
     AVAILABLE_CONFIGS = "Available configs"
     LOADED_CONFIG = "Loaded config"
+
+    def exportConfigurationIfChanged(self) -> None:
+        """Explorer 1.0.2 also runs this periodic save from a worker thread, but the
+        export refreshes Explorer's file tree (Qt GUI work): run it on the GUI thread."""
+        base = getattr(super(), "exportConfigurationIfChanged", None)
+        if callable(base):
+            _invoke_gui_callback(base)
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)

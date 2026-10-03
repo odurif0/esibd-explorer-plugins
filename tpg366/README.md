@@ -1,7 +1,7 @@
 # TPG366 Plugin
 
 USB pressure acquisition for the Pfeiffer MaxiGauge TPG 366, with six channels.
-Requires ESIBD Explorer 1.0.1 and its existing `pyserial` dependency; no vendor DLL.
+Requires ESIBD Explorer 1.0.2 and its existing `pyserial` dependency; no vendor DLL.
 
 ## Use
 

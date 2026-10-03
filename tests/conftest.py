@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import inspect
 import os
 from pathlib import Path
+import re
 
 import pytest
 
@@ -200,8 +201,34 @@ _HOST_MARKERS = ('distribution("esibd-explorer")', "distribution('esibd-explorer
 _USES_HOST = []
 
 
+# Sibling folders are byte-identical copies of their canonical plugin apart from
+# the Device name (test_plugin_family_parity, tools/sync_family_siblings.py), so
+# behaviour tests run on the canonical copy only. Tests where the folder or
+# plugin name itself matters still run on every copy; --all-siblings runs all.
+_SIBLING_ID = re.compile(r"(?:^|[\[\-])(psu_[b-e]|ampr_b|amx_b)(?:$|[\]\-])")
+_PER_FOLDER_MODULES = re.compile(
+    r"test_(documentation_integrity|error_catalog_integrity|plugin_autonomy|.*_packaging|amx_psu_icons"
+    r"|amx_psu_links|plugin_family_parity|family_sync_tool|release_archive_integrity|runtime_logging|mscan_.*)$")
+
+
+def pytest_addoption(parser):
+    parser.addoption("--all-siblings", action="store_true",
+                     help="also run behaviour tests on sibling plugin copies (release validation)")
+
+
+def _sibling_duplicate(item) -> bool:
+    callspec = getattr(item, "callspec", None)
+    return (callspec is not None and not _PER_FOLDER_MODULES.match(Path(str(item.fspath)).stem)
+            and bool(_SIBLING_ID.search(callspec.id)))
+
+
 def pytest_collection_modifyitems(config, items):
-    """Mark tests that start a subprocess (real Explorer/Qt probes) as slow."""
+    """Mark subprocess (real Explorer/Qt) tests slow; deselect sibling duplicates."""
+    if not config.getoption("--all-siblings"):
+        duplicates = [item for item in items if _sibling_duplicate(item)]
+        if duplicates:
+            config.hook.pytest_deselected(items=duplicates)
+            items[:] = [item for item in items if not _sibling_duplicate(item)]
     sources: dict = {}
     modules: dict = {}
     for item in items:

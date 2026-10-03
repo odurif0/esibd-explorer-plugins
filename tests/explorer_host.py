@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 
-TARGET_VERSION = "1.0.1"
+TARGET_VERSION = "1.0.2"
 
 _VERSION = re.compile(r"""PROGRAM_VERSION\s*=\s*version\.parse\(\s*['"]([^'"]+)['"]\s*\)""")
 

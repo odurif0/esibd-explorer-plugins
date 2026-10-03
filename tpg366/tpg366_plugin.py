@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import logging
 from pathlib import Path
 import re
 import sys
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 
 import numpy as np
@@ -81,6 +82,41 @@ def _transient_read_error(exc):
         _TRANSIENT_FRAME_ERRORS)
 
 
+_GUI_DISPATCH_LOCK = Lock()
+
+
+def _invoke_gui_callback(callback):
+    """Run on the GUI thread: directly when already there, otherwise queued."""
+    from PyQt6.QtCore import QObject, QThread, Qt
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None or QThread.currentThread() == app.thread():
+        callback()
+        return
+    with _GUI_DISPATCH_LOCK:
+        dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
+        if dispatcher is None:
+            class _Dispatcher(QObject):
+                requested = pyqtSignal(object)
+
+                def __init__(self):
+                    super().__init__()
+                    self.requested.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+                @pyqtSlot(object)
+                def _run(self, queued):
+                    try:
+                        queued()
+                    except Exception:
+                        logging.getLogger(__name__).exception("TPG366 GUI callback failed.")
+
+            dispatcher = _Dispatcher()
+            dispatcher.moveToThread(app.thread())
+            _invoke_gui_callback._dispatcher = dispatcher
+    dispatcher.requested.emit(callback)
+
+
 def _serial_port_name(value):
     """Accept Windows COM numbers like the CGC plugins, retaining explicit paths."""
     port = str(value).strip()
@@ -97,12 +133,19 @@ class TPG366(Device):
 
     name = "TPG366"
     version = "0.1.3"
-    supportedVersion = "1.0.1"
+    supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.OUTPUTDEVICE
     unit = "mbar"
     logY = True
     useOnOffLogic = True
     iconFile = "tpg366.png"
+
+    def exportConfigurationIfChanged(self) -> None:
+        """Explorer 1.0.2 also runs this periodic save from a worker thread, but the
+        export refreshes Explorer's file tree (Qt GUI work): run it on the GUI thread."""
+        base = getattr(super(), "exportConfigurationIfChanged", None)
+        if callable(base):
+            _invoke_gui_callback(base)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

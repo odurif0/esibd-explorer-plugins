@@ -16,7 +16,7 @@ including the AMX HD driver files and the vendor `COM-HVAMX4EDH.dll`.
 
 ## Requirements
 
-- ESIBD Explorer `1.0.1`
+- ESIBD Explorer `1.0.2`
 - Windows for real hardware communication
 - No separate `ESIBD_core` installation is required for the plugin itself
 
