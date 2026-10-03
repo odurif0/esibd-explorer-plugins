@@ -60,6 +60,7 @@ class Device:
         self.enabled = False
         self.automatic = False
         self.auto_range_failure = None
+        self.auto_modes = {}
         self.wrong_command_once = False
 
     def set_enable(self, enabled, **kwargs):
@@ -80,15 +81,18 @@ class Device:
 
     def set_module_auto_range(self, address, enabled, **kwargs):
         self.calls.append(("auto_range", address, enabled))
-        return -12 if address == self.auto_range_failure else self.NO_ERR
+        if address == self.auto_range_failure:
+            return -12
+        self.auto_modes[address] = enabled
+        return self.NO_ERR
 
     def get_module_meas_range(self, address, **kwargs):
         self.calls.append(("range_readback", address))
-        return self.NO_ERR, 0, True
+        return self.NO_ERR, 0, self.auto_modes.get(address, False)
 
     def get_state(self, **kwargs):
         self.calls.append(("state",))
-        return self.NO_ERR, "0x0000", "ST_OVERLOAD"
+        return self.NO_ERR, "0x0000", "ST_ON"
 
     def get_module_current(self, address, **kwargs):
         self.calls.append(("current", address))
@@ -196,22 +200,29 @@ def test_acquisition_reuses_one_lock_for_state_modules_and_recovery(rig, monkeyp
     # The old plugin inherits this loop; the corrected plugin must provide its
     # own loop that explicitly forwards ownership to the nested read sections.
     monkeypatch.setattr(rig.module.DeviceController, "runAcquisition", framework_acquisition, raising=False)
+    controller.toggleOn()  # The recovery must use ranges actually verified at ON.
+    assert controller.acquiring
+    rig.device.calls.clear()
+    controller.lock.attempts = 0
     rig.device.wrong_command_once = recover_polling_mode
-    controller.acquiring = True
     published = []
 
     def publish_once():
         published.append(dict(controller.values))
-        controller.acquiring = False
+        if len(published) == 1 + int(recover_polling_mode):
+            controller.acquiring = False
 
     controller.signalComm.updateValuesSignal = types.SimpleNamespace(emit=publish_once)
     controller.runAcquisition()
-    assert published == [{0: 1e-12, 3: 4e-12}]
+    assert published[-1] == {0: 1e-12, 3: 4e-12}
+    if recover_polling_mode:
+        assert all(np.isnan(value) for value in published[0].values())
+        assert controller._read_recovery.last_incident['resumed'] is True
     assert controller.errorCount == 0
-    assert controller.lock.attempts == 1
+    assert controller.lock.attempts == 1 + int(recover_polling_mode)
     assert not controller.lock._lock.locked()
-    assert not any("generator didn't yield" in message for message in rig.logs)
-    assert (("automatic", False) in rig.device.calls) is recover_polling_mode
+    assert not any("generator didn't yield" in message or 'mode was active' in message for message in rig.logs)
+    assert ("automatic", False) not in rig.device.calls  # It was already manual.
 
 
 def test_test_mode_never_reads_hardware(rig, monkeypatch):

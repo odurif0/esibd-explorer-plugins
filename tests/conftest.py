@@ -18,6 +18,7 @@ class PluginSpec:
     sibling_family: str | None
     header: str | None
     dll: str | None
+    bundled_files: tuple[str, ...] = ()
 
 
 PLUGIN_SPECS: tuple[PluginSpec, ...] = (
@@ -97,8 +98,11 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         None,
         "COM-ESI-CTRL.h",
         "COM-ESI-CTRL.dll",
+        bundled_files=("_heater_stability.py", "_experiment_guard.py", "_heater_limits.py"),
     ),
     PluginSpec("mscan", "MScan", "MScan", "mscan_plugin.py", None, "mscan", None, None, None),
+    PluginSpec("tpg366", "TPG366", "TPG366", "tpg366_plugin.py", None, "tpg366", None, None, None,
+               bundled_files=("_runtime/_tpg366.py", "_readout_panel.py", "tpg366.svg", "switch-medium_on.png", "switch-medium_off.png")),
     PluginSpec(
         "psu_a",
         "PSU_A",

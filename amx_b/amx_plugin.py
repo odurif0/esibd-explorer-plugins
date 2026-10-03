@@ -323,6 +323,14 @@ def _amx_output_rows(snapshot: dict[str, Any], clock_hz: float = 100e6) -> list[
                 elif signal["kind"] == "Periodic":
                     row.update(frequency=f"{clock_hz / signal['period'] / 1000:.6g} kHz", levels="Vneg ↔ Vpos")
                     delays = switch.get("trigger_delay", {})
+                    if all(isinstance(delays.get(edge), int) and 0 <= delays[edge] < 16 for edge in ("rise", "fall")):
+                        # Edge compensation preserves the source period. Its
+                        # hardware-dependent ns step is NOT an exact phase
+                        # measurement. Export registers separately so scans
+                        # can freeze/check the waveform without inventing one.
+                        row["waveform"] = dict(source=dict(signal), clock_hz=clock_hz,
+                            trigger_config=switch.get("trigger_config"), enable_config=switch.get("enable_config"),
+                            trigger_delay=dict(delays), enable_delay=switch.get("enable_delay"))
                     if delays.get("rise") == 0 and delays.get("fall") == 0:
                         row["dwell"] = f"{signal['high'] / clock_hz * 1e6:.6g} / {(signal['period'] - signal['high']) / clock_hz * 1e6:.6g}"
                         row["timing"] = signal
@@ -3245,10 +3253,13 @@ class AMXDevice(Device):
         controller = getattr(self, "controller", None)
         if controller:
             shutdown_confirmed = bool(controller.shutdownCommunication())
+        connection_pending = bool(
+            controller and getattr(controller, "_initial_open_incomplete", lambda: False)()
+        )
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = False if shutdown_confirmed else True
+            self.onAction.state = not shutdown_confirmed and not connection_pending
             self._sync_local_on_action()
-        if not shutdown_confirmed:
+        if not shutdown_confirmed and not connection_pending:
             self.print(
                 "AMX shutdown could not be confirmed; UI remains ON until "
                 "the hardware state is verified.",
@@ -3291,6 +3302,13 @@ class AMXDevice(Device):
         controller = getattr(self, "controller", None)
         current_state = self.isOn() if hasattr(self, "onAction") else False
         transition_target = getattr(controller, "transition_target_on", None)
+        requested_on = current_state if on is None else bool(on)
+        if controller and getattr(controller, "initializing", False) and not requested_on:
+            # The initialization worker owns Open and will perform verified
+            # shutdown if it succeeds. Never start a competing output worker.
+            controller._initial_open_close_requested = True
+            self._set_on_ui_state(False)
+            return
         if controller and (
             getattr(controller, "initializing", False)
             or getattr(controller, "transitioning", False)
@@ -3312,6 +3330,10 @@ class AMXDevice(Device):
         if getattr(self, "loading", False):
             return
 
+        if (controller and not self.isOn()
+                and getattr(controller, "_initial_open_incomplete", lambda: False)()):
+            self.shutdownCommunication()
+            return
         if self.isOn():
             self._finish_setpoint_edits()
         if controller and getattr(controller, "initialized", False):
@@ -3769,6 +3791,7 @@ class AMXController(DeviceController):
         self.available_configs_text = "n/a"
         self.loaded_config_text = "n/a"
         self.initialized = False
+        self._initial_open_close_requested = False
         self.transitioning = False
         self.transition_target_on: bool | None = None
         self._transition_lock = Lock()
@@ -3816,12 +3839,33 @@ class AMXController(DeviceController):
             self.frequency_readback_khz = np.nan
             self.output_rows = None
 
+    def initializeCommunication(self) -> None:
+        if getattr(self, "initializing", False):
+            return
+        acquisition_thread = getattr(self, "acquisitionThread", None)
+        if acquisition_thread is not None and acquisition_thread.is_alive():
+            self.closeCommunication()
+        # Only a new explicit request may forget a previous OFF/close. Arm it
+        # before scheduling the worker, never when that worker eventually runs.
+        self._initial_open_close_requested = False
+        super().initializeCommunication()
+
     def runInitialization(self) -> None:
+        if self._initial_open_close_requested:
+            self.initializing = False
+            return
+        if self._dispose_device() is False:
+            self.initializing = False
+            return  # The previous connection still owns its native port.
         self.initialized = False
-        self._dispose_device()
         try:
+            if self._initial_open_close_requested:
+                return
             self._initialize_transport_session()
-            self.signalComm.initCompleteSignal.emit()
+            if self._initial_open_close_requested:
+                self.shutdownCommunication()
+            else:
+                self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
             self._restore_off_ui_state()
             guidance = self._init_failure_guidance(exc)
@@ -3844,6 +3888,13 @@ class AMXController(DeviceController):
         COM port is locked in-process) instead of looping on a bare
         'Error opening port' (-2) while the hardware is actually responsive.
         """
+        if self._initial_open_incomplete():
+            return (
+                "The failed initial connection is retained until its native call finishes "
+                "and port closure is confirmed. Power the device on and retry ON explicitly. "
+                "If the call remains blocked or closure cannot be confirmed, restart Explorer "
+                "after making the hardware safe. No outputs are automatically re-enabled."
+            )
         current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
         guidance = _amx_poisoned_port_guidance(
             exc,
@@ -3855,6 +3906,8 @@ class AMXController(DeviceController):
         return guidance
 
     def initComplete(self) -> None:
+        if self._initial_open_close_requested:
+            return  # A queued success must not undo an explicit OFF/close.
         self._finalize_transport_initialization()
         self._resume_pending_on_request_after_transport_ready()
 
@@ -3871,7 +3924,12 @@ class AMXController(DeviceController):
         ).strip()
         if backend_reason:
             self.print(backend_reason, flag=PRINT.WARNING)
+        if self._initial_open_close_requested:
+            self._dispose_device()  # Construction finished, but Open was never sent.
+            return
         self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+        if self._initial_open_close_requested:
+            return  # The worker must verify shutdown, not continue initialization.
         self._refresh_available_configs()
         self._refresh_loaded_config_status()
         self._update_state()
@@ -4827,6 +4885,7 @@ class AMXController(DeviceController):
             self._sync_status_to_gui()
 
     def shutdownCommunication(self) -> bool:
+        self._initial_open_close_requested = True
         device = self.device
         if device is None:
             self.closeCommunication()
@@ -4834,6 +4893,9 @@ class AMXController(DeviceController):
 
         self._discard_pending_runtime_applies()
         self._stop_acquisition_for_transition()
+        if self._initial_open_incomplete():
+            self.closeCommunication()
+            return self.device is None and self.main_state == "Disconnected"
         self.print("Starting AMX shutdown sequence.")
         shutdown_kwargs = self._shutdown_kwargs()
         standby_config = shutdown_kwargs.get("standby_config")
@@ -4889,7 +4951,22 @@ class AMXController(DeviceController):
         return shutdown_confirmed
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
-        if (final_state or self.main_state) == _AMX_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+        self._initial_open_close_requested = True
+        if self._initial_open_incomplete():
+            # Release only the failed opening, never claim a hardware shutdown.
+            if self._dispose_device(initial_open_only=True) is False:
+                return
+            self._restore_off_ui_state()
+            final_state = "Disconnected"
+        # Resolve the outcome before closing anything: Open may just have
+        # finished, but that does not confirm a hardware shutdown.
+        if final_state is None:
+            final_state = self.main_state
+            if self.device is not None or final_state not in (
+                "Disconnected", _AMX_SHUTDOWN_UNCONFIRMED_STATE
+            ):
+                final_state = _AMX_SHUTDOWN_UNCONFIRMED_STATE
+        if final_state == _AMX_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
             self.acquiring = False
             self.initialized = True
             self.main_state = _AMX_SHUTDOWN_UNCONFIRMED_STATE
@@ -4901,12 +4978,6 @@ class AMXController(DeviceController):
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
-        if final_state is None:
-            final_state = self.main_state
-            if self.device is not None or final_state not in (
-                "Disconnected", _AMX_SHUTDOWN_UNCONFIRMED_STATE
-            ):
-                final_state = _AMX_SHUTDOWN_UNCONFIRMED_STATE
         resolved_final_state = str(final_state)
         is_disconnected = resolved_final_state == "Disconnected"
         self.main_state = resolved_final_state
@@ -4918,7 +4989,8 @@ class AMXController(DeviceController):
         self.loaded_config_text = "n/a"
         self._loaded_config_index = -1
         self._discard_pending_runtime_applies()
-        self._dispose_device()
+        if self._dispose_device() is False:
+            return
         self.initialized = False
         self._sync_status_to_gui()
 
@@ -4994,20 +5066,47 @@ class AMXController(DeviceController):
             self._transition_lock = lock
         return lock
 
-    def _dispose_device(self) -> None:
+    def _initial_open_incomplete(self) -> bool:
+        return self.device is not None and any(bool(getattr(self.device, name, False)) for name in (
+            "_open_failed", "_opening_in_progress", "_failed_open_released",
+        ))
+
+    def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
+        self.output_rows = None
         device = self.device
+        if device is None:
+            return self.main_state != _AMX_SHUTDOWN_UNCONFIRMED_STATE
+        # A connect that just succeeded needs verified shutdown, not bare Close.
+        # Its initializer retains the pending stop request and owns that path.
+        initial_cleanup = (getattr(device, "_open_failed", False)
+                           or getattr(device, "_failed_open_released", False))
+        can_disconnect = (not getattr(device, "_opening_in_progress", False)
+                          and (not initial_open_only or initial_cleanup))
+        released = (can_disconnect and getattr(device, "connected", None) is False
+                    and getattr(device, "_dll_port_claimed", None) is False)
+        try:
+            if can_disconnect and not released:
+                released = device.disconnect() is True
+        except Exception as exc:
+            self.print(f"AMX connection cleanup remains unconfirmed: {exc}", flag=PRINT.ERROR)
+        if not released:
+            initial_open = self._initial_open_incomplete()
+            self.initialized = not initial_open
+            self.acquiring = False
+            self.main_state = "Connection pending" if initial_open else _AMX_SHUTDOWN_UNCONFIRMED_STATE
+            if initial_open:
+                self._restore_off_ui_state()
+            else:
+                self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return False
+        if self._initial_open_incomplete():
+            self.main_state = "Disconnected"
         self.device = None
         self.initialized = False
-        self.output_rows = None
-        if device is None:
-            return
-        try:
-            device.disconnect()
-        except Exception:
-            pass
-        finally:
-            with contextlib.suppress(Exception):
-                device.close()
+        with contextlib.suppress(Exception):
+            device.close()
+        return True
 
     def _restore_off_ui_state(self) -> None:
         def _update_gui() -> None:

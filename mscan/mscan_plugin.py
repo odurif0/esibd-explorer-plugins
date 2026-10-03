@@ -1,4 +1,4 @@
-"""AMX/PSU amplitude scan, forked from Explorer's MassSpec (msScan).
+"""Quadrupole amplitude scan for AMX/PSU with DMMR current acquisition.
 
 Upstream: ioneater/ESIBD-Explorer, esibd/scans/ms/ms.py, commit 9945145.
 Copyright (C) 2021-2026 Tim Esser. GPL-2.0-or-later; see LICENSE.
@@ -7,19 +7,23 @@ time-windowed acquisition and explicit missing data. No driver access here.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections import deque
+import configparser
 import json
 import math
+from pathlib import Path
 from threading import Event
 import time
 from typing import Any, Callable
 
 import h5py
 import numpy as np
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QAbstractSpinBox, QComboBox, QHeaderView, QSizePolicy, QTreeWidgetItem
+from PyQt6.QtCore import QEvent, QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtWidgets import QAbstractSpinBox, QComboBox, QFileDialog, QHeaderView, QSizePolicy
 
-from esibd.core import INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, parameterDict, plotting
-from esibd.plugins import Scan
+from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
+from esibd.plugins import Plugin, Scan, SettingsManager
 
 
 def providePlugins():
@@ -86,12 +90,165 @@ class _GuiBridge(QObject):
     @pyqtSlot(str)
     def set_status(self, text):
         self.scan.scan_status = text
+        # QLabel updates do not notify Explorer's tree about wrapped row height.
+        # Idle polling is paused during a scan and while its file is being saved.
+        if self.scan.settingsTree:
+            self.scan._layout_readonly_fields()
 
 
 class _Amplitude(MetaChannel):
     """An Explorer scan axis, not a second device or an independently writable rail."""
     def connectSource(self, giveFeedback=False):
         pass
+
+
+class _Signal(MetaChannel):
+    """Data only: no live Input/Output widgets; retain units of archived data."""
+    def connectSource(self, giveFeedback=False):
+        unit, inout = self.unit, self.inout
+        # DMMR is an Explorer input-device with a current monitor. The saved
+        # data are scan outputs, independently of the source device category.
+        self.inout = None
+        try:
+            super().connectSource(giveFeedback=giveFeedback)
+        finally:
+            self.inout = inout
+        if unit:
+            self.unit = unit
+
+
+class _Settings(SettingsManager):
+    """UTF-8 settings and one-way migration; imported files are never rewritten."""
+    @staticmethod
+    def _read_ini(file):
+        config = configparser.ConfigParser(interpolation=None)
+        # Explorer writes UTF-8 but its 1.0.1 reader uses the Windows locale.
+        # Accept an optional BOM from Windows editors, without lossy decoding.
+        if file.exists():
+            config.read(file, encoding='utf-8-sig')
+        return config
+
+    def _settings_path(self, file, useDefaultFile, *, save=False):
+        if useDefaultFile:
+            return self.defaultFile
+        if file is None:
+            dialog = QFileDialog.getSaveFileName if save else QFileDialog.getOpenFileName
+            file = Path(dialog(parent=self.pluginManager.mainWindow, caption='msScan settings',
+                directory=self.pluginManager.Settings.configPath.as_posix(), filter=self.FILTER_INI_H5)[0])
+        return None if Path(file) == Path() else Path(file)
+
+    def loadSettings(self, file=None, useDefaultFile=False):
+        file = self._settings_path(file, useDefaultFile)
+        if file is None:
+            return
+        if file.suffix.lower() != '.ini':
+            return super().loadSettings(file=file)
+        config = self._read_ini(file)
+        self.loading = True
+        try:
+            items = []
+            for name, default in self.defaultSettings.items():
+                saved = config[name] if name in config else {}
+                item = dict(default)
+                item[Parameter.NAME] = name
+                item[Parameter.TREE] = self.tree if default[Parameter.WIDGET] is None else None
+                for field in (Parameter.VALUE, Parameter.DEFAULT, Parameter.ITEMS):
+                    item[field] = saved.get(field, default[field])
+                items.append(item)
+            self.updateSettings(items, file)
+            if not file.exists() or any(name not in config for name in self.defaultSettings):
+                self.saveSettings(file=file)
+            self.tree.collapseAll()
+        finally:
+            self.loading = False
+
+    def updateSettings(self, items, file):
+        saved = {}
+        if file.exists():
+            if file.suffix.lower() == '.ini':
+                config = self._read_ini(file)
+                saved = {key: dict(config[key]) for key in config.sections()}
+            else:
+                with h5py.File(file, 'r') as handle:
+                    group = handle.get(f'{self.parentPlugin.name}/Settings')
+                    if group is not None:
+                        saved = {key: dict(value.attrs) for key, value in group.items()}
+        scan = self.parentPlugin
+        aliases = {scan.DETECTOR: 'Display', scan.OUTPUTS: 'AMX outputs',
+                   scan.START: 'From', scan.STOP: 'To', scan.STEP: 'Step'}
+        def old_value(key, field):
+            values = saved.get(key, {})
+            return values.get(field, values.get(field.lower()))
+        for item in items:
+            key = item[Parameter.NAME]
+            if key not in saved:
+                for field in (Parameter.VALUE, Parameter.DEFAULT):
+                    value = old_value(aliases.get(key, ''), field)
+                    if key == scan.SETTLING:
+                        times = [old_value(k, field) for k in ('Wait', 'Wait long')]
+                        times = [float(t) / 1000 for t in times if t is not None]
+                        value = max(times) if times else None
+                    elif key == scan.INTEGRATION:
+                        value = old_value('Average', field)
+                        value = float(value) / 1000 if value is not None else None
+                    elif key == scan.RATE and old_value(scan.MODE, Parameter.VALUE) == scan.CONTINUOUS:
+                        step = old_value(scan.STEP, field)
+                        step = old_value('Step', field) if step is None else step
+                        duration = old_value(scan.TIME_STEP, field)
+                        if step is not None:
+                            duration = 1. if duration is None else float(duration)
+                            if not math.isfinite(duration) or duration <= 0:
+                                raise ScanError('Cannot convert the old sweep: invalid Time step.')
+                            value = float(step) / duration
+                            if not math.isfinite(value) or value <= 0:
+                                raise ScanError('Cannot convert the old sweep: invalid Amplitude step.')
+                    if value is not None:
+                        item[field] = value
+            if key == scan.MODE:
+                # Missing modes in old files always mean the old stepped scan.
+                # An unknown saved mode must remain visible and block Start.
+                item[Parameter.ITEMS] = ','.join(dict.fromkeys(
+                    [scan.STEPPED, scan.CONTINUOUS, str(item[Parameter.VALUE])]))
+            if key == scan.OUTPUTS:
+                # A former four-connector scan must not silently become a
+                # different physical pair when the settings are loaded.
+                for field in (Parameter.VALUE, Parameter.DEFAULT):
+                    if field in item and item[field] not in scan.PAIRS:
+                        item[field] = scan.NO_PAIR
+                item[Parameter.ITEMS] = ','.join([scan.NO_PAIR, *scan.PAIRS])
+            if key in (scan.DETECTOR, scan.AMX):
+                # Keep missing selections explicit, without phantom old choices.
+                if key == scan.DETECTOR:
+                    choices = [scan.NO_SIGNAL, *[scan._module_label(c) for c in scan.pluginManager.DeviceManager.channels() if scan._is_dmmr(c)]]
+                else:
+                    choices = ['None', *[p.name for p in scan.pluginManager.plugins if p.name in ('AMX_A', 'AMX_B')]]
+                choices.append(str(item[Parameter.VALUE]))
+                item[Parameter.ITEMS] = ','.join(dict.fromkeys(choices))
+        scan.notes = str(old_value('Notes', Parameter.VALUE) or '')
+        super().updateSettings(items, file)
+
+    def saveSettings(self, file=None, useDefaultFile=False):
+        file = self._settings_path(file, useDefaultFile, save=True)
+        if file is None:
+            return
+        # Do not append defaults to an existing imported INI or HDF5.
+        if self.loading and file != self.defaultFile and file.exists():
+            return
+        if file.suffix.lower() != '.ini':
+            return super().saveSettings(file=file, useDefaultFile=useDefaultFile)
+        config = self._read_ini(file)
+        config[INFO] = infoDict(self.name)
+        for name, setting in self.settings.items():
+            if setting.internal:
+                continue
+            if name not in config:
+                config[name] = {}
+            config[name][Parameter.VALUE] = setting.formatValue()
+            config[name][Parameter.DEFAULT] = setting.formatValue(setting.default)
+            if setting.parameterType in (PARAMETERTYPE.COMBO, PARAMETERTYPE.INTCOMBO, PARAMETERTYPE.FLOATCOMBO):
+                config[name][Parameter.ITEMS] = ','.join(setting.items)
+        with file.open('w', encoding='utf-8') as handle:
+            config.write(handle)
 
 
 class MScan(Scan):
@@ -102,27 +259,64 @@ class MScan(Scan):
     and calibration separately. Devices must already be enabled and recording.
     """
     name = 'MScan'
-    version = '0.1.0'
+    version = '0.2.0'
+    TITLE = 'msScan — AMX/PSU'
     supportedVersion = '1.0'
     iconFile = 'mscan.png'
     useInvalidWhileWaiting = False
     AMX = 'AMX'
-    OUTPUTS = 'AMX outputs'
+    OUTPUTS = 'AMX connectors'
+    START = 'Amplitude from (V)'
+    STOP = 'Amplitude to (V)'
+    STEP = 'Amplitude step (V)'
+    MODE = 'Scan mode'
+    STEPPED = 'Step by step'
+    CONTINUOUS = 'Continuous'
+    TIME_STEP = 'Time step (s)'
+    RATE = 'Sweep rate'
+    DETECTOR = 'DMMR module'
+    DMMR_INTERVAL = 'DMMR interval (ms)'
+    SETTLING = 'Settling time (s)'
+    INTEGRATION = 'Measurement time (s)'
+    CADENCE = 'DMMR data interval'
+    SAMPLES = 'Samples at last point'
+    SCANTIME = 'Minimum duration'
     SUPPLIES = 'Driven PSU'
     FREQUENCY = 'Fixed frequency'
-    NO_SIGNAL = 'Select channel'
+    AMPLITUDE_LIMITS = 'Allowed amplitude (V)'
+    FINAL_VOLTAGES = 'After completion'
+    CURRENT_LIMITS = 'PSU Ilim'
+    NO_SIGNAL = 'Select DMMR module'
+    NO_PAIR = 'Select AMX pair'
     TIMEOUT = 'Settle timeout'
     TOLERANCE = 'Voltage tolerance'
     STATUS = 'Status'
     VALIDATION = 'Validation'
-    PAIRS = {'CH0-CH1': (0, 1), 'CH2-CH3': (2, 3), 'CH0-CH3': (0, 1, 2, 3)}
+    PAIRS = {'CH0-CH1': (0, 1), 'CH2-CH3': (2, 3)}
     POLL_S = .05
 
     class Display(Scan.Display):
+        def closeGUI(self):
+            if self.scan.finished and self.titleBar is not None:
+                # Detach every action while both owners are alive: navigation
+                # belongs to navToolBar, Data to Clipboard belongs to Display.
+                # Leaving either attached can crash Qt during their destruction.
+                self.titleBar.clear()
+            super().closeGUI()
+
         def initGUI(self):
             super().initGUI()
+            self.titleBarLabel.setText(self.scan.TITLE)
             self.addAction(event=lambda: self.copyLineDataClipboard(line=self.ms),
                            toolTip='Data to Clipboard.', icon=self.dataClipboardIcon, before=self.copyAction)
+
+        def provideDock(self):
+            created = super().provideDock()
+            if self.dock:
+                self.dock.title = self.scan.TITLE
+                self.dock.setWindowTitle(self.scan.TITLE)
+                self.titleBarLabel.setText(self.scan.TITLE)
+            return created
 
         def initFig(self):
             super().initFig()
@@ -136,31 +330,80 @@ class MScan(Scan):
         self._cancel = Event()
         self._plan = None
         self._validation = {}
+        self._last_scan_status = ''
+        self._ready = False
+        self.displayDefault = ''  # Plot selection only; never an acquisition setting.
+        self.notes = ''
         super().__init__(**kwargs)
         self.useDisplayChannel = True
         self._bridge = _GuiBridge(self)
 
     def getDefaultSettings(self):
-        settings = super().getDefaultSettings()
-        # Keep the historical storage key/attribute, but acquire only the selected
-        # channel. The combo's other items are choices, never hidden acquisitions.
-        settings[self.DISPLAY] = parameterDict(value=self.NO_SIGNAL, items=self.NO_SIGNAL,
-            parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='displayDefault', event=self._signal_changed,
-            toolTip='Signal measured after the quadrupole. Select an Explorer channel; only this channel is recorded. '
-                    'Its device must be acquiring and recording. Units and device are shown in the choices\' tooltips.')
+        settings = {}
+        settings[self.DETECTOR] = parameterDict(value=self.NO_SIGNAL, items=self.NO_SIGNAL,
+            parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='detector_module', event=self._signal_changed,
+            toolTip='Physical DMMR module wired to the ion collector after the quadrupole. '
+                    'Only this current channel is acquired. DMMR acquisition and recording must already be active.')
         settings[self.AMX] = parameterDict(value='None', items='None, AMX_A, AMX_B',
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_name', event=self._setup_changed,
             toolTip='AMX with PSU associations already configured in its Settings. No automatic ON or config load.')
-        settings[self.OUTPUTS] = parameterDict(value='CH0-CH1', items=', '.join(self.PAIRS),
+        settings[self.OUTPUTS] = parameterDict(value='CH0-CH1', items=', '.join([self.NO_PAIR, *self.PAIRS]),
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_outputs', event=self._setup_changed,
             toolTip='Outputs wired to this quadrupole. Both rails of each associated PSU are swept together. Other outputs sharing these supplies are also affected.')
+        settings[self.MODE] = parameterDict(value=self.STEPPED, items=f'{self.STEPPED},{self.CONTINUOUS}',
+            parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='scan_mode', event=self._mode_changed,
+            toolTip='Step by step: settle, then measure at each amplitude. Continuous: PC-timed voltage increments '
+                    'with acquisition during transitions; not a hardware-synchronized analogue ramp. '
+                    'The horizontal axis is commanded amplitude, not a simultaneous voltage/current measurement.')
+        settings[self.TIME_STEP] = parameterDict(value=1., minimum=.001, maximum=3600., unit='s',
+            parameterType=PARAMETERTYPE.FLOAT, attr='time_step_s', event=self.estimateScanTime,
+            instantUpdate=False, displayDecimals=3,
+            toolTip='Continuous only: requested interval between voltage commands. DMMR samples are averaged '
+                    'over each actual command interval, including transitions. Does not change DMMR sampling. '
+                    'Must cover the selected module\'s valid data interval (see DMMR data interval); '
+                    'unknown cadence or a shorter step blocks Start. No new valid sample blocks the next command. '
+                    'A final interval is measured at the last amplitude. PC jitter may lengthen an interval, '
+                    'never shorten the next to catch up. A whole missed interval or an unfinished PSU move '
+                    'aborts the scan without skipping commands. Actual timestamps are saved.')
+        settings[self.RATE] = parameterDict(value=1., minimum=.000001, maximum=1e6,
+            parameterType=PARAMETERTYPE.FLOAT, attr='sweep_rate', event=self.estimateScanTime,
+            instantUpdate=False, displayDecimals=15, unit='V/s',
+            toolTip='Continuous only: positive requested sweep speed in V/s. Direction follows Amplitude from/to. '
+                    'Command increment = Sweep rate × Time step; the stepped-mode Amplitude step is ignored. '
+                    'PC-timed, sequential PSU writes, not a verified analogue slew rate or synchronized ramp.')
+        settings[self.DMMR_INTERVAL] = parameterDict(value=1000, minimum=100, maximum=10000,
+            parameterType=PARAMETERTYPE.INT, event=self._dmmr_interval_changed,
+            instantUpdate=False, restore=False, unit='ms',
+            toolTip='Live DMMR software interval, shared by ALL its modules and recording. '
+                    'Edits use the existing DMMR setting and its allowed range; no ON/OFF or ADC setting is changed. '
+                    'The delay is applied after module reads, so actual sample intervals can be longer. '
+                    'Explorer normally permits 100–10000 ms (1000 ms default), not a hardware sampling-rate guarantee. '
+                    'Loading a scan file never applies its saved interval to DMMR. Cannot edit during a scan.')
         for key, value, attr in ((self.START, 50., 'start'), (self.STOP, 200., 'stop'), (self.STEP, 1., 'step')):
             settings[key] = parameterDict(value=value, minimum=.000001 if key == self.STEP else 0., maximum=1e6,
                 parameterType=PARAMETERTYPE.FLOAT, attr=attr, event=self.estimateScanTime, instantUpdate=False,
                 displayDecimals=3, unit='V', toolTip='Amplitude A: rail levels -A / +A, not peak-to-peak voltage.')
-        settings[self.WAIT][Parameter.TOOLTIP] = 'Continuous time in tolerance after the PSU commands finish, before averaging (ms).'
-        settings[self.WAITLONG][Parameter.TOOLTIP] = 'Continuous settling time for a large amplitude step (ms).'
-        settings[self.AVERAGE][Parameter.MIN] = 1
+        for key, value, attr, tooltip in (
+            (self.SETTLING, .5, 'settling_s', 'Continuous time within voltage tolerance after the PSU commands finish. '
+                'Step by step: at every point and on return. Continuous: only at the start and on return.'),
+            (self.INTEGRATION, 1., 'integration_s', 'Time window for averaging new DMMR samples, after settling. '
+                'This does not change DMMR sampling. Empty or invalid windows are saved as NaN.'),
+        ):
+            settings[key] = parameterDict(value=value, minimum=.001, maximum=3600., unit='s',
+                parameterType=PARAMETERTYPE.FLOAT, attr=attr, event=self.estimateScanTime,
+                instantUpdate=False, displayDecimals=3, toolTip=tooltip)
+        for key, value, attr, tooltip in (
+            (self.CADENCE, 'Select a DMMR module', None, 'Intervals between the last 21 valid recorded samples of the selected module, '
+                'not empty recorder ticks. The minimum continuous Time step is the larger of the configured DMMR polling '
+                'interval and the longest observed interval, rounded up to milliseconds. At least two fresh valid samples '
+                'are required. This observed software bound does not certify an ADC conversion rate or future timing.'),
+            (self.SAMPLES, 'Not acquired', None, 'Number of finite/total DMMR samples used at the last acquired point.'),
+            (self.SCANTIME, 'Unavailable', 'scantime', 'Step by step: all settling and measurement windows plus final settling. '
+                'Continuous: one time step per amplitude, including the last, plus initial/final settling. '
+                'Approach/return, communication and waiting for DMMR data add time. Neither mode is inherently faster.'),
+        ):
+            settings[key] = parameterDict(value=value, parameterType=PARAMETERTYPE.LABEL,
+                indicator=True, restore=False, attr=attr, toolTip=tooltip)
         settings[self.TIMEOUT] = parameterDict(value=30., minimum=.1, maximum=3600., unit='s',
             parameterType=PARAMETERTYPE.FLOAT, attr='settle_timeout', advanced=True,
             toolTip='Abort if voltage settling or fresh detector data takes longer than this timeout.')
@@ -169,22 +412,69 @@ class MScan(Scan):
             toolTip='Allowed absolute difference between each measured PSU magnitude and its requested value.')
         settings[self.STATUS] = parameterDict(value='Idle', parameterType=PARAMETERTYPE.LABEL,
             attr='scan_status', indicator=True, restore=False,
-            toolTip='Normal completion restores the original PSU setpoints. Stop/error holds the last setpoints; HV stays ON.')
+            toolTip='Readiness is checked from existing device/channel states, without any hardware command. '
+                    'Normal completion restores the original PSU setpoints. Stop/error holds the last setpoints; HV stays ON.')
         settings[self.SUPPLIES] = parameterDict(value='Select an AMX', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
             toolTip='Both listed PSU setpoints follow A. Physical rails are -A / +A relative to the PSU reference. '
                     'All AMX connectors sharing a listed PSU are affected. This display never commands a device.')
         settings[self.FREQUENCY] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False, toolTip='Read from AMX. Frequency, duty cycle and routing stay fixed; change them in AMX, not here.')
-        settings[self.AVERAGE][Parameter.TOOLTIP] = 'Average fresh detector samples over this time window (ms), after voltage settling.'
-        order = (self.AMX, self.OUTPUTS, self.SUPPLIES, self.FREQUENCY,
-                 self.START, self.STOP, self.STEP, self.DISPLAY, self.WAIT, self.WAITLONG, self.LARGESTEP,
-                 self.AVERAGE, self.SCANTIME, self.STATUS, self.NOTES, self.TIMEOUT, self.TOLERANCE)
+        for key, tooltip in (
+            (self.AMPLITUDE_LIMITS, 'Intersection of all selected PSU hardware voltage limits and Explorer channel limits. '
+                'Read-only: choose the sweep with Amplitude from/to. Change channel Min/Max in PSU; the hardware ceiling cannot be overridden. '
+                'Read for the current range; unavailable limits block Start. This is a setpoint range, not a guarantee of regulation under load.'),
+            (self.FINAL_VOLTAGES, 'Normal completion restores these initial PSU voltage setpoints (V), even outside the scan interval. '
+                'Signed levels relative to the PSU reference. Iget (mA) is the PSU current measured now, '
+                'not a prediction of current after the return. It updates during the scan; the return voltage stays fixed. '
+                'Stop/error does not restore or switch HV OFF.'),
+            (self.CURRENT_LIMITS, 'Hardware-read Ilim and maximum programmable current, in CH0/CH1 order. MScan never changes Ilim. '
+                'A measured current at or above Ilim blocks/aborts acquisition. Foldback can limit below Ilim; voltage must also stay in tolerance. '
+                'This is not a fast overcurrent protection or a guarantee against transients.'),
+        ):
+            settings[key] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
+                indicator=True, restore=False, toolTip=tooltip)
+        order = (self.AMX, self.OUTPUTS, self.SUPPLIES, self.FREQUENCY, self.DETECTOR, self.DMMR_INTERVAL,
+                 self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.RATE, self.FINAL_VOLTAGES,
+                 self.SETTLING, self.INTEGRATION, self.TIME_STEP, self.CADENCE, self.SAMPLES,
+                 self.SCANTIME, self.STATUS, self.TIMEOUT, self.TOLERANCE)
         return {key: settings[key] for key in order}
 
     def initGUI(self):
-        super().initGUI()
+        # Use Explorer's common plugin/services, not the historical scan GUI.
+        self.loading = True
+        Plugin.initGUI(self)
+        self.titleBarLabel.setText(self.TITLE)
+        self.settingsTree = TreeWidget()
+        self.settingsTree.setMinimumWidth(200)
+        self.settingsTree.setHeaderLabels(['msScan', 'Value'])
+        self.settingsTree.setRootIsDecorated(False)
+        self.settingsTree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.settingsTree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.settingsTree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.addContentWidget(self.settingsTree)
+        self._layout_timer = QTimer(self._bridge)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.timeout.connect(self._layout_readonly_fields)
+        self.settingsMgr = _Settings(parentPlugin=self, pluginManager=self.pluginManager, tree=self.settingsTree,
+            name=f'{self.name} Settings', defaultFile=self.pluginManager.Settings.configPath / self.configINI,
+            dependencyPath=self.pluginManager.Settings.dependencyPath, sourceCodePath=self.pluginManager.Settings.sourceCodePath)
+        self.settingsMgr.addDefaultSettings(plugin=self)
+        self.settingsMgr.init()
+        self.addAction(event=lambda: self.loadSettings(file=None), toolTip='Load msScan settings.', icon=self.makeCoreIcon('blue-folder-import.png'))
+        self.addAction(event=lambda: self.saveSettings(file=None), toolTip='Export msScan settings.', icon=self.makeCoreIcon('blue-folder-export.png'))
+        self.recordingAction = self.addStateAction(event=self.toggleRecording,
+            toolTipFalse='Start the AMX/PSU scan with the selected DMMR module.', iconFalse=self.makeCoreIcon('play.png'),
+            toolTipTrue='Stop the scan; hold the last PSU setpoints. HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
+        self.loading = False
+        self.estimateScanTime()
+        self.dummyInitialization()
+        self.recordingAction.toggled.connect(self._update_scan_action)
+        button = self.titleBar.widgetForAction(self.recordingAction)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._update_scan_action()
         self._format_settings()
+        self.toggleAdvanced(advanced=False)
         self._refresh_interface()
         # Discovery/readback only, on Qt: no hardware reads and no reinitializing
         # scan data when a device appears, disappears or changes its live value.
@@ -192,30 +482,281 @@ class MScan(Scan):
         self._interface_timer.timeout.connect(self._refresh_interface)
         self._interface_timer.start(500)
 
+    def toggleAdvanced(self, advanced=None):
+        if advanced is not None:
+            self.advancedAction.state = advanced
+        if getattr(self, 'settingsMgr', None) is not None:
+            for setting in self.settingsMgr.settings.values():
+                if setting.advanced:
+                    setting.setHidden(not self.advancedAction.state)
+            self._mode_fields()
+
+    def _mode_fields(self):
+        if not all(key in self.settingsMgr.settings for key in (self.MODE, self.INTEGRATION, self.TIME_STEP, self.RATE, self.SETTLING)):
+            return
+        continuous = getattr(self, 'scan_mode', self.STEPPED) == self.CONTINUOUS
+        for key in (self.INTEGRATION, self.STEP):
+            self.settingsMgr.settings[key].setHidden(continuous)
+        for key in (self.TIME_STEP, self.RATE):
+            self.settingsMgr.settings[key].setHidden(not continuous)
+        self.settingsMgr.settings[self.SETTLING].setText(0,
+            'Initial/final settling (s)' if continuous else self.SETTLING)
+
+    def _mode_changed(self):
+        if not self.loading and not self.settingsMgr.loading:
+            self._mode_fields()
+            self._refresh_interface()
+
+    def _update_scan_action(self):
+        action = getattr(self, 'recordingAction', None)
+        if action is not None:
+            action.setText('Stop scan' if self.recording else 'Start scan')
+            action.setToolTip(action.toolTipTrue if self.recording else action.toolTipFalse)
+            # Stop remains available throughout the run, even if a source fails.
+            # A new scan must wait for the previous worker and file save to finish.
+            action.setEnabled(self.recording or (self.finished and self._ready))
+
     def _format_settings(self):
-        labels = {self.DISPLAY: 'Measured signal', self.OUTPUTS: 'AMX connectors',
-                  self.START: 'Amplitude from (V)', self.STOP: 'Amplitude to (V)', self.STEP: 'Amplitude step (V)',
-                  self.WAIT: 'Settling (ms)', self.WAITLONG: 'Large-step settling (ms)', self.LARGESTEP: 'Large step (V)',
-                  self.AVERAGE: 'Integration (ms)', self.SCANTIME: 'Estimated time',
+        # Preserve old step/time ratios, including when Qt interprets the text
+        # on Start or focus loss. Trim zeros, not significant digits: rounded
+        # text can silently drop an aligned endpoint from the generated scan.
+        spin = self.settingsMgr.settings[self.RATE].spin
+        spin.textFromValue = lambda value: f'{value:.15f}'.rstrip('0').rstrip('.')
+        spin.setValue(spin.value())
+        labels = {self.INTEGRATION: 'Measurement per point (s)', self.RATE: 'Sweep rate (V/s)',
                   self.TIMEOUT: 'Settle timeout (s)', self.TOLERANCE: 'Voltage tolerance (V)'}
         for key, label in labels.items():
             self.settingsMgr.settings[key].setText(0, label)  # labels, not INI/HDF5 keys
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for spin in self.settingsTree.findChildren(QAbstractSpinBox):
             spin.setKeyboardTracking(False)
-        for key in (self.DISPLAY, self.AMX, self.OUTPUTS):
+        for key in (self.DETECTOR, self.AMX, self.OUTPUTS, self.MODE):
             combo = self.settingsMgr.settings[key].combo
             combo.setMaximumWidth(16777215)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
-        for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS):
+        for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
+                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS):
             label = self.settingsMgr.settings[key].label
             label.setMaximumHeight(16777215)
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            label.setProperty('mscanWrappedLabel', True)
+            label.installEventFilter(self)
+        self._layout_readonly_fields()
+
+    def eventFilter(self, obj, event):
+        # Defer height changes until QTreeWidget has finished updating editors.
+        # Scheduling a new item layout inside their Resize events can recurse
+        # through visualRect/updateEditorGeometries until Qt exhausts its stack.
+        if (event.type() == QEvent.Type.Resize and obj.property('mscanWrappedLabel')
+                and event.size().width() != event.oldSize().width()):
+            self._layout_timer.start(0)
+        return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _fit_readonly_label(label):
+        # Recompute from the actual column width, not QLabel's preferred
+        # wrapping width (sizeHint can otherwise double the row height).
+        # Release both old bounds so shorter text AND narrower columns reflow.
+        label.setMinimumHeight(0)
+        label.setMaximumHeight(16777215)
+        label.setFixedHeight(max(0, label.heightForWidth(label.width())))
+
+    def _layout_readonly_fields(self):
+        for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
+                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS):
+            label = self.settingsMgr.settings[key].label
+            self._fit_readonly_label(label)
+        self.settingsTree.scheduleDelayedItemsLayout()
+
+    def provideDock(self):
+        created = super().provideDock()
+        if self.dock:
+            self.dock.title = self.TITLE
+            self.dock.setWindowTitle(self.TITLE)
+            self.titleBarLabel.setText(self.TITLE)
+        return created
+
+    @staticmethod
+    def _is_dmmr(channel):
+        try:
+            return (channel.getDevice().name == 'DMMR' and channel.real and channel.unit == 'A'
+                    and callable(getattr(channel, 'module_address', None)) and channel.module_address() >= 0)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _module_label(channel):
+        return f'Module {channel.module_address()} — {channel.name}'
+
+    def _detector(self):
+        selection = str(self.detector_module).strip()
+        if not selection or selection == self.NO_SIGNAL:
+            raise ScanError('Select a DMMR module connected to the ion collector.')
+        matches = [c for c in self.pluginManager.DeviceManager.channels() if self._is_dmmr(c)
+                   and selection in (self._module_label(c), c.name)]
+        if len(matches) != 1:
+            raise ScanError(f'DMMR module {selection} is unavailable or ambiguous. Check DMMR discovery and selection.')
+        return matches[0]
+
+    def estimateScanTime(self):
+        if not all(hasattr(self, attr) for attr in ('start', 'stop', 'step', 'settling_s', 'integration_s')):
+            return
+        try:
+            steps = self._scan_steps()
+            mode, duration = self._timing()
+            if mode == self.CONTINUOUS:
+                self.scantime = f'{len(steps) * duration + 2 * self.settling_s:g} s + control/data delays'
+            else:
+                self.scantime = f'{len(steps) * (self.settling_s + duration) + self.settling_s:g} s + ramping/data delays'
+        except (ScanError, AttributeError):
+            self.scantime = 'Invalid amplitude range or timing'
+
+    def _timing(self):
+        mode = getattr(self, 'scan_mode', self.STEPPED)
+        if mode not in (self.STEPPED, self.CONTINUOUS):
+            raise ScanError('Select Step by step or Continuous scan mode.')
+        duration = float(self.time_step_s if mode == self.CONTINUOUS else self.integration_s)
+        if not math.isfinite(duration) or duration <= 0:
+            raise ScanError('Time step must be positive and finite.' if mode == self.CONTINUOUS
+                            else 'Measurement time must be positive and finite.')
+        return mode, duration
+
+    def _dmmr_interval_setting(self):
+        device = self._detector().getDevice()
+        settings = getattr(self.pluginManager.Settings, 'settings', {})
+        setting = settings.get(f'{device.name}/{device.INTERVAL}')
+        if setting is None or setting.spin is None:
+            raise ScanError('DMMR Interval setting unavailable. Select an initialized DMMR module.')
+        return device, setting
+
+    def _dmmr_interval_editable(self, *, before_start=False):
+        return (self.finished and (before_start or not self.recording)
+                and not any(isinstance(p, Scan) and not p.finished for p in self.pluginManager.plugins if p is not self))
+
+    def _sync_dmmr_interval(self):
+        setting = self.settingsMgr.settings[self.DMMR_INTERVAL]
+        spin = setting.spin
+        # Disabling a focused field emits editingFinished too. A display sync
+        # must not re-enter the command callback while locking for acquisition.
+        previous = spin.blockSignals(True)
+        try:
+            device, source = self._dmmr_interval_setting()
+            self._cadence_epoch(device)
+            spin.setEnabled(self._dmmr_interval_editable())
+            if spin.hasFocus() or spin.lineEdit().hasFocus():
+                return  # never overwrite unsubmitted keyboard input
+            spin.setSpecialValueText('')
+            spin.setRange(source.spin.minimum(), source.spin.maximum())
+            spin.setValue(int(source.value))
+            spin.setToolTip(setting.toolTip)
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            spin.setEnabled(False)
+            spin.setRange(0, 0)
+            spin.setSpecialValueText('Unavailable')
+            spin.setToolTip(str(exc))
+        finally:
+            spin.blockSignals(previous)
+
+    def _dmmr_interval_changed(self, *, before_start=False):
+        if self.loading or self.settingsMgr.loading or self.pluginManager.loading or self.pluginManager.closing:
+            return False
+        applied = True
+        try:
+            if not self.finished or (self.recording and not before_start):
+                raise ScanError('Cannot change the DMMR interval during a scan.')
+            if not self._dmmr_interval_editable(before_start=before_start):
+                raise ScanError('Finish the other scan before changing the shared DMMR interval.')
+            device, source = self._dmmr_interval_setting()
+            requested = int(self.settingsMgr.settings[self.DMMR_INTERVAL].value)
+            if not source.spin.minimum() <= requested <= source.spin.maximum():
+                raise ScanError('DMMR interval outside its software setting limits.')
+            if source.value != requested:
+                self._cadence_epoch(device)
+                source.value = requested  # same live Setting, on Qt; no direct driver command
+                if not source.instantUpdate:
+                    source.changedEvent()  # commit its native callback and persistence, just like Enter
+                self._cadence_epoch(device)
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            applied = False
+            self.print(str(exc), flag=PRINT.WARNING)
+        self._sync_dmmr_interval()
+        self._refresh_interface()
+        return applied
+
+    def _cadence_epoch(self, device):
+        configured = float(getattr(device, 'interval', np.nan)) / 1000
+        if not math.isfinite(configured) or configured <= 0:
+            raise ScanError('DMMR polling interval unavailable.')
+        previous = getattr(self, '_dmmr_cadence_epoch', None)
+        if previous is None:
+            self._dmmr_cadence_epoch = (device, configured, -np.inf)
+        elif previous[0] is not device or previous[1] != configured:
+            # Do not mix old/fast or old/slow samples with the newly configured
+            # interval. Keep the actual history intact for all users of DMMR.
+            self._dmmr_cadence_epoch = (device, configured, time.time())
+        return configured, self._dmmr_cadence_epoch[2]
+
+    def _detector_cadence(self, c):
+        """Bound the scan by this module's usable history, not recorder ticks."""
+        device = c.getDevice()
+        if not c.acquiring or not device.recording:
+            raise ScanError(f'{c.name}: DMMR acquisition/recording stopped.')
+        configured, since = self._cadence_epoch(device)
+        times = np.asarray(device.time.get())
+        values = np.asarray(c.getValues(subtractBackground=False))
+        if len(times) != len(values):
+            raise ScanError(f'{c.name}: DMMR timestamps and values are misaligned.')
+        if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
+            raise ScanError(f'{c.name}: invalid DMMR timestamps.')
+        valid_times = times[np.isfinite(values) & (times > since)][-21:]
+        if len(valid_times) < 2:
+            reason = 'after DMMR interval change' if math.isfinite(since) else 'to determine Time step'
+            raise ScanError(f'{c.name}: waiting for two valid recorded DMMR samples {reason}.')
+        intervals = np.diff(valid_times)
+        largest = float(intervals.max())
+        if not 0 <= time.time() - valid_times[-1] <= max(2., 3 * configured, 3 * largest):
+            raise ScanError(f'{c.name}: waiting for fresh valid DMMR samples.')
+        # Round Unix timestamp subtraction to microseconds before the GUI's
+        # millisecond ceiling; binary roundoff must not add a spurious ms.
+        micros = round(max(configured, largest) * 1e6)
+        return dict(configured_interval_s=configured, typical_interval_s=float(np.median(intervals)),
+            largest_interval_s=largest, minimum_time_step_s=((micros + 999) // 1000) / 1000,
+            last_sample_time=float(valid_times[-1]), sample_count=len(valid_times))
+
+    def _require_time_step(self, c, duration, window_start=None):
+        cadence = self._detector_cadence(c)
+        minimum = cadence['minimum_time_step_s']
+        if duration < minimum:
+            raise ScanError(f'{c.name}: Time step must be at least {minimum:g} s for the selected DMMR module '
+                            f'(requested {duration:g} s). Increase Time step or change DMMR acquisition settings.')
+        if window_start is not None and cadence['last_sample_time'] <= window_start:
+            raise ScanError(f'{c.name}: no new valid DMMR sample within Time step. '
+                            'Scan stopped without advancing; increase Time step or check DMMR acquisition.')
+        return cadence
+
+    def _acquisition_info(self):
+        try:
+            cadence = self._detector_cadence(self._detector())
+            text = (f'≈ {cadence["typical_interval_s"]:.3g} s between valid samples; '
+                    f'Time step ≥ {cadence["minimum_time_step_s"]:g} s')
+        except (ScanError, AttributeError, ValueError, TypeError) as exc:
+            text = str(exc)
+        self.settingsMgr.settings[self.CADENCE].value = text
+        counts, finite = self._validation.get('samples'), self._validation.get('finite_samples')
+        windows = self._validation.get('window_end')
+        acquired = np.flatnonzero(np.isfinite(windows)) if windows is not None else []
+        self.settingsMgr.settings[self.SAMPLES].value = (f'{int(finite[acquired[-1], 0])} valid / {int(counts[acquired[-1], 0])} total'
+            if len(acquired) and counts is not None else 'Not acquired')
+
+    def scanUpdate(self, done=False):
+        self._acquisition_info()
+        super().scanUpdate(done=done)
 
     def _signal_changed(self):
         if not self.loading and not self.settingsMgr.loading:
+            self._refresh_interface()
             self.dummyInitialization()
 
     def _setup_changed(self):
@@ -233,42 +774,81 @@ class MScan(Scan):
             combo.blockSignals(previous)
             self.updateDisplayChannel()
 
+    def _completion_text(self, rails, *, running=False):
+        lines = []
+        for r in rails:
+            voltage = r['initial'] if running else self._number(r['channel'], 'voltage_setpoint_readback', 'Vset readback')
+            try:
+                current = f'Iget {self._number(r["channel"], "current_readback", "current measurement") * 1000:g} mA'
+            except ScanError:
+                current = 'Iget unavailable'
+            lines.append(f'{r["name"]}: {"+" if r["number"] == 0 else "−"}{voltage:g} V, {current}')
+        return '\n'.join(lines) or 'Unavailable'
+
+    def _refresh_completion(self, rails, *, running=False):
+        try:
+            text = self._completion_text(rails, running=running)
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError):
+            text = 'Unavailable'
+        setting = self.settingsMgr.settings[self.FINAL_VOLTAGES]
+        if setting.value != text:
+            setting.value = text
+        setting.label.setToolTip(f'{text}\n\n{setting.toolTip}')
+
     def _refresh_interface(self):
-        if (not self.finished or self.recording or self.loading or self.settingsMgr.loading
-                or self.pluginManager.loading or self.pluginManager.closing):
+        if (self.loading or self.settingsMgr.loading or self.pluginManager.loading or self.pluginManager.closing):
+            return
+        self._sync_dmmr_interval()
+        if not self.finished or self.recording:
+            # Keep setup/readiness frozen during acquisition. Only observe Iget;
+            # the return voltage must stay the initial target captured by the plan.
+            self._refresh_completion(self._plan['rails'] if self._plan else [], running=True)
+            self._layout_readonly_fields()
             return
         channels = list(self.pluginManager.DeviceManager.channels())
-        setting = self.settingsMgr.settings[self.DISPLAY]
+        modules = sorted([c for c in channels if self._is_dmmr(c)], key=lambda c: (c.module_address(), c.name))
+        setting = self.settingsMgr.settings[self.DETECTOR]
         combo, selected = setting.combo, str(setting.value).strip()
         if not combo.view().isVisible():
-            readable = [c for c in channels if callable(getattr(c, 'getValues', None)) and
-                        (c.inout == INOUT.OUT or c.useMonitors or not c.real)]
-            names = sorted({c.name for c in readable}, key=str.casefold)
-            # Preserve a missing saved selection explicitly, never substitute a
-            # different instrument. Drop obsolete *unselected* legacy items.
-            choices = [self.NO_SIGNAL, *names]
+            legacy = [c for c in modules if c.name == selected]
+            if len(legacy) == 1:
+                selected = self._module_label(legacy[0])
+            choices = list(dict.fromkeys([self.NO_SIGNAL, *[self._module_label(c) for c in modules]]))
             if selected and selected not in choices:
-                choices.append(selected)
+                choices.append(selected)  # never silently replace a lost selection
             previous = combo.blockSignals(True)
             if setting.items != choices:
                 combo.clear()
                 combo.addItems(choices)
             combo.setCurrentText(selected or self.NO_SIGNAL)
             for index, name in enumerate(choices):
-                matches = [c for c in channels if c.name.strip().casefold() == name.strip().casefold()]
-                if name == self.NO_SIGNAL:
-                    text = 'Choose the detector channel to record.'
-                elif len(matches) != 1:
-                    text = 'Channel unavailable or name ambiguous. Select a unique existing channel.'
-                else:
+                matches = [c for c in modules if self._module_label(c) == name]
+                if len(matches) == 1:
                     c = matches[0]
-                    text = f'{c.getDevice().name}: {c.name} ({c.unit}). Only this signal will be recorded.'
+                    text = f'{c.name}: ion current (A), DMMR module {c.module_address()}. '
+                    text += 'Acquiring and recording.' if c.acquiring and c.getDevice().recording else 'Start DMMR acquisition and recording.'
+                else:
+                    text = 'Select a discovered DMMR module; missing/ambiguous modules cannot start a scan.'
                 combo.setItemData(index, text, Qt.ItemDataRole.ToolTipRole)
             combo.blockSignals(previous)
+        amx_setting = self.settingsMgr.settings[self.AMX]
+        if not amx_setting.combo.view().isVisible():
+            choices = ['None', *sorted({p.name for p in self.pluginManager.plugins if p.name in ('AMX_A', 'AMX_B')})]
+            selected_amx = str(amx_setting.value)
+            if selected_amx not in choices:
+                choices.append(selected_amx)
+            previous = amx_setting.combo.blockSignals(True)
+            if amx_setting.items != choices:
+                amx_setting.combo.clear()
+                amx_setting.combo.addItems(choices)
+            amx_setting.combo.setCurrentText(selected_amx)
+            amx_setting.combo.blockSignals(previous)
+        self._acquisition_info()
+        self.estimateScanTime()
         supplies, frequency = 'Select an AMX', 'Unavailable'
         try:
             amx = self._plugin(self.amx_name)
-            selected_outputs = self.PAIRS[self.amx_outputs]
+            selected_outputs = self._selected_outputs()
             links = {0: str(amx.psu_ch01), 2: str(amx.psu_ch23)}
             names = list(dict.fromkeys(links[i] for i in (0, 2) if i in selected_outputs))
             lines = []
@@ -281,20 +861,66 @@ class MScan(Scan):
                     lines.append(f'{name}: CH0 = CH1 = A')
                 except ScanError:
                     lines.append(f'{name}: unavailable')
-                shared = [f'CH{i}-CH{i + 1}' for i, source in links.items() if source == name and i not in selected_outputs]
+                shared = []
+                for other in self.pluginManager.plugins:
+                    if other.name not in ('AMX_A', 'AMX_B'):
+                        continue
+                    for i, attr in ((0, 'psu_ch01'), (2, 'psu_ch23')):
+                        if str(getattr(other, attr, 'None')) == name and (other is not amx or i not in selected_outputs):
+                            shared.append(f'{other.name} CH{i}-CH{i + 1}')
                 if shared:
                     lines.append('Also affects ' + ', '.join(shared))
             supplies = '\n'.join(lines)
-            rows = json.loads(self._waveform(amx, selected_outputs))
-            frequencies = list(dict.fromkeys(r.get('frequency', 'Unavailable') for r in rows))
-            frequency = ', '.join(frequencies)
+            # A known period is not an exact phase/dwell measurement. Keep it
+            # visible even when a different readback requirement blocks Start.
+            rows = self._amx_rows(amx, selected_outputs)
+            frequencies = [r.get('frequency', 'Unavailable')
+                if r.get('state') == 'Periodic' else 'Unavailable' for r in rows]
+            frequency = frequencies[0] if len(set(frequencies)) == 1 else '\n'.join(
+                f'CH{i}: {value}' for i, value in zip(selected_outputs, frequencies))
         except (ScanError, AttributeError, KeyError, TypeError, ValueError):
             pass  # unavailable is not a measurement; the preflight explains any blocker
-        for key, value in ((self.SUPPLIES, supplies), (self.FREQUENCY, frequency)):
+        limits, currents = 'Unavailable', 'Unavailable'
+        rails = []
+        limit_help = ('Read-only admissible range. Choose the sweep with Amplitude from/to. '
+                      'Channel Min/Max can restrict it; the PSU hardware ceiling cannot be overridden.')
+        try:
+            rails = self._associated_rails(self._plugin(self.amx_name), self._selected_outputs())
+            low, high = self._amplitude_range(rails)
+            limits = f'{low:g} – {high:g}'
+            limit_help += '\n' + '\n'.join(
+                f'{r["device"].name} CH{r["number"]}: channel {r["channel"].min:g}–{r["channel"].max:g} V; '
+                f'PSU-reported maximum {r["channel"].hardware_voltage_limit:g} V (current range).'
+                for r in rails)
+            currents = '\n'.join(f'{r["device"].name} CH{r["number"]}: '
+                f'{self._number(r["channel"], "current_limit_readback", "Ilim readback") * 1000:g} mA '
+                f'(max {self._number(r["channel"], "hardware_current_limit", "current capacity") * 1000:g} mA)'
+                for r in rails)
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError):
+            pass
+        for key, value in ((self.SUPPLIES, supplies), (self.FREQUENCY, frequency),
+                           (self.AMPLITUDE_LIMITS, limits), (self.CURRENT_LIMITS, currents)):
             setting = self.settingsMgr.settings[key]
             if setting.value != value:
                 setting.value = value
-        self.settingsTree.scheduleDelayedItemsLayout()
+        self.settingsMgr.settings[self.AMPLITUDE_LIMITS].label.setToolTip(limit_help)
+        self.settingsMgr.settings[self.AMPLITUDE_LIMITS].setToolTip(0, limit_help)
+        self._refresh_completion(rails)
+        # Same preflight as Start, but do not initialize data, bind a plan, log
+        # warnings or touch a device. Keep the last outcome (including save errors).
+        try:
+            self._preflight()
+            self._ready = True
+            status = 'Ready to scan'
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            self._ready = False
+            status = f'Not ready: {exc}'
+        if self._last_scan_status:
+            status = f'Last scan: {self._last_scan_status}\n{status}'
+        if self.scan_status != status:
+            self.scan_status = status
+        self._update_scan_action()
+        self._layout_readonly_fields()
 
     def loadSettings(self, file=None, useDefaultFile=False):
         if not self.finished:
@@ -302,16 +928,18 @@ class MScan(Scan):
             return
         super().loadSettings(file=file, useDefaultFile=useDefaultFile)
         self._format_settings()
+        self.toggleAdvanced()
         self._refresh_interface()
         self.dummyInitialization()
 
     def initData(self):
-        super().initData()
-        if self.inputChannelGroupItem:
-            self.inputChannelGroupItem.setText(0, 'Scan axis')
-        if self.outputChannelGroupItem:
-            self.outputChannelGroupItem.setText(0, 'Measured signal')
-            self.outputChannelGroupItem.setToolTip(0, 'Live detector value. The plot and file contain averages over each integration window.')
+        for channel in self.channels:
+            channel.onDelete()
+        self.channels, self.inputChannels, self.outputChannels = [], [], []
+
+    def connectAllSources(self):
+        for channel in self.channels:
+            channel.connectSource()
 
     def getSteps(self, start, stop, step):
         try:
@@ -319,53 +947,94 @@ class MScan(Scan):
         except ScanError:
             return None
 
+    def _command_step(self):
+        if getattr(self, 'scan_mode', self.STEPPED) != self.CONTINUOUS:
+            return float(self.step)
+        rate = float(self.sweep_rate)
+        _, duration = self._timing()
+        if not math.isfinite(rate) or rate <= 0:
+            raise ScanError('Sweep rate must be positive and finite.')
+        increment = rate * duration
+        if not math.isfinite(increment) or increment <= 0:
+            raise ScanError('Sweep rate × Time step must give a finite positive voltage increment.')
+        return increment
+
+    def _scan_steps(self):
+        start, stop, step = float(self.start), float(self.stop), self._command_step()
+        span = abs(stop - start)
+        # Match amplitude_steps' floating-point margin for an aligned endpoint.
+        if (getattr(self, 'scan_mode', self.STEPPED) == self.CONTINUOUS
+                and 0 < span and span / step + 1e-10 < 1):
+            raise ScanError(f'Sweep rate × Time step gives {step:g} V per command, exceeding the {span:g} V scan span. '
+                            'Reduce Sweep rate or Time step.')
+        return amplitude_steps(start, stop, step)
+
     def addInputChannels(self):
-        steps = self.getSteps(self.start, self.stop, self.step)
-        if steps is not None:
-            self.addInputChannel('Amplitude', unit='V', recordingData=steps)
+        try:
+            steps = self._scan_steps()
+        except (ScanError, AttributeError, TypeError, ValueError):
+            return
+        self.addInputChannel('Amplitude', unit='V', recordingData=steps)
 
     def addInputChannel(self, name, start=None, stop=None, step=None, unit='V', recordingData=None):
         axis = _Amplitude(parentPlugin=self, name=name, unit=unit, recordingData=recordingData, inout=INOUT.IN)
         self.inputChannels.append(axis)
         self.channels.append(axis)
-        if self.inputChannelGroupItem:
-            row = QTreeWidgetItem(self.inputChannelGroupItem)
-            columns = list(self.headerChannel.getSortedDefaultChannel())
-            data = axis.getRecordingData()
-            span = f'{data[0]:g} → {data[-1]:g}' if data is not None and len(data) else '—'
-            for key, text in ((Parameter.NAME, name), (Parameter.VALUE, span), ('Unit', unit)):
-                row.setText(columns.index(key), text)
-            row.setToolTip(columns.index(Parameter.NAME), 'Planned amplitude A, not a separately writable PSU channel. Rail levels are -A / +A.')
+
         return axis
 
     def addOutputChannels(self):
         if not self.inputChannels:
             return
         data = np.full(len(self.inputChannels[0].recordingData), np.nan, dtype=np.float64)
-        name = str(self.displayDefault).strip()
-        if name and name != self.NO_SIGNAL:
-            self.addOutputChannel(name=name, recordingData=data)
-        if self.channelTree:
-            self.channelTree.setHeaderLabels([item.get(Parameter.HEADER, '') or name.title()
-                for name, item in self.headerChannel.getSortedDefaultChannel().items()])
-            self.toggleAdvanced(advanced=False)
+        try:
+            source = self._detector()
+        except ScanError:
+            return  # No synthetic or unavailable channel in the data model.
+        self.displayDefault = source.name
+        self.addOutputChannel(name=source.name, unit='A', recordingData=data)
+
+    def addOutputChannel(self, name, unit='', recordingData=None, recordingBackground=None):
+        channel = _Signal(parentPlugin=self, name=name, unit=unit, inout=INOUT.OUT,
+            recordingData=recordingData, recordingBackground=recordingBackground)
+        self.outputChannels.append(channel)
+        self.channels.append(channel)
+        return channel
+
+    def _preflight(self):
+        """Read-only validation shared by the idle status and actual Start."""
+        detector = self._detector()
+        self._registered(detector)
+        plan = self._prepare()
+        self._check_detectors([detector])
+        plan['detectors'] = [detector]
+        plan['detector_identity'] = (detector.getDevice(), detector.module_address(), detector.name)
+        self._cadence_epoch(detector.getDevice())
+        plan['detector_interval_ms'] = float(detector.getDevice().interval)
+        plan['metadata']['detector'] = dict(device=detector.getDevice().name, module=detector.module_address(), channel=detector.name,
+                                          interval_ms=plan['detector_interval_ms'])
+        if plan['mode'] == self.CONTINUOUS:
+            plan['metadata']['detector_cadence'] = self._require_time_step(detector, plan['average'])
+        return plan
 
     def initScan(self):
         self._plan = None
         self._validation = {}
         if self._dummy_initialization:
-            return super().initScan()
+            self.addInputChannels()
+            self.addOutputChannels()
+            self.updateFile()
+            self.populateDisplayChannel()
+            return bool(self.inputChannels and self.outputChannels)
+        self._last_scan_status = ''
         try:
-            name = str(self.displayDefault).strip()
-            if not name or name == self.NO_SIGNAL:
-                raise ScanError('Select a measured signal channel.')
-            detector = self.pluginManager.DeviceManager.getChannelByName(name)
-            if detector is None:
-                raise ScanError(f'Measured signal {name} is unavailable. Select an existing channel.')
-            self._registered(detector)
-            self._plan = self._prepare()
-            if not super().initScan():
-                raise ScanError(f'Measured signal {name} must be acquiring and recording.')
+            self._plan = self._preflight()
+            name = self._plan['detectors'][0].name
+            self.addInputChannels()
+            self.addOutputChannels()
+            self.toggleDisplay(visible=True)
+            self.updateFile()
+            self.populateDisplayChannel()
             configured = [name]
             if [c.name for c in self.outputChannels] != configured:
                 raise ScanError(f'Measured signal {name} must be available and recording.')
@@ -373,12 +1042,13 @@ class MScan(Scan):
             self._check_detectors()
             n, rails, outputs = len(self.inputChannels[0].recordingData), len(self._plan['rails']), len(configured)
             self._validation = dict(status='running', error='', point_status=['not acquired'] * n,
-                rail_v=np.full((n, rails), np.nan), window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
+                rail_v=np.full((n, rails), np.nan), rail_i=np.full((n, rails), np.nan),
+                window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
                 samples=np.zeros((n, outputs), dtype=np.int64), finite_samples=np.zeros((n, outputs), dtype=np.int64))
             self._cancel = Event()
             self.scan_status = 'Ready'
             return True
-        except (ScanError, AttributeError, TypeError, ValueError) as exc:
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
             self.scan_status = str(exc)
             self.print(f'Cannot start: {exc}', flag=PRINT.WARNING)
             self._plan = None
@@ -396,31 +1066,84 @@ class MScan(Scan):
         if len(matches) != 1 or matches[0] is not channel or manager.getChannelByName(channel.name) is not channel:
             raise ScanError(f'Channel {channel.name} is missing, renamed or ambiguous.')
 
-    def _waveform(self, amx, selected):
+    def _selected_outputs(self):
+        if self.amx_outputs not in self.PAIRS:
+            raise ScanError('Select one AMX pair: CH0-CH1 or CH2-CH3.')
+        return self.PAIRS[self.amx_outputs]
+
+    def _amx_rows(self, amx, selected):
         controller = amx.controller
-        if (not controller.initialized or controller.device is None or not amx.isOn()
-                or controller.initializing or controller.transitioning):
-            raise ScanError('AMX is not ready and ON.')
+        if controller.initializing or controller.transitioning:
+            raise ScanError(f'{amx.name}: wait for the AMX transition to finish.')
+        if not controller.initialized or controller.device is None or not amx.isOn():
+            raise ScanError(f'{amx.name}: turn the AMX ON.')
         rows = controller.output_rows
         if not rows or len(rows) != 4:
             raise ScanError('AMX waveform readback is unavailable.')
-        chosen = [rows[i] for i in selected]
-        if any(r.get('state') != 'Periodic' or not r.get('timing') for r in chosen):
-            raise ScanError('Use a known continuous periodic AMX waveform with resolved edge timing.')
+        return [rows[i] for i in selected]
+
+    def _waveform(self, amx, selected):
+        chosen = self._amx_rows(amx, selected)
+        for number, row in zip(selected, chosen):
+            if row.get('state') != 'Periodic':
+                raise ScanError(f'{amx.name} CH{number}: {row.get("state", "Unknown")}. '
+                    f'{row.get("detail", "Check the AMX output routing and readbacks.")}')
+            # Current AMX versions publish source timing AND per-edge raw
+            # delay registers. Earlier zero-delay summaries remain usable;
+            # never silently ignore nonzero or missing delay registers.
+            if not (row.get('waveform') or row.get('timing')):
+                raise ScanError(f'{amx.name} CH{number}: AMX edge-delay readback unavailable. '
+                    'Update AMX and MScan together; check the AMX readback. Do not zero compensation delays.')
         return json.dumps(chosen, sort_keys=True, allow_nan=False)
 
-    def _prepare(self):
-        steps = amplitude_steps(float(self.start), float(self.stop), float(self.step))
-        if not all(math.isfinite(float(v)) and float(v) > 0
-                   for v in (self.average, self.wait, self.waitLong, self.settle_timeout, self.voltage_tolerance)):
-            raise ScanError('Averaging, settling, timeout and tolerance must be positive and finite.')
-        amx = self._plugin(self.amx_name)
-        selected = self.PAIRS[self.amx_outputs]
-        waveform = self._waveform(amx, selected)
-        links = [(attr, str(getattr(amx, attr))) for attr in ('psu_ch01', 'psu_ch23')
+    @staticmethod
+    def _number(channel, attr, label, *, nonnegative=True):
+        try:
+            value = float(getattr(channel, attr))
+        except (AttributeError, TypeError, ValueError):
+            value = np.nan
+        if not math.isfinite(value) or (nonnegative and value < 0):
+            raise ScanError(f'{channel.name}: {label} unavailable or invalid; wait for a fresh PSU readback.')
+        return value
+
+    def _voltage_bounds(self, c):
+        minimum = self._number(c, 'min', 'channel minimum', nonnegative=False)
+        maximum = self._number(c, 'max', 'channel maximum', nonnegative=False)
+        ceiling = self._number(c, 'hardware_voltage_limit', 'hardware voltage limit')
+        low, high = max(0., minimum), min(maximum, ceiling)
+        if low > high:
+            raise ScanError(f'{c.name}: no admissible voltage range.')
+        return low, high
+
+    def _amplitude_range(self, rails):
+        bounds = [self._voltage_bounds(r['channel']) for r in rails]
+        low, high = max(b[0] for b in bounds), min(b[1] for b in bounds)
+        if low > high:
+            raise ScanError('The selected PSUs have no common amplitude range.')
+        return low, high
+
+    def _current_limits(self, c):
+        ilim = self._number(c, 'current_limit_readback', 'Ilim readback')
+        capacity = self._number(c, 'hardware_current_limit', 'hardware current limit')
+        if not 0 < ilim <= capacity:
+            raise ScanError(f'{c.name}: Ilim must be positive and within the hardware current limit.')
+        return ilim, capacity
+
+    def _check_current(self, c, ilim):
+        current = self._number(c, 'current_readback', 'current measurement')
+        if current >= ilim:
+            raise ScanError(f'{c.name}: measured current {current * 1000:g} mA reached/exceeded '
+                            f'Ilim {ilim * 1000:g} mA; point not acquired. MScan does not switch HV OFF.')
+        return current
+
+    def _associated_rails(self, amx, selected):
+        """Resolve the actual shared Channels without driver calls or commands."""
+        names = [str(getattr(amx, attr)) for attr in ('psu_ch01', 'psu_ch23')
                  if (0 if attr == 'psu_ch01' else 2) in selected]
         rails = []
-        for name in dict.fromkeys(name for _, name in links):
+        for name in dict.fromkeys(names):
+            if name in ('', 'None'):
+                raise ScanError(f'{amx.name}: associate a PSU in AMX Settings for the selected connectors.')
             psu = self._plugin(name)
             for number in (0, 1):
                 candidates = [c for c in psu.getChannels() if c.real
@@ -429,32 +1152,84 @@ class MScan(Scan):
                     raise ScanError(f'{name} CH{number} is missing or ambiguous.')
                 c = candidates[0]
                 self._registered(c)
-                if not hasattr(c, 'readback_status') or c.unit != 'V' or not c.useMonitors:
-                    raise ScanError(f'{c.name}: current PSU Channel interface required.')
-                if not c.enabled or not c.active or not c.initialized:
-                    raise ScanError(f'{c.name}: enable the channel and use manual (not equation) control.')
-                if not psu.isOn() or not math.isfinite(float(c.monitor)):
-                    raise ScanError(f'{c.name}: PSU must already be ON with valid readbacks.')
-                if c.min is None or c.max is None or min(steps) < c.min or max(steps) > c.max:
-                    raise ScanError(f'{c.name}: scan exceeds channel limits.')
-                token = psu.controller._output_cancel
-                if token.is_set():
-                    raise ScanError(f'{c.name}: output shutdown requested.')
                 rails.append(dict(channel=c, name=c.name, device=psu, controller=psu.controller,
-                    backend=psu.controller.device, token=token, initial=float(c.value), number=number))
-        if not all(math.isfinite(r['initial']) and r['initial'] >= 0 for r in rails):
-            raise ScanError('Initial PSU setpoints are invalid.')
+                    backend=psu.controller.device, token=psu.controller._output_cancel, number=number))
+        return rails
+
+    def _prepare(self):
+        self._scan_steps()
+        # Check the *requested endpoints*, even if a non-aligned step would not
+        # acquire the last endpoint. Never silently accept an incompatible span.
+        low, high = sorted((float(self.start), float(self.stop)))
+        mode, duration = self._timing()
+        if not all(math.isfinite(float(v)) and float(v) > 0
+                   for v in (self.settling_s, self.settle_timeout, self.voltage_tolerance)):
+            raise ScanError('Settling, timeout and tolerance must be positive and finite.')
+        if float(self.settling_s) >= float(self.settle_timeout):
+            raise ScanError('Settle timeout must exceed the settling duration.')
+        if self.amx_name in ('', 'None'):
+            raise ScanError('Select an AMX.')
+        amx = self._plugin(self.amx_name)
+        selected = self._selected_outputs()
+        waveform = self._waveform(amx, selected)
+        links = [(attr, str(getattr(amx, attr))) for attr in ('psu_ch01', 'psu_ch23')
+                 if (0 if attr == 'psu_ch01' else 2) in selected]
+        rails = self._associated_rails(amx, selected)
+        for r in rails:
+            c, psu, ctrl = r['channel'], r['device'], r['controller']
+            if not hasattr(c, 'readback_status') or c.unit != 'V' or not c.useMonitors:
+                raise ScanError(f'{c.name}: current PSU Channel interface required.')
+            if not all(hasattr(c, field) for field in ('hardware_voltage_limit', 'hardware_current_limit',
+                       'voltage_setpoint_readback', 'current_limit_readback', 'current_readback', 'voltage_request_revision')):
+                raise ScanError(f'{c.name}: update MScan and PSU plugins together; numeric limits/current and command tracking required.')
+            if not c.enabled:
+                raise ScanError(f'{c.name}: enable the PSU channel.')
+            if not c.active:
+                raise ScanError(f'{c.name}: use manual (not equation) control.')
+            if not c.initialized or not psu.isOn():
+                raise ScanError(f'{c.name}: turn the PSU ON.')
+            if any(bool(getattr(ctrl, flag, False)) for flag in
+                   ('initializing', 'transitioning', '_manual_apply_active', '_manual_apply_worker_running', '_hv_config_loading')):
+                raise ScanError(f'{c.name}: wait for the PSU transition to finish.')
+            if not math.isfinite(float(c.monitor)):
+                raise ScanError(f'{c.name}: no valid PSU voltage readback.')
+            minimum, maximum = self._voltage_bounds(c)
+            if low < minimum or high > maximum:
+                raise ScanError(f'{c.name}: requested scan {low:g}–{high:g} V exceeds allowed {minimum:g}–{maximum:g} V.')
+            initial = self._number(c, 'voltage_setpoint_readback', 'Vset readback')
+            if not math.isclose(float(c.value), initial, rel_tol=1e-10, abs_tol=1e-9):
+                raise ScanError(f'{c.name}: Vset is not yet confirmed by the PSU.')
+            if not minimum <= initial <= maximum:
+                raise ScanError(f'{c.name}: final restoration to {initial:g} V is outside allowed {minimum:g}–{maximum:g} V.')
+            ilim, imax = self._current_limits(c)
+            self._check_current(c, ilim)
+            if r['token'].is_set():
+                raise ScanError(f'{c.name}: output shutdown requested.')
+            r.update(initial=initial, ilim=ilim, current_capacity=imax,
+                     voltage_capacity=float(c.hardware_voltage_limit),
+                     request_revision=c.voltage_request_revision, confirmed_vset=initial)
         for plugin in self.pluginManager.plugins:
             if plugin is not self and isinstance(plugin, Scan) and not plugin.finished:
                 raise ScanError(f'Finish {plugin.name} before starting this coupled scan.')
         return dict(amx=amx, amx_controller=amx.controller, amx_backend=amx.controller.device,
             selected=selected, links=links, waveform=waveform, rails=rails,
-            expected=[r['initial'] for r in rails], timeout=float(self.settle_timeout),
-            tolerance=float(self.voltage_tolerance), average=float(self.average) / 1000,
-            wait=float(self.wait) / 1000, wait_long=float(self.waitLong) / 1000, large_step=float(self.largestep),
+            expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),
+            tolerance=float(self.voltage_tolerance), average=duration, wait=float(self.settling_s), mode=mode,
             metadata=dict(amx=amx.name, outputs=self.amx_outputs, waveform=json.loads(waveform), links=links,
+                mode=mode, settling_s=float(self.settling_s), measurement_s=duration,
+                time_step_s=duration if mode == self.CONTINUOUS else None,
+                command_step_v=self._command_step(),
+                requested_rate_v_s=math.copysign(float(self.sweep_rate), self.stop - self.start)
+                    if mode == self.CONTINUOUS else None,
+                acquisition=('PC-timed increments; late commands never shorten the next interval to catch up. '
+                    'All DMMR samples within actual command intervals, including transitions. '
+                    'X is requested amplitude, not simultaneous measured voltage. Rail commands are sequential; '
+                    'timestamps are PC/Explorer times, not hardware-synchronized ADC timestamps.'
+                    if mode == self.CONTINUOUS else 'Settle each amplitude, then average new DMMR samples.'),
                 rails=[dict(channel=r['name'], psu=r['device'].name, rail='Vpos' if r['number'] == 0 else 'Vneg',
-                            initial_vset=r['initial']) for r in rails],
+                            initial_vset=r['initial'], final_vset=r['initial'],
+                            voltage_limit_v=r['voltage_capacity'], ilim_a=r['ilim'],
+                            current_limit_a=r['current_capacity']) for r in rails],
                 amplitude_definition='Vpos=+A, Vneg=-A relative to PSU reference; external offset not included',
                 calibration='None; amplitude in V, not m/z', background_subtracted=False))
 
@@ -467,7 +1242,7 @@ class MScan(Scan):
                 or any(str(getattr(amx, attr)) != name for attr, name in p['links'])
                 or self._waveform(amx, p['selected']) != p['waveform']):
             raise ScanError('AMX waveform, source or PSU association changed during the scan.')
-        measured = []
+        measured, currents = [], []
         ready = True
         for rail, expected in zip(p['rails'], p['expected']):
             c, psu, ctrl = rail['channel'], rail['device'], rail['controller']
@@ -477,33 +1252,89 @@ class MScan(Scan):
                     or rail['token'].is_set() or not psu.isOn() or not ctrl.initialized
                     or not c.enabled or not c.active or not c.real):
                 raise ScanError(f'{rail["name"]}: source changed or was stopped.')
-            if not math.isclose(float(c.value), expected, rel_tol=1e-10, abs_tol=1e-9):
-                raise ScanError(f'{c.name}: setpoint changed outside the scan.')
+            if c.voltage_request_revision != rail['request_revision']:
+                raise ScanError(f'{c.name}: setpoint changed outside the scan '
+                                f'(scan target {expected:g} V, new request {float(c.value):g} V).')
             v = float(c.monitor)
             measured.append(v)
             busy = any(bool(getattr(ctrl, flag, False)) for flag in
                        ('initializing', 'transitioning', '_manual_apply_active', '_manual_apply_worker_running', '_hv_config_loading'))
-            ready &= not busy and math.isfinite(v) and v >= 0 and abs(v - expected) <= p['tolerance']
-        return ready, np.asarray(measured), time.time()
+            current = float(c.current_readback)
+            currents.append(current)
+            # During a write the producer invalidates the numerical fields.
+            # Settling can wait for fresh data, acquisition cannot accept a gap.
+            fields = ('hardware_voltage_limit', 'hardware_current_limit', 'current_limit_readback', 'voltage_setpoint_readback')
+            fresh = not busy and all(math.isfinite(float(getattr(c, f, np.nan))) for f in fields)
+            if fresh:
+                # The PSU verifies each write before publishing its quantized
+                # setpoint. Accept that first echo, not as a new request. Later
+                # hardware changes without a scan command must still abort.
+                readback = float(c.voltage_setpoint_readback)
+                confirmed = rail['confirmed_vset']
+                if confirmed is not None and not math.isclose(readback, confirmed, rel_tol=1e-10, abs_tol=1e-9):
+                    raise ScanError(f'{c.name}: PSU setpoint changed outside the scan '
+                                    f'(confirmed {confirmed:g} V, read back {readback:g} V).')
+                rail['confirmed_vset'] = readback
+                minimum, maximum = self._voltage_bounds(c)
+                if (p['requested_range'][0] < minimum or p['requested_range'][1] > maximum
+                        or not minimum <= rail['initial'] <= maximum):
+                    raise ScanError(f'{c.name}: voltage limits changed; scan or final restoration is no longer allowed.')
+                ilim, _ = self._current_limits(c)
+                if not math.isclose(ilim, rail['ilim'], rel_tol=1e-10, abs_tol=1e-12):
+                    raise ScanError(f'{c.name}: Ilim changed during the scan.')
+                if math.isfinite(current):
+                    self._check_current(c, ilim)
+            ready &= (fresh and math.isfinite(current) and current >= 0 and math.isfinite(v)
+                      and v >= 0 and abs(v - expected) <= p['tolerance'])
+        return ready, np.asarray(measured), np.asarray(currents), time.time()
 
-    def _command(self, targets):
+    def _command(self, targets, latest=None):
         # Validate *all* sources before the first write. No OFF/ON, ranges or
         # current-limit writes: use the standard Channel.value path only.
+        if 'detector_interval_ms' in self._plan:
+            self._check_detectors()
         self._observation()
         for rail, target in zip(self._plan['rails'], targets):
             c = rail['channel']
-            if not math.isfinite(target) or not c.min <= target <= c.max:
-                raise ScanError(f'{c.name}: requested amplitude exceeds current limits.')
+            if any(bool(getattr(rail['controller'], flag, False)) for flag in (
+                    'initializing', 'transitioning', '_manual_apply_active', '_manual_apply_worker_running', '_hv_config_loading')):
+                raise ScanError(f'{c.name}: PSU transition in progress; no scan command sent.')
+            minimum, maximum = self._voltage_bounds(c)
+            if not math.isfinite(target) or not minimum <= target <= maximum:
+                raise ScanError(f'{c.name}: requested amplitude exceeds allowed {minimum:g}–{maximum:g} V.')
+            ilim, _ = self._current_limits(c)
+            self._check_current(c, ilim)
+        if latest is not None and time.monotonic() >= latest:
+            raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
+        started = time.time()
         self._plan['expected'] = list(targets)
         for rail, target in zip(self._plan['rails'], targets):
             rail['channel'].value = target
+            revision = rail['channel'].voltage_request_revision
+            if revision != rail['request_revision']:
+                rail['confirmed_vset'] = None
+            rail['request_revision'] = revision
+        return started, time.time()
 
-    def _check_detectors(self):
-        for source in self._plan['detectors']:
+    def _check_detectors(self, sources=None):
+        for source in self._plan['detectors'] if sources is None else sources:
             self._registered(source)
             device = source.getDevice()
-            if not source.enabled or not source.initialized or not source.acquiring or not device.recording:
-                raise ScanError(f'{source.name}: detector must remain enabled, acquiring and recording.')
+            if not self._is_dmmr(source):
+                raise ScanError(f'{source.name}: select a real DMMR current module.')
+            identity = self._plan.get('detector_identity') if sources is None else None
+            if identity and (device is not identity[0] or source.module_address() != identity[1] or source.name != identity[2]):
+                raise ScanError('DMMR module identity changed during the scan.')
+            if sources is None and 'detector_interval_ms' in self._plan and float(device.interval) != self._plan['detector_interval_ms']:
+                raise ScanError('DMMR interval changed during the scan. Restart with the new cadence.')
+            if not source.enabled:
+                raise ScanError(f'{source.name}: enable the detector channel.')
+            if not source.initialized:
+                raise ScanError(f'{source.name}: initialize the detector.')
+            if not source.acquiring:
+                raise ScanError(f'{source.name}: start detector acquisition.')
+            if not device.recording:
+                raise ScanError(f'{source.name}: start detector recording.')
             if not hasattr(device, 'time') or not hasattr(source, 'values'):
                 raise ScanError(f'{source.name}: a timestamped Channel history is required.')
 
@@ -515,7 +1346,7 @@ class MScan(Scan):
             baselines.append((id(c.values), float(t[-1]) if len(t) else None))
         return time.time(), baselines
 
-    def _read_window(self, start, end, baselines):
+    def _window_samples(self, start, end, baselines, *, closed=True):
         self._check_detectors()
         results = []
         for c, (history, baseline) in zip(self._plan['detectors'], baselines):
@@ -525,15 +1356,23 @@ class MScan(Scan):
                 raise ScanError(f'{c.name}: detector history reset or timestamps misaligned.')
             if baseline is not None and (not len(times) or times[0] > baseline):
                 raise ScanError(f'{c.name}: history buffer truncated during averaging.')
-            if not len(times) or times[-1] < end:
-                return None  # wait for a sample closing the acquisition window
             if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
                 raise ScanError(f'{c.name}: invalid or nonmonotonic timestamps.')
-            samples = values[(times > start) & (times <= end)]
-            valid = int(np.isfinite(samples).sum())
-            mean = float(np.mean(samples)) if len(samples) and valid == len(samples) else np.nan
-            results.append((mean, len(samples), valid))
+            if closed and (not len(times) or times[-1] < end):
+                return None  # wait for a sample closing the acquisition window
+            selected = (times > start) & (times <= end)
+            results.append((times[selected], values[selected]))
         return results
+
+    @staticmethod
+    def _average_samples(samples):
+        valid = int(np.isfinite(samples).sum())
+        mean = float(np.mean(samples)) if len(samples) and valid == len(samples) else np.nan
+        return mean, len(samples), valid
+
+    def _read_window(self, start, end, baselines):
+        data = self._window_samples(start, end, baselines)
+        return None if data is None else [self._average_samples(values) for _, values in data]
 
     def _gui(self, action, cancel=True):
         call = _Call(action, self._cancel if cancel else None)
@@ -550,14 +1389,14 @@ class MScan(Scan):
             raise call.error
         return call.result
 
-    def _pause(self):
-        if self._cancel.wait(self.POLL_S):
+    def _pause(self, seconds=None):
+        if self._cancel.wait(self.POLL_S if seconds is None else max(0., seconds)):
             raise ScanStopped('Scan stopped.')
 
     def _settle(self, seconds):
         deadline, since = time.monotonic() + self._plan['timeout'], None
         while True:
-            ready, volts, _ = self._gui(self._observation)
+            ready, volts, _, _ = self._gui(self._observation)
             now = time.monotonic()
             since = (since if since is not None else now) if ready else None
             if since is not None and now - since >= seconds:
@@ -572,7 +1411,7 @@ class MScan(Scan):
         end = start + self._plan['average']
         deadline = start_mono + self._plan['average'] + self._plan['timeout']
         while True:
-            ready, volts, wall = self._gui(self._observation)
+            ready, volts, currents, wall = self._gui(self._observation)
             if not ready:
                 raise ScanError('PSU readback became invalid or left tolerance during acquisition.')
             if abs((wall - start) - (time.monotonic() - start_mono)) > .5:
@@ -580,33 +1419,156 @@ class MScan(Scan):
             if time.monotonic() >= start_mono + self._plan['average']:
                 values = self._gui(lambda: self._read_window(start, end, baselines))
                 if values is not None:
-                    return start, end, volts, values
+                    return start, end, volts, currents, values
             if time.monotonic() >= deadline:
                 raise ScanError('Fresh detector data timed out.')
             self._pause()
 
+    def _store_point(self, index, start, end, volts, currents, values, *, continuous=False):
+        validation = self._validation
+        validation['window_start'][index], validation['window_end'][index] = start, end
+        validation['rail_v'][index], validation['rail_i'][index] = volts, currents
+        for j, (mean, count, finite) in enumerate(values):
+            self.outputChannels[j].recordingData[index] = mean
+            validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
+        validation['point_status'][index] = (('acquired during sweep' if continuous else 'acquired')
+            if all(math.isfinite(v[0]) for v in values) else 'invalid detector data')
+        self.signalComm.scanUpdateSignal.emit(False)
+
+    def _run_stepped(self, steps):
+        p = self._plan
+        for index, amplitude in enumerate(steps):
+            if self._cancel.is_set():
+                raise ScanStopped('Scan stopped.')
+            self._bridge.status.emit(f'{index + 1}/{len(steps)}: settling at {amplitude:g} V')
+            self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails'])))
+            self._settle(p['wait'])
+            self._bridge.status.emit(f'{index + 1}/{len(steps)}: acquiring at {amplitude:g} V')
+            self._store_point(index, *self._measure())
+
+    def _continuous_command(self, amplitude, latest=None, *, window_start=None):
+        if latest is not None and time.monotonic() >= latest:
+            raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
+        # Validate the live detector cadence on Qt as well as in preflight.
+        # No new voltage command may outrun the selected module's data.
+        self._require_time_step(self._plan['detectors'][0], self._plan['average'], window_start)
+        # The deadline is checked on Qt, immediately before any setpoint write;
+        # a late queued callback must not issue a catch-up command.
+        return self._command([float(amplitude)] * len(self._plan['rails']), latest=latest)
+
+    def _capture_continuous(self, raw, origin, cutoff, baselines, *, cancel=True):
+        start = raw['detector_time'][-1] if raw['detector_time'] else origin
+        # A rolling Explorer history may discard samples already copied here.
+        # The last copied timestamp must still be retained: otherwise unseen
+        # samples may have been lost, and _window_samples must fail closed.
+        cursor = [(identity, start) for identity, _ in baselines] if raw['detector_time'] else baselines
+        def read():
+            samples = self._window_samples(start, cutoff, cursor, closed=False)[0]
+            latest = self._plan['detectors'][0].getDevice().time.get(length=1)
+            return samples, float(latest[-1]) if len(latest) else -math.inf
+        (times, currents), watermark = self._gui(read, cancel=cancel)
+        raw['detector_time'].extend(times.tolist())
+        raw['detector_current'].extend(currents.tolist())
+        return watermark
+
+    def _continuous_windows(self, pending, raw, watermark):
+        while pending and watermark >= pending[0][2]:
+            index, start, end, volts, currents = pending.popleft()
+            left, right = (bisect_right(raw['detector_time'], t) for t in (start, end))
+            values = self._average_samples(np.asarray(raw['detector_current'][left:right]))
+            self._store_point(index, start, end, volts, currents, [values], continuous=True)
+
+    def _run_continuous(self, steps):
+        p = self._plan
+        raw = self._validation['continuous'] = dict(
+            command_start=np.full(len(steps), np.nan), command_end=np.full(len(steps), np.nan),
+            detector_time=[], detector_current=[], psu_time=[], psu_v=[], psu_i=[], psu_target=[], psu_ready=[])
+        pending = deque()
+        origin = baselines = cutoff = None
+        try:
+            self._bridge.status.emit(f'Initial settling at {steps[0]:g} V')
+            raw['command_start'][0], raw['command_end'][0] = self._gui(lambda: self._continuous_command(steps[0]))
+            self._settle(p['wait'])
+            # Define the wall/monotonic origin together, on the same Qt callback
+            # that establishes the detector-history identity and baseline.
+            (origin, baselines), origin_mono = self._gui(lambda: (self._history_start(), time.monotonic()))
+            index, begin, ready_seen = 0, origin, True
+            last_command = origin_mono
+            duration = p['average']
+            next_deadline = origin_mono + duration
+            while index < len(steps) or pending:
+                ready, volts, currents, wall = self._gui(self._observation)
+                now = time.monotonic()
+                if abs((wall - origin) - (now - origin_mono)) > .5:
+                    raise ScanError('System clock changed during continuous acquisition.')
+                raw['psu_time'].append(wall)
+                raw['psu_v'].append(volts.copy())
+                raw['psu_i'].append(currents.copy())
+                raw['psu_target'].append(list(p['expected']))
+                raw['psu_ready'].append(bool(ready))
+                if ready_seen and not ready:
+                    raise ScanError('PSU readback became invalid or left tolerance after reaching the continuous target.')
+                # A first ready observation arriving after the deadline cannot
+                # prove that the PSU kept up, even if it has caught up by now.
+                ready_seen |= ready and now <= next_deadline
+                if not ready and now - last_command >= p['timeout']:
+                    raise ScanError('PSU voltage settling timed out during continuous acquisition.')
+                # A delayed closing timestamp can finalize an earlier window,
+                # but a new command requires a valid sample in the current one.
+                watermark = self._capture_continuous(raw, origin, cutoff if cutoff is not None else wall, baselines)
+                self._continuous_windows(pending, raw, watermark)
+                if pending and wall - pending[0][2] > p['timeout']:
+                    raise ScanError('Fresh detector data timed out during continuous acquisition.')
+                deadline = next_deadline
+                now = time.monotonic()
+                if index < len(steps) and now >= deadline:
+                    if not ready or not ready_seen:
+                        raise ScanError('PSU target was not confirmed within the continuous time step. '
+                                        'Increase Time step; point not acquired and no next command sent.')
+                    if now >= deadline + duration:
+                        raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
+                    if index + 1 < len(steps):
+                        command = self._gui(lambda: self._continuous_command(
+                            steps[index + 1], deadline + duration, window_start=begin))
+                        raw['command_start'][index + 1], raw['command_end'][index + 1] = command
+                        end = command[0]
+                        last_command, ready_seen = time.monotonic(), False
+                        # Never shorten the next interval to make up for PC
+                        # jitter. Actual command intervals are saved as measured.
+                        next_deadline = last_command + duration
+                    else:
+                        self._gui(lambda: self._require_time_step(p['detectors'][0], duration, begin))
+                        end = cutoff = time.time()
+                    if end <= begin:
+                        raise ScanError('System clock moved backwards during continuous acquisition.')
+                    pending.append((index, begin, end, volts.copy(), currents.copy()))
+                    index += 1
+                    begin = end
+                    if index < len(steps):
+                        self._bridge.status.emit(f'{index + 1}/{len(steps)}: continuous at {steps[index]:g} V')
+                if index < len(steps) or pending:
+                    self._pause(min(self.POLL_S, max(0., next_deadline - time.monotonic()))
+                        if index < len(steps) else self.POLL_S)
+        finally:
+            # Keep available raw samples from an interrupted window, but never
+            # present that incomplete window as an acquired spectrum point.
+            if origin is not None and abs((time.time() - origin) - (time.monotonic() - origin_mono)) <= .5:
+                try:
+                    watermark = self._capture_continuous(raw, origin, cutoff if cutoff is not None else time.time(),
+                                                        baselines, cancel=False)
+                    self._continuous_windows(pending, raw, watermark)
+                except Exception:
+                    pass  # retain the original failure; no fabricated replacement samples
+
     def runScan(self, recording):
-        validation, index = self._validation, 0
+        validation = self._validation
         try:
             p = self._plan
             steps = self.inputChannels[0].recordingData
-            for index, amplitude in enumerate(steps):
-                if self._cancel.is_set():
-                    raise ScanStopped('Scan stopped.')
-                delta = max(abs(amplitude - v) for v in p['expected'])
-                self._bridge.status.emit(f'{index + 1}/{len(steps)}: settling at {amplitude:g} V')
-                self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails'])))
-                self._settle(p['wait_long'] if delta > p['large_step'] else p['wait'])
-                self._bridge.status.emit(f'{index + 1}/{len(steps)}: acquiring at {amplitude:g} V')
-                start, end, volts, values = self._measure()
-                validation['window_start'][index], validation['window_end'][index] = start, end
-                validation['rail_v'][index] = volts
-                for j, (mean, count, finite) in enumerate(values):
-                    self.outputChannels[j].recordingData[index] = mean
-                    validation['samples'][index, j] = count
-                    validation['finite_samples'][index, j] = finite
-                validation['point_status'][index] = 'acquired' if all(math.isfinite(v[0]) for v in values) else 'invalid detector data'
-                self.signalComm.scanUpdateSignal.emit(False)
+            if p['mode'] == self.CONTINUOUS:
+                self._run_continuous(steps)
+            else:
+                self._run_stepped(steps)
             self._bridge.status.emit('Returning to initial PSU setpoints')
             self._gui(lambda: self._command([r['initial'] for r in p['rails']]))
             self._settle(p['wait'])
@@ -617,8 +1579,10 @@ class MScan(Scan):
             validation['status'], validation['error'] = 'error', str(exc)
             self.print(f'Scan aborted: {exc}', flag=PRINT.ERROR)
         finally:
-            if validation['point_status'][index] == 'not acquired':
-                validation['point_status'][index] = validation['status']
+            for index, status in enumerate(validation['point_status']):
+                if status == 'not acquired':
+                    validation['point_status'][index] = validation['status']
+                    break
             self._bridge.status.emit(validation['status'].capitalize() + (': ' + validation['error'] if validation['error'] else ''))
             # Stop/error never restores, re-enables or queues another voltage.
             self.signalComm.updateRecordingSignal.emit(False)
@@ -641,10 +1605,13 @@ class MScan(Scan):
 
     @finished.setter
     def finished(self, value):
+        if value and not self.finished:
+            self._last_scan_status = self.scan_status
         Scan.finished.fset(self, value)
         for key, setting in self.settingsMgr.settings.items():
-            if key not in (self.NOTES, self.STATUS, self.SCANTIME):
+            if not setting.indicator:
                 setting.setEnabled(value)
+        self._update_scan_action()
 
     def toggleRecording(self):
         if not self.recording:
@@ -652,6 +1619,12 @@ class MScan(Scan):
         elif self.finished and self.settingsTree:
             for spin in self.settingsTree.findChildren(QAbstractSpinBox):
                 spin.interpretText()
+            # Toolbar/shortcut activation need not leave the spinbox. Commit
+            # the DMMR proxy before preflight, never after a voltage command.
+            proxy = self.settingsMgr.settings[self.DMMR_INTERVAL].spin
+            if proxy.isEnabled() and not self._dmmr_interval_changed(before_start=True):
+                self.recording = False
+                return
         super().toggleRecording()
 
     def close(self):
@@ -661,6 +1634,10 @@ class MScan(Scan):
     def closeGUI(self):
         if hasattr(self, '_interface_timer'):
             self._interface_timer.stop()
+        if hasattr(self, '_layout_timer'):
+            self._layout_timer.stop()
+        if self.finished and self.titleBar is not None:
+            self.titleBar.clear()  # actions and toolbar can have different owners
         super().closeGUI()
 
     @plotting
@@ -673,27 +1650,52 @@ class MScan(Scan):
                 self.display.axes[0].set_ylabel(f'{output.name} ({output.unit})')
         else:
             self.display.ms.set_data([], [])
-        self.display.axes[0].set_xlabel('Amplitude A (V)')
+        self.display.axes[0].set_xlabel(self._axis_label())
         self.display.axes[0].relim()
         self.setLabelMargin(self.display.axes[0], .15)
         self.updateToolBar(update=update)
         self.defaultLabelPlot()
+
+    def _axis_label(self):
+        metadata = (self._plan or {}).get('metadata', {})
+        return 'Commanded amplitude A (V)' if metadata.get('mode') == self.CONTINUOUS else 'Amplitude A (V)'
 
     def saveData(self, file):
         super().saveData(file)
         if not self._validation:
             return
         with h5py.File(file, 'a') as handle:
+            if self.notes:
+                handle[self.name].attrs['notes'] = self.notes
             group = handle[self.name].require_group(self.VALIDATION)
             group.attrs['status'] = self._validation['status']
             group.attrs['error'] = self._validation['error']
             group.attrs['setup'] = json.dumps(self._plan['metadata'], allow_nan=False)
-            for key in ('rail_v', 'window_start', 'window_end', 'samples', 'finite_samples'):
+            for key in ('rail_v', 'rail_i', 'window_start', 'window_end', 'samples', 'finite_samples'):
                 group.create_dataset(key, data=self._validation[key])
             group.create_dataset('point_status', data=self._validation['point_status'], dtype=h5py.string_dtype('utf-8'))
             group['rail_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
+            group['rail_i'].attrs['Unit'] = 'A (PSU readback at end of integration, not detector current)'
             for key in ('window_start', 'window_end'):
                 group[key].attrs['Unit'] = 's since Unix epoch'
+            if 'continuous' in self._validation:
+                raw = group.create_group('Continuous')
+                for key, values in self._validation['continuous'].items():
+                    data = np.asarray(values, dtype=bool if key == 'psu_ready' else float)
+                    if key in ('psu_v', 'psu_i', 'psu_target'):
+                        data = data.reshape(-1, self._validation['rail_v'].shape[1])
+                    raw.create_dataset(key, data=data)
+                raw.attrs['timestamps'] = 'PC/Explorer times; not hardware-synchronized ADC timestamps.'
+                raw.attrs['commands'] = 'GUI dispatch of sequential rail requests; not hardware write/settling times.'
+                raw.attrs['readbacks'] = 'Snapshots of shared PSU channels, NaN while unavailable. No interpolation.'
+                raw['detector_current'].attrs['Unit'] = 'A (raw DMMR samples, no background subtraction)'
+                raw['psu_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
+                raw['psu_i'].attrs['Unit'] = 'A (PSU current, not detector current)'
+                raw['psu_target'].attrs['Unit'] = 'V (requested PSU magnitudes)'
+                for key in ('command_start', 'command_end', 'detector_time', 'psu_time'):
+                    raw[key].attrs['Unit'] = 's since Unix epoch'
+                group['rail_v'].attrs['Description'] = 'PSU observation at end of command interval; not synchronized to detector samples.'
+                group['rail_i'].attrs['Unit'] = 'A (PSU observation at end of command interval, not detector current)'
 
     def saveScanParallel(self, file):
         try:
@@ -708,11 +1710,20 @@ class MScan(Scan):
         loaded = super().loadDataInternal()
         if loaded:
             with h5py.File(self.file, 'r') as handle:
-                group = handle[self.name].get(self.VALIDATION)
+                saved = handle[self.name]
+                old_notes = saved.get('Settings/Notes')
+                self.notes = str(saved.attrs.get('notes', old_notes.attrs.get('Value', '') if old_notes is not None else ''))
+                group = saved.get(self.VALIDATION)
                 if group is not None:
                     self._plan = {'metadata': json.loads(group.attrs['setup'])}
                     self._validation = {key: group[key][:] for key in
                         ('rail_v', 'window_start', 'window_end', 'samples', 'finite_samples')}
+                    # Files predating current monitoring remain readable; no
+                    # current measurement is invented for their old points.
+                    self._validation['rail_i'] = (group['rail_i'][:] if 'rail_i' in group
+                        else np.full_like(self._validation['rail_v'], np.nan))
+                    if 'Continuous' in group:
+                        self._validation['continuous'] = {key: data[:] for key, data in group['Continuous'].items()}
                     self._validation.update(status=group.attrs['status'], error=group.attrs['error'],
                         point_status=list(group['point_status'].asstr()[:]))
         return loaded
@@ -720,7 +1731,7 @@ class MScan(Scan):
     def pythonPlotCode(self):
         return '''fig, ax = plt.subplots(constrained_layout=True)
 ax.plot(inputChannels[0].recordingData, outputChannels[output_index].recordingData, marker='.', markersize=4)
-ax.set_xlabel('Amplitude A (V)')
+ax.set_xlabel(AXIS_LABEL)
 ax.set_ylabel(f'{outputChannels[output_index].name} ({outputChannels[output_index].unit})')
 plt.show()
-'''
+'''.replace('AXIS_LABEL', repr(self._axis_label()))

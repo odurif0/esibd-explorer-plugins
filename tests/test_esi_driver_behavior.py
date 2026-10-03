@@ -18,7 +18,6 @@ import pytest
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "esi" / "vendor" / "runtime"
 RUNTIME_NAME = "_esi_driver_test_runtime"
 VENDOR_DIR = RUNTIME_DIR / "esi" / "vendor"
-ACTIVATION_NOTEBOOK = Path(__file__).resolve().parents[1] / "esi" / "esi_hv_activation_probe.ipynb"
 HARDWARE_NOTEBOOK = Path(__file__).resolve().parents[1] / "esi" / "esi_hardware_probe.ipynb"
 
 
@@ -43,9 +42,9 @@ def driver_modules():
     runtime = _load_runtime()
     driver_module = sys.modules[f"{RUNTIME_NAME}.esi.esi"]
     base_module = sys.modules[f"{RUNTIME_NAME}.esi.esi_base"]
-    driver_module._ESIController._connected_instance = None
+    driver_module._ESIController._active_connections.clear()
     yield runtime, driver_module, base_module
-    driver_module._ESIController._connected_instance = None
+    driver_module._ESIController._active_connections.clear()
 
 
 def _controller(driver_module):
@@ -53,6 +52,8 @@ def _controller(driver_module):
     controller.device_id = "test_esi"
     controller.com = 14
     controller.baudrate = 230400
+    controller.port_num = 0
+    controller._dll_port_claimed = False
     controller.connected = False
     controller._transport_poisoned = False
     controller._transport_error = None
@@ -71,7 +72,7 @@ def test_connect_validates_identity_and_forces_known_off_state(
     _runtime, driver_module, base_module = driver_modules
     controller = _controller(driver_module)
     calls = []
-    module_active = {1: True, 2: True}
+    module_active = {0: True, 1: True, 2: True}
 
     monkeypatch.setattr(base_module.ESIBase, "open_port", lambda self, com: calls.append(("open", com)) or 0)
     monkeypatch.setattr(base_module.ESIBase, "set_comspeed", lambda self, baud: calls.append(("baud", baud)) or (0, baud))
@@ -87,6 +88,10 @@ def test_connect_validates_identity_and_forces_known_off_state(
         "set_heat_ctrl_heater_temperature",
         lambda self, value: calls.append(("heat_target", value)) or (0, value),
     )
+    monkeypatch.setattr(base_module.ESIBase, "get_heat_ctrl_heater_temperature",
+                        lambda self: (calls.append(("heat_readback",)) or 0, 0.))
+    monkeypatch.setattr(base_module.ESIBase, "get_module_activation_state",
+                        lambda self, address: (calls.append(("module_readback", address)) or 0, module_active[address]))
     monkeypatch.setattr(base_module.ESIBase, "set_hv_supply_target_output_voltage", lambda self, address, value: calls.append(("target", address, value)) or 0)
     monkeypatch.setattr(
         base_module.ESIBase,
@@ -131,8 +136,17 @@ def test_connect_validates_identity_and_forces_known_off_state(
     assert calls[:3] == [("open", 14), ("baud", 230400), ("device_type",)]
     assert calls[3:] == [
         ("enable", False),
+        ("module", 0, False),
+        ("module_readback", 0),
+        ("module", 1, False),
+        ("pwm", 1),
+        ("module", 2, False),
+        ("pwm", 2),
         ("enable", True),
+        ("module", 0, False),
+        ("module_readback", 0),
         ("heat_target", 0.0),
+        ("heat_readback",),
         ("target", 1, 0.0),
         ("module", 1, False),
         ("pwm", 1),
@@ -158,7 +172,7 @@ def test_connect_rejects_wrong_controller_type(driver_modules, monkeypatch):
 
     assert closed == [True]
     assert controller.connected is False
-    assert driver_module._ESIController._connected_instance is None
+    assert not driver_module._ESIController._active_connections
 
 
 def test_discovery_requires_both_expected_hv_modules(driver_modules, monkeypatch):
@@ -501,202 +515,17 @@ def test_volatile_hv_step_configuration_requires_safe_off(
         controller.configure_hv_max_voltage_steps(timeout_s=0.5)
 
 
-def test_activation_notebook_uses_vendor_fixed_point_configuration_layout():
-    notebook = json.loads(ACTIVATION_NOTEBOOK.read_text(encoding="utf-8"))
-    setup_source = "".join(notebook["cells"][1]["source"])
-    probe_source = "".join(notebook["cells"][2]["source"])
-    notebook_source = "".join(
-        "".join(cell.get("source", [])) for cell in notebook["cells"]
-    )
-    namespace = {
-        "DRIVER_FILE": RUNTIME_DIR / "esi" / "esi_base.py",
-        "DLL_FILE": VENDOR_DIR / "x64" / "COM-ESI-CTRL.dll",
-        "ERROR_CODES_FILE": RUNTIME_DIR / "error_codes.json",
-        "MAX_VOLTAGE_STEP": 10.008,
-        "MAX_VOLTAGE_STEP_RAW": 10008,
-    }
-    exec(probe_source, namespace)
+def test_legacy_hv_activation_notebook_is_not_shipped():
+    assert not (RUNTIME_DIR.parents[1] / "esi_hv_activation_probe.ipynb").exists()
 
-    assert "ARM_TEMP_CONFIG = False" in setup_source
-    assert "ARM_NONZERO_TEST = False" in setup_source
-    assert "TEST_VOLTAGE = 100.0" in setup_source
-    assert "0.0 <= float(TEST_VOLTAGE) <= 3000.0" in notebook_source
-    assert "between 0 and 10 V" not in notebook_source
-    assert "lab_admin" not in notebook_source
-    assert "Path.home() / 'ESIBD Explorer' / 'plugins' / 'esi'" in setup_source
-    assert "NONZERO_RISE_TIMEOUT_SECONDS = 10.0" in setup_source
-    assert "NONZERO_HOLD_SECONDS = 20.0" in setup_source
-    assert "NONZERO_HOLD_START_V = 95.0" in setup_source
-    assert "NONZERO_OBSERVE_SECONDS" not in notebook_source
-    assert "NONZERO_POLL_SECONDS = 0.05" in setup_source
-    assert "NONZERO_ABS_LIMIT_V = 150.0" in setup_source
-    assert "NONZERO_ADC_GRACE_SECONDS = 1.5" in setup_source
-    assert "DISCHARGE_LIMIT_V = 1.0" in setup_source
-    assert "DISCHARGE_TIMEOUT_SECONDS = 60.0" in setup_source
-    assert "'nominal_evaluation': 'measurement_only'" in notebook_source
-    assert "(('positive', False), ('negative', True))" in notebook_source
-    assert "report['steps'][f'zero_{polarity}_adc']" in notebook_source
-    assert "verify_measurement_ranges_after_zero_adc" in notebook_source
-    assert "zero_active_current_configuration" in notebook_source
-    assert "expected_confirmation = f'ARM {TEST_VOLTAGE:g} V'" in notebook_source
-    assert "nonzero_global_off_after_observation" in notebook_source
-    assert "nonzero_safe_state_after_observation" in notebook_source
-    assert "nonzero_guard_samples" in notebook_source
-    assert "abort_nonzero(guard_reason)" in notebook_source
-    assert "nonzero_config['selected_max_step_bytes']" in notebook_source
-    assert "nonzero_staged_target_state" in notebook_source
-    assert "nonzero_activate_after_target" in notebook_source
-    assert "last_valid_adc_elapsed = None" in notebook_source
-    assert "adc_silence_seconds > NONZERO_ADC_GRACE_SECONDS" in notebook_source
-    assert "No fresh valid ADC conversion" in notebook_source
-    assert "hold_started_elapsed = None" in notebook_source
-    assert "abs(pwm_measured_v) >= NONZERO_HOLD_START_V" in notebook_source
-    assert "hold_elapsed_seconds >= NONZERO_HOLD_SECONDS" in notebook_source
-    assert "'completed': True" in notebook_source
-    assert "int(module_state_values[0]) & int(device.MS_ACTIVE)" in notebook_source
-    assert "safety_limit_v=NONZERO_ABS_LIMIT_V" in notebook_source
-    assert "abort_callback=abort_nonzero" in notebook_source
-    assert "guard_{polarity}_adc_settle_pwm" in notebook_source
-    assert "PWM activation was lost during" in notebook_source
-    assert "report['cleanup']['discharge']" in notebook_source
-    assert "def wait_for_discharge():" in notebook_source
-    assert "if not report['cleanup']['discharge']['confirmed']:" in notebook_source
-    assert notebook_source.index("'nonzero_guard_global_off'") < (
-        notebook_source.index("'nonzero_guard_zero_target'")
-    ) < notebook_source.index("'nonzero_guard_standby'")
-    assert notebook_source.index("guard_started = time.monotonic()") < (
-        notebook_source.index("nonzero_state = read_hv_state")
-    )
-    assert notebook_source.index("nonzero_global_off_after_observation") < (
-        notebook_source.index("'positive_voltage_v': input(")
-    )
-    assert notebook_source.index(
-        "report['cleanup']['discharge'] = wait_for_discharge()"
-    ) < notebook_source.index("'positive_voltage_v': input(")
 
-    class FakeAdcDevice:
-        NO_ERR = 0
-
-        def __init__(self):
-            self.pwm_measured_v = 100.0
-
-        @staticmethod
-        def format_status(status):
-            return str(status)
-
-        def set_hv_supply_meas_ranges(self, _address, _negative, _current_high):
-            return self.NO_ERR
-
-        def get_hv_supply_meas_ranges(self, _address):
-            return self.NO_ERR, False, False
-
-        def get_hv_supply_params_pwm(self, _address):
-            return (
-                self.NO_ERR,
-                5e-6,
-                15e-9,
-                0.0,
-                0.0,
-                100.0,
-                self.pwm_measured_v,
-                True,
-                0,
-            )
-
-    fake_adc_device = FakeAdcDevice()
-    namespace["SETTLE_SECONDS"] = 0.001
-    namespace["NONZERO_POLL_SECONDS"] = 0.0001
-    namespace["read_hv_state"] = lambda _device, _address: {
-        "measured_voltage": {"values": [True, 100.0]},
-        "pwm_voltage_measured_v": 100.0,
-    }
-    guarded_adc = namespace["select_and_read_adc"](
-        fake_adc_device,
-        1,
-        False,
-        False,
-        safety_limit_v=150.0,
-    )
-
-    assert guarded_adc["settle_guard_samples"]
-    assert all(
-        sample["pwm_measured_v"] == 100.0
-        for sample in guarded_adc["settle_guard_samples"]
-    )
-
-    fake_adc_device.pwm_measured_v = 151.0
-    abort_reasons = []
-
-    def abort_adc(reason):
-        abort_reasons.append(reason)
-        raise RuntimeError(reason)
-
-    with pytest.raises(RuntimeError, match="exceeds 150 V"):
-        namespace["select_and_read_adc"](
-            fake_adc_device,
-            1,
-            False,
-            False,
-            safety_limit_v=150.0,
-            abort_callback=abort_adc,
-        )
-
-    assert abort_reasons and "151 V exceeds 150 V" in abort_reasons[0]
-
-    hardware_notebook = json.loads(HARDWARE_NOTEBOOK.read_text(encoding="utf-8"))
-    hardware_source = "".join(
-        "".join(cell.get("source", [])) for cell in hardware_notebook["cells"]
-    )
-    assert "lab_admin" not in hardware_source
-    assert "REPO_ROOT" not in hardware_source
-    assert "Path.home() / 'ESIBD Explorer' / 'plugins' / 'esi'" in hardware_source
-    assert "report_path = (\n            PLUGIN_DIR /" in hardware_source
-
-    raw = [0] * 53
-    raw[11:15] = (273150).to_bytes(4, byteorder="little", signed=True)
-    decoded = namespace["decode_current_config"](raw)
-
-    assert decoded["heat"]["target_temperature_c"] == 0.0
-    assert namespace["safe_config_violations"](decoded) == []
-
-    temporary = namespace["build_temporary_hv_config"](raw, 1, 10.008)
-    changed_offsets = [
-        index
-        for index, (before, after) in enumerate(zip(raw, temporary, strict=True))
-        if before != after
-    ]
-    temporary_decoded = namespace["decode_current_config"](temporary)
-
-    assert changed_offsets == [21, 22]
-    assert temporary[21:25] == [0x18, 0x27, 0x00, 0x00]
-    assert temporary_decoded["hv"][1]["max_voltage_step_v"] == 10.008
-    assert namespace["temporary_config_violations"](
-        temporary_decoded, 1, 10.008
-    ) == []
-
-    old_misaligned_patch = bytearray(raw)
-    old_misaligned_patch[24:28] = bytes([0x18, 0x01, 0x00, 0x00])
-    old_misaligned_decoded = namespace["decode_current_config"](
-        old_misaligned_patch
-    )
-
-    assert old_misaligned_decoded["hv"][1]["max_voltage_step_v"] == 402653.184
-    assert old_misaligned_decoded["hv"][1]["negative_adc"] is True
-
-    active = bytearray(temporary)
-    active[0] = 1
-    active[17:21] = (10000).to_bytes(4, byteorder="little", signed=True)
-    active[27] = 1
-    active_decoded = namespace["decode_current_config"](active)
-
-    assert active_decoded["device_enabled"] is True
-    assert active_decoded["hv"][1] == {
-        "target_voltage_v": 10.0,
-        "max_voltage_step_v": 10.008,
-        "negative_adc": False,
-        "high_current_range": False,
-        "enabled": True,
-    }
+def test_inventory_notebook_has_portable_paths():
+    notebook = json.loads(HARDWARE_NOTEBOOK.read_text(encoding="utf-8"))
+    source = "".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    assert "lab_admin" not in source
+    assert "REPO_ROOT" not in source
+    assert "Path.home() / 'ESIBD Explorer' / 'plugins' / 'esi'" in source
+    assert "report_path = (\n            PLUGIN_DIR /" in source
 
 
 def test_diagnostics_use_complete_state_snapshot(driver_modules, monkeypatch):
@@ -770,6 +599,7 @@ def test_diagnostics_use_complete_state_snapshot(driver_modules, monkeypatch):
         "get_module_led_data",
         lambda _self, address: (0, address == 1, True, False),
     )
+    monkeypatch.setattr(base_module.ESIBase, "get_module_data_ready_flags", lambda self, address: (0, 1))
     monkeypatch.setattr(
         base_module.ESIBase,
         "get_heat_ctrl_monitoring",
@@ -812,9 +642,14 @@ def test_diagnostics_use_complete_state_snapshot(driver_modules, monkeypatch):
         },
     )
 
+    monkeypatch.setattr(base_module.ESIBase, "get_module_activation_state",
+                        lambda self, address: (0, False))
     snapshot = controller.collect_diagnostics(timeout_s=0.5)
 
     assert complete_calls == [True]
+    assert snapshot["heat"]["module_active"] is False
+    assert snapshot["heat"]["control_active"] is True
+    assert snapshot["heat"]["active"] is False
     assert snapshot["main_state"] == {"hex": "0x1", "name": "STATE_STANDBY"}
     assert snapshot["data_ready_flags"] == 0x05
     assert snapshot["device_state"]["flags"] == ["DEVST_OK"]
@@ -1073,46 +908,6 @@ def test_only_lab_hv_addresses_are_commandable(driver_modules):
     assert controller._validate_controlled_address(0) == 0
 
 
-def test_heat_output_disable_uses_zero_target_not_module_activation(
-    driver_modules,
-    monkeypatch,
-):
-    _runtime, driver_module, base_module = driver_modules
-    controller = _controller(driver_module)
-    controller.connected = True
-    calls = []
-    monkeypatch.setattr(
-        base_module.ESIBase,
-        "set_enable",
-        lambda _self, state: calls.append(("enable", state)) or 0,
-    )
-    monkeypatch.setattr(
-        base_module.ESIBase,
-        "get_enable",
-        lambda _self: (calls.append(("get_enable",)) or 0, True),
-    )
-    monkeypatch.setattr(
-        base_module.ESIBase,
-        "set_heat_ctrl_heater_temperature",
-        lambda self, value: calls.append(("temperature", value)) or (0, value),
-    )
-    monkeypatch.setattr(
-        base_module.ESIBase,
-        "set_module_activation_state",
-        lambda self, address, active: (_ for _ in ()).throw(
-            AssertionError("Heat must not use module activation")
-        ),
-    )
-
-    assert controller.set_output_active(0, True, timeout_s=0.5) is True
-    assert controller.set_output_active(0, False, timeout_s=0.5) is False
-    assert calls == [
-        ("enable", True),
-        ("get_enable",),
-        ("temperature", 0.0),
-    ]
-
-
 def test_hv_output_state_uses_module_toggle_and_global_gate(
     driver_modules,
     monkeypatch,
@@ -1276,8 +1071,16 @@ def test_heater_temperature_is_limited_by_hardware(driver_modules, monkeypatch):
         lambda self, target: applied.append(target) or (0, target),
     )
 
+    monkeypatch.setattr(base_module.ESIBase, "get_heat_ctrl_heater_temperature",
+                        lambda self: (0, applied[-1]))
+    for name in ("voltage", "current", "power"):
+        monkeypatch.setattr(base_module.ESIBase, f"get_heat_ctrl_{name}_limit", lambda self: (0, 1.))
+    monkeypatch.setattr(base_module.ESIBase, "get_module_data_ready_flags", lambda self, address: (0, 1))
+    monkeypatch.setattr(base_module.ESIBase, "get_heat_ctrl_monitoring",
+                        lambda self: (0, True, 0., 0., 0., 21.))
+    applied.append(0.)  # Initial simulated target before the preflight read.
     assert controller.set_heater_temperature(125.0, timeout_s=0.5) == 125.0
-    assert applied == [125.0]
+    assert applied == [0., 125.0]
     with pytest.raises(ValueError, match="hardware maximum 180"):
         controller.set_heater_temperature(181.0, timeout_s=0.5)
 
@@ -1332,10 +1135,10 @@ def test_second_inline_controller_is_rejected(driver_modules):
     second = _controller(driver_module)
     first.device_id = "first"
     second.device_id = "second"
-    first._claim_single_instance()
+    first._reserve_open_port(0.5)
 
-    with pytest.raises(RuntimeError, match="single-instance"):
-        second._claim_single_instance()
+    with pytest.raises(RuntimeError, match="reserved"):
+        second._reserve_open_port(0.5)
 
 
 def test_process_rpc_budgets_cover_batched_dll_operations(driver_modules):
@@ -1507,6 +1310,10 @@ def test_force_safe_off_retries_and_reports_stuck_global_enable(
     controller.thread_lock = __import__("threading").Lock()
 
     enable_states = []
+    monkeypatch.setattr(base_module.ESIBase, "get_module_activation_state",
+                        lambda self, address: (0, False))
+    monkeypatch.setattr(base_module.ESIBase, "get_heat_ctrl_heater_temperature",
+                        lambda self: (0, 0.))
 
     monkeypatch.setattr(
         base_module.ESIBase,

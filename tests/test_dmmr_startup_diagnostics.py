@@ -38,12 +38,12 @@ def native(tmp_path):
     cls = _load_module()._get_dmmr_driver_class()._PROCESS_CONTROLLER_CLASS
     driver = cls.__new__(cls)
     driver.com, driver.baudrate = 13, 230400
-    driver.connected = True
+    driver.connected = driver._dll_port_claimed = True
     driver._transport_poisoned = False
     driver._transport_error = None
     driver.thread_lock = threading.Lock()
     driver.logger = logging.getLogger("dmmr-startup-test")
-    driver._set_port_claimed = lambda value: None
+    driver._set_port_claimed = lambda value: setattr(driver, '_dll_port_claimed', value)
     driver.dmmr_dll_path = DLL_PATH
     driver._startup_log_dir = tmp_path
     driver._startup_log_path = None
@@ -345,6 +345,7 @@ def test_unclosed_capture_never_turns_into_continuous_logging(rig, poisoned):
     rig.controller.startAcquisition = lambda: pytest.fail("capture still open")
 
     def unclosed(**kwargs):
+        rig.device.calls.append(('capture', 'end'))
         rig.device._transport_poisoned = poisoned
         rig.device._startup_log_path = Path("still-open.log")
         if poisoned:
@@ -354,7 +355,12 @@ def test_unclosed_capture_never_turns_into_continuous_logging(rig, poisoned):
     rig.device.end_startup_diagnostics = unclosed
     start(rig)
     assert "DMMR acquisition enabled." not in rig.logs
-    assert ("enable", False) in rig.device.calls
+    if poisoned:
+        assert ('enable', False) not in rig.device.calls
+        assert ('automatic', False) not in rig.device.calls[rig.device.calls.index(('capture', 'end')) + 1:]
+        assert rig.controller.device is rig.device and rig.controller.initialized
+    else:
+        assert ('enable', False) in rig.device.calls
     assert rig.controller.acquiring is False
     assert rig.parent.on is poisoned
 

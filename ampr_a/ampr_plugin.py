@@ -1349,12 +1349,15 @@ class AMPRDevice(Device):
         self.stopAcquisition()
         if controller:
             shutdown_confirmed = bool(controller.shutdownCommunication())
+        connection_pending = getattr(controller, "main_state", None) == "Connection pending"
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = False if shutdown_confirmed else True
+            self.onAction.state = not shutdown_confirmed and not connection_pending
             self._sync_local_on_action()
             self._sync_toolbar_communication_controls()
         if not shutdown_confirmed:
             self.print(
+                "AMPR connection cleanup is pending; no output startup was performed."
+                if connection_pending else
                 "AMPR shutdown could not be confirmed; UI remains ON until "
                 "the hardware state is verified.",
                 flag=PRINT.WARNING,
@@ -1986,22 +1989,54 @@ class AMPRController(DeviceController):
             return float(limit_getter(module))
         return _AMPR_ABS_VOLTAGE_LIMIT
 
+    def initializeCommunication(self) -> None:
+        if self.initializing:
+            return
+        acquisition_thread = getattr(self, 'acquisitionThread', None)
+        if acquisition_thread is not None and acquisition_thread.is_alive():
+            self.closeCommunication()
+        # Arm the request before scheduling its worker so an intervening close
+        # cannot be forgotten when that worker eventually starts.
+        self._initial_open_close_requested = False
+        super().initializeCommunication()
+
     def runInitialization(self) -> None:
+        if getattr(self, '_initial_open_close_requested', False):
+            if not self.initialized:
+                self._restore_off_ui_state()
+            self._sync_status_to_gui()
+            self.initializing = False
+            return
+        if self._dispose_device() is False:
+            self.initializing = False
+            return  # The previous connection still owns its native port.
         self.initialized = False
-        self._dispose_device()
         try:
             ampr_driver_class = _get_ampr_driver_class()
-            self.device = ampr_driver_class(
+            device = ampr_driver_class(
                 device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
             )
+            if getattr(self, '_initial_open_close_requested', False):
+                # No native Open was issued by this freshly created backend.
+                with contextlib.suppress(Exception):
+                    device.close()
+                self._restore_off_ui_state()
+                self._sync_status_to_gui()
+                return
+            self.device = device
             backend_reason = str(
                 getattr(self.device, "_process_backend_disabled_reason", "")
             ).strip()
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            if getattr(self, '_initial_open_close_requested', False):
+                # Open succeeded after a close request: verify shutdown rather
+                # than publishing a successful initialization.
+                self.shutdownCommunication()
+                return
             self._refresh_module_scan()
             self._update_state()
             self.signalComm.initCompleteSignal.emit()
@@ -2027,6 +2062,13 @@ class AMPRController(DeviceController):
         COM port is locked in-process) instead of looping on a bare
         'Error opening port' (-2) while the hardware is actually responsive.
         """
+        if self._initial_open_incomplete():
+            return (
+                "The failed initial connection is retained until its native call finishes "
+                "and port closure is confirmed. Power the device on and retry ON explicitly. "
+                "If the call remains blocked or closure cannot be confirmed, restart Explorer "
+                "after making the hardware safe. No outputs are automatically re-enabled."
+            )
         current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
         guidance = _ampr_poisoned_port_guidance(
             exc,
@@ -2038,6 +2080,8 @@ class AMPRController(DeviceController):
         return guidance
 
     def initComplete(self) -> None:
+        if getattr(self, '_initial_open_close_requested', False):
+            return  # A queued success must not undo an explicit close.
         if self.device is not None and self.detected_module_ids:
             self.controllerParent._sync_channels_from_detected_modules(
                 self.detected_module_ids
@@ -2481,8 +2525,24 @@ class AMPRController(DeviceController):
             self.print("AMPR PSU turned ON. State: ST_ON.")
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        self._initial_open_close_requested = True
         self._cancel_setpoints()
-        if (final_state or self.main_state) == _AMPR_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+        if self._initial_open_incomplete():
+            if not self._dispose_device(initial_open_only=True):
+                return
+            final_state = "Disconnected"
+        # Resolve the outcome before closing anything: Open may just have
+        # finished, but that does not confirm a hardware shutdown.
+        if final_state is None and self.main_state != _AMPR_SHUTDOWN_UNCONFIRMED_STATE:
+            final_state = getattr(self, "_forced_close_state", None)
+        if final_state is None:
+            # Absence of a communication object is not proof of a safe stop.
+            final_state = self.main_state
+            if self.device is not None or final_state not in (
+                "Disconnected", _AMPR_SHUTDOWN_UNCONFIRMED_STATE, _AMPR_COMMUNICATION_LOST_STATE
+            ):
+                final_state = _AMPR_SHUTDOWN_UNCONFIRMED_STATE
+        if final_state == _AMPR_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
             # Keep both the backend and Explorer's closing warning until OFF succeeds.
             self.acquiring = False
             self.initialized = True
@@ -2494,15 +2554,6 @@ class AMPRController(DeviceController):
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
-        if final_state is None:
-            final_state = getattr(self, "_forced_close_state", None)
-        if final_state is None:
-            # Absence of a communication object is not proof of a safe stop.
-            final_state = self.main_state
-            if self.device is not None or final_state not in (
-                "Disconnected", _AMPR_SHUTDOWN_UNCONFIRMED_STATE, _AMPR_COMMUNICATION_LOST_STATE
-            ):
-                final_state = _AMPR_SHUTDOWN_UNCONFIRMED_STATE
         self.main_state = final_state
         self.detected_module_ids = []
         self.detected_modules_text = ""
@@ -2514,18 +2565,27 @@ class AMPRController(DeviceController):
         self.interlock_state_summary = summary_value
         self.voltage_state_summary = summary_value
         self._sync_status_to_gui()
-        self._dispose_device()
+        if self._dispose_device() is False:
+            return
         self.initialized = False
         self._clear_transport_failures()
         self._forced_close_state = None
 
     def shutdownCommunication(self) -> bool:
         """Run the AMPR shutdown sequence before releasing communication resources."""
+        self._initial_open_close_requested = True
         self._cancel_setpoints()
         device = self.device
         if device is None:
             self.closeCommunication()
             return self.main_state == "Disconnected"
+        if self._initial_open_incomplete(device):
+            # A failed initial Open needs port cleanup, not a hardware shutdown.
+            # Never close concurrently with the native worker or re-arm it.
+            released = self._dispose_device(initial_open_only=True)
+            if released:
+                self.closeCommunication(final_state="Disconnected")
+            return released
 
         if getattr(self, "acquiring", False):
             self.stopAcquisition()
@@ -2831,31 +2891,49 @@ class AMPRController(DeviceController):
     def _clear_transport_failures(self) -> None:
         self._consecutive_transport_failures = 0
 
-    def _dispose_device(self) -> None:
-        import gc
+    def _initial_open_incomplete(self, device: Any | None = None) -> bool:
+        device = self.device if device is None else device
+        return device is not None and any(bool(getattr(device, name, False)) for name in (
+            "_open_failed", "_opening_in_progress", "_failed_open_released",
+        ))
 
+    def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         self._cancel_setpoints()
+        self._last_output_targets = {}
         device = self.device
+        if device is None:
+            return self.main_state not in (_AMPR_SHUTDOWN_UNCONFIRMED_STATE, _AMPR_COMMUNICATION_LOST_STATE)
+        # A connect that just succeeded needs verified shutdown, not bare Close.
+        # Its initializer retains the pending stop request and owns that path.
+        initial_cleanup = (getattr(device, "_open_failed", False)
+                           or getattr(device, "_failed_open_released", False))
+        can_disconnect = (not getattr(device, "_opening_in_progress", False)
+                          and (not initial_open_only or initial_cleanup))
+        released = (can_disconnect and getattr(device, "connected", None) is False
+                    and getattr(device, "_dll_port_claimed", None) is False)
+        try:
+            if can_disconnect and not released:
+                released = device.disconnect() is True
+        except Exception as exc:  # noqa: BLE001
+            self.print(f"AMPR connection cleanup remains unconfirmed: {exc}", flag=PRINT.ERROR)
+        if not released:
+            initial_open = self._initial_open_incomplete()
+            self.initialized = not initial_open
+            self.acquiring = False
+            self.main_state = "Connection pending" if initial_open else _AMPR_SHUTDOWN_UNCONFIRMED_STATE
+            if initial_open:
+                self._restore_off_ui_state()
+            else:
+                self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return False
+        if self._initial_open_incomplete():
+            self.main_state = "Disconnected"
         self.device = None
         self.initialized = False
-        self._last_output_targets = {}
-        if device is None:
-            return
-
-        try:
-            if getattr(device, "connected", True):
-                device.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        finally:
-            try:
-                device.close()
-            except Exception:  # noqa: BLE001
-                pass
-            with contextlib.suppress(Exception):
-                device._set_port_claimed(False)
-        del device
-        gc.collect()
+        with contextlib.suppress(Exception):
+            device.close()
+        return True
 
     def _format_status(self, status: int, device: Any | None = None) -> str:
         device = self.device if device is None else device
@@ -2868,7 +2946,8 @@ class AMPRController(DeviceController):
 
     def _safe_query_state(self, getter_name: str, device: Any | None = None) -> str | None:
         device = self.device if device is None else device
-        if device is None:
+        if (device is None or self._initial_open_incomplete(device)
+                or getattr(device, "_transport_poisoned", False)):
             return None
         getter = getattr(device, getter_name, None)
         if getter is None:

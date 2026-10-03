@@ -98,9 +98,16 @@ not hard-code a channel count. Each timer channel exposes:
 ## Process Backend
 
 The bundled runtime runs inside Explorer. Process isolation is disabled:
-a spawned interpreter cannot import the private bundled modules. After a DLL
-timeout, the connection cannot be reused. Switch the instrument OFF using its
-hardware controls before restarting Explorer.
+a spawned interpreter cannot import the private bundled modules. A timed-out
+connection is never reused. For a failed initial Open only, a later OFF/close or
+ON request can release it after the native call returns and port closure is
+confirmed. Otherwise it stays `Connection pending`, without output commands.
+`Disconnected` confirms port closure, not HV discharge. Other DLL timeouts still
+require hardware OFF and an Explorer restart.
+
+OFF/close during initialization cancels startup. If the connection completes
+without a timeout, a normal verified shutdown follows. Starting again requires
+an explicit ON; the cancelled startup is never resumed automatically.
 
 ## Portability Note
 

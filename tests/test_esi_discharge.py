@@ -28,7 +28,7 @@ def rig(monkeypatch):
     base = sys.modules[f"{RUNTIME_NAME}.esi.esi_base"].ESIBase
     driver = _controller(module)
     driver.connected = True
-    type(driver)._connected_instance = driver
+    driver._set_port_claimed(True)
     clock = Clock()
     monkeypatch.setattr(module, "time", clock, raising=False)
     calls = []
@@ -94,7 +94,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(base, "close_port", close)
     yield SimpleNamespace(driver=driver, module=module, base=base, clock=clock,
                           calls=calls, ranges=ranges, values=values, counts=counts, state=state)
-    type(driver)._connected_instance = None
+    type(driver)._active_connections.clear()
 
 
 def test_disconnect_checks_four_outputs_after_disable_and_before_close(rig):
@@ -113,7 +113,7 @@ def test_disconnect_checks_four_outputs_after_disable_and_before_close(rig):
         assert final["modules"][address]["negative_v"] == -.5
         assert final["modules"][address]["measured_a"] == -2e-9
     assert not rig.driver.connected
-    assert type(rig.driver)._connected_instance is None
+    assert not type(rig.driver)._active_connections
 
 
 def test_exact_voltage_boundary_is_inclusive(rig):
@@ -128,7 +128,7 @@ def test_default_disconnect_cannot_bypass_discharge(rig):
         rig.driver.disconnect(timeout_s=.5)
     assert ("close",) not in rig.calls
     assert rig.driver.connected
-    assert type(rig.driver)._connected_instance is rig.driver
+    assert type(rig.driver)._active_connections[id(rig.driver)]["owner"] is rig.driver
 
 
 @pytest.mark.parametrize("address,negative", [(1, False), (1, True), (2, False), (2, True)])
@@ -243,7 +243,7 @@ def test_close_failure_after_discharge_keeps_connection_for_retry(rig):
     with pytest.raises(RuntimeError, match="close_port"):
         rig.driver.disconnect(timeout_s=.5)
     assert rig.driver.connected
-    assert type(rig.driver)._connected_instance is rig.driver
+    assert type(rig.driver)._active_connections[id(rig.driver)]["owner"] is rig.driver
     rig.state.close_status = 0
     assert rig.driver.disconnect(timeout_s=.5)
 
@@ -312,4 +312,4 @@ def test_poisoned_adc_call_does_not_restore_mux_or_close_concurrently(rig, monke
         release.set()
     time.sleep(.1)
     assert rig.calls == before, "No further DLL calls after the poisoned worker returns"
-    assert type(rig.driver)._connected_instance is rig.driver
+    assert type(rig.driver)._active_connections[id(rig.driver)]["owner"] is rig.driver

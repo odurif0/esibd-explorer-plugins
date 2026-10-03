@@ -103,6 +103,10 @@ _PSU_PANEL_DIAGNOSTICS_WIDTH = (
 _PSU_PANEL_OPERATOR_MAX_WIDTH = 900
 _PSU_LIVE_READBACK_REFRESH_PERIOD_S = 0.0
 _PSU_HOUSEKEEPING_REFRESH_PERIOD_S = 2.0
+_PSU_LIMIT_FIELDS = (
+    "hardware_voltage_limit", "hardware_current_limit",
+    "voltage_setpoint_readback", "current_limit_readback",
+)
 _PSU_MANUAL_NUMERIC_DEBOUNCE_MS = 250
 _PSU_FEEDBACK_OK_STYLE = "background-color: #2f855a; color: #ffffff; margin:0px; padding:0px 4px;"
 _PSU_FEEDBACK_WARN_STYLE = "background-color: #dd6b20; color: #ffffff; margin:0px; padding:0px 4px;"
@@ -1638,7 +1642,12 @@ class PSUDevice(Device):
             for channel in self.getChannels():
                 ch = channel.channel_number()
                 if ch in state.get("voltage_values", {}):
+                    previous = channel.value
                     channel.value = state["voltage_values"][ch]
+                    if channel.value != previous:
+                        # This is a request, unlike the housekeeping sync which
+                        # uses the same dispatch-suppression flag.
+                        channel.voltage_request_revision = getattr(channel, "voltage_request_revision", 0) + 1
                     # Use the value accepted by Explorer, never bypass its limits.
                     channel.lastAppliedValue = channel.value
                     state["voltage_values"][ch] = float(channel.value)
@@ -3617,10 +3626,13 @@ class PSUDevice(Device):
         shutdown_confirmed = True
         if controller:
             shutdown_confirmed = bool(controller.shutdownCommunication())
+        connection_pending = bool(
+            controller and getattr(controller, "_initial_open_incomplete", lambda: False)()
+        )
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = False if shutdown_confirmed else True
+            self.onAction.state = not shutdown_confirmed and not connection_pending
             self._sync_local_on_action()
-        if not shutdown_confirmed:
+        if not shutdown_confirmed and not connection_pending:
             self.print(
                 "PSU shutdown could not be confirmed; UI remains ON until "
                 "the hardware state is verified.",
@@ -3663,6 +3675,10 @@ class PSUDevice(Device):
         if getattr(self, "loading", False):
             return
 
+        if (controller and not self.isOn()
+                and getattr(controller, "_initial_open_incomplete", lambda: False)()):
+            self.shutdownCommunication()
+            return
         if controller and getattr(controller, "initialized", False):
             begin_transition = getattr(controller, "_begin_transition", None)
             can_start = not callable(begin_transition) or begin_transition(self.isOn())
@@ -3723,6 +3739,16 @@ class PSUChannel(Channel):
     CURRENT_SET = "Current set"
     CURRENT_MONITOR = "Current monitor"
     channelParent: PSUDevice
+    # Numeric, non-persisted observations on the shared Explorer Channel. These
+    # are never commands; consumers must not parse rounded Ilim/Iget labels.
+    hardware_voltage_limit = np.nan
+    hardware_current_limit = np.nan
+    voltage_setpoint_readback = np.nan
+    current_limit_readback = np.nan
+    current_readback = np.nan
+    # Monotonic request identity, distinct from quantized hardware echoes into
+    # Channel.value. Neither housekeeping nor acquisition increments it.
+    voltage_request_revision = 0
 
     def getDefaultChannel(self) -> dict[str, dict]:
         self.id: int
@@ -3901,6 +3927,7 @@ class PSUChannel(Channel):
     def valueChanged(self) -> None:
         if self.loading or getattr(self.channelParent, "_channelValueSyncing", False):
             return
+        self.voltage_request_revision += 1
         self.channelParent._sync_channel_voltage(self)
         super().valueChanged()
 
@@ -4099,6 +4126,8 @@ class PSUController(DeviceController):
         # interface; no separate signed-voltage API is maintained.
         self._hv_readback: dict[str, Any] | None = None
         self._hv_expiry_sample: dict[str, Any] | None = None
+        self._limits_readback: dict[str, Any] | None = None
+        self._limits_expiry_sample: dict[str, Any] | None = None
         self._hv_readback_invalidated_at = 0.0
         self._hv_config_loading = False
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
@@ -4110,17 +4139,18 @@ class PSUController(DeviceController):
         # consumers of NaN even when acquisition/recording is not running.
         self._hv_readback_invalidated_at = time.monotonic()
         self._hv_readback = None
+        self._limits_readback = None
         self.updateValues()
 
     def _publish_hv_readback(
         self, values: dict[int, Any], enabled: dict[int, bool],
-        device_enabled: Any, observed_at: float,
+        device_enabled: Any, observed_at: float, currents: dict[int, Any] | None = None,
     ) -> None:
-        """Capture a coherent worker sample for publication through Channel.monitor."""
+        """Capture coherent voltage/current samples for the shared Channels."""
         interval_s = _coerce_float(getattr(self.controllerParent, "interval", 1000), 1000.) / 1000
         max_age_s = max(2., 2 * interval_s) if np.isfinite(interval_s) else 2.
         self._hv_readback = {
-            "values": values, "enabled": enabled, "device_enabled": device_enabled,
+            "values": values, "currents": currents or {}, "enabled": enabled, "device_enabled": device_enabled,
             "observed_at": observed_at, "max_age_s": max_age_s, "device": self.device,
         }
 
@@ -4147,8 +4177,10 @@ class PSUController(DeviceController):
             return "PSU voltage readback expired."
         return ""
 
-    def _schedule_readback_expiry(self, sample: dict[str, Any] | None) -> None:
-        if sample is None or self._hv_expiry_sample is sample:
+    def _schedule_readback_expiry(self, sample: dict[str, Any] | None, *, limits: bool = False) -> None:
+        source = "_limits_readback" if limits else "_hv_readback"
+        marker = "_limits_expiry_sample" if limits else "_hv_expiry_sample"
+        if sample is None or getattr(self, marker) is sample:
             return
         delay_s = sample["observed_at"] + sample["max_age_s"] - time.monotonic()
         if not np.isfinite(delay_s) or delay_s <= 0:
@@ -4160,14 +4192,14 @@ class PSUController(DeviceController):
                 return
         except ImportError:
             return
-        self._hv_expiry_sample = sample
+        setattr(self, marker, sample)
 
         def expire() -> None:
-            if self._hv_readback is sample:
+            if getattr(self, source) is sample:
                 # Qt's coarse timer may fire slightly early. Allow publication
                 # to schedule the remaining delay instead of keeping a stale
                 # monitor forever when no further polling occurs.
-                self._hv_expiry_sample = None
+                setattr(self, marker, None)
                 self.updateValues()
 
         QTimer.singleShot(int(delay_s * 1000) + 1, expire)
@@ -4365,8 +4397,12 @@ class PSUController(DeviceController):
         if cancel.is_set():
             self.initializing = False
             return
-        self._dispose_device()
+        if self._dispose_device() is False:
+            self.initializing = False
+            return  # The previous connection still owns its native port.
         try:
+            if cancel.is_set():
+                return
             driver_class = _get_psu_driver_class()
             self.device = driver_class(
                 device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
@@ -4380,7 +4416,13 @@ class PSUController(DeviceController):
             ).strip()
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
+            if cancel.is_set():
+                self._dispose_device()  # Construction finished, but Open was never sent.
+                return
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            if cancel.is_set():
+                self.shutdownCommunication()
+                return
             self._apply_interlock_setting_unlocked(
                 self.device, timeout_s=float(self.controllerParent.connect_timeout_s)
             )
@@ -4391,6 +4433,15 @@ class PSUController(DeviceController):
             else:
                 self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
+            if self._initial_open_incomplete():
+                guidance = self._init_failure_guidance(exc)
+                self._dispose_device()
+                self._restore_off_ui_state()
+                self.print(
+                    f"PSU initialization failed on COM{int(self.controllerParent.com)}: {exc}\n{guidance}",
+                    flag=PRINT.ERROR,
+                )
+                return  # No output command was issued during this failed opening.
             recovered = self._safe_disable_outputs_after_failure(
                 timeout_s=float(self.controllerParent.connect_timeout_s)
             )
@@ -4420,6 +4471,13 @@ class PSUController(DeviceController):
         COM port is locked in-process) instead of looping on a bare
         'Error opening port' (-2) while the hardware is actually responsive.
         """
+        if self._initial_open_incomplete():
+            return (
+                "The failed initial connection is retained until its native call finishes "
+                "and port closure is confirmed. Power the device on and retry ON explicitly. "
+                "If the call remains blocked or closure cannot be confirmed, restart Explorer "
+                "after making the hardware safe. No outputs are automatically re-enabled."
+            )
         current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
         guidance = _psu_poisoned_port_guidance(
             exc,
@@ -4852,6 +4910,8 @@ class PSUController(DeviceController):
             return  # An old controller callback cannot overwrite its replacement.
         sample = self._hv_readback
         reason = self._hv_readback_status(sample)
+        limits = self._limits_readback
+        limits_reason = self._hv_readback_status(limits)
         busy = any(bool(getattr(self, flag, False)) for flag in (
             "initializing", "transitioning", "_manual_apply_active",
             "_manual_apply_worker_running", "_hv_config_loading",
@@ -4876,11 +4936,17 @@ class PSUController(DeviceController):
                 if getattr(channel, "waitToStabilize", False):
                     value = np.nan
                     detail = "Waiting for channel to stabilize."
+                current = _coerce_float(sample["currents"].get(ch), np.nan) if sample and not detail else np.nan
+                channel.current_readback = current if np.isfinite(current) and current >= 0 else np.nan
+                valid_limits = (not limits_reason and channel.real and channel.enabled and limits is not None
+                                and limits["device_enabled"] is True and limits["enabled"].get(ch) is True)
+                for field in _PSU_LIMIT_FIELDS:
+                    v = _coerce_float(limits["channels"].get(ch, {}).get(field), np.nan) if valid_limits else np.nan
+                    setattr(channel, field, v if np.isfinite(v) and v >= 0 else np.nan)
                 channel.readback_status = detail or "Measured PSU voltage."
                 channel.monitor = value
                 for method, text in (
-                    ("setCurrentMonitorText", _format_current_text(
-                        self.current_values.get(ch, np.nan) if not detail else np.nan)),
+                    ("setCurrentMonitorText", _format_current_text(channel.current_readback)),
                     ("setOutputStateText", "ON" if self.output_enabled_by_channel.get(ch) else "OFF"),
                     ("setCurrentSetText", self.current_setpoints.get(ch, "n/a")),
                 ):
@@ -4903,6 +4969,7 @@ class PSUController(DeviceController):
         finally:
             parent._channelValueSyncing = syncing
         self._schedule_readback_expiry(sample)
+        self._schedule_readback_expiry(limits, limits=True)
 
     def _apply_live_readbacks(
         self,
@@ -4927,15 +4994,10 @@ class PSUController(DeviceController):
                 for channel_no, value in (readbacks.get("values", {}) or {}).items()
             }
         )
-        measured_currents = dict(getattr(self, "current_values", {}) or {})
-        measured_currents.update(
-            {
-                channel_no: _coerce_float(value, np.nan)
-                for channel_no, value in (
-                    readbacks.get("current_values", {}) or {}
-                ).items()
-            }
-        )
+        measured_currents = {
+            channel_no: _coerce_float(value, np.nan)
+            for channel_no, value in (readbacks.get("current_values", {}) or {}).items()
+        }
 
         self.main_state = _harmonize_psu_main_state(
             getattr(self, "hardware_main_state", "Unknown"),
@@ -4960,6 +5022,7 @@ class PSUController(DeviceController):
         self._publish_hv_readback(
             readbacks.get("values", {}) or {}, output_enabled_map,
             readbacks.get("device_enabled"), self._last_live_readback_refresh_monotonic,
+            currents=readbacks.get("current_values", {}) or {},
         )
         self._sync_status_to_gui(sync_manual_panel=bool(output_enabled_map))
 
@@ -5001,6 +5064,7 @@ class PSUController(DeviceController):
         adc_temperatures: dict[int, float] = {}
         dropout_values: dict[int, float] = {}
         rail_summaries: dict[int, str] = {}
+        numeric_limits: dict[int, dict[str, float]] = {}
         for channel_snapshot in snapshot.get("channels", []):
             channel_no = _coerce_int(channel_snapshot.get("channel"), -1)
             if channel_no < 0:
@@ -5027,6 +5091,12 @@ class PSUController(DeviceController):
             )
             current_setpoints[channel_no] = _format_current_text(
                 current_limit_values[channel_no]
+            )
+            numeric_limits[channel_no] = dict(
+                hardware_voltage_limit=_coerce_float(channel_snapshot.get("voltage", {}).get("limit_v"), np.nan),
+                hardware_current_limit=_coerce_float(channel_snapshot.get("current", {}).get("limit_a"), np.nan),
+                voltage_setpoint_readback=voltage_setpoint_values[channel_no],
+                current_limit_readback=current_limit_values[channel_no],
             )
             full_range_by_channel[channel_no] = _coerce_bool(
                 channel_snapshot.get("full_range", {}).get("enabled"),
@@ -5076,8 +5146,14 @@ class PSUController(DeviceController):
             measured_voltages,
             {ch: enabled and ch < len(output_enabled) and output_enabled[ch]
              for ch, enabled in output_enabled_map.items()},
-            snapshot.get("device_enabled"), refresh_time,
+            snapshot.get("device_enabled"), refresh_time, currents=measured_currents,
         )
+        # Limits/setpoints come from housekeeping, not the fast live ADC read.
+        # A fresh Vget must never make old limits look fresh; expiry is separate.
+        self._limits_readback = {
+            **self._hv_readback, "channels": numeric_limits,
+            "max_age_s": max(self._hv_readback["max_age_s"], 2 * _PSU_HOUSEKEEPING_REFRESH_PERIOD_S),
+        }
         self._sync_status_to_gui(sync_manual_panel=True)
 
     def loadOperatingConfigNowFromThread(self, parallel: bool = True) -> None:
@@ -5762,6 +5838,9 @@ class PSUController(DeviceController):
         if callable(stop_acquisition):
             stop_acquisition()
             self.acquiring = False
+        if self._initial_open_incomplete():
+            self.closeCommunication()
+            return self.device is None and self.main_state == "Disconnected"
         self.print("Starting PSU shutdown sequence.")
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         shutdown_errors: list[str] = []
@@ -5818,7 +5897,23 @@ class PSUController(DeviceController):
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
         self._cancel_output_commands()
-        if (final_state or self.main_state) == _PSU_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+        if self._initial_open_incomplete():
+            # Release only the failed opening, never claim a hardware shutdown.
+            if self._dispose_device(initial_open_only=True) is False:
+                return
+            self._restore_off_ui_state()
+            final_state = "Disconnected"
+        # Resolve the outcome before closing anything: Open may just have
+        # finished, but that does not confirm a hardware shutdown.
+        if final_state is None and self.main_state != _PSU_SHUTDOWN_UNCONFIRMED_STATE:
+            final_state = getattr(self, "_forced_close_state", None)
+        if final_state is None:
+            final_state = self.main_state
+            if self.device is not None or final_state not in (
+                "Disconnected", _PSU_SHUTDOWN_UNCONFIRMED_STATE, _PSU_COMMUNICATION_LOST_STATE
+            ):
+                final_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
+        if final_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
             self.acquiring = False
             self.initialized = True
             self.main_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
@@ -5829,14 +5924,6 @@ class PSUController(DeviceController):
         base_close = getattr(super(), "closeCommunication", None)
         if callable(base_close):
             base_close()
-        if final_state is None:
-            final_state = getattr(self, "_forced_close_state", None)
-        if final_state is None:
-            final_state = self.main_state
-            if self.device is not None or final_state not in (
-                "Disconnected", _PSU_SHUTDOWN_UNCONFIRMED_STATE, _PSU_COMMUNICATION_LOST_STATE
-            ):
-                final_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
         resolved_final_state = str(final_state)
         is_disconnected = resolved_final_state == "Disconnected"
         self.main_state = resolved_final_state
@@ -5852,7 +5939,8 @@ class PSUController(DeviceController):
         self._set_loaded_config_text("n/a")
         self.initializeValues(reset=True)
         self._sync_status_to_gui()
-        self._dispose_device()
+        if self._dispose_device() is False:
+            return
         self.initialized = False
 
     def _update_state(self) -> None:
@@ -5990,11 +6078,14 @@ class PSUController(DeviceController):
         if callable(emit):
             emit()
 
-    def _dispose_device(self) -> None:
+    def _initial_open_incomplete(self) -> bool:
+        return self.device is not None and any(bool(getattr(self.device, name, False)) for name in (
+            "_open_failed", "_opening_in_progress", "_failed_open_released",
+        ))
+
+    def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         self._invalidate_hv_readback()
         device = self.device
-        self.device = None
-        self.initialized = False
         self.interlock_active = None
         self.psu_enabled_actual = None
         self.interlock_out_disabled = None
@@ -6002,20 +6093,39 @@ class PSUController(DeviceController):
         self.current_limit_active = None
         self.device_enabled = None
         if device is None:
-            return
+            return self.main_state not in (_PSU_SHUTDOWN_UNCONFIRMED_STATE, _PSU_COMMUNICATION_LOST_STATE)
+        # A connect that just succeeded needs verified shutdown, not bare Close.
+        # Its initializer retains the pending stop request and owns that path.
+        initial_cleanup = (getattr(device, "_open_failed", False)
+                           or getattr(device, "_failed_open_released", False))
+        can_disconnect = (not getattr(device, "_opening_in_progress", False)
+                          and (not initial_open_only or initial_cleanup))
+        released = (can_disconnect and getattr(device, "connected", None) is False
+                    and getattr(device, "_dll_port_claimed", None) is False)
         try:
-            if getattr(device, "connected", True):
-                device.disconnect()
+            if can_disconnect and not released:
+                released = device.disconnect() is True
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
-            self.print(
-                "PSU disconnect failed during cleanup; the COM port may still be "
-                f"open: {self._format_exception(exc)}",
-                flag=PRINT.ERROR,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                device.close()
+            self.print(f"PSU connection cleanup remains unconfirmed: {exc}", flag=PRINT.ERROR)
+        if not released:
+            initial_open = self._initial_open_incomplete()
+            self.initialized = not initial_open
+            self.acquiring = False
+            self.main_state = "Connection pending" if initial_open else _PSU_SHUTDOWN_UNCONFIRMED_STATE
+            if initial_open:
+                self._restore_off_ui_state()
+            else:
+                self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return False
+        if self._initial_open_incomplete():
+            self.main_state = "Disconnected"
+        self.device = None
+        self.initialized = False
+        with contextlib.suppress(Exception):
+            device.close()
+        return True
 
     def _restore_off_ui_state(self) -> None:
         def _update_gui() -> None:

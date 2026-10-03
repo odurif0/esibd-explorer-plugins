@@ -20,7 +20,7 @@ def test_missing_dmmr_sample_becomes_nan_without_losing_other_channels(failure):
     controller = module.DMMRController(parent)
     controller.lock = threading.Lock()
     controller.initialized = controller.acquiring = True
-    controller._update_state = lambda **kwargs: None
+    controller._update_state = lambda **kwargs: True
     controller.print = lambda *args, **kwargs: None
     failing = False
     calls = []

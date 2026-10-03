@@ -26,7 +26,8 @@ def member_segments(member: str) -> tuple[str, ...]:
 def required_members(spec: PluginSpec) -> frozenset[str]:
     root = spec.folder
     if spec.runtime_family is None:
-        return frozenset({f"{root}/{spec.entrypoint}", f"{root}/{spec.icon_stem}.png", f"{root}/LICENSE"})
+        return frozenset({f"{root}/{spec.entrypoint}", f"{root}/{spec.icon_stem}.png", f"{root}/LICENSE",
+                          *(f"{root}/{name}" for name in spec.bundled_files)})
     runtime = f"{root}/vendor/runtime"
     device = f"{runtime}/{spec.runtime_family}"
     vendor = f"{device}/vendor"
@@ -47,6 +48,7 @@ def required_members(spec: PluginSpec) -> frozenset[str]:
             f"{device}/{spec.runtime_family}_base.py",
             f"{vendor}/{spec.header}",
             f"{vendor}/x64/{spec.dll}",
+            *(f"{root}/{name}" for name in spec.bundled_files),
         }
     )
 
@@ -162,6 +164,12 @@ def test_release_archives_match_plugin_policy(
         assert_archive_members(archive, plugin_specs)
 
 
+def test_archive_rejects_missing_usb_protocol(plugin_specs: tuple[PluginSpec, ...]) -> None:
+    members = set(valid_members(plugin_specs)) - {"tpg366/_runtime/_tpg366.py"}
+    problems = validate_member_names(members, plugin_specs)
+    assert problems == ["tpg366: missing required members ['tpg366/_runtime/_tpg366.py']"]
+
+
 def test_synthetic_archive_accepts_valid_members(
     tmp_path: Path,
     plugin_specs: tuple[PluginSpec, ...],
@@ -169,6 +177,21 @@ def test_synthetic_archive_accepts_valid_members(
     archive = write_zip(tmp_path / "valid.zip", valid_members(plugin_specs))
 
     assert_archive_members(archive, plugin_specs)
+
+
+@pytest.mark.parametrize("helper", ["_heater_stability.py", "_experiment_guard.py", "_heater_limits.py"])
+def test_validator_rejects_missing_esi_helper(
+    tmp_path: Path,
+    plugin_specs: tuple[PluginSpec, ...],
+    helper: str,
+) -> None:
+    member = f"esi/{helper}"
+    archive = write_zip(
+        tmp_path / "missing-helper.zip",
+        tuple(name for name in valid_members(plugin_specs) if name != member),
+    )
+    with pytest.raises(AssertionError, match=helper):
+        assert_archive_members(archive, plugin_specs)
 
 
 def test_validator_rejects_readme_with_member_name(

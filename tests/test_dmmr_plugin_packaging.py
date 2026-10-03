@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 
 PLUGIN_PATH = (
@@ -196,6 +197,27 @@ def test_dmmr_plugin_loads_driver_from_private_runtime():
 
     assert driver_class.__name__ == "DMMR"
     assert driver_class.__module__.startswith("_esibd_bundled_dmmr_runtime_")
+
+
+@pytest.mark.parametrize('missing_recovery', [False, True])
+def test_copied_dmmr_folder_includes_private_recovery_without_repo_imports(tmp_path, missing_recovery):
+    _clear_test_modules()
+    _install_esibd_stubs()
+    target = tmp_path / 'standalone_dmmr'
+    shutil.copytree(PLUGIN_PATH.parent, target, ignore=shutil.ignore_patterns('__pycache__', 'logs'))
+    recovery_file = target / 'vendor/runtime/dmmr/read_recovery.py'
+    if missing_recovery:
+        recovery_file.unlink()
+    before = list(sys.path)
+    module = _import_plugin_module_from_path('dmmr_plugin_test', target / PLUGIN_PATH.name)
+    if missing_recovery:
+        with pytest.raises(ModuleNotFoundError, match='read_recovery'):
+            module._get_dmmr_driver_class()
+    else:
+        driver = module._get_dmmr_driver_class()
+        helper = sys.modules[driver.ReadRecovery.__module__]
+        assert Path(helper.__file__).resolve() == recovery_file.resolve()
+    assert sys.path == before
 
 
 def test_dmmr_plugin_runtime_supports_explicit_process_backend_when_supported(monkeypatch):
@@ -865,7 +887,8 @@ def test_dmmr_channel_panel_display_toggle_updates_underlying_channel():
     assert update_calls == [True]
 
 
-def test_dmmr_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
+@pytest.mark.parametrize("initial_open,expected_on", [(False, True), (True, False)])
+def test_dmmr_device_shutdown_keeps_established_output_distinct_from_pending_open(initial_open, expected_on):
     _clear_test_modules()
     _install_esibd_stubs()
 
@@ -881,14 +904,18 @@ def test_dmmr_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
     device._sync_acquisition_controls = lambda: None
     warnings = []
     device.print = lambda message, flag=None: warnings.append((message, flag))
-    device.controller = types.SimpleNamespace(shutdownCommunication=lambda: False)
+    device.controller = types.SimpleNamespace(
+        shutdownCommunication=lambda: False,
+        device=types.SimpleNamespace(_open_failed=True) if initial_open else None,
+    )
     device.recording = True
 
     module.DMMRDevice.shutdownCommunication(device)
 
-    assert device.onAction.state is True
-    assert sync_states == [True]
-    assert any("shutdown could not be confirmed" in message for message, _ in warnings)
+    assert device.onAction.state is expected_on
+    assert sync_states == [expected_on]
+    expected_warning = "connection cleanup is pending" if initial_open else "shutdown could not be confirmed"
+    assert any(expected_warning in message for message, _ in warnings)
 
 
 def test_dmmr_device_close_communication_bypasses_shutdown_when_transport_is_lost():

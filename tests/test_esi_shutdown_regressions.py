@@ -135,6 +135,10 @@ def test_off_cancels_inflight_output_command(monkeypatch, command, shutdown):
         controller.toggleOn()
         assert controller._output_cancel is not cancel
         assert not controller._output_cancel.is_set()
+        if command == "heat":
+            assert not controller.heat_readback_valid, "OFF must discard the old sensor sample"
+            # Simulate the new temperature sample obtained after reconnecting.
+            controller.heat_readback_valid = True
         controller.applyValue(channel)
         assert device.enabled
 

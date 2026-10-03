@@ -136,11 +136,15 @@ def test_early_qt_timer_reschedules_remaining_expiry(rig, monkeypatch):
     clock.now = 101.91
     callbacks.pop(0)[1]()  # Qt coarse timers may fire up to 5% early.
     assert parent.channels[0].monitor == 123.
-    assert len(callbacks) == 1 and 80 < callbacks[0][0] < 100
+    assert len(callbacks) == 2 and 80 < callbacks[0][0] < 100
+    assert 2000 < callbacks[1][0] < 2200  # independent housekeeping expiry
     clock.now = 102.01
     callbacks.pop(0)[1]()
-    assert not callbacks
+    assert len(callbacks) == 1
     assert np.isnan(parent.channels[0].monitor)
+    clock.now = 104.01
+    callbacks.pop(0)[1]()
+    assert not callbacks
 
 
 def test_expiry_updates_channels_not_a_separate_consumer_cache(rig):

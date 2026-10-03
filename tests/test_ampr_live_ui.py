@@ -78,6 +78,7 @@ def exercise(module, parent, app, window, output):
     class Hardware:
         NO_ERR = 0
         connected = True
+        _dll_port_claimed = True
         state = "ST_ON"
 
         def __init__(self):
@@ -109,6 +110,7 @@ def exercise(module, parent, app, window, output):
             assert samples[-1]["phase"] == "down"  # Already rendered during the descent.
             events.append("shutdown")
             self.connected = False
+            self._dll_port_claimed = False
             self.state = "ST_STBY"
             return True
 

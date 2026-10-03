@@ -98,10 +98,11 @@ CH1 the negative rail; `Vset` and `Vget` remain unsigned magnitudes in the PSU
 panel. These polarities follow `PSU_POS = 0` / `PSU_NEG = 1` in the
 [CGC PSU controller interface](https://www.cgc-instruments.com/data/Products/Power-Supplies/19PSU/Modules/PSU-CTRL-2D_Files/PSU-CTRL-2D_1-00_2.pdf), pp. 60–65.
 
-`Ilim` is the configured current setting. In normal constant-voltage operation,
-it behaves like a current limit/compliance and should be set slightly above the
-expected load current. If the load reaches that limit, the PSU can enter
-current-limited behavior.
+`Ilim` is programmed into the PSU, not just a software alarm. If the load demands
+too much current, the requested voltage may no longer be maintained. CGC documents
+an electronic output-current limiter whose capacity depends on voltage and
+temperature ([19PSU-350-2DSW](https://www.cgc-instruments.com/en/Products/Power-Supplies/19PSU/19PSU-350-2DSW)).
+This does not guarantee the absence of transient overcurrents.
 
 A config name such as `10 V / 1 A` therefore means:
 
@@ -135,6 +136,26 @@ AMX A/B resolve these channels through `DeviceManager.getChannelByName()` using
 the PSU associated with each output pair in their Settings. They display CH0
 as Vpos and CH1 as Vneg, relative to the PSU reference (external offset excluded).
 Linking an AMX performs no extra hardware reads and issues no PSU commands.
+
+For MScan, channels also expose numeric hardware voltage/current limits, confirmed
+Vset/Ilim and measured current, using existing housekeeping/live readings only.
+A per-channel request revision distinguishes real voltage edits from quantized
+hardware echoes; housekeeping does not increment it. Update PSU and MScan together.
+Unavailable or stale data becomes NaN; a fresh ADC sample never refreshes old
+limits. MScan uses these to validate the sweep and return voltages and to reject
+points at or above Ilim. It does not change ranges, Ilim or output enables.
+
+## Connection Failures
+
+A timed-out connection is never reused. For a failed initial Open only, a later
+OFF/close or ON request can release it after the native call returns and port
+closure is confirmed. Otherwise it stays `Connection pending`, without output
+commands. `Disconnected` confirms port closure, not HV discharge. Other DLL
+timeouts still require hardware OFF and an Explorer restart.
+
+OFF/close during initialization cancels startup. If the connection completes
+without a timeout, a normal verified shutdown follows. Starting again requires
+an explicit ON; the cancelled startup is never resumed automatically.
 
 ## Portability Note
 

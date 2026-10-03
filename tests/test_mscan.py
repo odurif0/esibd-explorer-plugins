@@ -32,6 +32,10 @@ def module(monkeypatch):
         def loadDataInternal(self):
             return True
     plugins.Scan = Scan
+    plugins.Plugin = type('Plugin', (), {})
+    plugins.SettingsManager = type('SettingsManager', (), {})
+    core.TreeWidget = type('TreeWidget', (), {})
+    core.INFO, core.infoDict = 'Info', lambda name: {'Plugin': name}
     core.INOUT = NS(IN='IN', OUT='OUT')
     core.PRINT = NS(WARNING='warning', ERROR='error')
     core.MetaChannel = type('MetaChannel', (), {})
@@ -64,6 +68,10 @@ class Rail:
         self.real = self.enabled = self.active = self.initialized = self.useMonitors = True
         self.unit, self.readback_status = 'V', 'Valid'
         self.min, self.max = 0., 250.
+        self.hardware_voltage_limit, self.hardware_current_limit = 200., .5
+        self.voltage_setpoint_readback = self._value
+        self.voltage_request_revision = 0
+        self.current_limit_readback, self.current_readback = .01, .002
     def channel_number(self):
         return self.number
     @property
@@ -72,6 +80,7 @@ class Rail:
     @value.setter
     def value(self, v):
         self.parent.writes.append((self.number, v))
+        self.voltage_request_revision += 1
         self._value = v
         self.parent.controller._manual_apply_worker_running = True
         self.monitor = np.nan
@@ -81,10 +90,11 @@ class Rail:
 def rig(module):
     scan = module.MScan.__new__(module.MScan)
     scan._cancel, scan._recording = Event(), True
+    scan.notes = ''
     scan.amx_name, scan.amx_outputs = 'AMX_A', 'CH0-CH1'
     scan.start, scan.stop, scan.step = 10., 30., 10.
-    scan.wait = scan.waitLong = 3
-    scan.average, scan.settle_timeout, scan.voltage_tolerance, scan.largestep = 12, .15, 1., 5.
+    scan.settling_s = .003
+    scan.integration_s, scan.settle_timeout, scan.voltage_tolerance = .012, .15, 1.
     rows = [dict(state='Periodic', timing={'period': 200, 'high': 100, 'phase': i % 2 * 100}) for i in range(4)]
     amx = NS(name='AMX_A', psu_ch01='PSU_A', psu_ch23='PSU_B', isOn=lambda: True,
         controller=NS(initialized=True, device=object(), initializing=False, transitioning=False, output_rows=rows))
@@ -95,9 +105,10 @@ def rig(module):
         p.channels = [Rail(p, i) for i in (0, 1)]
         p.getChannels = lambda p=p: p.channels
         psus.append(p)
-    detector_device = NS(initialized=True, acquiring=True, recording=True, time=History())
-    detector = NS(name='Detector', enabled=True, initialized=True, acquiring=True,
+    detector_device = NS(name='DMMR', initialized=True, acquiring=True, recording=True, time=History(), interval=2)
+    detector = NS(name='Detector', real=True, unit='A', module_address=lambda: 3, enabled=True, initialized=True, acquiring=True,
                   values=History(), getDevice=lambda: detector_device)
+    scan.detector_module = 'Module 3 — Detector'
     detector.getValues = lambda **kw: detector.values.get()
     all_channels = [c for p in psus for c in p.channels] + [detector]
     manager = NS(plugins=[amx, *psus, scan])
@@ -114,7 +125,8 @@ def rig(module):
     scan.inputChannels = [NS(recordingData=np.asarray([10., 20., 30.]))]
     scan.outputChannels = [NS(name='Detector', recordingData=np.full(3, np.nan))]
     scan._validation = dict(status='running', error='', point_status=['not acquired'] * 3,
-        rail_v=np.full((3, len(scan._plan['rails'])), np.nan), window_start=np.full(3, np.nan), window_end=np.full(3, np.nan),
+        rail_v=np.full((3, len(scan._plan['rails'])), np.nan), rail_i=np.full((3, len(scan._plan['rails'])), np.nan),
+        window_start=np.full(3, np.nan), window_end=np.full(3, np.nan),
         samples=np.zeros((3, 1), dtype=int), finite_samples=np.zeros((3, 1), dtype=int))
     r = NS(module=module, scan=scan, psus=psus, amx=amx, detector=detector,
            detector_device=detector_device, all_channels=all_channels,
@@ -127,6 +139,7 @@ def rig(module):
             p.controller._manual_apply_worker_running = False
             for c in p.channels:
                 c.monitor = c.value
+                c.voltage_setpoint_readback = c.value
         detector_device.time.data.append(time.time())
         detector.values.data.append(r.current())
     scan._pause = pause
@@ -182,16 +195,52 @@ def test_run_couples_rails_without_zero_and_restores_distinct_initials(rig):
     assert (s._validation['samples'] > 0).all()
 
 
+@pytest.mark.parametrize('change', ['virtual', 'non-dmmr', 'unit', 'module'])
+def test_only_real_dmmr_modules_can_be_selected(rig, change):
+    if change == 'virtual': rig.detector.real = False
+    if change == 'non-dmmr': rig.detector_device.name = 'Other'
+    if change == 'unit': rig.detector.unit = 'V'
+    if change == 'module': rig.detector.module_address = lambda: -1
+    with pytest.raises(rig.module.ScanError):
+        rig.scan._preflight()
+    assert rig.psus[0].writes == []
+
+
+def test_changed_dmmr_module_cannot_replace_selected_module_mid_scan(rig):
+    rig.scan._plan = rig.scan._preflight()
+    rig.detector.module_address = lambda: 5
+    rig.scan.runScan(lambda: True)
+    assert rig.scan._validation['status'] == 'error'
+    assert 'DMMR module identity changed' in rig.scan._validation['error']
+    assert np.isnan(rig.scan.outputChannels[0].recordingData).all()
+
+
+def test_one_continuous_settling_duration_at_every_point_and_return(rig):
+    s = rig.scan
+    s._plan = s._preflight()
+    times, original = [], s._settle
+    def record(seconds):
+        times.append(seconds)
+        return original(seconds)
+    s._settle = record
+    s.runScan(lambda: True)
+    assert s._validation['status'] == 'completed'
+    assert times == [s.settling_s] * 4
+    assert s._plan['average'] == s.integration_s
+    assert s._plan['metadata']['settling_s'] == s.settling_s
+    assert s._plan['metadata']['detector']['module'] == 3
+
+
 def test_second_pair_resolves_other_psu(rig):
     rig.scan.amx_outputs = 'CH2-CH3'
     p = rig.scan._prepare()
     assert [r['device'] for r in p['rails']] == [rig.psus[1]] * 2
 
 
-def test_all_outputs_deduplicate_shared_psu(rig):
-    rig.scan.amx_outputs = 'CH0-CH3'
-    assert len(rig.scan._prepare()['rails']) == 4
+def test_selected_pair_only_commands_its_two_psu_rails(rig):
     rig.amx.psu_ch23 = 'PSU_A'
+    assert len(rig.scan._prepare()['rails']) == 2
+    rig.scan.amx_outputs = 'CH2-CH3'
     assert len(rig.scan._prepare()['rails']) == 2
 
 
@@ -217,7 +266,9 @@ def test_configuration_or_identity_change_aborts_before_write(rig, change):
     if change == 'waveform': rig.amx.controller.output_rows[0]['timing']['high'] += 1
     if change == 'mapping': rig.amx.psu_ch01 = 'PSU_B'
     if change == 'cancel': p.controller._output_cancel.set()
-    if change == 'manual': p.channels[1]._value = 49
+    if change == 'manual':
+        p.channels[1]._value = 49
+        p.channels[1].voltage_request_revision += 1
     if change == 'rename': p.channels[0].name = 'Renamed'
     if change == 'duplicate': rig.all_channels.append(NS(name=p.channels[0].name))
     if change == 'backend': p.controller.device = object()
@@ -230,7 +281,7 @@ def test_configuration_or_identity_change_aborts_before_write(rig, change):
 def test_busy_psu_is_not_ready_even_if_old_value_matches(rig):
     p = rig.psus[0]
     p.controller._manual_apply_worker_running = True
-    ready, _, _ = rig.scan._observation()
+    ready, _, _, _ = rig.scan._observation()
     assert not ready
 
 

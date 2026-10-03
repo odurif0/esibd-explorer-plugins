@@ -130,6 +130,10 @@ def probe(folder, output):
         cards = [entry["card"] for entry in device.amxPanelCards.values()]
     elif family == "esi":
         device._ensure_operator_panel()
+        assert device.controller is None
+        assert not device.esiHeatTarget.isEnabled()
+        assert not device.esiHeatPowerLimit.isEnabled()
+        assert not device._heat_limits_timer.isActive()
         panel = device.esiPanel
         cards = [entry["card"] for entry in device.esiHVCards.values()]
     if family in ("psu", "dmmr"):

@@ -1634,6 +1634,7 @@ def test_shutdown_with_config_still_forces_safe_disable_before_disconnect():
         def disconnect(self, timeout_s=None):
             calls.append(("disconnect",))
             self.connected = False
+            self._dll_port_claimed = False
             return True
 
         def close(self):
@@ -2436,9 +2437,12 @@ def test_dispose_device_reports_failed_disconnect():
     controller.print = lambda message, flag=None: printed.append((message, flag))
     controller.errorCount = 0
 
-    controller._dispose_device()
+    device = controller.device
+    assert controller._dispose_device() is False
 
-    assert controller.device is None
-    assert closed == [True]
+    assert controller.device is device
+    assert controller.initialized
+    assert controller.main_state == "Shutdown unconfirmed"
+    assert closed == []
     assert controller.errorCount == 1
-    assert any("disconnect failed" in message for message, _flag in printed)
+    assert any("cleanup remains unconfirmed" in message for message, _flag in printed)
