@@ -1042,7 +1042,7 @@ def test_old_esi_runtime_refused_before_constructor(ns):
         _PROCESS_CONTROLLER_CLASS = object
         def __init__(self, *a, **k):
             pytest.fail("An old runtime must not be constructed")
-    with pytest.raises(RuntimeError, match="versions do not match"):
+    with pytest.raises(RuntimeError, match="heater safety"):
         ns["require_safe_esi"](SimpleNamespace(ESI=OldESI))
     runtime = ns["load_private"](ROOT / "esi/vendor/runtime/__init__.py", package=True)
     ns["require_safe_esi"](runtime)
@@ -1110,7 +1110,8 @@ def test_full_armed_main_uses_ports_runtime_guards_and_real_implementation(ns, r
     monkeypatch.setattr(sys, "platform", "win32")
     run = ns["main"]()
     assert report(run)["outcome"] == "complete"
-    assert report(run)["runtime_sources"] == ns["_BUNDLE_SHA256"]
+    assert report(run)["runtime_sources"] == ns["runtime_fingerprints"](ROOT)
+    assert set(report(run)["runtime_sources"]) == set(ns["_RUNTIME_FILES"])
     assert checks == [("load", "_experiment_guard.py"), ("lease",), ("load", "__init__.py"),
                       ("runtime_checked",), ("load", "_tpg366.py"), ("load", "_heater_stability.py"), ("load", "_heater_limits.py")]
     assert rig.calls.count(("heater_on",)) == 1
@@ -1281,26 +1282,25 @@ def test_pressure_timestamp_is_prx_time_not_delayed_return_time(ns, rig):
 
 
 @pytest.mark.parametrize("changed_source", ["esi/vendor/runtime/esi/esi.py", "esi/_experiment_guard.py", "esi/_heater_limits.py"])
-def test_verified_bundle_checks_exact_sources_before_import(ns, tmp_path, monkeypatch, changed_source):
+def test_updated_sources_are_recorded_not_refused(ns, tmp_path, changed_source):
+    # Plugins and notebooks evolve independently; the run records what it used.
+    import hashlib
     import shutil
     root = tmp_path / "plugins"
-    for relative in ns["_BUNDLE_SHA256"]:
+    for relative in ns["_RUNTIME_FILES"]:
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
-    assert ns["verify_bundle"](root) == ns["_BUNDLE_SHA256"]
-    (root / changed_source).write_text("# Older/intermediate dependency\n")
-    with pytest.raises(RuntimeError, match="versions do not match"):
-        ns["verify_bundle"](root)
-    ns.update(ARM_HEATING=True, OUTPUT_DIR=tmp_path / "output", find_plugins=lambda *a: root,
-              load_private=lambda *a, **k: pytest.fail("Mismatch must fail before any runtime import/construction"))
-    monkeypatch.setattr(sys, "platform", "win32")
-    with pytest.raises(RuntimeError, match="versions do not match"):
-        ns["main"]()
+    original = ns["runtime_fingerprints"](root)
+    (root / changed_source).write_text("# updated dependency\n")
+    updated = ns["runtime_fingerprints"](root)
+    assert updated[changed_source] == hashlib.sha256(b"# updated dependency\n").hexdigest()
+    assert {k: v for k, v in updated.items() if k != changed_source} == {
+        k: v for k, v in original.items() if k != changed_source}
 
 
-def test_sha_guard_checks_actual_imported_class_not_a_valid_candidate_file(ns, tmp_path):
-    # Both method names existed in an unsafe intermediate version.
+def test_capability_guard_checks_actual_imported_class_not_a_valid_candidate_file(ns, tmp_path):
+    # Both method names existed in an unsafe intermediate version without the contract.
     source = tmp_path / "old.py"
     source.write_text("class Controller:\n    def _set_heat_module_active_unlocked(self): pass\n"
                       "    def _validate_heat_operating_state_unlocked(self): pass\n")
@@ -1309,9 +1309,10 @@ def test_sha_guard_checks_actual_imported_class_not_a_valid_candidate_file(ns, t
     runtime = ns["load_private"](init, package=True)
     runtime.ESI = SimpleNamespace(_PROCESS_CONTROLLER_CLASS=runtime.Controller)
     assert runtime.Controller.__module__.startswith(runtime.__name__ + ".")
-    assert ns["verify_bundle"](ROOT) == ns["_BUNDLE_SHA256"]  # Candidate bundle is valid; actual class is not.
-    with pytest.raises(RuntimeError, match="versions do not match"):
+    with pytest.raises(RuntimeError, match="heater safety"):
         ns["require_safe_esi"](runtime)
+    runtime.Controller.HEATER_SAFETY_CONTRACT = 1  # a later version keeping the contract
+    ns["require_safe_esi"](runtime)
 
 
 @pytest.mark.parametrize("orphan", [False, True])
@@ -1702,7 +1703,7 @@ def test_real_shared_guard_wired_through_main_in_fresh_process(tmp_path, mode):
             pressure.is_shutdown = lambda: run.phase == 'shutdown'
             return run
         ns.update(ARM_HEATING=True, OUTPUT_DIR=output, find_plugins=lambda *a: kit,
-                  verify_bundle=lambda root: {'simulated': 'guard integration only'},
+                  runtime_fingerprints=lambda root: {'simulated': 'guard integration only'},
                   load_private=load_for_test, require_safe_esi=lambda runtime: None,
                   PressurePort=lambda protocol: pressure, Experiment=short_experiment)
         if mode == 'pressure_unconfirmed':

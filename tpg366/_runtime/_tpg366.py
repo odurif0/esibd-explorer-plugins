@@ -75,6 +75,7 @@ class TPG366Link:
         self.timeout = timeout
         self.identification = ""
         self.gauges: tuple[str, ...] = ()
+        self.unit: int | None = None  # UNI code confirmed by the last transaction
 
     def _check_cancelled(self):
         if self.cancelled.is_set():
@@ -141,6 +142,7 @@ class TPG366Link:
         self.gauges = tuple(part.strip() for part in self.query("TID").split(","))
         if len(self.gauges) != 6:
             raise ProtocolError(f"Expected six gauge identifications, received {self.gauges!r}.")
+        self.unit = self._unit()
 
     def _unit(self) -> int:
         reply = self.query("UNI").strip()
@@ -149,11 +151,15 @@ class TPG366Link:
         return int(reply)
 
     def read_pressures(self) -> Reading:
-        unit = self._unit()
+        # Two transactions per poll: PRX, then UNI compared with the unit confirmed
+        # by the previous transaction (initialization or the last poll). A front-
+        # panel change on either side of PRX discards the frame, never mislabels it.
+        if self.unit is None:
+            self.unit = self._unit()
         reply = self.query("PRX")
         received_at = time.time()
-        # Do not mislabel a frame if the front-panel unit changes during a poll.
-        if self._unit() != unit:
+        unit = self._unit()
+        if unit != self.unit:
             raise ProtocolError("Pressure unit changed during the read; measurement discarded. Reconnect to continue.")
         self._check_cancelled()
         return parse_pressures(reply, unit, received_at)

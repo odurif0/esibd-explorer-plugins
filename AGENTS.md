@@ -24,12 +24,10 @@ The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, d
 - Edit only the canonical plugin, then run `python3 tools/sync_family_siblings.py`
   (`--check` reports drift). Siblings differ only by the Device `name` literal.
 
-## Validated bundles
+## Notebooks and runtimes
 
-Notebooks pin SHA-256 hashes of runtime files (`_driver_common.py`, the ESI and
-DMMR runtimes, `tpg366/_runtime/_tpg366.py`). Changing one invalidates a validated
-notebook bundle: prefer changes in the plugin entrypoints, or update notebook and
-runtime together on purpose.
+Plugins and notebooks evolve freely: notebooks do not pin runtime or DLL hashes.
+They only record the SHA-256 of the files used in each run's metadata.
 
 ## Autonomy constraints
 
