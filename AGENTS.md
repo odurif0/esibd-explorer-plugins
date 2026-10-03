@@ -59,16 +59,18 @@ Run the smallest check that covers the change, then widen only if needed.
 ```bash
 python3 -m pytest -q
 python3 -m pytest -q -m "not slow"
+python3 -m pytest -q --all-siblings   # release validation
 python3 -m pytest -q tests/test_plugin_family_parity.py
 python3 -m pytest -q 'tests/test_plugin_family_parity.py::test_sibling_family_matches_canonical[amx]'
 ESIBD_RELEASE_ZIP=/path/to/file.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
 
 Real-Explorer tests validate the installed host only; the plugins target Explorer
-1.0.1 (`tests/explorer_host.py`). `ESIBD_REQUIRE_TARGET_HOST=1` fails on another host.
+1.0.2 (`tests/explorer_host.py`). `ESIBD_REQUIRE_TARGET_HOST=1` fails on another host.
 
 ## Release archive behavior
 
+- Build with `python3 tools/build_release.py X.Y.Z` (tracked files only, reproducible SHA-256).
 - Releases are validated from a single archive path.
 - If `ESIBD_RELEASE_ZIP` is set, that archive is used; a missing path fails fast.
 - Otherwise the newest root `esibd-explorer-plugins-v*.zip` is inspected.
