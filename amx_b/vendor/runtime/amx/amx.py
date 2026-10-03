@@ -182,9 +182,10 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
 
     def connect(self, timeout_s: float = 5.0) -> bool:
         """Connect to the AMX device."""
+        already_connected = self._connection_is_ready()
+        initial_open_returned = False
         try:
-            if self.connected:
-                self._set_port_claimed(True)
+            if already_connected:
                 self.logger.info(
                     f"AMX device {self.device_id} is already connected; skipping open_port"
                 )
@@ -201,9 +202,10 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
             set_baud_rate = super().set_baud_rate
             close_port = super().close_port
 
-            status = self._call_locked_with_timeout(
-                open_port, timeout_s, "open_port", self.com, self.port_num
+            status = self._call_initial_open(
+                open_port, close_port, timeout_s, self.com, self.port_num
             )
+            initial_open_returned = True
             if status != self.NO_ERR:
                 raise RuntimeError(
                     f"AMX open_port failed: {self.format_status(status)}"
@@ -252,8 +254,11 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
                 f"AMX set_baud_rate failed: {self.format_status(baud_status)}"
             )
         except Exception:
-            self.connected = False
+            if initial_open_returned:
+                self.connected = False
             raise
+        finally:
+            self._finish_initial_open()
 
     def _cleanup_initialize_failure(self, timeout_s: float) -> None:
         """Best-effort cleanup after a failed AMX initialize() sequence."""
@@ -452,6 +457,9 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
         timeout_s = self._resolve_io_timeout(timeout_s)
 
         try:
+            initial_open = self._disconnect_failed_open(timeout_s)
+            if initial_open is not None:
+                return initial_open
             if self._transport_poisoned:
                 self._set_port_claimed(True)
                 self.logger.warning(
@@ -460,9 +468,7 @@ class _AMXController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXBase):
                 )
                 return False
 
-            if not was_connected:
-                if not self._dll_port_claimed:
-                    self._set_port_claimed(False)
+            if not was_connected and not self._dll_port_claimed:
                 self._set_loaded_config_state(None)
                 return True
 

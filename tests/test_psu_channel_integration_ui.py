@@ -235,6 +235,7 @@ def probe(folder, output, configuration="bootstrap"):
     assert all(c.enabled and c.initialized and c.unit == "V" for c in channels)
     assert all(not c.getParameterByName(c.VALUE).spin.keyboardTracking() for c in channels)
     assert hw.calls == [], hw.calls
+    assert [c.voltage_request_revision for c in channels] == [0, 0]
 
     def drain():
         deadline = time.monotonic() + 5
@@ -246,8 +247,10 @@ def probe(folder, output, configuration="bootstrap"):
 
     def voltage_edit(edit, expected):
         hw.calls.clear()
+        revisions = [c.voltage_request_revision for c in channels]
         edit()
         drain()
+        assert [c.voltage_request_revision for c in channels] == [revisions[0] + 1, revisions[1]]
         assert hw.calls == [("voltage", 0, expected)], hw.calls
         assert hw.voltages == {0: expected, 1: 137.1234}
         assert hw.outputs == (True, True)
@@ -277,6 +280,7 @@ def probe(folder, output, configuration="bootstrap"):
 
     def panel_edit(ch, key, target, action):
         previous_v, previous_i = dict(hw.voltages), dict(hw.currents)
+        revisions = [c.voltage_request_revision for c in channels]
         hw.calls.clear()
         spin = controls[ch][key]
         spin.setFocus()
@@ -298,6 +302,9 @@ def probe(folder, output, configuration="bootstrap"):
         controller._update_state()
         parent._sync_manual_panel_from_controller()
         app.processEvents()
+        if key == 'voltage':
+            revisions[ch] += 1
+        assert [c.voltage_request_revision for c in channels] == revisions
         for i in (0, 1):
             assert channels[i].value == hw.voltages[i]
             assert controls[i]["voltage"].value() == round(hw.voltages[i], 3)

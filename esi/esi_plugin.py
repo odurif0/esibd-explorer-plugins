@@ -63,6 +63,9 @@ _ESI_PANEL_OFF = "color: #94a3b8; font-weight: 600;"
 _ESI_PANEL_OK = "color: #4ade80; font-weight: 600;"
 _ESI_PANEL_STANDBY = "color: #d69e2e; font-weight: 600;"
 _ESI_PANEL_ERR = "color: #f87171; font-weight: 700;"
+_ESI_HEAT_INPUT = ("QDoubleSpinBox { background-color: #202938; color: #f8fafc; "
+                   "border: 1px solid #64748b; border-radius: 3px; padding: 2px; } "
+                   "QDoubleSpinBox:disabled { color: #94a3b8; }")
 _ESI_BTN_HV_ACTIVE = "QPushButton { background-color: #3182ce; color: #f8fafc; font-weight: 700; border-radius: 4px; }"
 _ESI_BTN_HV_OFF = "QPushButton { background-color: #374151; color: #bfdbfe; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
 _ESI_BTN_OFF_ACTIVE = "QPushButton { background-color: #4b5563; color: #e2e8f0; font-weight: 600; border-radius: 4px; }"
@@ -94,6 +97,29 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 def _runtime_module_name(plugin_dir: Path) -> str:
     digest = hashlib.sha256(str(plugin_dir.resolve()).encode()).hexdigest()[:12]
     return f"{_RUNTIME_PREFIX}_{digest}"
+
+
+def _get_temperature_stability_class():
+    """Load the shared, hardware-free qualifier in a private namespace."""
+    path = Path(__file__).resolve().with_name("_heater_stability.py")
+    if not path.is_file():
+        raise ModuleNotFoundError(f"Missing bundled heater stability helper: {path}")
+    source = path.read_bytes()
+    digest = hashlib.sha256(str(path).encode() + source).hexdigest()[:16]
+    name = f"_esibd_bundled_esi_stability_{digest}"
+    with _RUNTIME_LOAD_LOCK:
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise ModuleNotFoundError(str(path))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            try:
+                exec(compile(source, str(path), "exec"), module.__dict__)
+            except BaseException:
+                sys.modules.pop(name, None)
+                raise
+        return sys.modules[name].TemperatureStability
 
 
 def _finish_spinbox_edit(widget: Any) -> bool:
@@ -619,6 +645,40 @@ class ESIDevice(Device):
             parts.append(heat)
         return " | ".join(parts)
 
+    def _update_heat_stability_display(self) -> None:
+        """Refresh only the thermal label; expiry never polls or commands hardware."""
+        heat = getattr(self, "esiHeatWidgets", None)
+        controller = getattr(self, "controller", None)
+        if not heat or controller is None:
+            return
+        stability = controller.heat_stability_status()
+        state = stability["state"]
+        inactive = not controller.initialized or controller.main_state in (
+            "Disconnected", "Connection pending", "Communication lost", "Shutdown unconfirmed", _ESI_STOPPING)
+        if inactive:
+            state = "n/a"
+        elif state in ("Stable", "Stabilizing") and self.esiHeatButton.text() != "ON":
+            state = "Unavailable"
+        label = heat["heat_stability"]
+        label.setText(state)
+        label.setStyleSheet(_ESI_PANEL_OK if state == "Stable" else
+                           _ESI_PANEL_STANDBY if state == "Stabilizing" else _ESI_PANEL_NEUTRAL)
+        slope = stability["slope_c_min"]
+        detail = (f"Observed span: {min(stability['span_s'], 60.):.0f}/60 s. "
+                  + (f"Drift: {slope:+.3f} °C/min." if slope is not None else "Drift not yet available."))
+        label.setToolTip(
+            "Measured temperature within ±0.2 °C of the applied target for a full 60 s window, "
+            "with absolute fitted drift <0.1 °C/min. " + detail +
+            " Missing/invalid data, OFF and new commands reset qualification. "
+            "This is not an independent accuracy, pressure-equilibrium or electrical-safety check."
+        )
+        timer = self._heat_stability_timer
+        expiry = stability["expires_at_s"]
+        if inactive or expiry is None:
+            timer.stop()
+        else:
+            timer.start(max(1, int(np.ceil((expiry - time.monotonic()) * 1000)) + 1))
+
     def _update_status_widgets(self) -> None:
         badge = getattr(self, "statusBadgeLabel", None)
         summary = getattr(self, "statusSummaryLabel", None)
@@ -676,7 +736,12 @@ class ESIDevice(Device):
         for ch in [channel] if channel is not None else self.getChannels():
             if getattr(ch, "is_current_channel", lambda: False)():
                 continue
-            target = (getattr(self, "esiHVCards", {}).get(ch.module_address(), {}) or {}).get("target")
+            target = (getattr(self, "esiHeatTarget", None) if ch.is_heat_channel() else
+                      (getattr(self, "esiHVCards", {}).get(ch.module_address(), {}) or {}).get("target"))
+            if ch.is_heat_channel():
+                power = getattr(self, "esiHeatPowerLimit", None)
+                if power is not None and power.isEnabled() and _finish_spinbox_edit(power):
+                    self.heat_power_limit_w = float(power.value())
             if _finish_spinbox_edit(target):
                 loading = getattr(ch, "loading", False)
                 ch.loading = True
@@ -718,7 +783,7 @@ class ESIDevice(Device):
             self._update_operator_panel()
             return
         try:
-            from PyQt6.QtCore import Qt
+            from PyQt6.QtCore import Qt, QTimer
             from PyQt6.QtWidgets import (
                 QButtonGroup,
                 QDoubleSpinBox,
@@ -895,16 +960,41 @@ class ESIDevice(Device):
         heat_header.addWidget(heat_btn)
         heat_cl.addLayout(heat_header)
 
+        controls = QGridLayout()
+        self.esiHeatTarget = QDoubleSpinBox()
+        self.esiHeatPowerLimit = QDoubleSpinBox()
+        for row, (title, spin, suffix) in enumerate((
+            ("Temperature", self.esiHeatTarget, " °C"),
+            ("Power limit", self.esiHeatPowerLimit, " W"),
+        )):
+            spin.setDecimals(3)
+            spin.setRange(0., 1000.)  # Disabled until device maxima are available.
+            spin.setSuffix(suffix)
+            spin.setKeyboardTracking(False)
+            spin.setEnabled(False)
+            controls.addWidget(QLabel(title), row, 0)
+            controls.addWidget(spin, row, 1)
+        self.esiHeatPowerLimit.setSpecialValueText("Keep device limit")
+        self.esiHeatTarget.valueChanged.connect(self._panel_heat_target_changed)
+        self.esiHeatPowerLimit.valueChanged.connect(self._panel_heat_power_changed)
+        self._heat_limits_timer = QTimer(heat_card)
+        self._heat_limits_timer.setSingleShot(True)
+        self._heat_limits_timer.timeout.connect(self._update_heat_controls)
+        heat_cl.addLayout(controls)
+
         heat_grid = QGridLayout()
         heat_grid.setContentsMargins(0, 0, 0, 0)
         heat_grid.setHorizontalSpacing(10)
         heat_grid.setVerticalSpacing(6)
+        heat_widgets = {}
         for row, (name, key) in enumerate((
-            ("Set", "heat_target"),
+            ("Applied target", "heat_target"),
             ("Measured", "heat_measured"),
-            ("Power", "heat_power"),
+            ("Applied power limit", "heat_power_limit"),
+            ("PID power target", "heat_power"),
             ("Sensor", "heat_sensor"),
             ("Interlock", "heat_interlock"),
+            ("Stability", "heat_stability"),
         )):
             nl = QLabel(name)
             nl.setStyleSheet(_ESI_PANEL_NAME)
@@ -912,6 +1002,7 @@ class ESIDevice(Device):
             vl.setStyleSheet(_ESI_PANEL_VALUE)
             heat_grid.addWidget(nl, row, 0)
             heat_grid.addWidget(vl, row, 1)
+            heat_widgets[key] = vl
         heat_cl.addLayout(heat_grid)
 
         heat_row = QWidget()
@@ -923,14 +1014,11 @@ class ESIDevice(Device):
         self.esiPanel = panel
         self.esiHeatCard = heat_card
         self.esiHeatButton = heat_btn
-        self.esiHeatWidgets = {
-            "heat_target": heat_grid.itemAtPosition(0, 1).widget(),
-            "heat_measured": heat_grid.itemAtPosition(1, 1).widget(),
-            "heat_power": heat_grid.itemAtPosition(2, 1).widget(),
-            "heat_sensor": heat_grid.itemAtPosition(3, 1).widget(),
-            "heat_interlock": heat_grid.itemAtPosition(4, 1).widget(),
-        }
+        self.esiHeatWidgets = heat_widgets
         heat_btn.toggled.connect(self._panel_heat_toggled)
+        self._heat_stability_timer = QTimer(heat_card)
+        self._heat_stability_timer.setSingleShot(True)
+        self._heat_stability_timer.timeout.connect(self._update_heat_stability_display)
 
         if self.tree is not None:
             self.tree.setVisible(False)
@@ -962,6 +1050,69 @@ class ESIDevice(Device):
                 break
         self._update_operator_panel()
 
+    def _heater_channel(self):
+        return next((ch for ch in self.getChannels()
+                     if ch.is_heat_channel() and not _is_current_channel(ch)), None)
+
+    def _panel_heat_target_changed(self, value: float) -> None:
+        if not getattr(self, "loading", False):
+            channel = self._heater_channel()
+            if channel is not None:
+                channel.getParameterByName(channel.VALUE).value = float(value)
+
+    def _panel_heat_power_changed(self, value: float) -> None:
+        if not getattr(self, "loading", False):
+            self.heat_power_limit_w = float(value)  # Existing persistent setting; its event applies it.
+
+    def _heat_power_limit_changed(self) -> None:
+        controller = getattr(self, "controller", None)
+        if not getattr(self, "loading", False) and controller is not None and controller.initialized:
+            controller.applyHeatPowerFromThread(float(self.heat_power_limit_w))
+
+    def _update_heat_controls(self) -> None:
+        if not hasattr(self, "esiHeatTarget"):
+            return
+        controller = self.controller
+        if controller is None:
+            for spin in (self.esiHeatTarget, self.esiHeatPowerLimit):
+                spin.setEnabled(False)
+                spin.setStyleSheet(_ESI_HEAT_INPUT)
+                spin.setToolTip("Waiting for fresh, valid device limits.")
+            self._heat_limits_timer.stop()
+            return
+        now = time.monotonic()
+        stamp = getattr(controller, "heat_limits_observed_at", float('-inf'))
+        expiry = stamp + float(getattr(self, "interval", 1000.)) / 1000. + float(getattr(self, "poll_timeout_s", 3.))
+        available = (controller.initialized and controller.main_state == "STATE_ON"
+                     and not getattr(controller, "transitioning", False) and now <= expiry)
+        channel = self._heater_channel()
+        for spin, maximum, requested in (
+            (self.esiHeatTarget, controller.heat_max_temperature_c, float(channel.value) if channel else 0.),
+            (self.esiHeatPowerLimit, controller.heat_max_power_w, float(getattr(self, "heat_power_limit_w", 50.))),
+        ):
+            valid = available and np.isfinite(maximum) and maximum > 0
+            blocked = spin.blockSignals(True)
+            if valid:
+                # Round the editor's upper bound down, never above the device maximum.
+                spin.setMaximum(float(np.floor(maximum * 1000.) / 1000.))
+            if np.isfinite(requested) and not spin.hasFocus():
+                spin.setValue(requested)
+            spin.blockSignals(blocked)
+            spin.setEnabled(bool(valid))
+            spin.setToolTip(f"Device maximum: {maximum:g}. Requested: {requested:g}."
+                            if valid else "Waiting for fresh, valid device limits.")
+        self.esiHeatTarget.setToolTip(self.esiHeatTarget.toolTip() + " " + controller.heat_temperature_error)
+        self.esiHeatTarget.setStyleSheet(_ESI_HEAT_INPUT + ("QDoubleSpinBox { color: #f87171; }" if controller.heat_temperature_error else ""))
+        self.esiHeatPowerLimit.setToolTip(self.esiHeatPowerLimit.toolTip() +
+            f" Applied limit: {controller.heat_power_limit_w:g} W. "
+            "Ceiling for the device PID, not imposed or measured power. 0 keeps the device setting. "
+            + controller.heat_power_error)
+        self.esiHeatPowerLimit.setStyleSheet(_ESI_HEAT_INPUT + ("QDoubleSpinBox { color: #f87171; }" if controller.heat_power_error else ""))
+        if available:
+            self._heat_limits_timer.start(max(1, int(np.ceil((expiry - now) * 1000)) + 1))
+        else:
+            self._heat_limits_timer.stop()
+
     def _panel_heat_toggled(self, checked: bool) -> None:
         if getattr(self, "loading", False):
             return
@@ -969,7 +1120,12 @@ class ESIDevice(Device):
             if channel.is_heat_channel():
                 if checked:
                     self._finish_setpoint_edits(channel)
-                channel.getParameterByName(channel.ENABLED).value = checked
+                if channel.enabled != checked:
+                    channel.getParameterByName(channel.ENABLED).value = checked
+                elif not checked:
+                    # An unconfirmed OFF must remain retryable even though the
+                    # saved selection is already OFF (Parameter may suppress it).
+                    channel.applyValue(apply=True)
         self._update_operator_panel()
 
     def _update_operator_panel(self) -> None:
@@ -1174,6 +1330,7 @@ class ESIDevice(Device):
                 f"{current * 1e9:.2f} nA" if np.isfinite(current) else "n/a"
             )
 
+        self._update_heat_controls()
         heat_btn = getattr(self, "esiHeatButton", None)
         heat = getattr(self, "esiHeatWidgets", None)
         heat_card = getattr(self, "esiHeatCard", None)
@@ -1187,18 +1344,43 @@ class ESIDevice(Device):
                 if channel.is_heat_channel():
                     heat_enabled = channel.enabled
                     break
+            activation = getattr(controller, "heat_activation", {}) or {}
+            heat_target = getattr(controller, "heat_target_temperature_c", np.nan)
+            heat_confirmed = bool(
+                heat_enabled and heat_valid and global_enabled is True
+                and all(activation.get(key) is True for key in (
+                    "active", "module_active", "module_gate_active",
+                    "device_gate_active", "control_active",
+                ))
+            )
+            heat_off_confirmed = (
+                activation.get("module_active") is False
+                and activation.get("module_gate_active") is False
+            )
+            if heat_card is not None:
+                heat_card.setStyleSheet(_ESI_PANEL_CARD_ON if heat_confirmed else
+                                       _ESI_PANEL_CARD_ERR if heat_enabled else _ESI_PANEL_CARD_OFF)
+            for widget in heat.values():
+                widget.setStyleSheet(_ESI_PANEL_VALUE if heat_enabled else _ESI_PANEL_NEUTRAL)
             if heat_btn is not None:
                 loading = getattr(self, "loading", False)
                 if not loading:
                     heat_btn.blockSignals(True)
-                    heat_btn.setChecked(heat_enabled)
+                    heat_btn.setChecked(heat_enabled or not heat_off_confirmed)
                     heat_btn.blockSignals(False)
-                heat_btn.setText("ON" if heat_enabled else "OFF")
-                heat_btn.setStyleSheet(
-                    _ESI_BTN_HEAT_ACTIVE if heat_enabled else _ESI_BTN_OFF_ACTIVE
+                heat_btn.setText("ON" if heat_confirmed else
+                                 "OFF" if not heat_enabled and heat_off_confirmed else "Unconfirmed")
+                heat_btn.setToolTip(
+                    "Module and temperature control confirmed; click to turn OFF."
+                    if heat_confirmed else "Module disabled; click to turn ON."
+                    if not heat_enabled and heat_off_confirmed else
+                    "Requested and measured heater states do not agree, or a readback is missing. "
+                    "Click to request OFF."
                 )
-                heat_btn.setEnabled(heat_valid)
-            heat_target = getattr(controller, "heat_target_temperature_c", np.nan)
+                heat_btn.setStyleSheet(_ESI_BTN_HEAT_ACTIVE if heat_confirmed else _ESI_BTN_NEUTRAL)
+                heat_btn.setMinimumWidth(max(80, heat_btn.fontMetrics().horizontalAdvance("Unconfirmed") + 24))
+                # Sensor failure must block ON, never the operator's OFF action.
+                heat_btn.setEnabled(heat_valid or heat_enabled or not heat_off_confirmed)
             heat["heat_target"].setText(
                 f"{heat_target:.1f} °C"
                 if np.isfinite(heat_target)
@@ -1207,18 +1389,26 @@ class ESIDevice(Device):
             heat["heat_measured"].setText(
                 f"{heat_temp:.1f} °C" if heat_valid else "INVALID"
             )
+            applied_power = getattr(controller, "heat_power_limit_w", np.nan)
+            heat['heat_power_limit'].setText(f'{applied_power:.3f} W' if np.isfinite(applied_power) else 'n/a')
+            heat['heat_power_limit'].setStyleSheet(_ESI_PANEL_ERR if controller.heat_power_error else
+                                                 _ESI_PANEL_VALUE if heat_enabled else _ESI_PANEL_NEUTRAL)
+            heat['heat_power_limit'].setToolTip(controller.heat_power_error)
             heat_power = getattr(controller, "heat_power_w", np.nan)
             heat["heat_power"].setText(
                 f"{heat_power:.1f} W" if np.isfinite(heat_power) else "n/a"
             )
             heat["heat_sensor"].setStyleSheet(
-                _ESI_PANEL_OK if heat_valid else _ESI_PANEL_ERR
+                (_ESI_PANEL_OK if heat_valid else _ESI_PANEL_ERR)
+                if heat_enabled else _ESI_PANEL_NEUTRAL
             )
-            heat["heat_sensor"].setText("OK" if heat_valid else "Disconnected")
+            heat["heat_sensor"].setText("OK" if heat_valid else "Invalid")
             interlock = str(getattr(self, "interlock_state", "n/a") or "n/a")
+            self._update_heat_stability_display()
             heat["heat_interlock"].setText(interlock)
             heat["heat_interlock"].setStyleSheet(
-                _ESI_PANEL_OK if interlock == "OK" else _ESI_PANEL_ERR
+                (_ESI_PANEL_OK if interlock == "OK" else _ESI_PANEL_ERR)
+                if heat_enabled else _ESI_PANEL_NEUTRAL
             )
         elif isinstance(heat, dict):
             for widget in heat.values():
@@ -1298,12 +1488,13 @@ class ESIDevice(Device):
             ),
         ):
             settings[f"{self.name}/{label}"] = parameterDict(
-                value=0.0,
+                value=50.0 if attr == "heat_power_limit_w" else 0.0,
                 minimum=0.0,
                 maximum=1000.0,
                 toolTip=tooltip,
                 parameterType=PARAMETERTYPE.FLOAT,
                 attr=attr,
+                event=self._heat_power_limit_changed if attr == "heat_power_limit_w" else None,
                 advanced=True,
             )
         for label, attr, tooltip in (
@@ -1515,6 +1706,10 @@ class ESIChannel(Channel):
         return self.unit
 
     def initGUI(self, item: dict) -> None:
+        # INI sections are case-insensitive; copying them directly would turn
+        # Name/Module/Function into lowercase keys and break Explorer on reload.
+        names = {name.casefold(): name for name in self.getDefaultChannel()}
+        item = {names.get(key.casefold(), key): value for key, value in item.items()}
         self._current_measurement = item.get(self.FUNCTION) == _ESI_CURRENT_FUNCTION
         if self.is_current_channel():
             # Set before Explorer constructs the editors. Current is not a target.
@@ -1544,6 +1739,14 @@ class ESIChannel(Channel):
             super().valueChanged()
 
     def applyValue(self, apply: bool = False) -> None:
+        if not apply and not self.is_current_channel() and self.is_heat_channel():
+            # Editing a temperature is not an activation command.
+            if self.real and self.value != self.lastAppliedValue:
+                self.lastAppliedValue = self.value
+                controller = getattr(self.channelParent, 'controller', None)
+                if self.enabled and controller is not None:
+                    controller.applyHeatTemperatureFromThread(float(self.value))
+            return
         if not self.is_current_channel():
             if self.enabled:
                 finish = getattr(self.channelParent, "_finish_setpoint_edits", None)
@@ -1559,6 +1762,10 @@ class ESIChannel(Channel):
             self.applyValue(apply=True)
 
 
+class _SupersededHeatEdit(Exception):
+    """A field edit has been replaced by a newer operator request."""
+
+
 class ESIController(DeviceController):
     """ESIBD bridge for the timeout-safe ESI runtime."""
 
@@ -1571,6 +1778,9 @@ class ESIController(DeviceController):
         # the current generation before waiting for an in-flight command.
         self._output_lock = RLock()
         self._output_cancel = Event()
+        self._heat_stability_lock = RLock()
+        self._heat_stability_generation = 0
+        self._heat_stability = _get_temperature_stability_class()()
         self.values: dict[int, float] | None = None
         self.currents: dict[int, float] = {}
         self.targets: dict[int, float] = {}
@@ -1587,32 +1797,71 @@ class ESIController(DeviceController):
         self.interlock_state = "n/a"
         self.detected_modules = "n/a"
         self.heat_status = "n/a"
+        self.heat_activation: dict[str, bool | None] = {}
         self.identity: dict[str, Any] = {}
         self.heat_readback_valid = False
-        self.heat_max_temperature_c = _ESI_MAX_TEMPERATURE
+        self.heat_max_temperature_c = np.nan
+        self.heat_max_power_w = np.nan
+        self.heat_power_limit_w = np.nan
+        self.heat_limits_observed_at = float('-inf')
+        self.heat_power_error = ""
+        self.heat_temperature_error = ""
+        self._heat_power_command = None
+        self._heat_power_request = None
+        self._heat_temperature_request = None
         self.available_configs: list[dict[str, Any]] = []
         self.available_configs_text = "n/a"
         self.loaded_config_text = "n/a"
 
+    def initializeCommunication(self) -> None:
+        if self.initializing:
+            return
+        acquisition_thread = getattr(self, 'acquisitionThread', None)
+        if acquisition_thread is not None and acquisition_thread.is_alive():
+            self.closeCommunication()
+        # Arm the request before scheduling its worker, never inside it: a
+        # close issued before that worker starts must still cancel the request.
+        self._initial_open_close_requested = False
+        super().initializeCommunication()
+
     def runInitialization(self) -> None:
+        if getattr(self, '_initial_open_close_requested', False):
+            if not self.initialized:
+                self._restore_off_ui_state()
+            self._sync_status()
+            self.initializing = False
+            return
         if not self._dispose_device():
             self.initializing = False
             return  # Never replace an unconfirmed backend/port reservation.
         self.initialized = False
         try:
             driver = _get_esi_driver_class()
-            self.device = driver(
+            device = driver(
                 device_id=f"esi_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
                 process_backend=False,
             )
+            if getattr(self, '_initial_open_close_requested', False):
+                # This freshly constructed backend has never been opened.
+                with contextlib.suppress(Exception):
+                    device.close()
+                self._restore_off_ui_state()
+                self._sync_status()
+                return
+            self.device = device
             backend_reason = str(
                 getattr(self.device, "_process_backend_disabled_reason", "")
             ).strip()
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
             self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+            if getattr(self, '_initial_open_close_requested', False):
+                # Open succeeded after a close request. Verify shutdown rather
+                # than activating or publishing this cancelled connection.
+                self.shutdownCommunication()
+                return
             self.device.set_global_active(
                 True,
                 timeout_s=float(self.controllerParent.connect_timeout_s),
@@ -1620,7 +1869,7 @@ class ESIController(DeviceController):
             heat_limits = {
                 "voltage_v": float(self.controllerParent.heat_voltage_limit_v),
                 "current_a": float(self.controllerParent.heat_current_limit_a),
-                "power_w": float(self.controllerParent.heat_power_limit_w),
+                # Power is applied/read back only by an explicit heater command or edit.
             }
             requested_limits = {
                 name: value for name, value in heat_limits.items() if value > 0
@@ -1648,6 +1897,9 @@ class ESIController(DeviceController):
         except Exception as exc:
             if self.device is None:
                 self._restore_off_ui_state()
+            elif self._initial_open_incomplete():
+                self._dispose_device()  # No HV/heater command after a failed Open.
+                self._restore_off_ui_state()
             else:
                 self.shutdownCommunication()
             self.print(
@@ -1660,6 +1912,8 @@ class ESIController(DeviceController):
             self.initializing = False
 
     def initComplete(self) -> None:
+        if getattr(self, '_initial_open_close_requested', False):
+            return  # Ignore a success signal queued before an explicit close.
         self.controllerParent.ensureFixedChannels(persist=True)
         self.initializeValues(reset=True)
         self.initialized = self.device is not None
@@ -1769,6 +2023,7 @@ class ESIController(DeviceController):
             )
             return
         timeout_s = float(self.controllerParent.connect_timeout_s)
+        self._reset_heat_stability()
         try:
             device.load_config(config_index, timeout_s=timeout_s)
             self.loaded_config_text = f"Config {config_index}"
@@ -1780,8 +2035,20 @@ class ESIController(DeviceController):
                 flag=PRINT.ERROR,
             )
 
+    def _reset_heat_stability(self) -> None:
+        with self._heat_stability_lock:
+            self._heat_stability_generation += 1
+            self._heat_stability.reset()
+        refresh = getattr(self.controllerParent, "_update_heat_stability_display", None)
+        if callable(refresh):
+            _invoke_gui_callback(refresh)
+
+    def heat_stability_status(self) -> dict:
+        return self._heat_stability.status(time.monotonic())
+
     def initializeValues(self, reset: bool = False) -> None:
         if self.values is None or reset:
+            self._reset_heat_stability()
             self.values = {address: np.nan for address in _ESI_MODULES}
             self.currents = {address: np.nan for address in _ESI_MODULES}
             self.targets = {address: np.nan for address in _ESI_HV_MODULES}
@@ -1798,6 +2065,18 @@ class ESIController(DeviceController):
                 address: None for address in _ESI_HV_MODULES
             }
             self.global_enabled = None
+            self.heat_activation = {}
+            self.heat_readback_valid = False
+            self.heat_target_temperature_c = np.nan
+            self.heat_power_w = np.nan
+            self.heat_power_limit_w = np.nan
+            self.heat_max_power_w = np.nan
+            self.heat_max_temperature_c = np.nan
+            self.heat_limits_observed_at = float('-inf')
+            self._heat_power_command = None
+            refresh = getattr(self.controllerParent, '_update_operator_panel', None)
+            if callable(refresh):
+                _invoke_gui_callback(refresh)
 
     def readNumbers(self) -> None:
         if self.main_state == _ESI_STOPPING:
@@ -1812,12 +2091,14 @@ class ESIController(DeviceController):
             self.initializeValues(reset=True)
             return
         device = self.device
+        generation = self._heat_stability_generation
         try:
             snapshot = device.collect_diagnostics(
                 timeout_s=float(self.controllerParent.poll_timeout_s)
             )
+            observed_at = time.monotonic()
             if device is self.device:
-                self._apply_snapshot(snapshot)
+                self._apply_snapshot(snapshot, observed_at=observed_at, stability_generation=generation)
         except Exception as exc:
             if device is not self.device or self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
                 return
@@ -1834,6 +2115,128 @@ class ESIController(DeviceController):
     def fakeNumbers(self) -> None:
         self.initializeValues(reset=True)
 
+    def applyHeatTemperatureFromThread(self, value: float) -> None:
+        cancel = self._output_cancel
+        request = object()
+        self._heat_temperature_request = request
+        Thread(target=self._apply_heat_temperature, args=(value, cancel, request), daemon=True).start()
+
+    def _apply_heat_temperature(self, value: float, cancel: Event, request=None) -> None:
+        with self._output_lock:
+            if request is not None and request is not self._heat_temperature_request:
+                return
+            if (cancel.is_set() or not self.initialized or self.device is None
+                    or not self.controllerParent.isOn() or self.main_state != "STATE_ON"
+                    or getattr(self, 'transitioning', False)):
+                return
+            self._reset_heat_stability()
+            try:
+                self._require_valid_heat_readback()
+                self.device.set_heater_temperature(value,
+                    timeout_s=float(self.controllerParent.poll_timeout_s), cancel_event=cancel)
+                if cancel.is_set() or (request is not None and request is not self._heat_temperature_request):
+                    return
+                self.heat_temperature_error = ""
+            except Exception as exc:
+                error = f"Temperature unconfirmed: {exc}"
+                if request is None or request is self._heat_temperature_request:
+                    self.heat_temperature_error = error
+                self.errorCount += 1
+                for ch in self.controllerParent.getChannels():
+                    if ch.is_heat_channel() and not _is_current_channel(ch):
+                        error += self._disable_failed_channel(ch)
+                        break
+                if request is None or request is self._heat_temperature_request:
+                    self.heat_temperature_error = error
+                self.print(error, flag=PRINT.ERROR)
+            finally:
+                self._reset_heat_stability()
+                self._sync_status()
+
+    def applyHeatPowerFromThread(self, value: float) -> None:
+        cancel = self._output_cancel  # Capture before worker dispatch, never revive queued work.
+        request = object()
+        self._heat_power_request = request
+        Thread(target=self._apply_heat_power, args=(value, cancel, request), daemon=True).start()
+
+    def _apply_heat_power(self, value: float, cancel: Event, request=None) -> None:
+        with self._output_lock:
+            if request is not None and request is not self._heat_power_request:
+                return
+            if (cancel.is_set() or not self.initialized or self.device is None
+                    or not self.controllerParent.isOn() or self.main_state != "STATE_ON"
+                    or getattr(self, 'transitioning', False)):
+                return
+            self._reset_heat_stability()
+            self.heat_power_error = "Power limit pending verification."
+            try:
+                if value > 0:
+                    self._require_valid_heat_readback()
+                self._configure_heat_power_unlocked(value, cancel, request=request)
+            except _SupersededHeatEdit:
+                pass  # Supersession is not a hardware fault; do not replay or enable.
+            except Exception as exc:
+                error = f"Power limit unconfirmed: {exc}"
+                if request is None or request is self._heat_power_request:
+                    self.heat_power_error = error
+                self.errorCount += 1
+                for ch in self.controllerParent.getChannels():
+                    if ch.is_heat_channel() and not _is_current_channel(ch):
+                        error += self._disable_failed_channel(ch)
+                        break
+                if request is None or request is self._heat_power_request:
+                    self.heat_power_error = error
+                self.print(error, flag=PRINT.ERROR)
+            finally:
+                self._reset_heat_stability()
+                self._sync_status()
+
+    def _configure_heat_power_unlocked(self, value: float, cancel: Event, *, target=None, request=None) -> None:
+        def permission():
+            if cancel.is_set():
+                raise InterruptedError("ESI heater operation cancelled")
+            if request is not None and request is not self._heat_power_request:
+                raise _SupersededHeatEdit()
+        permission()
+        timeout = float(self.controllerParent.poll_timeout_s)
+        before = self.device.get_heat_configuration(timeout_s=timeout)
+        permission()
+        if target is not None:
+            max_t = float(before['hardware_limits']['max_temperature_c'])
+            if not (np.isfinite(target) and np.isfinite(max_t) and max_t > 0 and 0 <= target <= max_t):
+                raise ValueError(f"Temperature must be within the device maximum {max_t:g} °C.")
+        maximum = float(before['hardware_limits']['max_power_w'])
+        current = float(before['power_limit_w'])
+        if not (np.isfinite(value) and np.isfinite(maximum) and maximum > 0 and 0 <= value <= maximum):
+            raise ValueError(f"Power limit must be within the device maximum {maximum:g} W (0 keeps the device limit).")
+        if value == 0:
+            actual = current  # Preserve existing saved legacy configurations, never reinterpret zero as OFF.
+        elif self._heat_power_command == (value, current):
+            actual = current
+        else:
+            permission()
+            self._require_valid_heat_readback()
+            applied = self.device.configure_heat_limits(power_w=value, timeout_s=timeout, cancel_event=cancel)
+            permission()
+            actual = float(applied['power_w'])
+            if not (np.isfinite(actual) and 0 < actual <= min(value, maximum)):
+                raise ValueError(f"Applied power {actual:g} W does not respect the requested ceiling {value:g} W.")
+            after = self.device.get_heat_configuration(timeout_s=timeout)
+            permission()
+            actual_max = float(after['hardware_limits']['max_power_w'])
+            if (not np.isfinite(actual_max) or not 0 < actual <= actual_max
+                    or float(after['power_limit_w']) != actual
+                    or any(after[key] != before[key] for key in ('voltage_limit_v', 'current_limit_a'))):
+                raise ValueError("Independent power-limit readback did not confirm the applied limit with unchanged V/I.")
+            self._heat_power_command = (value, actual)
+        if not (np.isfinite(actual) and 0 < actual <= maximum):
+            raise ValueError("The device power limit is unavailable or zero; choose a positive limit.")
+        with self._heat_stability_lock:
+            # Fence snapshots acquired before or during this verified command.
+            self._reset_heat_stability()
+            self.heat_power_limit_w = actual
+            self.heat_power_error = ""
+
     def applyValue(self, channel: ESIChannel) -> None:
         if _is_current_channel(channel):
             return
@@ -1847,6 +2250,11 @@ class ESIController(DeviceController):
             return
         if self.device is None or not self.initialized or not self.controllerParent.isOn():
             return
+        if channel.is_heat_channel():
+            # Do not keep displaying a previous ON after a failed/new command.
+            # Acquisition, not the requested target, restores measured status.
+            self.heat_activation = {}
+            self._reset_heat_stability()
         if not channel.enabled:
             try:
                 self.device.set_output_active(
@@ -1863,14 +2271,27 @@ class ESIController(DeviceController):
                     f"ESI failed to disable {channel.name}: {exc}",
                     flag=PRINT.ERROR,
                 )
+            finally:
+                if channel.is_heat_channel():
+                    self._reset_heat_stability()
             return
         if channel.is_heat_channel():
             target = float(channel.value)
             try:
                 self._require_valid_heat_readback()
+                requested_power = float(getattr(self.controllerParent, 'heat_power_limit_w', 0.))
+                if requested_power != 0:
+                    try:
+                        self._configure_heat_power_unlocked(requested_power, cancel, target=target)
+                    except Exception as exc:
+                        self.heat_power_error = f"Power limit unconfirmed: {exc}"
+                        raise
+                if cancel.is_set():
+                    return
                 self.device.set_heater_temperature(
                     target,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
+                    cancel_event=cancel,
                 )
                 if cancel.is_set():
                     return
@@ -1878,15 +2299,20 @@ class ESIController(DeviceController):
                     channel.module_address(),
                     True,
                     timeout_s=float(self.controllerParent.poll_timeout_s),
+                    cancel_event=cancel,
                 )
                 self.global_enabled = bool(enabled)
+                self.heat_temperature_error = ""
             except Exception as exc:
+                self.heat_temperature_error = f"Temperature unconfirmed: {exc}"
                 self.errorCount += 1
                 rollback = self._disable_failed_channel(channel)
                 self.print(
                     f"ESI rejected temperature {target:g} for HEAT: {exc}.{rollback}",
                     flag=PRINT.ERROR,
                 )
+            finally:
+                self._reset_heat_stability()
             return
         # The C API exposes one unsigned target for the module's +/- output pair.
         target = abs(float(channel.value))
@@ -1946,6 +2372,7 @@ class ESIController(DeviceController):
             return
         if not target_on:
             self._output_cancel.set()
+            self._reset_heat_stability()
         with self._output_lock:
             # A newer OFF request takes precedence over a queued ON request.
             if target_on and (not self.controllerParent.isOn()
@@ -1966,6 +2393,10 @@ class ESIController(DeviceController):
         timeout = float(self.controllerParent.connect_timeout_s)
         try:
             if target_on:
+                # The shared gate must not restart a stored heater selection.
+                self.heat_activation = {}
+                self._reset_heat_stability()
+                self.device.set_output_active(_ESI_HEAT_MODULE, False, timeout_s=timeout)
                 # Clear every stored HV target before opening the shared gate.
                 for address in _ESI_HV_MODULES:
                     self.device.set_output_active(address, False, timeout_s=timeout)
@@ -1996,8 +2427,22 @@ class ESIController(DeviceController):
                 flag=PRINT.ERROR,
             )
 
+    def _invalidate_heat_confirmation(self) -> None:
+        with self._heat_stability_lock:
+            self._reset_heat_stability()
+            self.heat_activation = {}
+            self.heat_readback_valid = False
+            self.heat_limits_observed_at = float('-inf')
+            self.heat_power_limit_w = np.nan
+            self.heat_target_temperature_c = np.nan
+            self.heat_power_w = np.nan
+            self._heat_power_command = None
+
     def _disable_failed_channel(self, channel: ESIChannel) -> str:
         """Best-effort safe fallback after a channel command fails."""
+        heat = channel.is_heat_channel()
+        if heat:
+            self._invalidate_heat_confirmation()
         device = self.device
         if device is None:
             return " Device is unavailable; output state is unconfirmed"
@@ -2013,6 +2458,9 @@ class ESIController(DeviceController):
             device.set_output_active(address, False, timeout_s=timeout)
         except Exception as exc:
             failures.append(f"deactivation failed: {exc}")
+        finally:
+            if heat:
+                self._invalidate_heat_confirmation()
         if failures:
             return (
                 " Safe disable also failed; output state is unconfirmed and the "
@@ -2098,7 +2546,9 @@ class ESIController(DeviceController):
         return not cancel.is_set()
 
     def shutdownCommunication(self) -> bool:
+        self._initial_open_close_requested = True
         self._output_cancel.set()
+        self._reset_heat_stability()
         with self._output_lock:
             return self._shutdown_communication_unlocked()
 
@@ -2119,6 +2569,12 @@ class ESIController(DeviceController):
         device = self.device
         if device is None:
             return self.main_state == "Disconnected"
+        if self._initial_open_incomplete():
+            # An unfinished initial connection is not an output shutdown.
+            # The runtime retires a failed Open only after its worker returns.
+            self.initializeValues(reset=True)
+            self.discharge_readings = {}
+            return self._dispose_device()
         confirmed = False
         self.acquiring = False
         self.main_state = _ESI_STOPPING
@@ -2161,7 +2617,7 @@ class ESIController(DeviceController):
             super().closeCommunication()
         self.shutdownCommunication()
 
-    def _apply_snapshot(self, snapshot: dict[str, Any]) -> None:
+    def _apply_snapshot(self, snapshot: dict[str, Any], *, observed_at=None, stability_generation=None) -> None:
         if self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
             return  # A late status poll must not erase the shutdown check or uncertainty.
         self.main_state = str(snapshot["main_state"]["name"])
@@ -2206,24 +2662,50 @@ class ESIController(DeviceController):
             )
         heat = snapshot["heat"]
         heat_temperature = float(heat["monitor_temperature_c"])
-        self.heat_target_temperature_c = float(
-            heat.get("target_temperature_c", np.nan)
-        )
-        self.heat_power_w = float(heat.get("heater_power_w", np.nan))
-        self.heat_max_temperature_c = float(
-            heat["hardware_limits"]["max_temperature_c"]
-        )
-        self.heat_readback_valid = bool(
-            heat["valid"]
-            and np.isfinite(heat_temperature)
-            and 0.0 <= heat_temperature <= self.heat_max_temperature_c
-        )
-        self.values[_ESI_HEAT_MODULE] = (
-            heat_temperature if self.heat_readback_valid else np.nan
-        )
-        self.currents[_ESI_HEAT_MODULE] = (
-            float(heat["monitor_current_a"]) if heat["valid"] else np.nan
-        )
+        with self._heat_stability_lock:
+            heat_snapshot_current = stability_generation is None or stability_generation == self._heat_stability_generation
+            if heat_snapshot_current:
+                self.heat_activation = {key: heat.get(key) for key in (
+                    "active", "module_active", "module_gate_active",
+                    "device_gate_active", "control_active",
+                )}
+                self.heat_target_temperature_c = float(heat.get("target_temperature_c", np.nan))
+                self.heat_power_w = float(heat.get("heater_power_w", np.nan))
+                self.heat_max_power_w = float(heat["hardware_limits"].get("max_power_w", np.nan))
+                self.heat_power_limit_w = float(heat.get("power_limit_w", np.nan))
+                self.heat_limits_observed_at = time.monotonic() if observed_at is None else observed_at
+                self.heat_max_temperature_c = float(heat["hardware_limits"]["max_temperature_c"])
+                self.heat_readback_valid = bool(
+                    heat["valid"] and np.isfinite(self.heat_max_temperature_c)
+                    and self.heat_max_temperature_c > 0.0 and np.isfinite(heat_temperature)
+                    and 0.0 <= heat_temperature <= self.heat_max_temperature_c)
+                self.values[_ESI_HEAT_MODULE] = heat_temperature if self.heat_readback_valid else np.nan
+                self.currents[_ESI_HEAT_MODULE] = float(heat["monitor_current_a"]) if heat["valid"] else np.nan
+                # The expected interval plus the existing read budget bounds missing observations.
+                max_gap_s = (
+                    max(0., float(getattr(self.controllerParent, "interval", 1000.))) / 1000.
+                    + max(0.1, float(getattr(self.controllerParent, "poll_timeout_s", 3.)))
+                )
+                if max_gap_s != self._heat_stability.max_gap_s:
+                    self._heat_stability.reset()
+                    self._heat_stability.max_gap_s = max_gap_s
+                try:
+                    no_fault = int(snapshot["device_state"]["hex"], 0) == 0
+                except (KeyError, TypeError, ValueError):
+                    no_fault = False
+                active = snapshot.get("enabled") is True and all(self.heat_activation.get(key) is True for key in (
+                    "active", "module_active", "module_gate_active", "device_gate_active", "control_active"))
+                known_off = snapshot.get("enabled") is False or self.heat_activation.get("module_active") is False
+                self._heat_stability.update(
+                    time.monotonic() if observed_at is None else observed_at,
+                    heat_temperature, self.heat_target_temperature_c,
+                    active=not known_off,
+                    valid=self.heat_readback_valid and active and no_fault and self.main_state == "STATE_ON",
+                )
+            else:
+                # No repeated last measurement with a new acquisition timestamp.
+                self.values[_ESI_HEAT_MODULE] = np.nan
+                self.currents[_ESI_HEAT_MODULE] = np.nan
         flags = snapshot["interlock_state"]["flags"]
         self.interlock_state = ", ".join(flags) if flags else "OK"
         module_identity = self.identity.get("modules", {})
@@ -2235,13 +2717,13 @@ class ESIController(DeviceController):
             label = product_id if isinstance(product_id, str) and product_id else fallback
             labels.append(f"{address}: {label}")
         self.detected_modules = ", ".join(labels)
-        if self.heat_readback_valid:
+        if heat_snapshot_current and self.heat_readback_valid:
             self.heat_status = (
                 f"T={heat_temperature:.1f} degC, "
-                f"P={float(heat['heater_power_w']):.2f} W, "
+                f"Pset={float(heat['heater_power_w']):.2f} W, "
                 f"Ilock=0x{int(heat['interlock_state']):02X}"
             )
-        else:
+        elif heat_snapshot_current:
             self.heat_status = (
                 f"INVALID T={heat_temperature:.1f} degC; check temperature sensor"
             )
@@ -2260,12 +2742,32 @@ class ESIController(DeviceController):
 
         _invoke_gui_callback(update)
 
+    def _initial_open_incomplete(self) -> bool:
+        return self.device is not None and any(bool(getattr(self.device, name, False)) for name in (
+            "_open_failed", "_opening_in_progress", "_failed_open_released",
+        ))
+
     def _dispose_device(self, *, shutdown_confirmed: bool = False) -> bool:
         self._output_cancel.set()
         with self._output_lock:
             if self.device is None:
                 return self.main_state != "Shutdown unconfirmed"
-            if not shutdown_confirmed:
+            if self._initial_open_incomplete():
+                released = False
+                try:
+                    released = self.device.disconnect(
+                        timeout_s=float(self.controllerParent.connect_timeout_s)
+                    ) is True
+                except Exception as exc:
+                    self.print(f"ESI connection cleanup remains unconfirmed: {exc}", flag=PRINT.ERROR)
+                self.initialized = False
+                self.acquiring = False
+                self.main_state = "Disconnected" if released else "Connection pending"
+                self._restore_off_ui_state()
+                self._sync_status()
+                if not released:
+                    return False
+            elif not shutdown_confirmed:
                 return self._shutdown_communication_unlocked()
             device, self.device = self.device, None
             with contextlib.suppress(Exception):

@@ -17,6 +17,7 @@ class FaultingDMMR:
         self.automatic = False
         self.calls = []
         self.fail_start = "range"
+        self.auto_modes = {}
         self.start_failed = False
         self.reject_cleanup = False
         self.auto_disable_raises = False
@@ -60,11 +61,12 @@ class FaultingDMMR:
         if address == 5 and self.fail_start == "range":
             self.start_failed = True
             return -12
+        self.auto_modes[address] = value
         return 0
 
     def get_module_meas_range(self, address, **kwargs):
         self.calls.append(("range_readback", address))
-        return self.NO_ERR, 0, True
+        return self.NO_ERR, 0, self.auto_modes.get(address, False)
 
     def _get_gate(self, name, value):
         self.calls.append(("read", name))

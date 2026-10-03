@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ("widgets", "panel", "groups", "horizontal", "vertical", "stacked", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed")
+STABILITY_CASES = ("heat_stable", "heat_stabilizing", "heat_stale", "heat_expired", "heat_reset")
+HEAT_CASES = (*STABILITY_CASES, "heat_controls", "heat_failed_edit", "heat_active", "heat_blocked", "heat_invalid_sensor", "heat_unknown", "heat_poll_error", "heat_off", "heat_stuck_off", "heat_quantized")
+CASES = ("widgets", "panel", "groups", "horizontal", "vertical", "stacked", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -225,7 +227,7 @@ def probe(case, output):
         window.grab().save(str(output / "esi-current-widgets.png"))
         return 0
 
-    if case in ("panel", "off", "stopping", "unconfirmed"):
+    if case in ("panel", "off", "stopping", "unconfirmed", *HEAT_CASES):
         window = QtWidgets.QWidget()
         window.resize(720, 710)
         layout = QtWidgets.QVBoxLayout(window)
@@ -256,6 +258,139 @@ def probe(case, output):
         assert device.esiHVCards[2]["current"].text() == "-4.50 nA"
         assert "98.0" in device.esiHVCards[1]["measured"].text()
         window.grab().save(str(output / "esi-current-panel.png"))
+        if case in HEAT_CASES:
+            data = snapshot()
+            heat_channel = device.channels[2]
+            heat_channel.value = 100.
+            heat_channel.enabled = case not in ("heat_off", "heat_stuck_off")
+            off = case in ("heat_off", "heat_blocked")
+            data["heat"].update(active=not off, module_active=not off,
+                                module_gate_active=not off, device_gate_active=True,
+                                control_active=True, target_temperature_c=0. if off else 100.)
+            if case == "heat_invalid_sensor":
+                data["heat"]["monitor_temperature_c"] = 521.975
+            elif case == "heat_unknown":
+                for key in ("active", "module_active", "module_gate_active", "device_gate_active", "control_active"):
+                    data["heat"].pop(key)
+            elif case == "heat_quantized":
+                heat_channel.value = 100.1234
+                data["heat"]["target_temperature_c"] = 100.123
+            if case in ('heat_controls', 'heat_failed_edit'):
+                data['main_state']['name'] = 'STATE_ON'
+                data['heat']['hardware_limits'].update(max_power_w=179.999931891712)
+                data['heat']['power_limit_w'] = 49.999861776384
+                device.heat_power_limit_w = 50.
+            calls = []
+            device.esiHeatButton.toggled.connect(lambda checked: calls.append(checked))
+            controller._apply_snapshot(data)
+            if case in STABILITY_CASES:
+                clock = [0.]
+                module.time = SimpleNamespace(monotonic=lambda: clock[0])
+                controller._reset_heat_stability()
+                data['main_state']['name'] = 'STATE_ON'
+                data['device_state'] = {'hex': '0x0'}
+                for t in range(61):
+                    clock[0] = float(t)
+                    data['heat']['monitor_temperature_c'] = 100. if case != 'heat_stabilizing' else 99.925+t*.15/60
+                    controller._apply_snapshot(data)
+                if case == 'heat_stale':
+                    clock[0] = 65.
+            if case == "heat_poll_error":
+                controller.initializeValues(reset=True)
+            device._update_operator_panel()
+            app.processEvents()
+            # Keep a render even when an assertion reproduces the original bug.
+            window.grab().save(str(output / f"esi-{case}.png"))
+            button = device.esiHeatButton
+            expected = "ON" if case in ("heat_active", "heat_quantized", 'heat_controls', 'heat_failed_edit', *STABILITY_CASES) else "OFF" if case == "heat_off" else "Unconfirmed"
+            assert button.text() == expected, (button.text(), case)
+            assert not calls, "Status refresh must never dispatch an output command"
+            assert button.isEnabled(), "OFF must remain reachable even with an invalid sensor"
+            assert button.isChecked() == (case != "heat_off")
+            if case in STABILITY_CASES:
+                status = device.esiHeatWidgets['heat_stability']
+                assert status.text() == {'heat_stable': 'Stable', 'heat_stabilizing': 'Stabilizing', 'heat_stale': 'Unavailable', 'heat_expired': 'Stable', 'heat_reset': 'Stable'}[case]
+                assert '±0.2' in status.toolTip() and '<0.1' in status.toolTip()
+                if case in ('heat_expired', 'heat_reset'):
+                    if case == 'heat_expired':
+                        # Advance observation time and let the real single-shot Qt deadline elapse.
+                        assert device._heat_stability_timer.isSingleShot()
+                        clock[0] = 65.
+                        QTest.qWait(4500)
+                    else:
+                        # Native command workers must clear the label on the GUI thread.
+                        worker = threading.Thread(target=controller._reset_heat_stability)
+                        worker.start()
+                        worker.join(timeout=1)
+                        assert not worker.is_alive()
+                        QTest.qWait(80)
+                    assert status.text() == 'Unavailable', 'No manual panel refresh should be necessary'
+                    assert button.text() == 'ON' and not calls
+                    window.grab().save(str(output / f'esi-{case}-after.png'))
+                assert status.width() >= status.fontMetrics().horizontalAdvance(status.text())
+                assert device.esiHeatCard.rect().contains(QtCore.QRect(status.mapTo(device.esiHeatCard, QtCore.QPoint()), status.size()))
+            if case in ("heat_active", "heat_quantized", 'heat_controls', 'heat_failed_edit', *STABILITY_CASES):
+                assert button.styleSheet() == module._ESI_BTN_HEAT_ACTIVE
+            else:
+                assert button.styleSheet() == module._ESI_BTN_NEUTRAL
+            if case == "heat_off":
+                for widget in device.esiHeatWidgets.values():
+                    assert widget.styleSheet() == module._ESI_PANEL_NEUTRAL
+            if case == "heat_stuck_off":
+                retries = []
+                heat_channel.applyValue = lambda apply=False: retries.append(apply)
+                QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+                assert heat_channel.enabled is False
+                assert retries == [True], "A failed OFF must be retryable without enabling the heater"
+            if case in ('heat_controls', 'heat_failed_edit'):
+                target, power = device.esiHeatTarget, device.esiHeatPowerLimit
+                assert target.isEnabled() and power.isEnabled()
+                assert target.maximum() == 175. and power.maximum() == 179.999
+                assert power.value() == 50.
+                assert 'Applied limit: 49.9999' in power.toolTip()
+                target.setFocus()
+                target.selectAll()
+                QTest.keyClicks(target, '125.5')
+                QTest.keyClick(target, QtCore.Qt.Key.Key_Return)
+                assert heat_channel.value == 125.5
+                power.setFocus()
+                power.selectAll()
+                QTest.keyClicks(power, '35')
+                QTest.keyClick(power, QtCore.Qt.Key.Key_Return)
+                assert device.heat_power_limit_w == 35.
+                assert not calls, 'Editing a field must not toggle the activation button'
+                window.grab().save(str(output / 'esi-controls-edited.png'))
+                if case == 'heat_failed_edit':
+                    hardware_calls = []
+                    class FailedEditDevice:
+                        def get_heat_configuration(self, **kwargs):
+                            return dict(hardware_limits=dict(max_power_w=180., max_temperature_c=175.),
+                                        power_limit_w=20., voltage_limit_v=22., current_limit_a=10.)
+                        def configure_heat_limits(self, **kwargs):
+                            raise RuntimeError('Simulated write refusal')
+                        def set_output_active(self, address, active, **kwargs):
+                            hardware_calls.append((address, active))
+                            return active
+                    device.poll_timeout_s = .1
+                    controller.device = FailedEditDevice()
+                    controller._apply_heat_power(35., controller._output_cancel)
+                    device._update_operator_panel()
+                    app.processEvents()
+                    assert hardware_calls == [(0, False)]
+                    assert button.text() == 'Unconfirmed'
+                    assert not controller.heat_activation
+                    assert 'forced OFF' in controller.heat_power_error
+                    assert not power.isEnabled()
+                    window.grab().save(str(output / 'esi-failed-edit.png'))
+                else:
+                    stamp = module.time.monotonic()
+                    module.time = SimpleNamespace(monotonic=lambda: stamp + 10.)
+                    QTest.qWait(4500)
+                    assert not target.isEnabled() and not power.isEnabled(), 'Stale maxima must disable editing automatically'
+                assert not calls
+            # Both cards and the heater button must remain readable in the real layout.
+            assert button.rect().width() >= button.fontMetrics().horizontalAdvance(button.text()) + 12
+            return 0
         if case != "panel":
             calls = []
             saved_enabled = [channel.enabled for channel in device.channels]

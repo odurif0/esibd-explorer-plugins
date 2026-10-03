@@ -9,3 +9,6 @@ __pycache__/
 
 # runtime device logs (created at runtime, never shipped)
 logs/
+
+# local agent tooling artifacts
+.omo/

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from .._driver_common import (
+    DllPortClaimRegistryMixin,
     ProcessIsolatedClientMixin,
     TimeoutSafeDllMixin,
     build_device_logger,
@@ -19,7 +20,7 @@ from .._driver_common import (
 from .esi_base import ESIBase
 
 
-class _ESIController(TimeoutSafeDllMixin, ESIBase):
+class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
     """Validated ESI controller with deterministic high-voltage shutdown."""
 
     _INSTRUMENT_NAME = "ESI"
@@ -32,6 +33,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     DISCHARGE_LIMIT_V = 1.0
     DISCHARGE_SAMPLES = 3
     DISCHARGE_TIMEOUT_S = 60.0
+    HEAT_MON_READY = 1 << 0  # CGC COM_ESI_CTRL_HTCTRL_MON_RDY
     HV_ADC_V_READY = 1 << 4
     HV_ADC_I_READY = 1 << 6
     HV_CONFIG_BASE_OFFSET = 17
@@ -39,8 +41,8 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     HV_CONFIG_MAX_STEP_OFFSET = 4
     HV_CONFIG_ENABLE_OFFSET = 10
     DEFAULT_HV_MAX_VOLTAGE_STEP_V = 10.008
-    _instance_lock = threading.Lock()
-    _connected_instance: Optional["_ESIController"] = None
+    _active_connections_lock = threading.Lock()
+    _active_connections: dict[int, dict[str, object]] = {}
 
     def __init__(
         self,
@@ -60,6 +62,8 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self.device_id = device_id
         self.com = int(com)
         self.baudrate = int(baudrate)
+        self.port_num = 0  # The ESI DLL has one implicit native channel.
+        self._dll_port_claimed = False
         self.connected = False
         self._transport_poisoned = False
         self._transport_error = None
@@ -98,39 +102,18 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         if status != self.NO_ERR:
             raise RuntimeError(f"ESI {action} failed: {self.format_status(status)}")
 
-    def _claim_single_instance(self):
-        cls = type(self)
-        with cls._instance_lock:
-            holder = cls._connected_instance
-            if holder is not None and holder is not self:
-                raise RuntimeError(
-                    "ESI-CTRL DLL is single-instance per process; "
-                    f"'{holder.device_id}' already owns its implicit channel."
-                )
-            cls._connected_instance = self
-
-    def _release_single_instance(self):
-        cls = type(self)
-        with cls._instance_lock:
-            if cls._connected_instance is self:
-                cls._connected_instance = None
-
-    def _on_transport_poisoned(self) -> None:
-        # A timed-out DLL thread may still own the implicit COM channel.
-        # Keep the single-instance claim until this process exits.
-        self.connected = False
-
     def connect(self, timeout_s: float = 5.0) -> bool:
         """Connect, validate identity, inventory modules, and force HV OFF."""
+        already_connected = self._connection_is_ready()
         timeout = self._resolve_timeout(timeout_s)
-        if self.connected:
+        if already_connected:
             return True
         self._hv_measurement_requests.clear()
-        self._claim_single_instance()
         opened = False
         try:
-            status = self._call_locked_with_timeout(
-                ESIBase.open_port, timeout, "open_port", self, self.com
+            status = self._call_initial_open(
+                ESIBase.open_port, lambda: ESIBase.close_port(self),
+                timeout, self, self.com
             )
             self._raise_on_status(status, "open_port")
             opened = True
@@ -160,26 +143,39 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             )
             return True
         except Exception:
-            self.connected = False
+            # The connect phase is over before rollback. Once identity has
+            # been validated, disconnect must verify HV OFF/discharge too;
+            # never discard an uncertain output state with a raw port close.
+            self._finish_initial_open()
             if opened and not self._transport_poisoned:
-                with contextlib.suppress(Exception):
-                    self._call_locked_with_timeout(
-                        ESIBase.close_port, timeout, "close_port_rollback", self
-                    )
-            if not self._transport_poisoned:
-                self._release_single_instance()
+                try:
+                    self.disconnect(timeout_s=timeout)
+                except Exception as cleanup_error:
+                    self.logger.error(f"ESI connect cleanup unconfirmed: {cleanup_error}")
             raise
+        finally:
+            self._finish_initial_open()
 
     def _prepare_safe_inventory(self, timeout: float) -> None:
         """Disable all outputs before inventory communication."""
         def prepare():
             status = ESIBase.set_enable(self, False)
             self._raise_on_status(status, "module disable before inventory")
+            # Global OFF preserves module gates. Disarm every output before
+            # reopening communication, including HV with stored nonzero targets.
+            self._set_heat_module_active_unlocked(False)
+            for address in self.HV_MODULE_ADDRESSES:
+                status, read_status, active = self._set_hv_module_active_unlocked(address, False)
+                self._raise_on_status(status, f"inventory HV{address} disable")
+                self._raise_on_status(read_status, f"inventory HV{address} disable readback")
+                if active:
+                    raise RuntimeError(f"ESI inventory HV{address} remained active")
+            self._raise_if_transport_poisoned()
             status = ESIBase.set_enable(self, True)
             self._raise_on_status(status, "module communication enable")
 
         self._call_locked_with_timeout(
-            prepare, timeout * 2.0, "prepare_safe_inventory"
+            prepare, timeout * 10.0, "prepare_safe_inventory"
         )
 
     def force_safe_off(self, timeout_s: Optional[float] = None) -> bool:
@@ -188,11 +184,9 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         timeout = self._resolve_timeout(timeout_s)
 
         def safe_off_batch():
-            failures = []
-            status, _temperature = ESIBase.set_heat_ctrl_heater_temperature(self, 0.0)
-            if status != self.NO_ERR:
-                failures.append(f"heat target zero: {self.format_status(status)}")
+            failures = self._disable_heat_unlocked()
             for address in self.HV_MODULE_ADDRESSES:
+                self._raise_if_transport_poisoned()
                 status = ESIBase.set_hv_supply_target_output_voltage(self, address, 0.0)
                 if status != self.NO_ERR:
                     failures.append(
@@ -215,6 +209,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     failures.append(
                         f"module {address} remained active after deactivation"
                     )
+            self._raise_if_transport_poisoned()
             status = ESIBase.set_enable(self, False)
             if status != self.NO_ERR:
                 failures.append(f"module disable: {self.format_status(status)}")
@@ -223,6 +218,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             # reports success but the controller is still enabled.
             readback_status, still_enabled = ESIBase.get_enable(self)
             if readback_status == self.NO_ERR and still_enabled:
+                self._raise_if_transport_poisoned()
                 status = ESIBase.set_enable(self, False)
                 if status != self.NO_ERR:
                     failures.append(
@@ -246,7 +242,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             return failures
 
         failures = self._call_locked_with_timeout(
-            safe_off_batch, timeout * 6.0, "force_safe_off"
+            safe_off_batch, timeout * 8.0, "force_safe_off"
         )
         if failures:
             raise RuntimeError("ESI safe OFF failed: " + "; ".join(failures))
@@ -702,12 +698,15 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._hv_measurement_requests[address] = (*requested, True)
         return True
 
-    def set_global_active(self, active: bool, timeout_s: Optional[float] = None) -> bool:
+    def set_global_active(self, active: bool, timeout_s: Optional[float] = None, *, cancel_event=None) -> bool:
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
         requested = bool(active)
 
         def set_and_verify():
+            if requested and cancel_event is not None:
+                # Stop may arrive after dispatch but before this worker starts.
+                self._check_heat_read_permission(cancel_event)
             status = ESIBase.set_enable(self, requested)
             if status != self.NO_ERR:
                 return status, self.NO_ERR, not requested
@@ -779,39 +778,237 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
     def _set_hv_module_active_unlocked(
         self, address: int, requested: bool
     ) -> tuple[int, int, bool]:
+        self._raise_if_transport_poisoned()
         status = ESIBase.set_module_activation_state(
             self, address, requested
         )
+        self._raise_if_transport_poisoned()
         if status != self.NO_ERR:
             return status, self.NO_ERR, not requested
         pwm = ESIBase.get_hv_supply_params_pwm(self, address)
         if pwm[0] != self.NO_ERR:
+            self._raise_if_transport_poisoned()
             pwm = ESIBase.get_hv_supply_params_pwm(self, address)
         return status, pwm[0], bool(pwm[7])
 
-    def set_output_active(
-        self, address: int, active: bool, timeout_s: Optional[float] = None
-    ) -> bool:
-        """Control one module's HVC toggle and the controller-wide gate.
+    def _set_heat_module_active_unlocked(self, requested: bool) -> bool:
+        """Command module 0 and require its direct activation readback.
 
-        HV disable always zeros the target before requesting module standby.
-        HV enable verifies the module toggle before opening the global gate.
+        The CGC module command includes HEAT, not only the HV converters.
+        No missing acknowledgement (including -10) is accepted for HEAT.
+        """
+        self._raise_if_transport_poisoned()
+        status = ESIBase.set_module_activation_state(
+            self, self.HEAT_MODULE_ADDRESS, requested
+        )
+        self._raise_on_status(status, "set_heat_module_active(0)")
+        self._raise_if_transport_poisoned()
+        status, observed = ESIBase.get_module_activation_state(
+            self, self.HEAT_MODULE_ADDRESS
+        )
+        self._raise_on_status(status, "verify_heat_module_active(0)")
+        if bool(observed) != requested:
+            raise RuntimeError(
+                "ESI heater module 0 activation verification failed: "
+                f"requested {requested}, controller reports {bool(observed)}"
+            )
+        return bool(observed)
+
+    def _set_heat_temperature_unlocked(self, target: float, maximum: float = 0.0) -> float:
+        self._raise_if_transport_poisoned()
+        status, applied = ESIBase.set_heat_ctrl_heater_temperature(self, target)
+        self._raise_on_status(status, "set_heat_ctrl_heater_temperature")
+        # The native in/out argument is the applied, potentially quantized value.
+        if not math.isfinite(applied) or not 0 <= applied <= maximum:
+            raise RuntimeError("ESI heater applied temperature is outside the allowed range")
+        self._raise_if_transport_poisoned()
+        status, observed = ESIBase.get_heat_ctrl_heater_temperature(self)
+        self._raise_on_status(status, "verify_heat_ctrl_heater_temperature")
+        if not math.isfinite(observed) or not math.isclose(
+            observed, applied, rel_tol=1e-9, abs_tol=1e-6
+        ):
+            raise RuntimeError(
+                "ESI heater temperature verification failed: "
+                f"applied {applied:g} degC, controller reports {observed:g} degC"
+            )
+        return float(observed)
+
+    def _disable_heat_unlocked(self) -> list[str]:
+        """Disable the gate, then zero the target, retaining returned failures."""
+        failures = []
+        for operation in (
+            lambda: self._set_heat_module_active_unlocked(False),
+            lambda: self._set_heat_temperature_unlocked(0.0),
+        ):
+            self._raise_if_transport_poisoned()
+            try:
+                operation()
+            except RuntimeError as exc:
+                failures.append(str(exc))
+        self._raise_if_transport_poisoned()
+        return failures
+
+    def _check_heat_read_permission(self, cancel_event=None) -> None:
+        self._raise_if_transport_poisoned()
+        if getattr(self, "_transport_poisoned", None) is not False:
+            raise RuntimeError("ESI transport state is unknown; heater operation refused")
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("ESI heater operation cancelled")
+
+    def _get_heat_monitoring_unlocked(self, timeout: float, cancel_event=None):
+        """Wait for MON_RDY under the caller's lock, then read exactly once.
+
+        No-data is not a sensor reading. Conversely, an invalid tuple after
+        readiness is returned unchanged to the caller, never retried or cached.
+        The readiness deadline does not replace the outer native-call timeout.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            self._check_heat_read_permission(cancel_event)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("ESI heater monitoring data not ready within the I/O timeout")
+            status, flags = ESIBase.get_module_data_ready_flags(self, self.HEAT_MODULE_ADDRESS)
+            self._check_heat_read_permission(cancel_event)
+            self._raise_on_status(status, "get_heat_monitoring_ready(0)")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("ESI heater monitoring data not ready within the I/O timeout")
+            if int(flags) & self.HEAT_MON_READY:
+                result = ESIBase.get_heat_ctrl_monitoring(self)
+                self._check_heat_read_permission(cancel_event)
+                return result
+            delay = min(.1, max(0., deadline - time.monotonic()))
+            if cancel_event is None:
+                time.sleep(delay)
+            else:
+                cancel_event.wait(delay)
+
+    def _validate_heat_operating_state_unlocked(
+        self, target: Optional[float] = None, *, timeout: Optional[float] = None,
+        cancel_event=None,
+    ) -> float:
+        self._check_heat_read_permission(cancel_event)
+        configuration = self.get_heat_configuration_unlocked()
+        maxima = configuration["hardware_limits"]
+        for name, unit in (("voltage", "v"), ("current", "a"), ("power", "w")):
+            value = configuration[f"{name}_limit_{unit}"]
+            maximum = maxima[f"max_{name}_{unit}"]
+            if not (math.isfinite(value) and math.isfinite(maximum)
+                    and 0 < value <= maximum):
+                raise RuntimeError(
+                    f"ESI heater {name} limit is {value:g} {unit.upper()}; "
+                    "configure a positive limit appropriate for the load "
+                    f"and no greater than {maximum:g} {unit.upper()} before ON. "
+                    "A plugin setting of zero retains the device setting."
+                )
+        maximum = maxima["max_temperature_c"]
+        if target is None:
+            target = configuration["target_temperature_c"]
+        if not (math.isfinite(maximum) and maximum > 0
+                and math.isfinite(target) and 0 <= target <= maximum):
+            raise RuntimeError("ESI heater temperature target or hardware limit is invalid")
+        self._raise_if_transport_poisoned()
+        status, valid, _vout, _vmon, _imon, temperature = self._get_heat_monitoring_unlocked(
+            self._resolve_timeout(timeout), cancel_event
+        )
+        self._raise_on_status(status, "get_heat_ctrl_monitoring before ON")
+        if not valid or not math.isfinite(temperature) or not 0 <= temperature <= maximum:
+            raise RuntimeError("ESI heater temperature sensor readback is invalid; ON refused")
+        return float(maximum)
+
+    def _enable_heat_unlocked(self, timeout: float, cancel_event=None) -> bool:
+        self._validate_heat_operating_state_unlocked(timeout=timeout, cancel_event=cancel_event)
+        self._check_heat_read_permission(cancel_event)
+        return self._set_heat_module_active_unlocked(True)
+
+    def _confirm_heat_active_unlocked(self, timeout: float, cancel_event=None) -> bool:
+        """Confirm the asynchronous state transition, never replay ON.
+
+        The I/O budget and 0.1 s polling cadence are software bounds, not
+        measured firmware settling times. Only missing activation bits may
+        wait; explicit faults, lost command gates and bad responses fail.
+        """
+        deadline = time.monotonic() + timeout
+        last_state = None
+
+        def permitted():
+            self._check_heat_read_permission(cancel_event)
+            if time.monotonic() >= deadline:
+                observed = "unavailable" if last_state is None else hex(last_state)
+                raise RuntimeError(
+                    "ESI heater activation not confirmed within the I/O timeout; "
+                    f"last module state={observed}"
+                )
+
+        def checked(method, *args):
+            permitted()
+            result = method(self, *args)
+            self._check_heat_read_permission(cancel_event)
+            self._raise_on_status(result[0], f"confirm_heat_activation/{method.__name__}")
+            permitted()
+            return result[1:]
+
+        while True:
+            try:
+                (_, device_state, _, _, _, _, main_state, _, module_states) = checked(
+                    ESIBase.get_complete_state
+                )
+                last_state = int(module_states[self.HEAT_MODULE_ADDRESS])
+                device_state, main_state = int(device_state), int(main_state)
+            except (TypeError, ValueError, IndexError) as exc:
+                raise RuntimeError("ESI heater activation received an invalid complete state") from exc
+            if device_state or self.MAIN_STATE.get(main_state) != "STATE_ON":
+                raise RuntimeError(
+                    "ESI heater activation blocked by controller fault/state: "
+                    f"device={hex(device_state)}, main={hex(main_state)}, module={hex(last_state)}"
+                )
+            enabled, = checked(ESIBase.get_enable)
+            module_active, = checked(ESIBase.get_module_activation_state, self.HEAT_MODULE_ADDRESS)
+            if not enabled or not module_active:
+                raise RuntimeError(
+                    "ESI heater activation command readback lost: "
+                    f"enabled={bool(enabled)}, module_active={bool(module_active)}, state={hex(last_state)}"
+                )
+            required = self.MS_CTRL_ACT | self.MS_MOD_ACT | self.MS_DEV_ACT
+            permitted()
+            if last_state & required == required:
+                return True
+            delay = min(.1, max(0., deadline - time.monotonic()))
+            if cancel_event is None:
+                time.sleep(delay)
+            else:
+                cancel_event.wait(delay)
+
+    def set_output_active(
+        self, address: int, active: bool, timeout_s: Optional[float] = None, *, cancel_event=None
+    ) -> bool:
+        """Verify the selected module gate before opening the shared gate.
+
+        HEAT requires valid sensor/limits, command readbacks, and confirmed
+        CTRL/MOD/DEV activation state within the existing I/O budget.
+        Local OFF disables only that module and zeros its target; it does not
+        interrupt other outputs or depend on valid heater operating limits.
         """
         self._require_connected()
         address = self._validate_controlled_address(address)
         timeout = self._resolve_timeout(timeout_s)
         if address == self.HEAT_MODULE_ADDRESS:
             if active:
-                self.set_global_active(True, timeout_s=timeout)
+                self._call_locked_with_timeout(
+                    self._enable_heat_unlocked, timeout * 8.0, "enable_heat_output", timeout, cancel_event
+                )
+                self._check_heat_read_permission(cancel_event)
+                self.set_global_active(True, timeout_s=timeout, cancel_event=cancel_event)
+                self._call_locked_with_timeout(
+                    self._confirm_heat_active_unlocked, timeout * 2.0,
+                    "confirm_heat_activation", timeout, cancel_event,
+                )
+                self._check_heat_read_permission(cancel_event)
                 return True
-            result = self._call_locked_with_timeout(
-                ESIBase.set_heat_ctrl_heater_temperature,
-                timeout,
-                "disable_heat_output",
-                self,
-                0.0,
+            failures = self._call_locked_with_timeout(
+                self._disable_heat_unlocked, timeout * 4.0, "disable_heat_output"
             )
-            self._raise_on_status(result[0], "disable_heat_output")
+            if failures:
+                raise RuntimeError("ESI heater OFF failed: " + "; ".join(failures))
             return False
         if active:
             self.set_hv_module_active(address, True, timeout_s=timeout)
@@ -826,42 +1023,8 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
 
-        def configuration():
-            def checked(result, action):
-                self._raise_on_status(result[0], action)
-                return result[1:]
-
-            max_voltage, max_current, max_power, max_temperature = checked(
-                ESIBase.get_heat_ctrl_hw_limits(self), "get_heat_ctrl_hw_limits"
-            )
-            voltage_limit, = checked(
-                ESIBase.get_heat_ctrl_voltage_limit(self), "get_heat_ctrl_voltage_limit"
-            )
-            current_limit, = checked(
-                ESIBase.get_heat_ctrl_current_limit(self), "get_heat_ctrl_current_limit"
-            )
-            power_limit, = checked(
-                ESIBase.get_heat_ctrl_power_limit(self), "get_heat_ctrl_power_limit"
-            )
-            target_temperature, = checked(
-                ESIBase.get_heat_ctrl_heater_temperature(self),
-                "get_heat_ctrl_heater_temperature",
-            )
-            return {
-                "hardware_limits": {
-                    "max_voltage_v": float(max_voltage),
-                    "max_current_a": float(max_current),
-                    "max_power_w": float(max_power),
-                    "max_temperature_c": float(max_temperature),
-                },
-                "voltage_limit_v": float(voltage_limit),
-                "current_limit_a": float(current_limit),
-                "power_limit_w": float(power_limit),
-                "target_temperature_c": float(target_temperature),
-            }
-
         return self._call_locked_with_timeout(
-            configuration, timeout * 5.0, "get_heat_configuration"
+            self.get_heat_configuration_unlocked, timeout * 5.0, "get_heat_configuration"
         )
 
     def configure_heat_limits(
@@ -871,8 +1034,9 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         current_a: Optional[float] = None,
         power_w: Optional[float] = None,
         timeout_s: Optional[float] = None,
+        cancel_event=None,
     ) -> dict:
-        """Apply selected heater limits after validating hardware maxima."""
+        """Apply selected heater limits after validating hardware maxima; honor Stop in the worker."""
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
         requested = {
@@ -882,9 +1046,11 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         }
 
         def configure():
+            self._check_heat_read_permission(cancel_event)
             status, max_voltage, max_current, max_power, _max_temperature = (
                 ESIBase.get_heat_ctrl_hw_limits(self)
             )
+            self._check_heat_read_permission(cancel_event)
             self._raise_on_status(status, "get_heat_ctrl_hw_limits")
             maxima = {
                 "voltage_v": float(max_voltage),
@@ -899,7 +1065,8 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             for name, value in requested.items():
                 if value is None:
                     continue
-                if not 0 < value <= maxima[name]:
+                if not (math.isfinite(value) and math.isfinite(maxima[name])
+                        and 0 < value <= maxima[name]):
                     raise ValueError(
                         f"ESI heat {name} must be greater than 0 and no more "
                         f"than the hardware maximum {maxima[name]:g}."
@@ -909,9 +1076,14 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
             for name, value in requested.items():
                 if value is None:
                     continue
+                self._check_heat_read_permission(cancel_event)
                 result = setters[name](self, value)
+                self._check_heat_read_permission(cancel_event)
                 self._raise_on_status(result[0], f"set_heat_{name}")
-                applied[name] = float(result[1])
+                actual = float(result[1])
+                if not (math.isfinite(actual) and 0 < actual <= maxima[name]):
+                    raise ValueError(f"ESI heat {name} returned an invalid applied limit: {actual}.")
+                applied[name] = actual
             return applied
 
         return self._call_locked_with_timeout(
@@ -919,7 +1091,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         )
 
     def set_heater_temperature(
-        self, temperature_c: float, timeout_s: Optional[float] = None
+        self, temperature_c: float, timeout_s: Optional[float] = None, *, cancel_event=None
     ) -> float:
         """Set heater target temperature within the reported hardware limit."""
         self._require_connected()
@@ -927,30 +1099,38 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         target = float(temperature_c)
 
         def set_temperature():
+            if target > 0:
+                self._check_heat_read_permission(cancel_event)
             status, _max_v, _max_i, _max_p, max_temperature = (
                 ESIBase.get_heat_ctrl_hw_limits(self)
             )
             self._raise_on_status(status, "get_heat_ctrl_hw_limits")
-            if not 0 <= target <= float(max_temperature):
+            if not (math.isfinite(max_temperature) and max_temperature > 0
+                    and math.isfinite(target) and 0 <= target <= max_temperature):
                 raise ValueError(
                     "ESI heater target must be between 0 and the hardware "
                     f"maximum {float(max_temperature):g} degC."
                 )
-            status, applied = ESIBase.set_heat_ctrl_heater_temperature(self, target)
-            self._raise_on_status(status, "set_heat_ctrl_heater_temperature")
-            return float(applied)
+            if target > 0:
+                # A live setpoint change can heat before any subsequent ON call.
+                self._validate_heat_operating_state_unlocked(target, timeout=timeout, cancel_event=cancel_event)
+                self._check_heat_read_permission(cancel_event)
+            return self._set_heat_temperature_unlocked(target, max_temperature)
 
         return self._call_locked_with_timeout(
-            set_temperature, timeout * 2.0, "set_heater_temperature"
+            set_temperature, timeout * 9.0, "set_heater_temperature"
         )
 
-    def collect_diagnostics(self, timeout_s: Optional[float] = None) -> dict:
+    def collect_diagnostics(self, timeout_s: Optional[float] = None, *, cancel_event=None) -> dict:
         """Collect controller, HV, and heater state without changing outputs."""
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
 
         def snapshot():
+            self._raise_if_transport_poisoned()
+
             def checked(result, action):
+                self._raise_if_transport_poisoned()
                 self._raise_on_status(result[0], action)
                 return result[1:]
 
@@ -1067,7 +1247,7 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                     },
                 }
             heat_valid, heat_vout, heat_vmon, heat_imon, heat_tmon = checked(
-                ESIBase.get_heat_ctrl_monitoring(self), "get_heat_ctrl_monitoring"
+                self._get_heat_monitoring_unlocked(timeout, cancel_event), "get_heat_ctrl_monitoring"
             )
             heat_output_voltage, = checked(
                 ESIBase.get_heat_ctrl_output_voltage(self),
@@ -1084,9 +1264,16 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 "get_heat_ctrl_housekeeping",
             )
             heat_configuration = self.get_heat_configuration_unlocked()
-            heat_active = bool(
-                enabled and heat_configuration["target_temperature_c"] > 0.0
+            heat_module_active, = checked(
+                ESIBase.get_module_activation_state(self, self.HEAT_MODULE_ADDRESS),
+                "get_heat_module_active(0)",
             )
+            heat_state = int(module_states[self.HEAT_MODULE_ADDRESS])
+            heat_control_active = bool(heat_state & self.MS_CTRL_ACT)
+            heat_module_gate = bool(heat_state & self.MS_MOD_ACT)
+            heat_device_gate = bool(heat_state & self.MS_DEV_ACT)
+            heat_active = bool(enabled and heat_module_active and heat_module_gate
+                               and heat_device_gate and heat_control_active)
             return {
                 "main_state": {"hex": main_hex, "name": main_name},
                 "data_ready_flags": int(data_flags),
@@ -1115,7 +1302,12 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
                 },
                 "modules": modules,
                 "heat": {
-                    "active": bool(heat_active),
+                    "active": heat_active,
+                    "module_active": bool(heat_module_active),
+                    "module_state": heat_state,
+                    "control_active": heat_control_active,
+                    "module_gate_active": heat_module_gate,
+                    "device_gate_active": heat_device_gate,
                     "valid": bool(heat_valid),
                     "output_voltage_v": float(heat_output_voltage),
                     "heater_power_w": float(heat_power),
@@ -1142,7 +1334,10 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
 
     def get_heat_configuration_unlocked(self) -> dict:
         """Read heat configuration while the caller already owns the DLL lock."""
+        self._raise_if_transport_poisoned()
+
         def checked(result, action):
+            self._raise_if_transport_poisoned()
             self._raise_on_status(result[0], action)
             return result[1:]
 
@@ -1280,23 +1475,27 @@ class _ESIController(TimeoutSafeDllMixin, ESIBase):
         )
 
     def disconnect(self, timeout_s: Optional[float] = None, *, on_discharge=None) -> bool:
-        # A timeout also sets connected=False, but says nothing about the
-        # physical outputs. Never report a confirmed shutdown in that case.
-        self._raise_if_transport_poisoned()
-        if not self.connected:
-            self._release_single_instance()
-            return True
         timeout = self._resolve_timeout(timeout_s)
-        # Do not discard the only way to retry OFF after a failed verification.
-        self.force_safe_off(timeout_s=timeout)
-        self.set_global_active(False, timeout_s=timeout)
-        self._verify_hv_discharge(timeout, on_discharge=on_discharge)
+        initial_open = self._disconnect_failed_open(timeout)
+        if initial_open is not None:
+            return initial_open
+        # A timeout after opening says nothing about the physical outputs.
+        self._raise_if_transport_poisoned()
+        if not self.connected and not self._dll_port_claimed:
+            return True
+        if self.connected:
+            # Keep the owner and output uncertainty if any verification fails.
+            self.force_safe_off(timeout_s=timeout)
+            self.set_global_active(False, timeout_s=timeout)
+            self._verify_hv_discharge(timeout, on_discharge=on_discharge)
+        # A claimed but not yet connected port has not passed identity checks;
+        # no output commands were issued and none may be sent to this device.
         status = self._call_locked_with_timeout(
             ESIBase.close_port, timeout, "close_port", self
         )
         self._raise_on_status(status, "close_port")
         self.connected = False
-        self._release_single_instance()
+        self._set_port_claimed(False)
         return True
 
 
@@ -1316,7 +1515,8 @@ class ESI(ProcessIsolatedClientMixin):
         "list_configs": (20.0, 10.0, 90.0),
         "load_config": (15.0, 10.0, 60.0),
         "save_config": (15.0, 10.0, 60.0),
-        "set_heater_temperature": (4.0, 10.0, 30.0),
+        "set_heater_temperature": (10.0, 10.0, 30.0),
+        "set_output_active": (12.0, 10.0, 45.0),
         "force_safe_off": (8.0, 10.0, 45.0),
         "disconnect": (10.0, 10.0, 60.0),
     }

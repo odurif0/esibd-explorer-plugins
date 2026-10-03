@@ -2,7 +2,7 @@
 
 Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIBD-Explorer).
 
-12 device plugins and one standalone scan plugin.
+13 device plugins and one standalone scan plugin (14 folders).
 
 ## Available Plugins
 
@@ -21,6 +21,10 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 | `amx_b`  | Controls AMX_B timing and displays expected CH0–CH3 signals |
 | `amx_hd` | Controls AMX HD frequency and timer modules |
 | `mscan`  | Scans quadrupole amplitude through AMX-linked PSU channels |
+| `tpg366` | Reads six Pfeiffer TPG 366 pressure inputs over USB |
+
+**TPG366 is not included in v0.2.14.** Until the next release, copy its folder
+from this repository; see [TPG366 setup](tpg366/README.md).
 
 ## Quick Start
 
@@ -44,7 +48,8 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
    ├── amx_a/
    ├── amx_b/
    ├── amx_hd/
-   └── mscan/
+   ├── mscan/
+   └── tpg366/        # source addition, not in v0.2.14
    ```
 
 3. **Enable** the plugins you need in the Plugin Manager.
@@ -55,6 +60,15 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 For amplitude scans, see [MScan](mscan/README.md). Its axis is in volts, without
 m/z calibration. **Stopping a scan does not turn the HV outputs off.**
 
+## Host fixes and hardware validation
+
+`install_explorer_fixes.py` installs the targeted Explorer fixes for small-current
+cursor labels, incomplete channel names and UTF-8 configuration reading. Run it
+with Explorer's Python environment after closing Explorer and its notebooks;
+`--check` is read-only, and the original sources are backed up. It does not open
+instruments. Software validation is separate from the physical checks listed in
+[SOFTWARE_TEST_PLAN.md](SOFTWARE_TEST_PLAN.md).
+
 ## Setpoint entry
 
 Press Enter, Tab, or click outside a numeric field to apply its contents.
@@ -63,6 +77,11 @@ it does not move keyboard focus. OFF stops without first applying a new target.
 Acquisition refreshes do not replace text while you are editing it.
 
 ## ON / OFF
+
+For **TPG366**, ON/OFF starts or stops acquisition and the USB connection.
+It never switches gauges or changes controller settings.
+
+For the other device plugins:
 
 - **ON** connects and runs the configured startup sequence. Check each output's
   readback: ON does not necessarily enable every channel (for example, PSU
@@ -74,6 +93,16 @@ Acquisition refreshes do not replace text while you are editing it.
   active. This button state is not confirmation that outputs are enabled. If a
   DLL call is blocked, make the instrument safe locally and restart Explorer.
 
+A failed initial port opening uses **Connection pending** instead, with the
+DMMR button OFF rather than falsely indicating initialized operation. OFF or
+closing communication cleans up that opening without output commands. The
+driver instance and port reservation remain until the native call has ended
+and closure is confirmed. This confirms port closure, not the hardware output
+state. If opening succeeds after a close request, the plugin runs its normal
+verified shutdown instead of completing initialization.
+A new ON explicitly reconnects after cleanup; a native call that never returns
+or an unconfirmed closure can still require a restart.
+
 For HV devices, a verified disable is **not proof of complete electrical
 discharge**. ESI additionally checks both HV polarities on each module against
 its 1 V shutdown criterion before disconnecting (see `esi/README.md`). This
@@ -84,6 +113,12 @@ safety procedure before touching hardware.
 
 - ESIBD Explorer `1.0.1` on Windows
 
+
+## Notebooks
+
+[DMMR zero check](notebooks/dmmr_zero_check.ipynb): two 6-hour runs with a
+5-minute disconnected pause and temperature/diagnostic logging. Run outside
+Explorer. Standalone notebooks are not included in the plugin release ZIP.
 
 ## Running Tests
 

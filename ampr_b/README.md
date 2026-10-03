@@ -71,8 +71,18 @@ OFF during startup or ramp-up interrupts the ascent after the current hardware
 call, then ramps down from the last accepted/read-back targets before verified
 shutdown. It never raises a channel to its unfinished target before stopping.
 
-After a failed startup or ramp, the plugin verifies disable before closing
-the port. If this fails, `Shutdown unconfirmed` stays visible and the next
+If the initial port opening fails, shutdown or closing communication cleans
+up that opening without output commands. `Connection pending` stays visible
+until the native opening has ended and closure is confirmed. This is port
+cleanup, not confirmation of the HV output state. The backend and port
+reservation are retained in the meantime; a new ON explicitly reconnects
+after cleanup. A call that never returns or a failed closure may still require
+an Explorer restart. This cleanup does not apply to a timeout during operation.
+If Open succeeds after a close request, normal verified shutdown runs instead
+of completing initialization.
+
+Once connected, a failed startup or ramp requires verified disable before
+closing the port. If this fails, `Shutdown unconfirmed` stays visible and the next
 click retries OFF; the button's ON state does not confirm an active output.
 A confirmed OFF does not certify complete electrical discharge.
 

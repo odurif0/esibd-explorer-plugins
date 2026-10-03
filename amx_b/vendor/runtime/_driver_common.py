@@ -127,6 +127,13 @@ class TimeoutSafeDllMixin:
 
     _INSTRUMENT_NAME = "CGC"
 
+    _TRANSPORT_SAFETY_WARNING = (
+        "WARNING: high-voltage outputs may remain energized at their last "
+        "setpoint because this transport can no longer command a disable; "
+        "manually verify outputs are OFF via the hardware interlock / front "
+        "panel before approaching the device."
+    )
+
     def _on_transport_poisoned(self) -> None:
         """Hook for instrument-specific cleanup after a timed-out DLL call.
 
@@ -144,7 +151,8 @@ class TimeoutSafeDllMixin:
             detail = self._transport_error or "unknown transport failure"
             raise RuntimeError(
                 f"{self._INSTRUMENT_NAME} transport is unusable after a timed-out DLL call. "
-                f"{detail} Recreate the {self._INSTRUMENT_NAME} instance before retrying."
+                f"{detail} The old instance cannot be reused. A new connection requires "
+                "confirmed release of its DLL port; never open or close alongside an active call."
             )
 
     def _poison_transport(self, step_name: str):
@@ -152,10 +160,7 @@ class TimeoutSafeDllMixin:
         self._transport_error = (
             f"Timed out during '{step_name}'. "
             "The device may be powered off or unresponsive. "
-            "WARNING: high-voltage outputs may remain energized at their last "
-            "setpoint because this transport can no longer command a disable; "
-            "manually verify outputs are OFF via the hardware interlock / front "
-            "panel before approaching the device."
+            f"{self._TRANSPORT_SAFETY_WARNING}"
         )
         self.connected = False
         logger = getattr(self, "logger", None)
@@ -181,6 +186,7 @@ class TimeoutSafeDllMixin:
         release_lock = True
         thread = None
         try:
+            self._raise_if_transport_poisoned()
             result_queue = queue.Queue(maxsize=1)
 
             def runner():
@@ -194,6 +200,10 @@ class TimeoutSafeDllMixin:
             thread.join(timeout_s)
             if thread.is_alive():
                 release_lock = False
+                self._pending_dll_call = {
+                    'thread': thread, 'results': result_queue, 'step': step_name,
+                    'cleanup_lock': threading.Lock(),
+                }
                 self._poison_transport(step_name)
                 raise RuntimeError(
                     f"{self._INSTRUMENT_NAME} DLL call timed out during '{step_name}'. "
@@ -213,9 +223,155 @@ class TimeoutSafeDllMixin:
             if thread is not None and thread.is_alive():
                 release_lock = False
                 if not self._transport_poisoned:
+                    self._pending_dll_call = {
+                        'thread': thread, 'results': result_queue, 'step': step_name,
+                        'cleanup_lock': threading.Lock(),
+                    }
                     self._poison_transport(step_name)
             if release_lock:
                 self.thread_lock.release()
+
+    def _call_initial_open(self, open_port, close_port, timeout_s, *args):
+        """Reserve a native channel and track an open-only rollback callback.
+
+        The caller finishes its entire connect sequence with
+        _finish_initial_open() in finally. close_port takes no arguments and
+        returns a native status, not bool; it sends no output/configuration commands.
+        """
+        self._raise_if_transport_poisoned()
+        self._reserve_open_port(timeout_s)
+        self._failed_open_close = close_port
+        self._open_failed = False
+        self._failed_open_released = False
+        self._failed_open_cleanup_outcome = None
+        entered = threading.Event()
+        @functools.wraps(open_port)
+        def tracked_open(*open_args):
+            entered.set()
+            started = time.monotonic()
+            result = open_port(*open_args)
+            self.logger.info('Initial open_port returned %r after %.3f s.',
+                             result, time.monotonic() - started)
+            return result
+        try:
+            status = self._call_locked_with_timeout(tracked_open, timeout_s, 'open_port', *args)
+        except BaseException:
+            self._open_failed = True
+            # A lock/start failure before a worker could enter the DLL owns no
+            # native handle. A live worker, even not yet scheduled, is poisoned
+            # by _call_locked_with_timeout and must retain its reservation.
+            if not entered.is_set() and not self._transport_poisoned:
+                self._open_failed = False
+                self._failed_open_released = True
+                self._set_port_claimed(False)
+            raise
+        self._open_failed = status != self.NO_ERR
+        return status
+
+    def _connection_is_ready(self):
+        """Do not publish a connection while its setup still owns the channel."""
+        with self._active_connections_lock:
+            if getattr(self, '_opening_in_progress', False):
+                raise RuntimeError(f'{self._INSTRUMENT_NAME} connection is already in progress.')
+            return bool(self.connected)
+
+    def _finish_initial_open(self):
+        with self._active_connections_lock:
+            if getattr(self, '_opening_caller', None) is threading.current_thread():
+                self._opening_in_progress = False
+                self._opening_caller = None
+
+    def _disconnect_failed_open(self, timeout_s):
+        """Return None for a normal connection, otherwise a rollback result.
+
+        This confirms only release of an initial connection, never output OFF.
+        No command-timeout recovery or automatic output reactivation is allowed.
+        """
+        if getattr(self, '_opening_in_progress', False):
+            return False
+        if getattr(self, '_failed_open_released', False):
+            return True
+        if not getattr(self, '_open_failed', False):
+            return None
+        guard = self._failed_open_guard
+        if not guard.acquire(blocking=False):
+            return False
+        try:
+            if getattr(self, '_failed_open_released', False):
+                return True
+            if self._transport_poisoned:
+                released = self._close_completed_open(self._failed_open_close, timeout_s)
+            else:
+                status = self._call_locked_with_timeout(
+                    self._failed_open_close, timeout_s, 'close_failed_open')
+                self._failed_open_cleanup_outcome = ('result', status)
+                released = status == self.NO_ERR
+            if released:
+                self._failed_open_released = True
+                self._open_failed = False
+                self.connected = False
+                self._set_port_claimed(False)
+                self.logger.info('%s failed opening finished; serial-port closure confirmed.', self._INSTRUMENT_NAME)
+            else:
+                self.logger.warning('%s failed opening retained; port closure unconfirmed (%r).',
+                                    self._INSTRUMENT_NAME,
+                                    getattr(self, '_failed_open_cleanup_outcome', 'worker pending'))
+            return released
+        except Exception as exc:
+            self.logger.warning('%s initial-opening cleanup not confirmed: %s', self._INSTRUMENT_NAME, exc)
+            return False
+        finally:
+            guard.release()
+
+    def _close_completed_open(self, close_port, timeout_s):
+        """Retire an abandoned initial open; never rearm its poisoned instance.
+
+        The caller must establish that initialization never passed open_port.
+        The old I/O lock stays held. Only the native close is allowed, and only
+        after the original worker (including its diagnostic wrapper) has exited.
+        A read/enable timeout does not qualify, even after its worker returns.
+        """
+        call = getattr(self, '_pending_dll_call', None)
+        if call is None or call['step'] not in ('open_port', 'close_failed_open'):
+            return False
+        guard = call['cleanup_lock']
+        if not guard.acquire(blocking=False):
+            return False
+        try:
+            if self._pending_dll_call is not call or call['thread'].is_alive():
+                return False
+            if call['step'] == 'close_failed_open':
+                # A close that returned late is checked, not sent a second time.
+                if 'outcome' not in call:
+                    try:
+                        call['outcome'] = call['results'].get_nowait()
+                    except queue.Empty:
+                        return False
+                self._failed_open_cleanup_outcome = call['outcome']
+                return call['outcome'] == ('result', self.NO_ERR)
+
+            results = queue.Queue(maxsize=1)
+            def close_runner():
+                try:
+                    results.put(('result', close_port()))
+                except Exception as exc:
+                    results.put(('error', exc))
+            worker = threading.Thread(target=close_runner, daemon=True)
+            cleanup = {'thread': worker, 'results': results,
+                       'step': 'close_failed_open', 'cleanup_lock': guard}
+            self._pending_dll_call = cleanup
+            worker.start()
+            worker.join(timeout_s)
+            if worker.is_alive():
+                return False
+            try:
+                cleanup['outcome'] = results.get_nowait()
+            except queue.Empty:
+                return False
+            self._failed_open_cleanup_outcome = cleanup['outcome']
+            return cleanup['outcome'] == ('result', self.NO_ERR)
+        finally:
+            guard.release()
 
     def _call_locked(self, method, *args, **kwargs):
         self._raise_if_transport_poisoned()
@@ -252,9 +408,10 @@ class DllPortClaimRegistryMixin:
             cls._purge_stale_connections()
             cls._active_connections[id(self)] = {
                 "ref": weakref.ref(self),
+                "owner": self,  # Retain the handle's owner even if a UI drops it.
                 "device_id": self.device_id,
                 "com": self.com,
-                "port": self.port_num,
+                "port": getattr(self, 'port_num', 0),
             }
 
     def _unregister_connected_instance(self):
@@ -263,7 +420,40 @@ class DllPortClaimRegistryMixin:
             cls._active_connections.pop(id(self), None)
             cls._purge_stale_connections()
 
+    def _reserve_open_port(self, timeout_s):
+        """Atomically reserve one DLL channel, retiring only failed initial opens."""
+        cls = type(self)
+        port = getattr(self, 'port_num', 0)
+        for attempt in range(2):
+            with cls._active_connections_lock:
+                cls._purge_stale_connections()
+                owners = [entry['ref']() for entry in cls._active_connections.values()
+                          if entry['port'] == port]
+                if not owners:
+                    self._dll_port_claimed = True
+                    self._opening_in_progress = True
+                    self._opening_caller = threading.current_thread()
+                    self._failed_open_guard = threading.Lock()
+                    cls._active_connections[id(self)] = {
+                        'ref': weakref.ref(self), 'owner': self,
+                        'device_id': self.device_id, 'com': self.com, 'port': port,
+                    }
+                    return
+            # Do not hold the registry mutex across any DLL call. The old
+            # attempt has its own cleanup guard; competing opens recheck above.
+            if (attempt == 0 and len(owners) == 1 and owners[0] is not self
+                    and getattr(owners[0], '_open_failed', False)
+                    and owners[0]._disconnect_failed_open(timeout_s) is True):
+                continue
+            raise RuntimeError(
+                f'{self._INSTRUMENT_NAME} DLL port {port} is still reserved by a previous connection. '
+                'No new open was attempted; its opening/closure must finish first.')
+
     def _set_port_claimed(self, claimed: bool):
+        if getattr(self, '_transport_poisoned', False):
+            released = getattr(self, '_failed_open_released', False)
+            if (not claimed and not released) or (claimed and released):
+                return  # Neither discard an uncertain owner nor resurrect a retired one.
         self._dll_port_claimed = bool(claimed)
         if self._dll_port_claimed:
             self._register_connected_instance()

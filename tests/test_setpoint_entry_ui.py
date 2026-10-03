@@ -62,7 +62,11 @@ def probe(folder, surface, output, *, actions=False):
     device.frequency_khz = 2.0
     device.print = lambda *args, **kw: None
     device.controller = SimpleNamespace(device=object(), initialized=True, initializing=False,
-                                        transitioning=False, global_enabled=True)
+                                        transitioning=False, global_enabled=True, main_state="STATE_ON",
+                                        heat_max_temperature_c=float('nan'), heat_max_power_w=float('nan'),
+                                        heat_temperature_error="", heat_power_error="", heat_power_limit_w=50.,
+                                        heat_stability_status=lambda: dict(state="Unavailable", slope_c_min=None,
+                                                                          span_s=0., expires_at_s=None))
     calls = []
     device.channels = [SimpleNamespace(
         name=f"CH{i}", real=True, enabled=True, active=True, display=True, value=0.,

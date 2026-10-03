@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from .._driver_common import (
+    DllPortClaimRegistryMixin,
     ProcessIsolatedClientMixin,
     TimeoutSafeDllMixin,
     build_device_logger,
@@ -82,7 +83,7 @@ def _resolve_module_capabilities(
         capabilities["channel_count"] = _parse_module_channel_count(product_id)
     return capabilities
 
-class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
+class _AMPRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMPRBase):
     """
     AMPR device communication class with logging functionality.
 
@@ -109,6 +110,8 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
 
     _INSTRUMENT_NAME = "AMPR"
     _DEFAULT_IO_TIMEOUT_S = 5.0
+    _active_connections_lock = threading.Lock()
+    _active_connections: dict[int, dict[str, object]] = {}
 
     def __init__(
         self,
@@ -143,6 +146,9 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
         self.baudrate = baudrate
         self.hk_interval_s = hk_interval_s
         
+        # AMPR has one implicit native channel, even across different COM ports.
+        self.port_num = 0
+        self._dll_port_claimed = False
         # Connection status
         self.connected = False
         self._transport_poisoned = False
@@ -228,7 +234,9 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             )
             return
 
-        if close_status != self.NO_ERR:
+        if close_status == self.NO_ERR:
+            self._set_port_claimed(False)
+        else:
             self.logger.warning(
                 f"AMPR port rollback after {reason} also failed: "
                 f"{self.format_status(close_status)}"
@@ -252,9 +260,11 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
 
     def connect(self, timeout_s: float = 5.0) -> bool:
         """Connect to the AMPR device."""
+        already_connected = self._connection_is_ready()
+        initial_open_returned = False
         close_port = None
         try:
-            if self.connected:
+            if already_connected:
                 self.logger.info(
                     f"AMPR device {self.device_id} is already connected; skipping open_port"
                 )
@@ -266,9 +276,10 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             set_baud_rate = super().set_baud_rate
             close_port = super().close_port
 
-            status = self._call_locked_with_timeout(
-                open_port, timeout_s, "open_port", self.com
+            status = self._call_initial_open(
+                open_port, close_port, timeout_s, self.com
             )
+            initial_open_returned = True
 
             if status == self.NO_ERR:
                 self.connected = True
@@ -305,17 +316,25 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             )
                 
         except Exception as e:
-            if close_port is not None and self.connected and not self._transport_poisoned:
-                self._rollback_connect_failure(
-                    close_port, timeout_s, "connect verification failure"
-                )
+            # A refused reservation belongs to another connect caller. It
+            # must not close or reset that caller's successful connection.
+            if initial_open_returned:
+                if close_port is not None and self.connected and not self._transport_poisoned:
+                    self._rollback_connect_failure(
+                        close_port, timeout_s, "connect verification failure"
+                    )
+                self.connected = False
             self.logger.error(f"Connection error: {e}")
-            self.connected = False
             raise
+        finally:
+            self._finish_initial_open()
 
     def disconnect(self) -> bool:
         """Disconnect from the AMPR device."""
         try:
+            initial_open = self._disconnect_failed_open(self._resolve_io_timeout(None))
+            if initial_open is not None:
+                return initial_open
             self.stop_housekeeping()
             
             self.logger.info(f"Disconnecting AMPR device {self.device_id}")
@@ -327,7 +346,7 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
                     "after a timed-out DLL call. Recreate the AMPR instance."
                 )
                 return False
-            if not self.connected:
+            if not self.connected and not self._dll_port_claimed:
                 return True
 
             status = self._call_locked_with_timeout(
@@ -338,6 +357,7 @@ class _AMPRController(TimeoutSafeDllMixin, AMPRBase):
             
             if status == self.NO_ERR:
                 self.connected = False
+                self._set_port_claimed(False)
                 self.logger.info(f"Successfully disconnected AMPR device {self.device_id}")
                 return True
 

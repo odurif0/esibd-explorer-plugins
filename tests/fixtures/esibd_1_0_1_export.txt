@@ -1,0 +1,86 @@
+# ESIBD Explorer 1.0.1 — exact export methods, without @synchronized.
+# Copyright (C) 2021-2026 Tim Esser <ioneater.dev@gmail.com>.
+# SPDX-License-Identifier: GPL-2.0-or-later (license text: ../../mscan/LICENSE)
+# Source: https://pypi.org/project/esibd-explorer/1.0.1/
+# Wheel SHA256: 6fc04fef5234b082b79b128b43427a0d618d13835f22eb6cdc9a3dc2f152eba7
+# Offline regression fixture; compiled by AST, not imported as a host.
+class Device:
+    def exportOutputData(self, useDefaultFile: bool = False, useAllHistory: bool = False) -> None:
+        """Export output data.
+
+        :param useDefaultFile: Add configuration to default file, defaults to False
+        :type useDefaultFile: bool, optional
+        :param useAllHistory: Export entire history and not just visible part, defaults to False
+        :type useAllHistory: bool, optional
+        """
+        if not self.liveDisplay:
+            return
+        if useAllHistory:
+            time_axis = self.time.get()
+            if time_axis.shape[0] == 0:
+                return  # no data to save
+        if useDefaultFile:
+            self.file = Path(self.pluginManager.Settings.configPath) / self.confh5.strip('_')
+        else:
+            self.pluginManager.Settings.incrementMeasurementNumber()
+            self.file = self.pluginManager.Settings.getMeasurementFileName(self.liveDisplay.previewFileTypes[0])
+        with h5py.File(name=self.file, mode='w' if useDefaultFile else 'a', track_order=True) as h5File:
+            self.hdfUpdateVersion(h5File)
+            self.appendOutputData(h5File, useAllHistory=useAllHistory)
+        self.print(f'Stored data in {self.file.name}')
+        if useDefaultFile:
+            self.exportConfiguration(file=self.file)
+        else:
+            self.pluginManager.DeviceManager.exportConfiguration(file=self.file)  # save corresponding device settings in measurement file
+            self.pluginManager.Explorer.populateTree()
+
+    def appendOutputData(self, h5file: h5py.File, useAllHistory: bool = False) -> None:
+        """Append :class:`~esibd.plugins.Device` data to hdf file.
+
+        :param h5file: The file to which append the data.
+        :type h5file: h5py.File
+        :param useAllHistory: Export entire history and not just visible part, defaults to False
+        :type useAllHistory: bool, optional
+        """
+        if not self.liveDisplay:
+            return
+        fullRange = True
+        group = self.requireGroup(h5file, self.name)  # , track_order=True
+        time_axis = self.time.get()
+        i_min = None
+        i_max = None
+        if not useAllHistory and time_axis.shape[0] > 0 and len(self.liveDisplay.livePlotWidgets) > 0:
+            # Only save currently visible data (specific regions of interest).
+            # Otherwise history of last few days might be added to files, making it hard to find the region of interest.
+            # Complete data can still be exported if needed by displaying entire history before exporting.
+            # if default == True: save entire history to default file for restoring on next start
+            t_min, t_max = cast('PlotItem | PlotWidget', self.liveDisplay.livePlotWidgets[0]).getAxis('bottom').range
+            i_min = np.argmin(np.abs(time_axis - t_min))
+            i_max = np.argmin(np.abs(time_axis - t_max))
+            fullRange = False
+        input_group = self.requireGroup(group, INPUTCHANNELS)
+        try:
+            # need double precision to keep all decimal places
+            input_group.create_dataset(self.TIME, data=time_axis[i_min:i_max] if not fullRange and i_min and i_max else time_axis, dtype=np.float64, track_order=True)
+        except ValueError as e:
+            self.print(f'Could not create data set. If the file already exists, make sure to increase the measurement number and try again. Original error: {e}', flag=PRINT.ERROR)
+            return
+        output_group = self.requireGroup(group, OUTPUTCHANNELS)
+        # avoid using getValues() function and use get() to make sure raw data, without background subtraction or unit correction etc. is saved in file
+        for channel in self.getDataChannels():
+            if channel.name in output_group:
+                self.print(f'Ignoring duplicate channel {channel.name}', flag=PRINT.WARNING)
+                continue
+            value_dataset = output_group.create_dataset(channel.name, data=channel.values.get()[i_min:i_max] if not fullRange and i_min and i_max
+                                                        else channel.values.get(), dtype='f')
+            value_dataset.attrs[UNIT] = self.unit
+            if self.useBackgrounds:
+                # Note: If data format will be changed in future (ensuring backwards compatibility), consider saving single 2D data set with data and background instead.
+                background_dataset = output_group.create_dataset(f'{channel.name}_BG', data=channel.backgrounds.get()[i_min:i_max] if not fullRange and i_min and i_max
+                                                                 else channel.backgrounds.get(), dtype='f')
+                background_dataset.attrs[UNIT] = self.unit
+            for parameter in channel.getRecordedParameters():
+                parameter_dataset = output_group.create_dataset(f'{channel.name}.{parameter.name}', data=parameter.values.get()[i_min:i_max] if not fullRange and i_min and i_max
+                                                                 else parameter.values.get(), dtype='f')
+                parameter_dataset.attrs[UNIT] = parameter.unit
+

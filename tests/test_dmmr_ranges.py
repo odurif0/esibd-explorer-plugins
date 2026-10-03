@@ -70,11 +70,16 @@ def test_on_applies_each_module_choice_then_verifies_it(rig, fixed):
     rig.channels[1]._requested_range_mode = str(fixed)
     rig.controller.toggleOn()
     assert rig.controller.acquiring
-    assert rig.hardware.calls[:7] == [
+    expected = [
         ("enable", True), ("automatic", False),
-        ("auto_range", 0, True), ("range_readback", 0),
-        ("auto_range", 3, False), ("fixed_range", 3, fixed), ("range_readback", 3),
+        ("range_readback", 0), ("range_readback", 3),
+        ("auto_range", 3, False), ("range_readback", 3),
     ]
+    if fixed != 4:
+        expected += [("fixed_range", 3, fixed), ("range_readback", 3)]
+    assert rig.hardware.calls[:len(expected)] == expected
+    assert ("auto_range", 0, True) not in rig.hardware.calls
+    assert rig.hardware.calls.count(("fixed_range", 3, fixed)) == int(fixed != 4)
     assert rig.channels[1]._requested_range_mode == str(fixed)
     assert rig.hardware.modes == {0: True, 3: False}
     # An automatic range can legitimately differ from the fixed module's range.
@@ -85,6 +90,7 @@ def test_on_applies_each_module_choice_then_verifies_it(rig, fixed):
                                     "wrong_auto", "wrong_range", "invalid_range"])
 def test_unconfirmed_range_aborts_on_and_verifies_off(rig, failure):
     rig.hardware.failure = failure
+    rig.channels[1]._requested_range_mode = '0'  # A real change, not a redundant write.
     rig.controller.toggleOn()
     assert not rig.controller.acquiring
     assert not rig.hardware.enabled
@@ -129,7 +135,9 @@ def test_poll_keeps_range_from_the_same_reply_not_the_requested_range(rig):
     assert rig.controller.measurementSnapshot()[2] is not token
 
 
-@pytest.mark.parametrize("bad", [(-12, 1e-12, 2), (0, np.nan, 0), (0, np.inf, 0),
+# Transport receive faults invalidate the whole poll and are covered by
+# test_dmmr_transient_reads; malformed individual samples stay module-local.
+@pytest.mark.parametrize("bad", [(0, np.nan, 0), (0, np.inf, 0),
                                  (0, 1e-12, 5), (0, 1e-12, -1), (0, 1e-12, True),
                                  TimeoutError("busy")])
 def test_bad_sample_invalidates_both_current_and_range_without_losing_other_modules(rig, bad):

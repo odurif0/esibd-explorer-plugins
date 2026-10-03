@@ -56,7 +56,7 @@ _DMMR_INITIAL_HISTORY_POINTS = 100_000
 _DMMR_MIN_ROW_HEIGHT = 28
 _DMMR_COMMUNICATION_LOST_STATE = "Communication lost"
 _DMMR_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
-_DMMR_ATTENTION_STATE_TOKENS = ("error", "unconfirmed", "lost")
+_DMMR_ATTENTION_STATE_TOKENS = ("error", "unconfirmed", "lost", "pending")
 _DMMR_TRANSPORT_FAILURE_THRESHOLD = 3
 _DMMR_POWER_ON_ICON = "switch-medium_on.png"
 _DMMR_POWER_OFF_ICON = "switch-medium_off.png"
@@ -113,6 +113,14 @@ _DMMR_PANEL_BADGE_OFF_STYLE = "color: #a8b3c4; font-size: 11px;"
 _DMMR_PANEL_EMPTY_STYLE = "color: #718096; font-style: italic; padding: 8px 0px;"
 _DMMR_PANEL_CARD_MIN_WIDTH = 180
 _DMMR_PANEL_CARD_MAX_WIDTH = 210
+
+
+def _initial_open_incomplete(device: Any) -> bool:
+    """Only a tracked initial open permits cleanup without acquisition shutdown."""
+    return device is not None and any(
+        bool(getattr(device, name, False))
+        for name in ('_open_failed', '_opening_in_progress', '_failed_open_released')
+    )
 
 
 def _valid_measurement_range(value: Any) -> bool:
@@ -189,24 +197,18 @@ def _transport_failure_is_fatal(exc: Exception) -> bool:
     )
 
 
-# A timed-out open_port poisons the COM port for the lifetime of the ESIBD
-# Explorer process: the blocked vendor-DLL call keeps an exclusive OS handle, so
-# no new instance can reopen it and every later retry fails with ERR_OPEN (-2)
-# even once the device is powered on. The operator-facing guidance below makes
-# that explicit instead of letting the user loop on a confusing
-# 'Error opening port' message while the hardware is actually fine.
+# Fallback when no safely retireable initial-open record is available. A
+# returned initial open can be closed; a still-blocked call or a timeout during
+# acquisition must not be bypassed by creating another instance.
 _DMMR_POISONED_PORT_RECOVERY = (
-    "The COM port is now locked inside this ESIBD Explorer process: the timed-out "
-    "attempt left a blocked vendor-DLL call holding an exclusive handle to the port. "
-    "This instance can no longer reopen it, so every later retry will keep failing "
-    "with 'Error opening port' (-2) even once the device is powered on. Power the "
-    "device on, then RESTART ESIBD Explorer to release the port before trying again."
+    "The timed-out transport cannot safely be reused; port closure is not confirmed. "
+    "Do not force a parallel open or close. If the initial opening cannot be safely "
+    "retired, check the hardware state, then RESTART ESIBD Explorer."
 )
 _DMMR_POISONED_PORT_RETRY = (
-    "This retry is failing because an earlier timed-out connection attempt locked "
-    "the COM port inside this ESIBD Explorer process. The device may well be powered "
-    "on now, but the port cannot be reopened from this instance. RESTART ESIBD "
-    "Explorer to release the port and retry."
+    "An earlier timeout left this COM port without confirmed closure. Powering the "
+    "device on does not itself release the connection. If controlled cleanup cannot "
+    "confirm closure, check the hardware state, then RESTART ESIBD Explorer."
 )
 
 
@@ -218,11 +220,8 @@ def _dmmr_poisoned_port_guidance(
 ) -> str:
     """Return operator guidance for a failed DMMR init, or "" when none applies.
 
-    A timed-out open_port poisons the COM port for the lifetime of the process
-    (the blocked vendor-DLL thread keeps an exclusive OS handle), so no new
-    instance can reopen it and every retry fails with ERR_OPEN (-2). Surface
-    that instead of letting the operator loop on a confusing 'Error opening
-    port' while the hardware is actually fine.
+    Restart is a fallback, not an assertion that every timeout leaves a live
+    worker. Tracked initial-open cleanup is handled by _init_failure_guidance.
     """
     if _transport_failure_is_fatal(exc):
         return _DMMR_POISONED_PORT_RECOVERY
@@ -805,7 +804,7 @@ class DMMRDevice(Device):
     )
 
     name = "DMMR"
-    version = "0.1.0"
+    version = "0.1.1"
     supportedVersion = "1.0.1"
     pluginType = PLUGINTYPE.INPUTDEVICE
     unit = "A"
@@ -1942,22 +1941,26 @@ class DMMRDevice(Device):
                 if buffer is not None:
                     buffer.max_size = limit
 
-    def appendOutputData(self, h5file, useDefaultFile: bool = False) -> None:
+    def appendOutputData(self, h5file, useAllHistory: bool | None = None, *, useDefaultFile: bool = False) -> None:
         """Keep Explorer's current datasets and add a parallel range history."""
+        # Explorer 1.0.1 renamed this history-selection argument. The old
+        # keyword remains accepted, but an explicit useAllHistory takes priority.
+        full_history = useDefaultFile if useAllHistory is None else useAllHistory
         from esibd.const import INPUTCHANNELS, OUTPUTCHANNELS
 
         time_path = f"{self.name}/{INPUTCHANNELS}/{self.TIME}"
         already_saved = time_path in h5file
         output_path = f"{self.name}/{OUTPUTCHANNELS}"
         existing = set(h5file[output_path]) if output_path in h5file else set()
-        super().appendOutputData(h5file, useDefaultFile=useDefaultFile)
+        # The second positional argument has the same meaning on both hosts.
+        super().appendOutputData(h5file, full_history)
         if already_saved or time_path not in h5file:
             return
         # Match the host's selection exactly, including its full-history fallback
         # when either endpoint is zero. Never crop ranges differently to currents.
         selection = slice(None)
         time_axis = self.time.get()
-        if not useDefaultFile and time_axis.size and self.liveDisplay.livePlotWidgets:
+        if not full_history and time_axis.size and self.liveDisplay.livePlotWidgets:
             t_min, t_max = self.liveDisplay.livePlotWidgets[0].getAxis("bottom").range
             i_min = int(np.argmin(np.abs(time_axis - t_min)))
             i_max = int(np.argmin(np.abs(time_axis - t_max)))
@@ -2254,13 +2257,18 @@ class DMMRDevice(Device):
         shutdown_confirmed = True
         if self.controller:
             shutdown_confirmed = bool(self.controller.shutdownCommunication())
+        pending = _initial_open_incomplete(getattr(self.controller, 'device', None))
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = False if shutdown_confirmed else True
+            # Initial connection ownership is not a confirmed acquisition ON.
+            self.onAction.state = not shutdown_confirmed and not pending
             self._sync_local_on_action()
             self._sync_toolbar_communication_controls()
             self._update_status_widgets()
         if not shutdown_confirmed:
             self.print(
+                "DMMR connection cleanup is pending; use Disconnect to retry closure "
+                "or ON to clean up before reconnecting after the DLL call returns."
+                if pending else
                 "DMMR shutdown could not be confirmed; UI remains ON until the hardware state is verified.",
                 flag=PRINT.WARNING,
             )
@@ -2291,6 +2299,12 @@ class DMMRDevice(Device):
         """Toggle the DMMR without relying on a channel apply path."""
         controller = self.controller if hasattr(self, "controller") else None
         current_state = self.isOn() if hasattr(self, "onAction") else False
+        requested_on = current_state if on is None else bool(on)
+        if (not requested_on and not getattr(self, 'loading', False)
+                and (_initial_open_incomplete(getattr(controller, 'device', None))
+                     or (getattr(controller, 'initializing', False) and controller.device is None))):
+            self.shutdownCommunication()
+            return
         transition_target = getattr(controller, "transition_target_on", None)
         if controller and (
             getattr(controller, "initializing", False)
@@ -2704,8 +2718,8 @@ class DMMRController(DeviceController):
         self._close_lock = Lock()
         self._forced_close_state: str | None = None
         self._consecutive_transport_failures = 0
-        # COM port (if any) whose transport was poisoned by a timed-out DLL call
-        # earlier in this session and is therefore still locked in-process.
+        # Last timed-out COM port, until its closure is positively confirmed.
+        # This cache alone cannot establish whether a native worker is still alive.
         self._poisoned_com: int | None = None
         self._sample_lock = RLock()
         self.meas_ranges: dict[int, float] = {}
@@ -2736,31 +2750,104 @@ class DMMRController(DeviceController):
         values[module] = float(current)
         ranges[module] = int(meas_range)
 
-    def _configure_module_ranges(self, device, modules, timeout_s: float) -> None:
+    def _new_command_recovery(self, device, timeout_s: float, phase: str):
+        factory = getattr(device, 'new_command_recovery', None)
+        if not callable(factory):
+            return None  # An old/incomplete backend fails closed on a receive error.
+        return factory(
+            phase=phase, timeout_s=timeout_s,
+            continue_check=lambda: self.device is device and (
+                phase != 'startup' or self.controllerParent.isOn()),
+        )
+
+    def _startup_call(self, device, name, *args, timeout_s: float, recovery=None):
+        if recovery is not None:
+            recovery._active()
+        elif getattr(device, '_transport_poisoned', False):
+            raise RuntimeError('DLL blocked; startup cancelled.')
+        result = getattr(device, name)(*args, timeout_s=timeout_s)
+        if recovery is not None:
+            recovery._active()
+        elif getattr(device, '_transport_poisoned', False):
+            raise RuntimeError('DLL blocked; startup cancelled.')
+        return result
+
+    def _recover_startup_command(self, device, recovery, status, action, verify):
+        if recovery is None or status not in (-10, -11, -12, -13):
+            raise RuntimeError(f'{action} failed: {self._format_status(status, device=device)}')
+        self.print(f'DMMR startup receive error in {action}: {status}; checking hardware readbacks.', flag=PRINT.WARNING)
+        result = recovery.recover(status, action, verify)
+        self.print(f'Recovered DMMR startup after {action}: {status}; hardware readbacks verified.', flag=PRINT.WARNING)
+        return result
+
+    def _validate_startup_range(self, device, address, auto, fixed, result):
+        status, used_range, auto_readback = result
+        if (status != device.NO_ERR or type(auto_readback) is not bool
+                or (auto is not None and auto_readback is not auto)
+                or not _valid_measurement_range(used_range)
+                or (fixed is not None and used_range != fixed)):
+            raise RuntimeError(
+                f'Range not confirmed for module {address}: requested auto={auto}, fixed={fixed}, '
+                f'read range={used_range!r}, auto={auto_readback!r}, status={self._format_status(status, device=device)}')
+        return result
+
+    def _verify_startup_ranges(self, device, recovery):
+        state_reply = recovery.verify_running()
+        # Check settings confirmed before the fault too. Auto ranges may move.
+        for address, (value, automatic) in self._verified_read_ranges.items():
+            result = (device.NO_ERR, *recovery._call('get_module_meas_range', address))
+            self._validate_startup_range(device, address, automatic, None if automatic else value, result)
+        return state_reply
+
+    def _configure_module_ranges(self, device, modules, timeout_s: float, *, recovery=None) -> None:
+        self._read_recovery = None
+        self._verified_read_ranges = {}
         requested = {
-            channel.module_address(): getattr(channel, "_requested_range_mode", "Auto")
+            channel.module_address(): getattr(channel, '_requested_range_mode', 'Auto')
             for channel in self.controllerParent.getChannels() if channel.real
         }
+
+        def recover_range(status, action, address, auto, fixed=None):
+            def verify():
+                self._verify_startup_ranges(device, recovery)
+                result = (device.NO_ERR, *recovery._call('get_module_meas_range', address))
+                return self._validate_startup_range(device, address, auto, fixed, result)
+            return self._recover_startup_command(device, recovery, status, action, verify)
+
+        def readback(module, auto=None, fixed=None):
+            result = self._startup_call(device, 'get_module_meas_range', module,
+                                        timeout_s=timeout_s, recovery=recovery)
+            if result[0] != device.NO_ERR:
+                result = recover_range(result[0], f'get_module_meas_range({module})', module, auto, fixed)
+            return self._validate_startup_range(device, module, auto, fixed, result)
+
         for module in modules:
-            mode = requested.get(module, "Auto")
+            mode = requested.get(module, 'Auto')
             if mode not in _DMMR_RANGE_MODES:
-                raise ValueError(f"Invalid range mode for module {module}: {mode!r}")
-            auto = mode == "Auto"
-            status = device.set_module_auto_range(module, auto, timeout_s=timeout_s)
-            if status != device.NO_ERR:
-                raise RuntimeError(f"set_module_auto_range({module}, {auto}) failed: {self._format_status(status, device=device)}")
-            if not auto:
-                status = device.set_module_meas_range(module, int(mode), timeout_s=timeout_s)
+                raise ValueError(f'Invalid range mode for module {module}: {mode!r}')
+            auto = mode == 'Auto'
+            fixed = None if auto else int(mode)
+            # Read the hardware, not a cached setting. Rewriting an unchanged
+            # range needlessly exposes startup to the vendor's malformed ACKs.
+            result = readback(module)
+            if result[2] is not auto:
+                status = self._startup_call(device, 'set_module_auto_range', module, auto,
+                                            timeout_s=timeout_s, recovery=recovery)
                 if status != device.NO_ERR:
-                    raise RuntimeError(f"set_module_meas_range({module}, {mode}) failed: {self._format_status(status, device=device)}")
-            status, used_range, auto_readback = device.get_module_meas_range(module, timeout_s=timeout_s)
-            if (status != device.NO_ERR or auto_readback is not auto
-                    or not _valid_measurement_range(used_range)
-                    or (not auto and used_range != int(mode))):
-                raise RuntimeError(
-                    f"Range not confirmed for module {module}: requested {mode}, "
-                    f"read range={used_range!r}, auto={auto_readback!r}, status={self._format_status(status, device=device)}"
-                )
+                    result = recover_range(status, f'set_module_auto_range({module}, {auto})', module, auto)
+                else:
+                    result = readback(module, auto)
+            # Auto ranging may have moved since the first read. Use the readback
+            # after manual mode was confirmed, not the old range number.
+            if not auto and result[1] != fixed:
+                status = self._startup_call(device, 'set_module_meas_range', module, fixed,
+                                            timeout_s=timeout_s, recovery=recovery)
+                if status != device.NO_ERR:
+                    result = recover_range(status, f'set_module_meas_range({module}, {mode})', module, auto, fixed)
+                else:
+                    result = readback(module, auto, fixed)
+            _, used_range, auto_readback = self._validate_startup_range(device, module, auto, fixed, result)
+            self._verified_read_ranges[module] = (used_range, auto_readback)
 
     def _measurement_modules(self) -> list[int]:
         configured_modules_getter = getattr(self.controllerParent, "getConfiguredModules", None)
@@ -2784,19 +2871,12 @@ class DMMRController(DeviceController):
             )
         return sorted(configured_modules)
 
-    def _wrong_command_status(self, status: Any, device: Any | None = None) -> bool:
-        device = self.device if device is None else device
-        if device is None:
-            return False
-        wrong_command = getattr(device, "ERR_COMMAND_WRONG", None)
-        return wrong_command is not None and status == wrong_command
-
     def _disable_automatic_current_for_module_polling(
         self,
         *,
         timeout_s: float,
-        log_warning: bool = False,
         device: Any | None = None,
+        recovery=None,
     ) -> bool:
         """Force the controller back to manual module polling mode.
 
@@ -2812,58 +2892,81 @@ class DMMRController(DeviceController):
         if not callable(disable_automatic):
             return False
 
-        status = disable_automatic(False, timeout_s=timeout_s)
-        if status != getattr(device, "NO_ERR", status):
-            raise RuntimeError(
-                "set_automatic_current(False) failed: "
-                f"{self._format_status(status, device=device)}"
-            )
+        status = self._startup_call(device, 'set_automatic_current', False,
+                                    timeout_s=timeout_s, recovery=recovery)
+        if status != device.NO_ERR:
+            self._recover_startup_command(device, recovery, status, 'set_automatic_current(False)',
+                                          lambda: recovery.verify_running())
 
-        if log_warning:
-            self.print(
-                "DMMR automatic current mode was active; switched back to "
-                "manual module polling.",
-                flag=PRINT.WARNING,
-            )
+        status, enabled = self._startup_call(device, 'get_automatic_current',
+                                             timeout_s=timeout_s, recovery=recovery)
+        if status != device.NO_ERR:
+            self._recover_startup_command(device, recovery, status, 'get_automatic_current()',
+                                          lambda: recovery.verify_running())
+        elif enabled is not False:
+            raise RuntimeError('DMMR manual module polling mode not confirmed.')
         return True
 
+    def initializeCommunication(self) -> None:
+        if self.initializing:
+            return  # A duplicate ON must not erase an earlier close request.
+        # Arm on the caller thread, before the host queues the worker.
+        self._initial_open_close_requested = False
+        super().initializeCommunication()
+
     def runInitialization(self) -> None:
-        self.initialized = False
-        self._forced_close_state = None
         self._end_transition()
-        self._dispose_device()
+        started_new_connection = False
         try:
+            if getattr(self, '_initial_open_close_requested', False):
+                return
+            if not self._dispose_device():
+                raise RuntimeError('Previous DMMR connection has not been released; no new open was attempted.')
+            if getattr(self, '_initial_open_close_requested', False):
+                return
+            self.initialized = False
+            self._forced_close_state = None
             dmmr_driver_class = _get_dmmr_driver_class()
+            self._last_open_cleanup_confirmed = False
             self.device = dmmr_driver_class(
                 device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
             )
+            started_new_connection = True
             backend_reason = str(
                 getattr(self.device, "_process_backend_disabled_reason", "")
             ).strip()
             if backend_reason:
                 self.print(backend_reason, flag=PRINT.WARNING)
+            if getattr(self, '_initial_open_close_requested', False):
+                self.closeCommunication(final_state='Disconnected')
+                return
             module_info = self.device.initialize(
                 timeout_s=float(self.controllerParent.connect_timeout_s)
             )
+            if getattr(self, '_initial_open_close_requested', False):
+                # OFF arrived while Open was active. If connect has since
+                # succeeded, use the normal verified shutdown; never enable.
+                self.shutdownCommunication()
+                return
             self.detected_module_ids = sorted(module_info)
             self.detected_modules_text = (
                 ", ".join(str(module) for module in self.detected_module_ids)
                 if self.detected_module_ids
                 else "None"
             )
-            self._update_state()
-            if self.device is None:
-                # _update_state() destroyed the device after a fatal transport
-                # failure; do not emit initCompleteSignal, otherwise initComplete()
-                # would misreport this hard failure as simulated "Test mode".
-                raise RuntimeError(
-                    "DMMR became unavailable while confirming initialization."
-                )
+            if not self._update_state() or self.device is None:
+                raise RuntimeError('DMMR state could not be confirmed after initialization.')
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
-            self._restore_off_ui_state()
+            if started_new_connection and not self.initialized:
+                self._dispose_device()
+            if self.initialized or (self.device is not None
+                                    and getattr(self, '_initial_open_close_requested', False)):
+                self._restore_on_ui_state()
+            else:
+                self._restore_off_ui_state()
             guidance = self._init_failure_guidance(exc)
             message = (
                 f"DMMR initialization failed on COM{int(self.controllerParent.com)}: "
@@ -2872,18 +2975,29 @@ class DMMRController(DeviceController):
             if guidance:
                 message = f"{message}\n{guidance}"
             self.print(message, flag=PRINT.ERROR)
-            self._dispose_device()
         finally:
             self.initializing = False
 
     def _init_failure_guidance(self, exc: Exception) -> str:
         """Operator guidance appended to an init-failure message, or "" if none.
 
-        Tracks whether a transport was poisoned by a timed-out DLL call earlier
-        in this session so that later retries explain why they still fail (the
-        COM port is locked in-process) instead of looping on a bare
-        'Error opening port' (-2) while the hardware is actually responsive.
+        Distinguish a pending initial open, an unconfirmed close, and a retired
+        attempt. Never infer port closure from the device having been powered on.
         """
+        device = self.device
+        if device is not None and (getattr(device, '_open_failed', False)
+                                   or getattr(device, '_opening_in_progress', False)):
+            call = getattr(device, '_pending_dll_call', None)
+            if call is not None and call['thread'].is_alive():
+                return ('The previous DLL opening or its cleanup is still running. '
+                        'Power the DMMR on and retry after it returns; no parallel open or close is allowed. '
+                        'If the call remains blocked, RESTART ESIBD Explorer.')
+            outcome = getattr(device, '_failed_open_cleanup_outcome', None)
+            detail = '' if outcome is None else f' Cleanup returned {outcome!r}.'
+            return ('The initial opening has returned but serial-port closure is not confirmed.'
+                    + detail + ' The old connection is retained; no new opening is allowed until it is released.')
+        if getattr(self, '_last_open_cleanup_confirmed', False):
+            return 'The failed connection attempt was released. Power the DMMR on, then retry the connection.'
         current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
         guidance = _dmmr_poisoned_port_guidance(
             exc,
@@ -2895,6 +3009,9 @@ class DMMRController(DeviceController):
         return guidance
 
     def initComplete(self) -> None:
+        if getattr(self, '_initial_open_close_requested', False):
+            self.shutdownCommunication()
+            return
         if self.device is not None and self.detected_module_ids:
             self.controllerParent._sync_channels_from_detected_modules(
                 self.detected_module_ids
@@ -2952,7 +3069,8 @@ class DMMRController(DeviceController):
         if self.device is None or not getattr(self, "initialized", False):
             return
 
-        self._update_state(already_acquired=already_acquired)
+        if not self._update_state(already_acquired=already_acquired):
+            return
         # If _update_state detected an unusable device it will have set
         # acquiring=False and emitted closeCommunicationSignal.  Bail out
         # immediately to avoid a cascade of redundant module-read errors.
@@ -3000,38 +3118,18 @@ class DMMRController(DeviceController):
 
             if status == getattr(device, "NO_ERR", status):
                 self._store_current(new_values, new_ranges, module, measured_current, meas_range)
+                recovery = getattr(self, '_read_recovery', None)
+                if recovery is not None and np.isfinite(new_values.get(module, np.nan)):
+                    expected = recovery.ranges.get(module)
+                    if recovery.awaiting_samples and expected and not expected[1] and meas_range != expected[0]:
+                        new_values[module] = new_ranges[module] = np.nan
+                    else:
+                        recovery.note_sample(module)
                 continue
 
-            if self._wrong_command_status(status, device=device):
-                try:
-                    with self._controller_lock_section(
-                        "Could not acquire lock to recover DMMR polling mode.",
-                        already_acquired=already_acquired,
-                    ):
-                        device = self.device
-                        if device is None:
-                            return
-                        recovered = self._disable_automatic_current_for_module_polling(
-                            timeout_s=float(self.controllerParent.connect_timeout_s),
-                            log_warning=True,
-                            device=device,
-                        )
-                        if recovered:
-                            status, measured_current, meas_range = device.get_module_current(
-                                module,
-                                timeout_s=float(self.controllerParent.poll_timeout_s),
-                            )
-                    if status == getattr(device, "NO_ERR", status):
-                        self._store_current(new_values, new_ranges, module, measured_current, meas_range)
-                        continue
-                except Exception as exc:  # noqa: BLE001
-                    self.errorCount += 1
-                    self.print(
-                        "Failed to recover DMMR manual polling mode: "
-                        f"{self._format_exception(exc)}",
-                        flag=PRINT.ERROR,
-                    )
-                    continue
+            if status in (-10, -11, -12, -13):
+                self._recover_read(status, f'get_module_current({module})', already_acquired=already_acquired)
+                return  # Publish the missing cycle, never reuse or backfill it.
 
             self.errorCount += 1
             self.print(
@@ -3040,10 +3138,66 @@ class DMMRController(DeviceController):
                 flag=PRINT.ERROR,
             )
 
+        recovery = getattr(self, '_read_recovery', None)
+        if recovery is not None and recovery.awaiting_samples:
+            self._stop_after_read_failure(
+                f'No new valid reply after recovery for modules {sorted(recovery.awaiting_samples)}.',
+                already_acquired=already_acquired)
+            return
         with self._sample_lock:
             self.values = new_values
             self.meas_ranges = new_ranges
             self._sample_token = object()
+
+    def _recover_read(self, status, action, *, already_acquired=False):
+        self.print(f'DMMR receive error {status} during {action}; checking communication. '
+                   'This measurement is missing.', flag=PRINT.WARNING)
+        try:
+            with self._controller_lock_section('Could not acquire DMMR recovery lock.',
+                                               already_acquired=already_acquired):
+                if getattr(self, '_read_recovery', None) is None:
+                    self._read_recovery = _get_dmmr_driver_class().ReadRecovery(
+                        self.device, getattr(self, '_verified_read_ranges', {}), automatic=False,
+                        timeout_s=float(self.controllerParent.poll_timeout_s),
+                        continue_check=lambda: self.acquiring and self.controllerParent.isOn())
+                incident = self._read_recovery.recover(status, action)
+                diagnostic = getattr(self.device, 'protocol_diagnostics', lambda: {})()
+                self.print('DMMR communication verified; waiting for new module readings. '
+                           f'Protocol log: {diagnostic.get("file") or "unavailable"}', flag=PRINT.WARNING)
+                return incident
+        except Exception as exc:  # No endless retry, nor cleanup beside a blocked DLL.
+            self._stop_after_read_failure(str(exc), already_acquired=already_acquired)
+            return None
+
+    def _stop_after_read_failure(self, reason, *, already_acquired=False):
+        self.print(f'DMMR reading stopped: {reason}', flag=PRINT.ERROR)
+        self.acquiring = False
+        self.initializeValues(reset=True)
+        stopped = False
+        try:
+            with self._controller_lock_section('Could not acquire DMMR stop lock.',
+                                               already_acquired=already_acquired):
+                device = self.device
+                if device is None and not self.initialized and self.main_state == 'Disconnected':
+                    # An explicit OFF can finish between recovery and this lock.
+                    # Preserve that confirmed result, not merely connected=False.
+                    stopped = True
+                elif device is not None and not getattr(device, '_transport_poisoned', False):
+                    if self._disable_acquisition(already_acquired=True):
+                        stopped = device.disconnect() is True
+        except Exception as stop_exc:
+            self.print(f'DMMR stop not confirmed: {stop_exc}', flag=PRINT.WARNING)
+        if stopped:
+            self.device = None  # Port closure and OFF were both confirmed.
+            self.initialized = False
+            self.main_state = 'Disconnected'
+            self._restore_off_ui_state()
+        else:
+            self.initialized = True
+            self.main_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+            self._restore_on_ui_state()
+        self.device_state_summary = self.voltage_state_summary = self.temperature_state_summary = 'Unknown'
+        self._sync_status_to_gui()
 
     def fakeNumbers(self) -> None:
         self.initializeValues(reset=True)
@@ -3092,6 +3246,13 @@ class DMMRController(DeviceController):
 
         target_on = bool(self.controllerParent.isOn())
         device = self.device
+        if not target_on and (_initial_open_incomplete(device)
+                              or (self.initializing and device is None)):
+            try:
+                self.closeCommunication()
+            finally:
+                self._end_transition()
+            return
         if device is None:
             self._end_transition()
             return
@@ -3112,9 +3273,10 @@ class DMMRController(DeviceController):
                         raise RuntimeError("DMMR became unavailable during startup.")
                     diagnostics_device = device
                     self._report_startup_diagnostics(device, start=True)
-                    enable_status = device.set_enable(
-                        True,
-                        timeout_s=float(self.controllerParent.connect_timeout_s),
+                    timeout_s = float(self.controllerParent.connect_timeout_s)
+                    recovery = self._new_command_recovery(device, timeout_s, 'startup')
+                    enable_status = self._startup_call(
+                        device, 'set_enable', True, timeout_s=timeout_s, recovery=recovery,
                     )
                     if enable_status != device.NO_ERR:
                         raise RuntimeError(
@@ -3124,14 +3286,15 @@ class DMMRController(DeviceController):
                     # ranges, not only after all those command/reply exchanges.
                     self._disable_automatic_current_for_module_polling(
                         timeout_s=float(self.controllerParent.connect_timeout_s),
-                        device=device,
+                        device=device, recovery=recovery,
                     )
                     self._configure_module_ranges(
-                        device, measurement_modules,
-                        timeout_s=float(self.controllerParent.connect_timeout_s),
+                        device, measurement_modules, timeout_s=timeout_s, recovery=recovery,
                     )
-                if not self._update_state():
-                    raise RuntimeError("Could not confirm the DMMR state after startup.")
+                if not self._update_state(startup_recovery=recovery):
+                    raise RuntimeError('Could not confirm the DMMR state after startup.')
+                if self.main_state != 'ST_ON':
+                    raise RuntimeError(f'DMMR did not enter ST_ON after startup: {self.main_state}.')
                 self._report_startup_diagnostics(diagnostics_device, start=False)
                 diagnostics_device = None  # Close before starting continuous reads.
                 if getattr(device, "_transport_poisoned", False):
@@ -3188,7 +3351,21 @@ class DMMRController(DeviceController):
             self._sync_status_to_gui()
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
-        if (final_state or self.main_state) == _DMMR_SHUTDOWN_UNCONFIRMED_STATE and self.device is not None:
+        self._initial_open_close_requested = True
+        initial_open = _initial_open_incomplete(self.device)
+        if not initial_open:
+            if final_state is None and self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
+                final_state = self._forced_close_state
+            if final_state is None:
+                final_state = self.main_state
+                if self.device is not None or final_state not in (
+                    "Disconnected", _DMMR_SHUTDOWN_UNCONFIRMED_STATE, _DMMR_COMMUNICATION_LOST_STATE
+                ):
+                    final_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+        # Resolve before any command, native Close or host teardown: successful
+        # Open (including one finishing during dispatch) does not verify OFF.
+        if (not initial_open and final_state == _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+                and self.device is not None):
             self.acquiring = False
             self.initialized = True
             self.main_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
@@ -3210,19 +3387,24 @@ class DMMRController(DeviceController):
             # Best-effort attempt to disable the DMMR hardware so the
             # physical LED reflects the disconnected state.  Failures are
             # expected and silently ignored when the link is already broken.
-            self._attempt_device_disable()
+            if not initial_open:
+                self._attempt_device_disable()
+            disposed = (self._dispose_device(initial_open_only=True)
+                        if initial_open else self._dispose_device())
+            if not disposed:
+                self.initializeValues(reset=True)
+                if _initial_open_incomplete(self.device):
+                    self._restore_off_ui_state()
+                elif self.initialized:
+                    self._restore_on_ui_state()
+                self._sync_status_to_gui()
+                return
 
+            if initial_open and self._last_open_cleanup_confirmed:
+                final_state = 'Disconnected'
             base_close = getattr(super(), "closeCommunication", None)
             if callable(base_close):
                 base_close()
-            if final_state is None:
-                final_state = self._forced_close_state
-            if final_state is None:
-                final_state = self.main_state
-                if self.device is not None or final_state not in (
-                    "Disconnected", _DMMR_SHUTDOWN_UNCONFIRMED_STATE, _DMMR_COMMUNICATION_LOST_STATE
-                ):
-                    final_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
             self.main_state = final_state
             self.detected_module_ids = []
             self.detected_modules_text = ""
@@ -3231,16 +3413,22 @@ class DMMRController(DeviceController):
             self.voltage_state_summary = summary_value
             self.temperature_state_summary = summary_value
             self._sync_status_to_gui()
-            self._dispose_device()
             self.initializeValues(reset=True)
             self.initialized = False
             self._clear_transport_failures()
             self._forced_close_state = None
+            if self.main_state == 'Disconnected' and getattr(self, '_initial_open_close_requested', False):
+                self._restore_off_ui_state()
+            # Keep cancellation through worker completion and queued callbacks.
+            # Only a new explicit initializeCommunication may rearm it.
         finally:
             close_lock.release()
 
     def shutdownCommunication(self) -> bool:
         """Run the DMMR shutdown sequence before releasing communication resources."""
+        if _initial_open_incomplete(self.device):
+            self.closeCommunication()
+            return self.device is None and self.main_state == 'Disconnected'
         device = self.device
         if device is None:
             self.closeCommunication()
@@ -3287,9 +3475,9 @@ class DMMRController(DeviceController):
                     else _DMMR_SHUTDOWN_UNCONFIRMED_STATE
                 )
             )
-        return shutdown_confirmed
+        return shutdown_confirmed and self.device is None and self.main_state == 'Disconnected'
 
-    def _update_state(self, *, already_acquired: bool = False) -> bool:
+    def _update_state(self, *, already_acquired: bool = False, startup_recovery=None) -> bool:
         if self.device is None:
             return False  # Preserve the last shutdown/transport-loss diagnosis.
 
@@ -3302,7 +3490,15 @@ class DMMRController(DeviceController):
                 device = self.device
                 if device is None:
                     return False
-                status, _state_hex, state_name = device.get_state(timeout_s=timeout_s)
+                if startup_recovery is None:
+                    status, _state_hex, state_name = device.get_state(timeout_s=timeout_s)
+                else:
+                    status, _state_hex, state_name = self._startup_call(
+                        device, 'get_state', timeout_s=timeout_s, recovery=startup_recovery)
+                    if status != device.NO_ERR:
+                        status, _state_hex, state_name = self._recover_startup_command(
+                            device, startup_recovery, status, 'get_state()',
+                            lambda: self._verify_startup_ranges(device, startup_recovery))
         except TimeoutError:
             # Transient controller-lock contention; skip this refresh and keep
             # the last state. A real device fault is handled by except-Exception.
@@ -3319,22 +3515,21 @@ class DMMRController(DeviceController):
             elif self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
                 self.main_state = "State error"
             self.print(f"Failed to read DMMR state: {exc}", flag=PRINT.ERROR)
+            if transport_lost or getattr(self.device, '_transport_poisoned', False):
+                self._handle_transport_loss()
+                return False
             self.device_state_summary = self._safe_query_state("get_device_state") or "Unknown"
             self.voltage_state_summary = self._safe_query_state("get_voltage_state") or "Unknown"
             self.temperature_state_summary = self._safe_query_state("get_temperature_state") or "Unknown"
-            # When the DLL marks the instance unusable (e.g. after a timeout),
-            # every subsequent call will fail immediately.  Stop the acquisition
-            # loop and trigger closeCommunication via the framework's
-            # thread-safe signal so the GUI updates on the main thread and the
-            # COM port is released for potential re-initialization.
-            if transport_lost:
-                self._handle_transport_loss()
             return False
 
         self._clear_transport_failures()
         if status == device.NO_ERR:
             if self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
                 self.main_state = state_name
+        elif status in (-10, -11, -12, -13) and self.acquiring:
+            self._recover_read(status, 'get_state', already_acquired=already_acquired)
+            return False
         else:
             if self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
                 self.main_state = "State error"
@@ -3352,11 +3547,8 @@ class DMMRController(DeviceController):
         return status == device.NO_ERR
 
     def _handle_transport_loss(self) -> None:
-        """Force immediate backend teardown after a fatal transport timeout."""
-        if (
-            self._forced_close_state == _DMMR_COMMUNICATION_LOST_STATE
-            and self.device is None
-        ):
+        """Stop publishing readings; retain the backend until shutdown is verified."""
+        if self.device is None:
             return
 
         self.print(
@@ -3368,22 +3560,16 @@ class DMMRController(DeviceController):
             flag=PRINT.ERROR,
         )
 
-        self.main_state = _DMMR_COMMUNICATION_LOST_STATE
-        self.device_state_summary = "Unknown"
-        self.voltage_state_summary = "Unknown"
-        self.temperature_state_summary = "Unknown"
-        self._forced_close_state = _DMMR_COMMUNICATION_LOST_STATE
         self.acquiring = False
-        self.initialized = False
-        self._clear_transport_failures()
+        self.initialized = True
+        self.main_state = self._forced_close_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+        self.device_state_summary = self.voltage_state_summary = self.temperature_state_summary = 'Unknown'
         self._end_transition()
-        self._restore_off_ui_state()
-        self._dispose_device()
+        self.initializeValues(reset=True)
+        self._restore_on_ui_state()
         self._sync_status_to_gui()
-        close_signal = getattr(getattr(self, "signalComm", None), "closeCommunicationSignal", None)
-        emit = getattr(close_signal, "emit", None)
-        if callable(emit):
-            emit()
+        # Neither a timeout exception nor connected=False proves physical OFF.
+        # Only an explicit, verified shutdown can release this live backend.
 
     def _sync_status_to_gui(self) -> None:
         # ESIBD setting attributes are widget-backed properties, not plain data.
@@ -3428,30 +3614,46 @@ class DMMRController(DeviceController):
     def _clear_transport_failures(self) -> None:
         self._consecutive_transport_failures = 0
 
-    def _dispose_device(self) -> None:
-        import gc
-
+    def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         device = self.device
+        if device is None:
+            return True
+        try:
+            # Do not race a successful Open into a bare normal disconnect.
+            # The initializer handles a close request after connect finishes.
+            initial_cleanup = (getattr(device, '_open_failed', False)
+                               or getattr(device, '_failed_open_released', False))
+            released = (not getattr(device, '_opening_in_progress', False)
+                        and (not initial_open_only or initial_cleanup)
+                        and device.disconnect() is True)
+        except Exception:  # noqa: BLE001
+            released = False
+        # Recheck after disconnect: an ongoing connect may have moved beyond
+        # Open in the meantime; a later fault is not initial-open cleanup.
+        failed_open = _initial_open_incomplete(device)
+        if not released:
+            # A Python object's destruction cannot close a vendor's global
+            # serial handle. Keep its owner and reservation until real closure.
+            self.main_state = 'Connection pending' if failed_open else _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+            self.initialized = not failed_open
+            self._forced_close_state = None if failed_open else _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+            self._sync_status_to_gui()
+            return False
         self.device = None
         self.initialized = False
-        if device is None:
-            return
-
-        try:
-            device.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        finally:
-            with contextlib.suppress(Exception):
-                device.close()
-            with contextlib.suppress(Exception):
-                device._set_port_claimed(False)
-        # Force the Python GC to release the DMMR DLL instance so that the
-        # underlying serial port handle is freed.  Without this the DLL may
-        # keep the COM port locked and prevent re-initialization on the same
-        # port (Windows error -2 "port already in use").
-        del device
-        gc.collect()
+        self._last_open_cleanup_confirmed = failed_open
+        self._poisoned_com = None
+        if failed_open:
+            self.main_state = 'Disconnected'
+            self._forced_close_state = None
+            self.detected_module_ids, self.detected_modules_text = [], ''
+            self.device_state_summary = self.voltage_state_summary = self.temperature_state_summary = 'n/a'
+            if getattr(self, '_initial_open_close_requested', False):
+                self._restore_off_ui_state()
+            self._sync_status_to_gui()
+        with contextlib.suppress(Exception):
+            device.close()
+        return True
 
     def _attempt_device_disable(self) -> None:
         """Best-effort attempt to disable the DMMR hardware before closing.
@@ -3462,7 +3664,10 @@ class DMMRController(DeviceController):
         already degraded when this method is called.
         """
         device = self.device
-        if device is None or not getattr(device, "connected", True):
+        if (device is None or not getattr(device, 'connected', True)
+                or getattr(device, '_transport_poisoned', False)
+                or getattr(device, '_opening_in_progress', False)
+                or getattr(device, '_open_failed', False)):
             return
         try:
             device.set_enable(False, timeout_s=1.0)
@@ -3480,7 +3685,7 @@ class DMMRController(DeviceController):
 
     def _safe_query_state(self, getter_name: str, device: Any | None = None) -> str | None:
         device = self.device if device is None else device
-        if device is None:
+        if device is None or getattr(device, '_transport_poisoned', False):
             return None
         getter = getattr(device, getter_name, None)
         if getter is None:
@@ -3540,44 +3745,77 @@ class DMMRController(DeviceController):
 
         _invoke_gui_callback(_update_gui)
 
-    def _disable_acquisition(self) -> bool:
-        """Attempt both OFF commands and confirm both gates, also after failed ON.
+    def _disable_acquisition(self, *, already_acquired=False) -> bool:
+        """Confirm both OFF gates; one resynchronization for returned receive faults.
 
-        A rejected command, unreadable flag or still-enabled gate leaves the
-        stop unconfirmed. Never skip the hardware disable because the automatic
-        current command failed, and never raise out of startup failure cleanup.
+        Always attempt both disables unless the DLL is blocked. Only OFF writes
+        may be repeated; never reconnect or re-enable during cleanup.
         """
         errors: list[str] = []
         try:
             with self._controller_lock_section(
-                "Could not acquire lock to disable DMMR acquisition."
+                'Could not acquire lock to disable DMMR acquisition.',
+                already_acquired=already_acquired,
             ):
                 device = self.device
                 if device is None:
-                    raise RuntimeError("device unavailable")
+                    raise RuntimeError('device unavailable')
                 timeout_s = float(self.controllerParent.connect_timeout_s)
-                for name in ("set_automatic_current", "set_enable"):
-                    try:
-                        status = getattr(device, name)(False, timeout_s=timeout_s)
-                        if status != device.NO_ERR:
-                            raise RuntimeError(self._format_status(status, device=device))
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(f"{name}(False) failed: {exc}")
-                for name in ("get_automatic_current", "get_enable"):
-                    try:
-                        status, enabled = getattr(device, name)(timeout_s=timeout_s)
-                        if status != device.NO_ERR:
-                            raise RuntimeError(self._format_status(status, device=device))
-                        if enabled is not False:
-                            raise RuntimeError(f"OFF not confirmed (readback {enabled!r})")
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(f"{name}() failed: {exc}")
+
+                def stop_once():
+                    failures, receive_status, fatal = [], None, False
+                    off_readbacks = 0
+                    for name in ('set_automatic_current', 'set_enable', 'get_automatic_current', 'get_enable'):
+                        if getattr(device, '_transport_poisoned', False):
+                            failures.append('DLL blocked; shutdown cannot be confirmed.')
+                            fatal = True
+                            break
+                        try:
+                            write = name.startswith('set_')
+                            result = getattr(device, name)(*((False,) if write else ()), timeout_s=timeout_s)
+                            status = result if write else result[0]
+                            if status != device.NO_ERR:
+                                failures.append(f'{name} failed: {self._format_status(status, device=device)}')
+                                if status in (-10, -11, -12, -13):
+                                    receive_status = status
+                                else:
+                                    fatal = True
+                            elif not write:
+                                if result[1] is False:
+                                    off_readbacks += 1
+                                else:
+                                    failures.append(f'{name}: OFF not confirmed (readback {result[1]!r})')
+                                    fatal = True
+                        except Exception as exc:  # noqa: BLE001
+                            failures.append(f'{name} failed: {exc}')
+                            fatal = True
+                    if getattr(device, '_transport_poisoned', False):
+                        failures.append('DLL blocked; shutdown cannot be confirmed.')
+                        fatal = True
+                    return failures, None if fatal else receive_status, off_readbacks == 2 and not fatal
+
+                errors, receive_status, off_verified = stop_once()
+                if errors and receive_status is not None:
+                    recovery = self._new_command_recovery(device, timeout_s, 'shutdown')
+                    if recovery is not None:
+                        def verify_off():
+                            if not off_verified:
+                                retry_errors, _, _ = stop_once()
+                                if retry_errors:
+                                    raise RuntimeError('; '.join(retry_errors))
+                            recovery.last_incident['off_flags'] = {'automatic': False, 'enable': False}
+                        # Lost command ACKs do not justify purging when both
+                        # subsequent, successful flag reads already prove OFF.
+                        recovery.recover(receive_status, 'disable acquisition', verify_off,
+                                         purge_first=not off_verified)
+                        errors = []
+                        self.print('Recovered DMMR shutdown; both OFF gates verified.', flag=PRINT.WARNING)
         except Exception as exc:  # noqa: BLE001
             errors.append(str(exc))
         if errors:
             self.print(
-                "DMMR shutdown unconfirmed: " + "; ".join(errors)
-                + ". OFF can be retried with the ON/OFF button.",
+                'DMMR shutdown unconfirmed: ' + '; '.join(errors)
+                + '. OFF can be retried with the ON/OFF button.',
                 flag=PRINT.WARNING,
             )
         return not errors

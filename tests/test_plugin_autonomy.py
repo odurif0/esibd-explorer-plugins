@@ -18,7 +18,8 @@ PLUGIN_FOLDERS = tuple(spec.folder for spec in PLUGIN_SPECS)
 
 def required_paths(spec: PluginSpec, plugin_root: Path) -> tuple[Path, ...]:
     if spec.runtime_family is None:
-        return (plugin_root / spec.entrypoint, plugin_root / f"{spec.icon_stem}.png", plugin_root / "LICENSE")
+        return (plugin_root / spec.entrypoint, plugin_root / f"{spec.icon_stem}.png", plugin_root / "LICENSE",
+                *(plugin_root / name for name in spec.bundled_files))
     runtime_root = plugin_root / "vendor" / "runtime"
     device_root = runtime_root / spec.runtime_family
     vendor_root = device_root / "vendor"
@@ -38,6 +39,7 @@ def required_paths(spec: PluginSpec, plugin_root: Path) -> tuple[Path, ...]:
         device_root / f"{spec.runtime_family}_base.py",
         vendor_root / spec.header,
         vendor_root / "x64" / spec.dll,
+        *(plugin_root / name for name in spec.bundled_files),
     )
 
 
@@ -133,6 +135,28 @@ def test_validator_rejects_missing_dll(
 
     assert str(dll_path) in str(excinfo.value)
     assert "required regular file is missing" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("helper", ["_heater_stability.py", "_experiment_guard.py", "_heater_limits.py"])
+def test_validator_rejects_missing_esi_helper(
+    tmp_path: Path,
+    plugin_specs: tuple[PluginSpec, ...],
+    helper: str,
+) -> None:
+    spec, plugin_root, plugin_slugs = copied_plugin(tmp_path, plugin_specs, "esi")
+    (plugin_root / helper).unlink()
+    with pytest.raises(AssertionError, match=f"{helper}: required regular file is missing"):
+        validate_plugin_autonomy(spec, plugin_root, plugin_slugs)
+
+
+def test_validator_rejects_missing_usb_protocol(
+    tmp_path: Path,
+    plugin_specs: tuple[PluginSpec, ...],
+) -> None:
+    spec, plugin_root, plugin_slugs = copied_plugin(tmp_path, plugin_specs, "tpg366")
+    (plugin_root / "_runtime" / "_tpg366.py").unlink()
+    with pytest.raises(AssertionError, match="_tpg366.py: required regular file is missing"):
+        validate_plugin_autonomy(spec, plugin_root, plugin_slugs)
 
 
 def test_validator_rejects_symlink(

@@ -1664,6 +1664,7 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
         def disconnect(self):
             self.calls.append(("disconnect",))
             self.connected = False
+            self._dll_port_claimed = False
             return True
 
         def close(self):

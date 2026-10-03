@@ -70,6 +70,8 @@ The cards display the measured current for each HV module. Two read-only
 Explorer channels, `ESI_HV1_I` and `ESI_HV2_I`, provide live traces and recorded
 currents in amperes. They are added automatically to existing configurations
 without replacing the voltage and heater channels or their settings.
+Reloading an INI configuration preserves channel names, module addresses and
+output targets; the current channels remain read-only.
 
 The vendor API reports one current per HV module, not separate currents for
 the positive and negative connectors. Voltage, current, and temperature use
@@ -81,19 +83,66 @@ commands and do not impose a current limit.
 
 ### Heater
 
-`ESI_HEAT` controls target temperature in degrees Celsius and monitors measured
-temperature. Advanced voltage, current, and power limits use `0` to retain the
-hardware settings; positive overrides are checked against hardware limits.
-Heating is blocked if the temperature readback is missing, non-finite, below
-0 degC, or above the hardware maximum. A disconnected sensor can report an
-out-of-range temperature even with zero heater power.
+The heater card provides `Temperature` (°C) and `Power limit` (W) inputs.
+The default power ceiling is **50 W** for new settings; saved settings are retained.
+Both inputs are bounded by fresh device maxima and disabled while those maxima
+are unavailable. Controller maxima are not certified capillary or seal ratings.
+Editing either field never enables heating. Live power changes leave voltage,
+current and PID settings unchanged; the applied ceiling is independently read back
+and shown as `Applied power limit`. Invalid temperature readback blocks a positive
+power edit. A newer field edit replaces older queued edits; OFF cancels queued
+changes. A native write already in progress cannot be undone by cancellation.
+
+`ESI_HEAT` controls target temperature in degrees Celsius. ON writes and reads
+back the target, then commands and verifies module 0 before opening the shared
+gate. ON then polls the complete CTRL/MOD/DEV activation state within the I/O
+budget instead of treating an incomplete transition as immediate failure. Faults,
+lost command readbacks and Stop abort confirmation; ON is never replayed.
+The native setter returns the applied temperature, which may be quantized;
+an independent read verifies that value. The panel shows `ON` only when module
+activation, controller gate and temperature-control state are confirmed. Otherwise it shows
+`Unconfirmed`; OFF remains available even with an invalid sensor. `ON` confirms
+controller states, not delivered heating power. `PID power target` is the CGC power
+target, not a measured power.
+
+The separate `Stability` line requires a full 60-second observation window within
+±0.2 °C of the applied target and an absolute fitted drift below 0.1 °C/min.
+`Stabilizing` does not delay ON or change the device's PID. New commands, OFF,
+invalid data and acquisition gaps reset qualification; stale data show
+`Unavailable`. The tooltip reports the observed span and drift. These are
+experimental temperature criteria, not proof of pressure equilibrium or safety.
+
+Local OFF disables and verifies module 0, then zeros and reads back its target,
+without stopping the HV modules. Zero temperature alone is not proof of OFF.
+Global OFF and configuration loading also require confirmed heater deactivation;
+a failure prevents port closure and leaves shutdown unconfirmed.
+
+Advanced voltage/current settings and the existing power setting use `0` to
+retain the device limit (shown as `Keep device limit` for power), not to request
+zero power. Installing the update does not apply the new default to hardware. ON and positive temperature writes require all three actual limits to be finite, positive and within
+the reported hardware maxima; it never substitutes maxima for missing limits.
+Choose limits suitable for the heater load. The fresh sensor reading must also
+be valid, finite and within 0 degC to the hardware maximum. A disconnected
+sensor can report an out-of-range value even with no heating power.
+The target cannot exceed the temperature maximum reported by the device.
 
 ### ON / OFF
 
 ON connects and starts operation according to the selected outputs. Review
 their targets and activation states before switching ON.
 
-Global OFF first disables the outputs, then displays `Stopping: checking HV`.
+If the initial port opening fails, OFF or closing communication cleans up
+that opening without attempting an HV shutdown. The state stays
+`Connection pending` while the native Open or Close call is unfinished or closure is not
+confirmed; the backend and port reservation are retained. Confirmed closure
+sets `Disconnected`, without certifying the HV output state; a new ON
+explicitly reconnects. A call that never returns
+or a failed closure may still require an Explorer restart. This cleanup does
+not apply to a timeout during operation. If Open succeeds after a close
+request, normal verified shutdown runs instead of completing initialization.
+
+For an established connection, global OFF first disables the outputs, then
+displays `Stopping: checking HV`.
 The port stays open while the driver checks both ADC polarities on both HV
 modules. All four absolute voltages must be **at most 1 V for three consecutive
 fresh measurement rounds** before the port closes. The check has a 60-second
@@ -116,7 +165,8 @@ next ON reconnects. Saved output selections are not changed.
 **This 1 V software check does not certify safe access or complete discharge.**
 It cannot verify disconnected loads or replace an independent voltage check.
 If shutdown is unconfirmed, use the physical interlock/front panel and the
-instrument's safety procedure. A blocked DLL requires an Explorer restart.
+instrument's safety procedure. A DLL blocked during operation requires an
+Explorer restart.
 
 The cards wrap in narrow panels, with scrollbars when needed. The mouse wheel
 does not edit setpoints.
@@ -144,8 +194,113 @@ these changes to NVM.
 Use these tools when investigating hardware, communication, or activation
 problems. They are separate from normal plugin installation. Close Explorer
 and other ESI applications first: the DLL allows only one active connection.
-Run notebooks on the Windows controller PC and set `COM_PORT` to its actual
+Run notebooks on the Windows controller PC and set their COM port to the actual
 port (`16` is the notebook default).
+
+### Read-only heater notebook
+
+[`esi_heater_readonly_probe.ipynb`](esi_heater_readonly_probe.ipynb) has one code
+cell and uses the installed bundled DLL. It reads heater activation, interlocks,
+limits, targets, monitoring, LED RGB and identification without output,
+configuration or baud-setting commands. Use a fresh kernel; Close is attempted
+only after a successful Open. Unavailable modules are not enabled to read them. Explorer shutdown requests OFF, so this is a post-shutdown snapshot, not a
+reproduction of the preceding ON failure.
+
+Send the JSON report saved under `logs/esi_heater_readonly/`, including partial
+reports. A timeout or interrupt stops further DLL calls, with no concurrent or
+late cleanup; make the instrument safe locally before restarting the kernel.
+A confirmed communication Close is not an output-shutdown confirmation.
+
+### Active heater characterization (up to 100 °C)
+
+[`esi_heater_characterization.ipynb`](../notebooks/esi_heater_characterization.ipynb) is a
+supervised test of the original CGC heater, with HV gates OFF and zero targets
+verified. Use a fresh 64-bit Windows kernel and check `ESI_COM`.
+**`ARM_HEATING=True` by default: running the cell requests real heating.**
+Set it to `False` for a no-hardware check. Existing unfinished-run guards still
+block activation. A matched runtime/DLL is required; do not edit validated hashes.
+
+The fixed trial envelope is at most **22 V / 10 A / 50 W**, further bounded by
+fresh hardware maxima and rounded down to verified native codes using the shared
+pure `_heater_limits.py` helper. Applied echoes and independent readbacks must
+agree before activation. These are agreed test
+settings, not certified load ratings: 22 V / 50 W is present in the supplied CGC
+Heat60 profile; 10 A uses the controller's nominal designation rather than
+the profile's 12 A. No complete profile is loaded and power is never increased automatically.
+
+Start below 30 °C. After a 60 s OFF baseline, test 30/40/50/60/70/80/90 °C.
+Each stage must first reach ±1 °C within 300 s, then complete 60 continuous
+seconds in that zone, with a fixed total limit of 360 s. An excursion resets
+the observation, never extends this total deadline. The first successful
+30 °C stage includes OFF for 60 s and a controlled restart at 30 °C; changed
+limits block restart rather than being silently rewritten. The final 100 °C
+stage has a 300 s deadline with no extension and stops at the first observed
+temperature ≥100 °C, without a hold. These are experimental criteria, not thermal equilibrium
+or a physical guarantee against overshoot. After confirmed heater OFF, observe
+cooling for 180 s, then verify HV discharge and port closure; 180 s does not
+establish that the heater is cold. Cleanup progress is printed once per phase
+(waiting for OFF, cooling observation, discharge/closure); the final result and
+any unconfirmed-shutdown warning remain visible.
+
+Interrupt the kernel once to request Stop. The original instrument owner waits
+for the active call before cleanup; a second Stop may shorten cooling observation,
+not interrupt discharge verification. Poisoned or unknown transports forbid further
+commands/Close and retain the unfinished-run guard: use physical safety controls,
+never rerun or restart the kernel as a substitute for OFF.
+
+Keep `notebooks/` beside `esi/`, or set `PLUGIN_DIR` to the ESI plugin folder.
+CSV/JSON and `heater.png` remain under the plugin's `logs/esi_heater_characterization/`.
+Do not move or delete existing logs or unfinished-run markers when updating the notebook.
+`native_calls.jsonl` records the existing base-wrapper calls with arguments,
+exact returned statuses/tuples (including `Valid=False` and tagged NaN/Infinity),
+UTC/monotonic timestamps, exceptions, and every supplied discharge observation.
+Tracing itself adds no instrument calls or retries. The matched runtime waits
+for module-0 MON_RDY (bit 0) before one monitoring read, in diagnostics and before
+positive targets/ON. Waiting uses the existing I/O budget (normally 5 s), not a
+fixed settling delay. A datum invalid after readiness still refuses heating;
+no previous temperature is substituted. Stop cancels pending heating waits and
+commands, while OFF/cooling remain available. After ON, the runtime also waits
+for confirmed CTRL/MOD/DEV activation, with cancellable polling waits of up to
+0.1 s within its configured I/O budget. This is a software bound, not a measured settling
+time; a fault or failure to converge still aborts. The HV discharge check is unchanged.
+Logging has timing overhead and is not a raw serial capture.
+The asynchronous writer reports capture errors and stays available for a late
+native return after poison; forced process termination can lose pending records.
+Characterization and pressure–temperature notebooks share `_experiment_guard.py`.
+It acquires a per-user COM lock under `~/.esibd/esi_experiment_guards/` and the
+historical heater lock, and checks both notebooks' known unfinished-run markers
+before constructing any instrument. Changing output folders or notebook names
+cannot bypass registered uncertainty. Other users, physical port aliases and
+unknown legacy output folders are not covered: close Explorer and former kernels.
+An unfinished run blocks heating until a separate operator-authorized restart.
+In a fresh kernel, type the run-specific `RESTART …` phrase only after physically
+making the equipment safe and terminating the former ESI/pressure-owning processes.
+This declares both conditions; software does not verify another process's exit
+or retroactively confirm HV discharge. ARM alone never acknowledges restart.
+The original marker, report and available traces are archived with SHA-256 hashes
+under the COM registry's `operator_restarts/`; original shutdown values are preserved.
+The declaration and initial report are durable before the central claim and
+compatibility markers are updated, then instrument construction may start.
+These file updates are not a single atomic transaction: an interrupted transition
+blocks heating rather than discarding uncertainty. With a valid central claim and
+intact original evidence, missing compatibility markers are recorded and require
+explicit operator recovery; they are never repaired automatically. Markers are
+released only after confirmed shutdown, finished owners and a durable final report.
+Missing/changed original evidence, preloaded runtimes, archive failures or a
+competing owner abort the restart. OS-held ownership lasts throughout the new run;
+no automatic retry follows a further failure.
+
+Monitoring VoltOut, VoltHeat and CurrOut remain separate from voltage/power
+**targets**. VoltHeat × CurrOut is a calculated indicator, not verified dissipated
+power; averaging/PWM/synchronization are unspecified. There is no undocumented
+U/I-to-limit alarm or claim of synchronous electrical sampling. Full electrical power/energy
+characterization requires CGC clarification or suitable external instrumentation.
+
+Electrical limits remain configured after OFF; initial zeros are not restored.
+No Save/NVM command is issued, but power-cycle persistence is unknown. This test
+**does not qualify 175 °C**, even if the retained positive limits subsequently
+satisfy another notebook's preflight. Keep required cooling in service and physical
+shutdown controls accessible throughout the experiment.
 
 ### Inventory notebook
 
@@ -161,44 +316,14 @@ HEAT=0, HV1=1, and HV2=2. Keep the physical interlock available and verify HV
 independently. The notebook's low-level DLL calls have no cancellable timeout;
 if a call blocks, make the instrument safe before restarting the kernel.
 
-### Activation notebook
+### Retired HV activation probe
 
-[`esi_hv_activation_probe.ipynb`](esi_hv_activation_probe.ipynb) tests activation
-commands and readbacks. Both `ARM_TEMP_CONFIG` and `ARM_NONZERO_TEST` default
-to `False`. Even with these switches disarmed, it changes activation states,
-zero targets, and ADC selections. It is not a passive inventory.
-
-The zero-target test checks direct and PWM activation readbacks and both ADC
-polarities, then restores the initial ADC selection. Require status `0` and
-matching readbacks before proceeding with commissioning.
-
-For a configuration test, first use `ARM_TEMP_CONFIG=True` with
-`ARM_NONZERO_TEST=False`. This requires an initially verified OFF configuration,
-changes only the selected module's `HVPSxMaxVoltStep` to `10.008`, verifies the
-53-byte readback, and restores the original safe bytes. After a transient
-`SetCurrentConfig` status `-11`, the notebook proceeds only if the immediate
-readback matches exactly; a mismatch aborts the test and triggers restoration.
-
-A nonzero test requires a separate, successful configuration-only run,
-`ARM_NONZERO_TEST=True`, the confirmation `ARM 100 V`, and both external meters.
-It stages `100 V` while the module is OFF, then activates it. The notebook:
-
-- polls target, module state, PWM and the selected ADC with a 50 ms loop delay;
-- allows 10 seconds to reach a `95 V` PWM trigger, then records a 20-second hold;
-- aborts above the approved absolute `150 V` limit, including during the final
-  ADC polarity reads; during continuous polling, it also aborts after more than
-  1.5 seconds without a fresh valid ADC conversion;
-- attempts to return enable, target and module activation to OFF, then waits
-  for PWM and ADC readbacks below `1 V`, with a 60-second timeout, before
-  requesting the external meter readings.
-
-The trigger starts observation, not an accuracy verdict. Evaluate PWM, both
-ADCs and both external meters rather than assuming the setpoint was reached.
-
-For configuration diagnostics, the HV blocks begin at byte 17 with a 12-byte
-stride: signed 32-bit millivolt target and maximum step, ADC selection, current
-range, activation, and padding. Module 1's `10.008` maximum step occupies bytes
-21-24 as `18 27 00 00`. Verify this layout at `0 V` before any nonzero test.
+The legacy low-level HV activation notebook is no longer shipped. Its discharge
+check accepted one reading from one selected module instead of the driver's
+three fresh rounds on both modules and both polarities. Do not run old copies.
+The supported heater notebooks keep HV disabled and preserve an unconfirmed
+shutdown; operator restart does not certify discharge. Nonzero HV commissioning
+requires a separate approved protocol and resolution of the current readout issue.
 
 ### Vendor utility
 

@@ -9,11 +9,13 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize("outcome", ["success", "stopped", "unconfirmed", "lost_ack", "close_failure"])
-def test_dmmr_failed_start_button_and_next_click(outcome, tmp_path):
+@pytest.mark.parametrize('outcome', ['success', 'stopped', 'unconfirmed', 'lost_ack', 'close_failure',
+                                   'recovered', 'recovered_off', 'persistent'])
+@pytest.mark.parametrize('scale', ['1', '1.5'])
+def test_dmmr_failed_start_button_and_next_click(outcome, scale, tmp_path):
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), outcome, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen', 'QT_SCALE_FACTOR': scale},
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode == 77:
@@ -87,7 +89,16 @@ def probe(outcome, output):
     parent._update_status_widgets = refresh_widgets
     controller = module.DMMRController(parent)
     parent.controller = controller
-    controller.device = hardware = FaultingDMMR()
+    if outcome in ('recovered', 'recovered_off', 'persistent'):
+        from test_dmmr_command_recovery import StartupDevice
+        hardware = StartupDevice(module._get_dmmr_driver_class().CommandRecovery)
+        if outcome != 'recovered_off':
+            hardware.faults[('auto_range', 2)] = -12
+            hardware.desync = True
+            hardware.persistent = outcome == 'persistent'
+    else:
+        hardware = FaultingDMMR()
+    controller.device = hardware
     hardware.fail_start = None if outcome in ("success", "close_failure") else "enable_ack" if outcome == "lost_ack" else "range"
     hardware.reject_cleanup = outcome in ("unconfirmed", "lost_ack")
     hardware.disconnect_result = outcome != "close_failure"
@@ -142,9 +153,13 @@ def probe(outcome, output):
     expected_on = outcome != "stopped"
     check(expected_on)
     assert requests == [True]
-    if outcome in ("success", "close_failure"):
+    if outcome in ('success', 'close_failure', 'recovered', 'recovered_off'):
         assert controller.acquiring and hardware.enabled
-        assert parent.statusBadgeLabel.text() == "ST_ON"
+        assert parent.statusBadgeLabel.text() == 'ST_ON'
+        if outcome == 'recovered':
+            assert hardware.events[-1]['verified']
+            assert hardware.calls.count(('auto_range', 2, True)) == 1
+            assert hardware.calls.count(('purge',)) == 1
     else:
         assert not controller.acquiring
         assert np.isnan(channel.monitor), "Failed startup left a stale displayed sample"
@@ -160,7 +175,7 @@ def probe(outcome, output):
     # Following a stopped failure, retry ON. Otherwise the next click is OFF,
     # including a second unsuccessful OFF and a later verified recovery.
     enable_count = hardware.calls.count(("enable", True))
-    if outcome in ("unconfirmed", "lost_ack", "close_failure"):
+    if outcome in ('unconfirmed', 'lost_ack', 'close_failure', 'persistent'):
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         settle()
         assert requests == [True, False]
@@ -171,6 +186,10 @@ def probe(outcome, output):
     hardware.reject_cleanup = False
     hardware.fail_start = None
     hardware.disconnect_result = True
+    if outcome == 'persistent':
+        hardware.persistent = hardware.sticky = False
+    elif outcome == 'recovered_off':
+        hardware.sticky = True
     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
     settle()
     check(not expected_on)

@@ -9,7 +9,8 @@ from conftest import PLUGIN_SPECS
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ERROR_CATALOG = Path("vendor/runtime/error_codes.json")
 CANONICAL_FOLDER = "amx_a"
-# MScan is a scan, not a device: it has no vendor runtime or error catalog.
+# The 12 DLL-backed devices own these catalogs. MScan and the ASCII/USB
+# TPG366 driver have no vendor DLL runtime or error catalog.
 EXPECTED_CATALOG_COUNT = 12
 EXPECTED_DEBUG_OUTPUT_MESSAGE = "Error opening the file for debugging output"
 

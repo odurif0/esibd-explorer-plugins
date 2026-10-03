@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+import json
 import logging
 import sys
 import threading
@@ -12,16 +14,22 @@ from typing import Optional
 from .._driver_common import (
     DllPortClaimRegistryMixin,
     ProcessIsolatedClientMixin,
+    RotatingFileHandler,
     TimeoutSafeDllMixin,
     build_device_logger,
 )
 from .dmmr_base import DMMRBase
+from .read_recovery import CommandRecovery, ReadRecovery
 
 
 class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
     """High-level CGC DMMR driver."""
 
     _INSTRUMENT_NAME = "DMMR"
+    _TRANSPORT_SAFETY_WARNING = (
+        "WARNING: current acquisition may still be active. The displayed current "
+        "is no longer updated; hardware stop is not confirmed."
+    )
     _active_connections_lock = threading.Lock()
     _active_connections: dict[int, dict[str, object]] = {}
     _EXPECTED_PRODUCT_TOKENS = ("DMMR",)
@@ -71,6 +79,12 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         self._transport_error = None
         self._startup_log_dir = Path(log_dir) if log_dir is not None else Path(__file__).resolve().parents[3] / "logs"
         self._startup_log_path: Path | None = None
+        self._protocol_lock = threading.RLock()
+        self._protocol_events = deque(maxlen=128)
+        self._protocol_event_count = 0
+        self._protocol_handler = None
+        self._protocol_log_error = None
+        self._protocol_log_path = None
         self._optional_command_warnings: set[tuple[str, int]] = set()
         self._optional_command_support: dict[tuple[str, Optional[int]], bool] = {}
 
@@ -96,6 +110,99 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         )
 
         super().__init__(com=com, log=None, idn=device_id, dll_path=dll_path)
+
+    def configure_protocol_log(self, directory=None):
+        """Keep receive/recovery events separate from routine rotating logs."""
+        if not hasattr(self, '_protocol_lock'):
+            self._protocol_lock = threading.RLock()
+            self._protocol_events = deque(maxlen=128)
+            self._protocol_event_count = 0
+            self._protocol_handler = None
+            self._protocol_log_error = None
+        with self._protocol_lock:
+            root = Path(directory) if directory is not None else self._startup_log_dir
+            path = root / f'dmmr_protocol_com{self.com}.jsonl'
+            if self._protocol_handler is not None and path == self._protocol_log_path:
+                return
+            if self._protocol_handler is not None:
+                self._protocol_handler.close()
+                self._protocol_handler = None
+            if getattr(self, '_protocol_log_path', None) not in (None, path):
+                self._protocol_events.clear()
+                self._protocol_event_count = 0
+            self._protocol_log_path = path
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding='utf-8')
+                handler.setFormatter(logging.Formatter('%(message)s'))
+                def report_write_error(_record):
+                    # logging normally swallows emit failures. Keep evidence
+                    # in memory and report the failed file without aborting reads.
+                    self._protocol_log_error = str(sys.exc_info()[1])
+                handler.handleError = report_write_error
+                self._protocol_handler = handler
+                self._protocol_log_error = None
+            except OSError as exc:
+                self._protocol_log_error = str(exc)
+
+    def record_protocol_event(self, event):
+        if not hasattr(self, '_protocol_lock') or self._protocol_log_path is None:
+            self.configure_protocol_log()
+        with self._protocol_lock:
+            self._protocol_event_count += 1
+            record = dict(event, sequence=self._protocol_event_count, unix_time_s=time.time())
+            # Serialize a copy: later recovery/sample updates must not rewrite history.
+            text = json.dumps(record, default=repr, ensure_ascii=True, allow_nan=False)
+            self._protocol_events.append(json.loads(text))
+            if self._protocol_handler is not None:
+                self._protocol_handler.handle(logging.LogRecord('DMMR.protocol', logging.WARNING,
+                                                               __file__, 0, text, (), None))
+            if self._protocol_log_error:
+                self.logger.warning('DMMR protocol log unavailable: %s; %s', self._protocol_log_error, text)
+
+    def protocol_diagnostics(self):
+        if not hasattr(self, '_protocol_lock'):
+            return {'event_count': 0, 'file': None, 'events': []}
+        with self._protocol_lock:
+            return {'event_count': self._protocol_event_count, 'file': str(self._protocol_log_path) if self._protocol_log_path else None,
+                    'log_error': self._protocol_log_error, 'events': list(self._protocol_events)}
+
+    def _protocol_call_unlocked(self, method, action, *args, **kwargs):
+        """Capture clear-on-read port diagnostics before another DLL transaction."""
+        self._raise_if_transport_poisoned()
+        result = method(*args, **kwargs)
+        status = result[0] if isinstance(result, tuple) and result else result
+        if isinstance(status, int) and status < 0:
+            record = {'kind': 'dll_error', 'action': action, 'status': status,
+                      'transport_poisoned': bool(self._transport_poisoned)}
+            if not self._transport_poisoned:
+                for name in ('get_io_state', 'get_comm_error'):
+                    if self._transport_poisoned:
+                        break
+                    # Raw getters: the transport lock is already held. Calling
+                    # timed public methods here would deadlock on that lock.
+                    try:
+                        record[name] = getattr(DMMRBase, name)(self)
+                    except Exception as exc:
+                        record[name] = {'unavailable': f'{type(exc).__name__}: {exc}'}
+                    if self._transport_poisoned:
+                        break
+            record['transport_poisoned'] = bool(self._transport_poisoned)
+            try:
+                self.record_protocol_event(record)
+            except Exception as exc:
+                self.logger.warning('Could not save DMMR protocol diagnostics: %s', exc)
+        return result
+
+    def _call_locked_with_timeout(self, method, timeout_s, step_name, *args, **kwargs):
+        return super()._call_locked_with_timeout(
+            self._protocol_call_unlocked, timeout_s, step_name, method, step_name, *args, **kwargs)
+
+    def new_read_recovery(self, ranges, **kwargs):
+        return ReadRecovery(self, ranges, **kwargs)
+
+    def new_command_recovery(self, **kwargs):
+        return CommandRecovery(self, **kwargs)
 
     def begin_startup_diagnostics(self, timeout_s: Optional[float] = None) -> str:
         """Enable native evidence for one ON attempt, never for ongoing polling."""
@@ -429,14 +536,17 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
 
     def connect(self, timeout_s: float = 5.0) -> bool:
         """Connect to the DMMR device."""
+        self._raise_if_transport_poisoned()
+        already_connected = self._connection_is_ready()
+        initial_open_returned = False
         try:
-            if self.connected:
-                self._set_port_claimed(True)
+            if already_connected:
                 self.logger.info(
                     f"DMMR device {self.device_id} is already connected; skipping open_port"
                 )
                 return True
-
+            if getattr(self, '_open_failed', False):
+                raise RuntimeError('Previous DMMR open has not been released; discard this connection first.')
             self._warn_on_other_process_ports()
             self.logger.info(
                 f"Connecting to DMMR device {self.device_id} on COM{self.com}"
@@ -446,12 +556,8 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             set_baud_rate = super().set_baud_rate
             close_port = super().close_port
 
-            status = self._call_locked_with_timeout(
-                open_port,
-                timeout_s,
-                "open_port",
-                self.com,
-            )
+            status = self._call_initial_open(open_port, close_port, timeout_s, self.com)
+            initial_open_returned = True
             if status != self.NO_ERR:
                 raise RuntimeError(
                     f"DMMR open_port failed: {self.format_status(status)}"
@@ -493,8 +599,11 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             )
             return True
         except Exception:
-            self.connected = False
+            if initial_open_returned:
+                self.connected = False
             raise
+        finally:
+            self._finish_initial_open()
 
     def initialize(
         self,
@@ -560,6 +669,9 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
         was_connected = self.connected
 
         try:
+            opening_cleanup = self._disconnect_failed_open(self._resolve_io_timeout())
+            if opening_cleanup is not None:
+                return opening_cleanup
             if self._transport_poisoned:
                 self.connected = False
                 self._set_port_claimed(True)
@@ -569,10 +681,9 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
                 )
                 return False
 
-            if not was_connected:
+            if not was_connected and not self._dll_port_claimed:
                 self.connected = False
-                if not self._dll_port_claimed:
-                    self._set_port_claimed(False)
+                self._set_port_claimed(False)
                 return True
 
             self.logger.info(f"Disconnecting DMMR device {self.device_id}")
@@ -1576,6 +1687,8 @@ class DMMR(ProcessIsolatedClientMixin):
     """Public DMMR client with process isolation on Windows."""
 
     _INSTRUMENT_NAME = "DMMR"
+    ReadRecovery = ReadRecovery
+    CommandRecovery = CommandRecovery
     _PROCESS_CONTROLLER_CLASS = _DMMRController
     _PROCESS_CONTROLLER_PATH = f"{__name__}:_DMMRController"
     _PROCESS_TIMEOUT_RULES = {

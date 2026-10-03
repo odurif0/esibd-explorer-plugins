@@ -36,8 +36,9 @@ Each real channel must be configured with:
 
 - `Module`: DMMR module address from `0` to `7`
 - `Range mode`: `Auto` (default) or fixed range index `0`–`4`. Choose it in the
-  module card while OFF. ON applies the saved choice and verifies its readback;
-  a failed write or readback aborts startup and triggers verified shutdown.
+  module card while OFF. ON reads the hardware, writes only changed settings,
+  and verifies the result. A receive error allows one checked recovery;
+  unverified settings abort startup.
 
 The plugin auto-discovers installed modules, creates one channel per detected
 module, reads live current measurements as channel monitors, and exposes a
@@ -46,9 +47,11 @@ verifies that acquisition is disabled, closes the port, and reports
 `Disconnected`. The next ON reconnects automatically. If the port cannot be
 closed, the failure remains visible and the next click retries OFF.
 
-After a failed start, OFF is shown only when both acquisition gates read back
+After a failed acquisition start, OFF is shown only when both acquisition gates read back
 disabled. Otherwise, `Shutdown unconfirmed` is displayed and the button stays
 ON so the next click retries OFF; this does not mean acquisition is running.
+Only a confirmed `ST_ON` allows acquisition. Undocumented state codes keep their
+numeric value and an `UNKNOWN_STATE` label, not an assumed overload diagnosis.
 
 Use `Display` to show or hide a module's time trace. The color square next to
 it opens the color picker; the choice is saved in the channel configuration.
@@ -69,6 +72,7 @@ limit, all three are thinned together. HDF5 exports keep the existing current
 channels and add `DMMR/Measurement ranges/<channel>`, aligned with each current
 and timestamp. Dataset attributes link the three series. Unknown ranges and
 missing readings are NaN; old recordings load without inventing their ranges.
+Full-history and visible-window exports remain aligned with Explorer 1.0.1.
 
 The recording timer no longer repeats a polling result when acquisition is
 slower than recording; it leaves a NaN gap instead. Identical currents from
@@ -79,27 +83,61 @@ recording times, not simultaneous conversion times for all modules.
 
 ## Startup Diagnostics
 
+If connection fails with the DMMR powered off, power it on and retry. The plugin
+keeps the old attempt until its opening call returns and port closure is confirmed,
+then permits a new connection. OFF, Disconnect and Explorer closure clean up only
+that failed opening, without sending acquisition commands. Until closure is
+confirmed, the backend remains reserved and `Connection pending` keeps the button
+ON for another OFF attempt; this does not mean acquisition started. An OFF request
+before the connection worker starts prevents opening; during opening it cancels
+subsequent activation. Only a fresh ON rearms startup. `Disconnected` requires
+confirmed closure of any opened port. A persistently blocked DLL or unconfirmed closure can still require
+restarting Explorer. This recovery never applies to a timeout after opening.
+
 Each ON attempt captures the native DLL startup exchanges, including failed-start
 cleanup, into `esibd explorer.log` under `[DMMR startup]` / `[DMMR native]`.
 To investigate an error, try ON once and share that Explorer log. No additional
-tool or setting is needed; retries and serial timeouts are unchanged.
+tool or setting is needed.
+
+Startup has one receive-error recovery budget for mode, range and final-state
+checks. If readbacks fail to communicate, one purge restores the link and baud
+rate before rechecking settings. Configuration writes are never replayed.
+A lost enable ACK still triggers OFF, not another enable. Shutdown has its own
+single recovery attempt and confirms both OFF flags before closing the port.
 
 Capture stops before continuous polling. The raw file in `dmmr/logs/` is reused
 on each attempt and trimmed to 64 KiB after closing. A blocked DLL is never
 closed concurrently: any partial capture is reported, and Explorer must be
 restarted. An unavailable capture is explicitly reported, not silently omitted.
 
+## Read Errors
+
+Returned receive errors (`−10` to `−13`) are logged before recovery. The driver
+checks the controller, acquisition mode and ranges, with at most one serial
+purge if needed. The failed reading is missing data, never a reused value.
+A second error before valid replies from all modules, or a fourth incident
+within 60 seconds, stops acquisition. A blocked DLL is never retried or closed
+concurrently. This checks new replies, not fresh ADC conversions.
+
+Keep `dmmr/logs/dmmr_protocol_com*.jsonl*` with the Explorer log. The protocol
+log records clear-on-read port diagnostics before another transaction; it
+rotates at 1 MB with three backups. `−13` alone does not identify automatic mode.
+
 ## Optional Zero Check
 
-[`dmmr_zero_check.ipynb`](dmmr_zero_check.ipynb) runs outside Explorer: close
-Explorer first and check the notebook's COM port (default COM15). It records
-all eight modules for 15 minutes in fixed range 0, without offset correction,
-and reports time traces, per-minute means and standard deviations. A completed
-run also reports the final five minutes, without assuming they are stable.
+The [zero-check notebook](../notebooks/dmmr_zero_check.ipynb) records all eight
+modules in fixed range 0 for two 6-hour runs, with a 5-minute disconnected pause
+and temperature/diagnostic logging. Close Explorer before running it.
+The notebook uses the same bounded recovery for range setup and current reads,
+and saves protocol logs per series. Range writes are never replayed after an error.
+Update both the notebook and the complete `dmmr/` folder, including `vendor/`.
+Instructions and limits are in the notebook. Keep the whole output folder.
+This characterizes offset, noise and drift; it does not calibrate the input or
+change gain, bias or NVM. Record the input connection and shielding. Acceptance
+limits require the applicable range/integration-time specification or CGC's
+criteria; none is invented from the measured scatter.
 
-Keep `raw.csv`, `report.json` and `native_startup.log` from the run directory.
-Open inputs can pick up interference; this check does not certify conformance
-or test gain and linearity without a reference current source.
+The notebook lives in `notebooks/`, outside the plugin release ZIP.
 
 ## Portability Note
 

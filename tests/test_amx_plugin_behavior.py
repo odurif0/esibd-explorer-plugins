@@ -1401,7 +1401,7 @@ def test_controller_close_communication_syncs_after_device_is_disposed():
 
     class FakeDevice:
         def disconnect(self):
-            return None
+            return True
 
         def close(self):
             return None
@@ -1419,7 +1419,9 @@ def test_controller_close_communication_syncs_after_device_is_disposed():
     controller.available_configs = [{"index": 9, "name": "Operate"}]
     controller.available_configs_text = "9:Operate"
 
-    controller.closeCommunication()
+    # This checks GUI synchronization after a verified shutdown. An unqualified
+    # Close must retain the backend; test_cgc_initial_cleanup_race covers that.
+    controller.closeCommunication(final_state="Disconnected")
 
     assert controller.device is None
     assert controller.initialized is False
@@ -1486,7 +1488,7 @@ def test_controller_shutdown_uses_full_software_shutdown():
             return True
 
         def disconnect(self):
-            return None
+            return True
 
         def close(self):
             return None
@@ -1613,7 +1615,7 @@ def test_controller_shutdown_parks_standby_before_disconnect_when_available():
             return True
 
         def disconnect(self):
-            return None
+            return True
 
         def close(self):
             return None

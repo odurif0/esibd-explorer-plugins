@@ -343,7 +343,7 @@ def test_controller_read_numbers_does_not_block_on_zero_ready_flags():
     assert controller.device.current_calls == [(1, 2.5), (2, 2.5)]
 
 
-def test_controller_read_numbers_recovers_from_automatic_current_mode():
+def test_controller_read_numbers_stops_if_manual_mode_has_changed():
     module = _load_module()
 
     class FakeDevice:
@@ -353,6 +353,21 @@ def test_controller_read_numbers_recovers_from_automatic_current_mode():
         def __init__(self):
             self.current_calls = []
             self.automatic_current = True
+            self.enabled = self.connected = True
+
+        def get_enable(self, **kw):
+            return 0, self.enabled
+
+        def get_automatic_current(self, **kw):
+            return 0, self.automatic_current
+
+        def set_enable(self, enabled, **kw):
+            self.enabled = enabled
+            return 0
+
+        def disconnect(self):
+            self.connected = False
+            return True
 
         def get_state(self, timeout_s=None):
             return self.NO_ERR, "0x0000", "ST_ON"
@@ -402,26 +417,21 @@ def test_controller_read_numbers_recovers_from_automatic_current_mode():
     )
 
     controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
+    hardware = controller.device = FakeDevice()
     controller.initialized = True
     controller.acquiring = True
+    controller._verified_read_ranges = {3: (3, False)}
     controller.detected_module_ids = [3]
     controller.print = lambda message, flag=None: logs.append((message, flag))
 
     controller.readNumbers()
 
-    assert controller.values == {3: 3e-12}
-    assert controller.errorCount == 0
-    assert controller.device.current_calls == [
-        (3, 2.5, True),
-        (3, 2.5, False),
-    ]
-    assert logs == [
-        (
-            "DMMR automatic current mode was active; switched back to manual module polling.",
-            module.PRINT.WARNING,
-        )
-    ]
+    assert np.isnan(controller.values[3])
+    assert not controller.acquiring and not controller.initialized
+    assert not hardware.connected
+    assert hardware.current_calls == [(3, 2.5, True)]
+    assert any('Current acquisition mode changed' in message for message, _ in logs)
+    assert not any('mode was active' in message for message, _ in logs)
 
 
 def test_controller_toggle_on_enables_measurement():
@@ -430,6 +440,9 @@ def test_controller_toggle_on_enables_measurement():
 
     class FakeDevice:
         NO_ERR = 0
+
+        def get_automatic_current(self, **kw):
+            return 0, False
 
         def set_enable(self, enabled, timeout_s=None):
             calls.append(("set_enable", enabled, timeout_s))
@@ -481,10 +494,13 @@ def test_controller_toggle_on_enables_measurement():
 
 def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
     module = _load_module()
-    calls = []
+    calls, modes = [], {}
 
     class FakeDevice:
         NO_ERR = 0
+
+        def get_automatic_current(self, **kw):
+            return 0, False
 
         def set_enable(self, enabled, timeout_s=None):
             calls.append(("set_enable", enabled, timeout_s))
@@ -492,11 +508,12 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
 
         def set_module_auto_range(self, module, enabled, timeout_s=None):
             calls.append(("set_module_auto_range", module, enabled, timeout_s))
+            modes[module] = enabled
             return self.NO_ERR
 
         def get_module_meas_range(self, module, timeout_s=None):
             calls.append(("get_module_meas_range", module, timeout_s))
-            return self.NO_ERR, 0, True
+            return self.NO_ERR, 0, modes.get(module, False)
 
         def set_automatic_current(self, enabled, timeout_s=None):
             calls.append(("set_automatic_current", enabled, timeout_s))
@@ -540,8 +557,10 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
     assert calls == [
         ("set_enable", True, 7.0),
         ("set_automatic_current", False, 7.0),
+        ("get_module_meas_range", 1, 7.0),
         ("set_module_auto_range", 1, True, 7.0),
         ("get_module_meas_range", 1, 7.0),
+        ("get_module_meas_range", 3, 7.0),
         ("set_module_auto_range", 3, True, 7.0),
         ("get_module_meas_range", 3, 7.0),
     ]
@@ -672,7 +691,7 @@ def test_controller_toggle_off_failure_restores_on_ui_state():
     )
 
 
-def test_controller_marks_communication_lost_and_requests_forced_close_when_transport_is_unusable():
+def test_controller_retains_backend_and_unconfirmed_shutdown_when_transport_is_unusable():
     module = _load_module()
     ui_states = []
 
@@ -712,15 +731,15 @@ def test_controller_marks_communication_lost_and_requests_forced_close_when_tran
 
     controller._update_state()
 
-    assert controller.main_state == module._DMMR_COMMUNICATION_LOST_STATE
-    assert controller._forced_close_state == module._DMMR_COMMUNICATION_LOST_STATE
+    assert controller.main_state == module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
+    assert controller._forced_close_state == module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
     assert controller.acquiring is False
-    assert controller.initialized is False
-    assert controller.device is None
+    assert controller.initialized is True
+    assert isinstance(controller.device, FakeDevice)
     assert controller.transitioning is False
     assert controller.transition_target_on is None
-    assert ui_states == [False]
-    assert controller.signalComm.closeCommunicationSignal.last_emit == ((), {})
+    assert ui_states == [True]
+    assert not hasattr(controller.signalComm.closeCommunicationSignal, 'last_emit')
 
 
 def test_controller_read_numbers_acquires_lock_for_state_and_module_polling():
@@ -808,7 +827,7 @@ def test_controller_read_numbers_acquires_lock_for_state_and_module_polling():
     assert controller.values == {3: 3.2e-12}
 
 
-def test_controller_marks_communication_lost_after_repeated_generic_state_failures():
+def test_controller_retains_shutdown_uncertainty_after_repeated_state_failures():
     module = _load_module()
     ui_states = []
 
@@ -859,11 +878,12 @@ def test_controller_marks_communication_lost_after_repeated_generic_state_failur
 
     controller._update_state()
 
-    assert controller.main_state == module._DMMR_COMMUNICATION_LOST_STATE
-    assert controller.device is None
+    assert controller.main_state == module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
+    assert isinstance(controller.device, FakeDevice)
+    assert controller.initialized is True
     assert controller.acquiring is False
-    assert controller.signalComm.closeCommunicationSignal.last_emit == ((), {})
-    assert ui_states == [False]
+    assert not hasattr(controller.signalComm.closeCommunicationSignal, 'last_emit')
+    assert ui_states == [True]
 
 
 def test_close_communication_preserves_forced_communication_lost_state():
@@ -1117,8 +1137,14 @@ def test_controller_shutdown_success_marks_state_disconnected():
     module = _load_module()
 
     class FakeDevice:
+        connected = True
+
         def shutdown(self, timeout_s=None):
+            self.connected = False  # Runtime shutdown has already closed the port.
             return True
+
+        def disconnect(self):
+            return self.connected is False
 
     parent = types.SimpleNamespace(
         connect_timeout_s=7.0,
@@ -1302,7 +1328,8 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     retry_exc = RuntimeError("DMMR open_port failed: -2 (Error opening port)")
     guidance2 = controller._init_failure_guidance(retry_exc)
     assert "RESTART ESIBD Explorer" in guidance2
-    assert "locked the COM port" in guidance2
+    assert "without confirmed closure" in guidance2
+    assert "every later retry" not in guidance1 + guidance2
     assert controller._poisoned_com == 10
 
 

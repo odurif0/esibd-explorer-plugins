@@ -187,9 +187,10 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
 
     def connect(self, timeout_s: float = 5.0) -> bool:
         """Connect to the PSU device."""
+        already_connected = self._connection_is_ready()
+        initial_open_returned = False
         try:
-            if self.connected:
-                self._set_port_claimed(True)
+            if already_connected:
                 self.logger.info(
                     f"PSU device {self.device_id} is already connected; skipping open_port"
                 )
@@ -206,9 +207,10 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
             set_baud_rate = super().set_baud_rate
             close_port = super().close_port
 
-            status = self._call_locked_with_timeout(
-                open_port, timeout_s, "open_port", self.com, self.port_num
+            status = self._call_initial_open(
+                open_port, close_port, timeout_s, self.com, self.port_num
             )
+            initial_open_returned = True
             if status != self.NO_ERR:
                 raise RuntimeError(
                     f"PSU open_port failed: {self.format_status(status)}"
@@ -244,8 +246,11 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
                 f"PSU set_baud_rate failed: {self.format_status(baud_status)}"
             )
         except Exception:
-            self.connected = False
+            if initial_open_returned:
+                self.connected = False
             raise
+        finally:
+            self._finish_initial_open()
 
     def _cleanup_initialize_failure(self, timeout_s: float) -> None:
         """Best-effort cleanup after a failed PSU initialize() sequence."""
@@ -357,6 +362,9 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
         timeout_s = self._resolve_io_timeout(timeout_s)
 
         try:
+            initial_open = self._disconnect_failed_open(timeout_s)
+            if initial_open is not None:
+                return initial_open
             if self._transport_poisoned:
                 self._set_port_claimed(True)
                 self.logger.warning(
@@ -365,9 +373,7 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
                 )
                 return False
 
-            if not was_connected:
-                if not self._dll_port_claimed:
-                    self._set_port_claimed(False)
+            if not was_connected and not self._dll_port_claimed:
                 return True
 
             self.logger.info(f"Disconnecting PSU device {self.device_id}")

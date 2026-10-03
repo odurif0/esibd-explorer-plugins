@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "esi" / "esi_plugin.py"
@@ -588,6 +589,7 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
     controller.toggleOn()
 
     assert calls == [
+        ("module", 0, False),
         ("module", 1, False),
         ("module", 2, False),
         ("global", True),
@@ -604,13 +606,16 @@ def test_on_sequence_programs_heat_target_before_activation():
         def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("hv_target", address, value))
 
-        def set_heater_temperature(self, value, timeout_s):
+        def set_heater_temperature(self, value, timeout_s, *, cancel_event=None):
+            assert cancel_event is controller._output_cancel
             calls.append(("heat_target", value))
 
         def set_global_active(self, active, timeout_s):
             calls.append(("global", active))
 
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
+            if active and address == 0:
+                assert cancel_event is controller._output_cancel
             calls.append(("module", address, active))
 
     heat = types.SimpleNamespace(
@@ -634,6 +639,7 @@ def test_on_sequence_programs_heat_target_before_activation():
     controller.toggleOn()
 
     assert calls == [
+        ("module", 0, False),
         ("module", 1, False),
         ("module", 2, False),
         ("global", True),
@@ -741,10 +747,12 @@ def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
     calls = []
 
     class FakeDevice:
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
+            assert cancel_event is controller._output_cancel
             calls.append(("active", address, active, timeout_s))
 
-        def set_heater_temperature(self, target, timeout_s):
+        def set_heater_temperature(self, target, timeout_s, *, cancel_event=None):
+            assert cancel_event is controller._output_cancel
             calls.append(("temperature", target, timeout_s))
 
         def set_hv_module_target(self, *args, **kwargs):
@@ -771,6 +779,42 @@ def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
         ("temperature", 95.0, 2.0),
         ("active", 0, True, 2.0),
     ]
+
+
+@pytest.mark.parametrize('operation', ['target', 'on'])
+def test_heat_ready_wait_uses_the_existing_output_cancellation_token(operation):
+    module = _load_plugin()
+    channel = types.SimpleNamespace(module_address=lambda: 0, is_heat_channel=lambda: True,
+                                    enabled=True, value=30., name='HEAT')
+    parent = types.SimpleNamespace(poll_timeout_s=1., isOn=lambda: True)
+    controller = module.ESIController(parent)
+    controller.initialized = True
+    controller.heat_readback_valid = True
+    controller.errorCount = 0
+    controller.print = lambda *args, **kwargs: None
+    writes = []
+    class Device:
+        def set_heater_temperature(self, target, timeout_s, *, cancel_event=None):
+            assert cancel_event is controller._output_cancel
+            if operation == 'target':
+                controller._output_cancel.set()  # Stop while acquiring a ready datum.
+                if cancel_event.is_set():
+                    raise InterruptedError('Stopped before target')
+            writes.append(('target', target))
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
+            if active and operation == 'on':
+                assert cancel_event is controller._output_cancel
+                controller._output_cancel.set()
+                if cancel_event.is_set():
+                    raise InterruptedError('Stopped before ON')
+            writes.append(('module', active))
+            return active
+    controller.device = Device()
+    controller.applyValue(channel)
+    if operation == 'target':
+        assert ('target', 30.) not in writes
+    assert ('module', True) not in writes
+    assert ('module', False) in writes  # Rollback remains possible after Stop.
 
 
 def test_invalid_heat_readback_blocks_nonzero_target_and_forces_off():
@@ -982,6 +1026,7 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     controller.toggleOn()
 
     assert calls == [
+        ("module", 0, False),
         ("module", 1, False),
         ("module", 2, False),
         ("global", True),

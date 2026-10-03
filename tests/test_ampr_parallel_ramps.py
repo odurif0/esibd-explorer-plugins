@@ -156,6 +156,7 @@ def test_one_worker_handles_off_from_startup_through_ramp_completion(rig, when, 
         stops.append(True)
         if shutdown_ok:
             hw.connected = False
+            hw._dll_port_claimed = False
         return shutdown_ok
     hw.shutdown = stop
     def off():
