@@ -1,4 +1,9 @@
-"""Reproduce host defects against the real Explorer source, without instruments."""
+"""Host defects fixed by install_explorer_fixes.py, checked on the real Explorer source.
+
+The fixture copies the host's core.py/plugins.py (ESIBD_EXPLORER_SOURCE, else the
+installed esibd package) and applies the installer's patches to the copy, so the
+tests validate "this Explorer release + our installer" without modifying it.
+"""
 from __future__ import annotations
 
 import ast
@@ -7,6 +12,7 @@ import configparser
 import copy
 from datetime import datetime
 import __future__
+import importlib.util
 import os
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -15,12 +21,38 @@ from typing import cast
 import pytest
 
 
+def _installer():
+    path = Path(__file__).resolve().parents[1] / "install_explorer_fixes.py"
+    spec = importlib.util.spec_from_file_location("_explorer_fixes_for_host_tests", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture
-def host_source():
-    root = Path(os.environ.get("ESIBD_EXPLORER_SOURCE", str(Path.home() / "Git/ESIBD-Explorer"))) / "esibd"
+def host_source(tmp_path):
+    source = os.environ.get("ESIBD_EXPLORER_SOURCE")
+    if source:
+        root = Path(source) / "esibd"
+    else:
+        spec = importlib.util.find_spec("esibd")
+        locations = list(spec.submodule_search_locations or []) if spec else []
+        root = Path(locations[0]) if locations else Path()
     if not (root / "core.py").is_file():
         pytest.skip("Real Explorer source is required")
-    return root
+    installer = _installer()
+    patched = tmp_path / "esibd"
+    patched.mkdir()
+    try:
+        (patched / "core.py").write_text(installer.patch_core((root / "core.py").read_text(encoding="utf-8")), encoding="utf-8")
+        (patched / "plugins.py").write_text(installer.patch_plugins((root / "plugins.py").read_text(encoding="utf-8")),
+                                            encoding="utf-8")
+    except ValueError as error:
+        import explorer_host
+        if explorer_host.source_version(root) == explorer_host.TARGET_VERSION:
+            pytest.fail(f"install_explorer_fixes.py must support the targeted Explorer: {error}")
+        pytest.skip(f"install_explorer_fixes.py does not support this Explorer source: {error}")
+    return patched
 
 
 def definition(path, name, class_name=None):
