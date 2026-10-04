@@ -83,8 +83,8 @@ Important points:
   controls in the plugin UI. It is chosen by loading a saved AMX HD config.
 - The plugin `OFF` action disables or parks the controller with a confirmed
   shutdown path, then disconnects.
-- Before choosing a config index, query the controller with the AMX HD wrapper
-  notebook or `list_configs()`.
+- Before choosing a config index, query the controller with the
+  [AMX HD hardware probe](../notebooks/amx_hd_hardware_probe.ipynb) or `list_configs()`.
 
 The plugin queries the timer count at runtime (`get_timer_count()`); it does
 not hard-code a channel count. Each timer channel exposes:

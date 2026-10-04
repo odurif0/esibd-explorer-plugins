@@ -199,7 +199,7 @@ port (`16` is the notebook default).
 
 ### Read-only heater notebook
 
-[`esi_heater_readonly_probe.ipynb`](esi_heater_readonly_probe.ipynb) has one code
+[`esi_heater_readonly_probe.ipynb`](../notebooks/esi_heater_readonly_probe.ipynb) has one code
 cell and uses the installed bundled DLL. It reads heater activation, interlocks,
 limits, targets, monitoring, LED RGB and identification without output,
 configuration or baud-setting commands. Use a fresh kernel; Close is attempted
@@ -304,7 +304,7 @@ shutdown controls accessible throughout the experiment.
 
 ### Inventory notebook
 
-[`esi_hardware_probe.ipynb`](esi_hardware_probe.ipynb) identifies modules and
+[`esi_hardware_probe.ipynb`](../notebooks/esi_hardware_probe.ipynb) identifies modules and
 records diagnostics in a JSON report. It is **not read-only**: it switches
 module communication with `set_enable`, writes zero HV and heater targets
 (`0 V`, `0 degC`), then attempts to disable operation and close the port.

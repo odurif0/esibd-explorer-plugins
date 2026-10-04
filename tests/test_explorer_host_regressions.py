@@ -13,6 +13,7 @@ import copy
 from datetime import datetime
 import __future__
 import importlib.util
+from importlib.metadata import PackageNotFoundError, distribution
 import os
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -35,9 +36,11 @@ def host_source(tmp_path):
     if source:
         root = Path(source) / "esibd"
     else:
-        spec = importlib.util.find_spec("esibd")
-        locations = list(spec.submodule_search_locations or []) if spec else []
-        root = Path(locations[0]) if locations else Path()
+        # Package metadata, not sys.modules: other tests install esibd stubs.
+        try:
+            root = Path(distribution("esibd-explorer").locate_file("esibd"))
+        except PackageNotFoundError:
+            root = Path()
     if not (root / "core.py").is_file():
         pytest.skip("Real Explorer source is required")
     installer = _installer()

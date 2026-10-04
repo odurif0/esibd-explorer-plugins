@@ -18,7 +18,7 @@ import pytest
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "esi" / "vendor" / "runtime"
 RUNTIME_NAME = "_esi_driver_test_runtime"
 VENDOR_DIR = RUNTIME_DIR / "esi" / "vendor"
-HARDWARE_NOTEBOOK = Path(__file__).resolve().parents[1] / "esi" / "esi_hardware_probe.ipynb"
+HARDWARE_NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "esi_hardware_probe.ipynb"
 
 
 def _load_runtime():
@@ -525,6 +525,7 @@ def test_inventory_notebook_has_portable_paths():
     assert "lab_admin" not in source
     assert "REPO_ROOT" not in source
     assert "Path.home() / 'ESIBD Explorer' / 'plugins' / 'esi'" in source
+    assert "Path.cwd().parent / 'esi'" in source  # notebooks/ beside the esi/ plugin folder
     assert "report_path = (\n            PLUGIN_DIR /" in source
 
 
