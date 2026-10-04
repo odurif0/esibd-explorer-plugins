@@ -55,7 +55,7 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
 ## ESI heater / pressure–temperature
 
 The approved heater characterization remains **50 W / 100 °C**, armed by default.
-The pressure–temperature notebook is **disarmed by default** and uses the separate
+The pressure–temperature notebook is also **armed by default** and uses the separate
 approved 175 °C protocol. Both share a per-COM lock, historical guards and explicit
 operator recovery; they must not own the same instrument concurrently. Old kernels
 and old software copies are not retrospectively protected by the new lock.
