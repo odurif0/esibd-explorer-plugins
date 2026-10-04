@@ -292,7 +292,9 @@ def rows(run):
 def test_disarmed_entire_cell_does_not_load_runtime_or_touch_hardware(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     namespace = {}
-    exec(compile(code(), str(NOTEBOOK), "exec"), namespace)
+    disarmed = code().replace("ARM_HEATING = True", "ARM_HEATING = False", 1)
+    assert disarmed != code()
+    exec(compile(disarmed, str(NOTEBOOK), "exec"), namespace)
     assert "No hardware accessed" in capsys.readouterr().out
     assert not list(tmp_path.iterdir())
     namespace["find_plugins"] = lambda *a: pytest.fail("Disarmed must not resolve/load runtimes")
@@ -309,7 +311,7 @@ def test_defaults_and_notebook_prose():
     constants = {node.targets[0].id: ast.literal_eval(node.value) for node in tree.body
                  if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
                  and isinstance(node.value, (ast.Constant, ast.Tuple))}
-    assert constants["ARM_HEATING"] is False
+    assert constants["ARM_HEATING"] is True
     assert constants["BASELINE_S"] == 60 and constants["HOLD_S"] == 300 and constants["SAMPLE_S"] == 1
     assert constants["TARGETS_C"] == tuple(range(30, 171, 10)) + (175,)
     assert constants["QUALIFICATION_DEADLINE_S"] == 600 and constants["STAGE_DEADLINE_S"] == 900
@@ -1117,7 +1119,20 @@ def test_full_armed_main_uses_ports_runtime_guards_and_real_implementation(ns, r
     assert rig.calls.count(("heater_on",)) == 1
 
 
+def test_armed_default_cell_refuses_off_windows_before_any_access(tmp_path, monkeypatch):
+    # The whole cell runs armed by default. Force a non-Windows platform so that
+    # running the test suite on the lab PC can never start a real experiment.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.chdir(tmp_path)
+    namespace = {"__file__": str(tmp_path / "pressure_temperature.ipynb")}
+    with pytest.raises(RuntimeError, match="requires Windows"):
+        exec(compile(code(), str(NOTEBOOK), "exec"), namespace)
+    assert namespace["ARM_HEATING"] is True
+    assert not list(tmp_path.iterdir()), "no run folder, marker or lock before the platform check"
+
+
 def test_disarmed_cell_warns_that_previous_unconfirmed_heating_is_not_switched_off(ns, capsys):
+    ns["ARM_HEATING"] = False
     ns["_PT_GUARD"]["run"] = object()
     ns["main"]()
     assert "disarming this cell does not switch hardware OFF" in capsys.readouterr().out
