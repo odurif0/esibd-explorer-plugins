@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-NOTEBOOK = ROOT / "esi/esi_heater_readonly_probe.ipynb"
+NOTEBOOK = ROOT / "notebooks/esi_heater_readonly_probe.ipynb"
 
 
 def notebook_code():
@@ -333,7 +333,8 @@ def test_invalid_com_is_not_wrapped_into_a_different_port(ns, port):
         ns["main"]()
 
 
-def test_main_finds_installed_bundle_and_runs_with_private_loader(ns, tmp_path, monkeypatch):
+@pytest.mark.parametrize("start", ["plugins", "notebooks"])
+def test_main_finds_installed_bundle_and_runs_with_private_loader(ns, tmp_path, monkeypatch, start):
     plugin = tmp_path / "esi"
     vendor = plugin / "vendor/runtime/esi/vendor/x64"
     vendor.mkdir(parents=True)
@@ -364,7 +365,11 @@ def test_main_finds_installed_bundle_and_runs_with_private_loader(ns, tmp_path, 
     ns["importlib"] = SimpleNamespace(util=SimpleNamespace(
         spec_from_file_location=spec, module_from_spec=lambda value: module,
     ))
-    monkeypatch.chdir(tmp_path)  # Automatic discovery: cwd/esi, no manual paths.
+    # Automatic discovery, no manual paths: from the plugins folder (cwd/esi) or
+    # from notebooks/ beside it (cwd/../esi), where this notebook now lives.
+    cwd = tmp_path if start == "plugins" else tmp_path / "notebooks"
+    cwd.mkdir(exist_ok=True)
+    monkeypatch.chdir(cwd)
     before_path = list(sys.path)
     ns["main"]()
     assert sys.path == before_path

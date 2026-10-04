@@ -26,6 +26,8 @@ The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, d
 
 ## Notebooks and runtimes
 
+All notebooks live in `notebooks/` (enforced by `tests/test_notebook_layout.py`),
+never inside plugin folders or `tests/`, and are not shipped in the release ZIP.
 Plugins and notebooks evolve freely: notebooks do not pin runtime or DLL hashes.
 They only record the SHA-256 of the files used in each run's metadata.
 

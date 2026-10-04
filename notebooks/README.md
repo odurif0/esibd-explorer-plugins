@@ -1,5 +1,18 @@
 # Notebooks
 
+All notebooks live here, outside the plugin folders; they are not part of the
+release ZIP. Keep `notebooks/` beside the plugin folders (`esi/`, `dmmr/`,
+`tpg366/`, `amx_hd/`), or set the notebook's plugin-path variable. Close ESIBD
+Explorer and vendor utilities before a notebook opens an instrument.
+
+## Hardware probes
+
+- [`esi_hardware_probe.ipynb`](esi_hardware_probe.ipynb): ESI module inventory and diagnostics. **Not read-only**: writes zero targets and disables operation; see [esi/README.md](../esi/README.md#inventory-notebook).
+- [`esi_heater_readonly_probe.ipynb`](esi_heater_readonly_probe.ipynb): read-only ESI heater snapshot (activation, interlocks, limits, monitoring); JSON report under `esi/logs/esi_heater_readonly/`.
+- [`amx_hd_hardware_probe.ipynb`](amx_hd_hardware_probe.ipynb): AMX HD identity, state encoding, housekeeping, timers and configuration slots through the bundled driver.
+
+## DMMR zero check
+
 - [`dmmr_zero_check.ipynb`](dmmr_zero_check.ipynb): Checks offset, noise and drift on the eight DMMR modules, while recording temperatures and device diagnostics. Default: two 6-hour runs in fixed range 0, with a 5-minute disconnected pause. Minute statistics and 30-minute baseline means/slopes.
 
 ## ESI heater characterization

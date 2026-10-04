@@ -115,9 +115,10 @@ safety procedure before touching hardware.
 
 ## Notebooks
 
-[DMMR zero check](notebooks/dmmr_zero_check.ipynb): two 6-hour runs with a
-5-minute disconnected pause and temperature/diagnostic logging. Run outside
-Explorer. Standalone notebooks are not included in the plugin release ZIP.
+All notebooks are in [`notebooks/`](notebooks/README.md): ESI and AMX HD hardware
+probes, the DMMR zero check, ESI heater characterization and the
+pressure–temperature protocol. Run them outside Explorer, with `notebooks/`
+beside the plugin folders. Notebooks are not included in the plugin release ZIP.
 
 ## Running Tests
 
