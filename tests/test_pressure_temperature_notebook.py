@@ -944,7 +944,14 @@ def test_real_discharge_verifier_requires_fresh_low_values(ns, rig, native_disch
         assert metadata["last_discharge"]["limit_v"] == 1
         assert all(abs(values[key]) <= 1 for values in metadata["last_discharge"]["modules"].values()
                    for key in ("positive_v", "negative_v"))
-    else:
+    if fault in (None, "high_voltage"):
+        # Every round with fresh readings is kept, not only the last one.
+        observations = metadata["discharge_observations"]
+        assert len(observations) > 1
+        assert {key: value for key, value in observations[-1].items() if key != "elapsed_s"} == metadata["last_discharge"]
+        elapsed = [observation["elapsed_s"] for observation in observations]
+        assert elapsed == sorted(elapsed)
+    if fault is not None:
         assert not metadata["shutdown_confirmed"] and ("close",) not in native_discharge.calls
         assert ns["_PT_GUARD"] and rig.run.guard_path.exists()
     assert not any(call == ("gate", True) for call in native_discharge.calls)
@@ -1103,7 +1110,9 @@ def test_full_armed_main_uses_ports_runtime_guards_and_real_implementation(ns, r
         assert runtime.ESI is ESIFactory
         checks.append(("runtime_checked",))
     original = ns["Experiment"]
+    configured = []
     def experiment(output, esi_factory, pressure_factory, **kwargs):
+        configured.append(kwargs["stability_factory"])
         kwargs["stability_factory"] = rig.run.stability_factory
         return original(output, esi_factory, pressure_factory, baseline_s=1., hold_s=1., cooling_s=1.,
                         clock=rig.clock, sleep=rig.clock.sleep, plots_factory=NoPlots, **kwargs)
@@ -1117,6 +1126,7 @@ def test_full_armed_main_uses_ports_runtime_guards_and_real_implementation(ns, r
     assert checks == [("load", "_experiment_guard.py"), ("lease",), ("load", "__init__.py"),
                       ("runtime_checked",), ("load", "_tpg366.py"), ("load", "_heater_stability.py"), ("load", "_heater_limits.py")]
     assert rig.calls.count(("heater_on",)) == 1
+    assert configured[0]().max_gap_s == ns["MAX_SAMPLE_GAP_S"] == 10.
 
 
 def test_armed_default_cell_refuses_off_windows_before_any_access(tmp_path, monkeypatch):
@@ -1763,12 +1773,12 @@ def test_real_shared_guard_wired_through_main_in_fresh_process(tmp_path, mode):
     assert "REAL_GUARD_SIMULATED_INSTRUMENTS_OK" in completed.stdout
 
 
-def prepare_stage(ns, rig, target=30.):
+def prepare_stage(ns, rig, target=30., **stability):
     run = rig.run
     run.started = 0.
     run.requested, run.heat_requested, run.phase = target, True, "heating"
     run.hold_s = 300.
-    run.stability = ns["TemperatureStability"]()
+    run.stability = ns["TemperatureStability"](**stability)
     run.stage = {"target_c": target, "commanded_s": 0., "complete": False,
                  "first_qualified_s": None, "observation_started_s": None, "qualified_observation_s": 0.}
     def observe(timestamp, temperature=None):
@@ -1824,6 +1834,29 @@ def test_loss_resets_observation_without_resetting_absolute_deadline(ns, rig, lo
     with pytest.raises(RuntimeError, match="Absolute stage deadline"):
         observe(900)
     assert not rig.run.stage["complete"]
+
+
+def test_slow_esi_read_within_configured_gap_keeps_the_hold(ns, rig):
+    # Real run at 60 °C: a successful ESI read stalled 4.5 s (5.4 s between
+    # temperatures) and restarted the 300 s hold three times until the deadline.
+    observe = prepare_stage(ns, rig, max_gap_s=ns["MAX_SAMPLE_GAP_S"])
+    for timestamp in range(101):
+        observe(timestamp)
+    row = observe(100 + 5.42)
+    assert row["thermal_stable"] and rig.run.stage["observation_started_s"] == 60
+    for timestamp in range(106, 360):
+        assert not observe(timestamp)["stage_complete"]
+    assert observe(360)["stage_complete"]
+    assert rig.run.stage.get("observation_resets", 0) == 0
+
+
+def test_gap_beyond_configured_tolerance_still_restarts_the_window(ns, rig):
+    observe = prepare_stage(ns, rig, max_gap_s=ns["MAX_SAMPLE_GAP_S"])
+    for timestamp in range(101):
+        observe(timestamp)
+    row = observe(100 + ns["MAX_SAMPLE_GAP_S"] + .001)
+    assert not row["thermal_stable"] and row["stability_span_s"] == 0
+    assert row["qualified_observation_s"] == 0 and rig.run.stage["observation_resets"] == 1
 
 
 @pytest.mark.parametrize("drift", [-.11, .11])
@@ -2092,3 +2125,70 @@ def test_explorer_plugin_path_is_read_from_its_windows_settings(ns, monkeypatch,
     assert opened == [("HKCU", r"Software\ESIBD LAB\ESIBD Explorer\General")]
     assert found[-1] == Path.home() / "ESIBD Explorer" / "plugins"
     assert (found[0] == Path(expected_first)) if expected_first else (len(found) == 1)
+
+
+def test_keep_awake_spans_the_whole_run_including_shutdown(rig):
+    events = []
+    rig.run.awake = lambda enabled: events.append((enabled, list(rig.calls))) or True
+    rig.run.run()
+    (first, before), (last, after) = events
+    assert first is True and before == []
+    assert last is False and ("disconnect",) in after and ("pressure_close",) in after
+    assert report(rig.run)["keep_awake"] is True
+
+
+def _sleep_during(rig, target, seconds, suspended):
+    asleep = [0.]
+    rig.run.suspended = (lambda: asleep[0]) if suspended else (lambda: None)
+    sleep = rig.run.sleep
+    def sleeping(duration):
+        sleep(duration)
+        if rig.run.phase == "heating" and rig.run.requested == target and not asleep[0]:
+            asleep[0] = seconds
+            rig.clock.now += seconds
+    rig.run.sleep = sleeping
+
+
+def test_computer_sleep_during_heating_stops_with_an_explicit_message(rig):
+    # Lab run 2026-10-05: Windows slept 60 min after the last keyboard input, for 2004 s
+    # at 100 °C; the run then failed with an unexplained absolute-deadline error.
+    _sleep_during(rig, 40., 2004., suspended=True)
+    rig.run.run()
+    data = report(rig.run)
+    assert data["outcome"] == "error" and data["shutdown_confirmed"]
+    assert any("slept or hibernated for 2004 s" in error for error in data["errors"])
+    assert not any("deadline" in error for error in data["errors"])
+    assert data["observation_interruptions"][0]["suspended_s"] == 2004.
+    assert [call[1] for call in rig.calls if call[0] == "target"] == [30., 40.]
+    assert ("heater_off",) in rig.calls
+
+
+@pytest.mark.parametrize("stall", [59., 61.])
+def test_stall_without_sleep_information_stops_beyond_the_limit(rig, stall):
+    _sleep_during(rig, 40., stall, suspended=False)
+    rig.run.run()
+    data = report(rig.run)
+    if stall < 60:
+        assert data["outcome"] == "complete" and "observation_interruptions" not in data
+    else:
+        assert data["outcome"] == "error" and data["shutdown_confirmed"]
+        assert any("No sample for 61 s" in error and "slept" in error for error in data["errors"])
+        assert data["observation_interruptions"][0]["suspended_s"] is None
+
+
+def test_windows_sleep_counters_and_keep_awake_request(ns, monkeypatch):
+    import ctypes
+    assert ns["suspended_seconds"]() is None and ns["keep_awake"](True) is False  # Not Windows: inert.
+    states = []
+    def set_state(flags):
+        states.append(flags)
+        return 0x80000000
+    def unbiased(reference):
+        reference._obj.value = 7_000 * 10**7  # 7000 s awake, in 100 ns units
+        return 1
+    kernel32 = SimpleNamespace(GetTickCount64=lambda: 10_000_000,  # 10000 s since boot, sleep included
+                               QueryUnbiasedInterruptTime=unbiased, SetThreadExecutionState=set_state)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name: kernel32, raising=False)
+    assert ns["suspended_seconds"]() == 3000.
+    assert ns["keep_awake"](True) is True and ns["keep_awake"](False) is True
+    assert states == [0x80000003, 0x80000000]

@@ -23,6 +23,11 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   an unreviewed startup profile. Check ON, OFF, reconnect and window closing.
   A shutdown/closure failure must remain unconfirmed, not become Disconnected.
   Software OFF is not a substitute for an independent physical safety check.
+- **Sleep prevention (all device plugins):** with a device ON, run
+  `powercfg /requests` in an administrator prompt: SYSTEM must list
+  "ESIBD Explorer: <device> on COM<n> is connected" for each connected device,
+  and the entry must disappear after a confirmed OFF. Leave the PC idle beyond
+  its sleep delay with a device ON: it must stay awake.
 - **TPG366:** match its real USB baud setting; compare all six statuses and units
   with the controller display. Test OFF/ON and reconnection after a controller
   power cycle. Inspect missing/off gauges without unplugging a powered gauge.
@@ -65,7 +70,9 @@ For PT175: baseline OFF 60 s; 30, 40, …, 170, 175 °C; applied limits at most
 22 V / 10 A / 50 W and no more than fresh controller maxima. Each stage requires
 60 s within ±0.2 °C with absolute OLS drift below 0.1 °C/min, then 300 s continuous
 stable observation. First complete qualification must occur within 600 s of the
-command; the absolute stage deadline is 900 s, never extended by resets.
+command; the absolute stage deadline is 900 s, never extended by resets. A gap of
+more than 10 s between temperature observations (`MAX_SAMPLE_GAP_S`) restarts the
+window; successful ESI reads occasionally take up to ~5 s on the real controller.
 
 At 175 °C the effective band is **174.8–175.0 °C**. A hold is attempted, not
 promised: the first observed temperature above 175 °C stops heating and leaves the
@@ -85,4 +92,11 @@ operator recovery acknowledges physical safety/closed old processes but does not
 turn a false shutdown report into true. Nonzero HV commissioning is not authorized
 by these heater protocols. Its next discriminating checks need independent meter
 observations and the saved native ADC/range/readiness trace, without relaxing the
-three-round discharge criterion or assuming an ABI/ADC fault.
+three-round discharge criterion or assuming an ABI/ADC fault. PT175 keeps every
+discharge round in `metadata.json` (`discharge_observations`). During the
+2026-10-05 run, routine diagnostics on the selected negative range read about
+−0.06 V on both modules throughout, while the final check read 1324 V (HV1) and
+110 V (HV2) on that range after reselecting it. `notebooks/esi_adc_probe.ipynb`
+records every fresh conversion after each channel selection, with the raw
+ready/overflow flags and a native call trace: run it together with an independent
+HV measurement of both outputs.
