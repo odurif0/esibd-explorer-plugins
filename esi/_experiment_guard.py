@@ -129,7 +129,7 @@ class RunLock:
 
 
 def require_fresh_kernel(root, kernel_globals):
-    if any(kernel_globals.get(name) for name in ('_HC_GUARD', '_PT_GUARD')):
+    if any(kernel_globals.get(name) for name in ('_HC_GUARD', '_PT_GUARD', '_ADC_GUARD')):
         raise RuntimeError('Unfinished run in this kernel: terminate its process; recovery here is forbidden')
     runtime = root / 'vendor/runtime'
     for name, module in tuple(sys.modules.items()):
@@ -244,7 +244,7 @@ class ExperimentGuard:
                  legacy_pt_dirs=(), state_root=None):
         if type(com) is not int or not 1 <= com <= 255:
             raise ValueError('ESI COM must be an integer in 1..255')
-        if kind not in ('heater', 'pressure_temperature'):
+        if kind not in ('heater', 'pressure_temperature', 'adc_probe'):
             raise ValueError('Unknown ESI experiment kind')
         if not isinstance(kernel_globals, dict):
             raise TypeError('Pass the notebook globals for the fresh-kernel check')

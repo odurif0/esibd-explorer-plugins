@@ -93,7 +93,7 @@ def test_bad_port_refused(env, com):
         env(com=com)
 
 
-@pytest.mark.parametrize('key', ['_HC_GUARD', '_PT_GUARD'])
+@pytest.mark.parametrize('key', ['_HC_GUARD', '_PT_GUARD', '_ADC_GUARD'])
 def test_old_kernel_rejected_before_locks(env, key):
     with pytest.raises(RuntimeError, match='kernel'):
         env(kernel_globals={key: {'run': object()}})
@@ -186,6 +186,27 @@ def test_deleted_run_folder_after_unconfirmed_shutdown_needs_declaration_not_man
     d2, r2, data2 = initial(guard_module, fresh, 'restarted')
     fresh.claim(d2, r2)
     assert complete(guard_module, fresh, r2, data2)
+
+
+def test_adc_probe_shares_the_com_guard_with_the_heater_notebooks(guard_module, env, tmp_path):
+    probe = env(kind='adc_probe', output_dir=tmp_path / 'esi_adc_probe_runs')
+    assert probe.authorize_restart() == []
+    d, r, data = initial(guard_module, probe)
+    assert r.name == 'metadata.json'
+    probe.claim(d, r)
+    probe.mark_hardware_started()
+    # Discharge unconfirmed: the probe keeps the claim, like any ESI notebook.
+    assert probe.finalize(shutdown_confirmed=False, owners_idle=True, auxiliary_closed=True, transport_poisoned=False) is False
+    probe._release_unused()  # TEST ONLY: the old kernel exited
+    pt = env(kind='pressure_temperature')
+    with pytest.raises(RuntimeError, match='declaration'):
+        pt.authorize_restart(input_fn=lambda _: '')
+    record = pt.authorize_restart(input_fn=agree)[0]
+    assert record['missing_evidence'] == []
+    d2, r2, data2 = initial(guard_module, pt, 'after-probe')
+    pt.claim(d2, r2)
+    assert complete(guard_module, pt, r2, data2)
+    assert r.read_bytes() and json.loads(r.read_text())['shutdown_confirmed'] is False  # evidence untouched
 
 
 def test_ambiguous_timestamp_only_pt_refuses(guard_module, env, tmp_path):
