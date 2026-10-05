@@ -62,11 +62,12 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
 
 The approved heater characterization remains **50 W / 100 °C**, armed by default.
 The pressure–temperature notebook is also **armed by default** and uses the separate
-approved 175 °C protocol. Both share a per-COM lock, historical guards and explicit
-operator recovery; they must not own the same instrument concurrently. Old kernels
-and old software copies are not retrospectively protected by the new lock.
+approved protocol up to 170 °C, with a 175 °C safety stop. Both share a per-COM
+lock, historical guards and explicit operator recovery; they must not own the same
+instrument concurrently. Old kernels and old software copies are not
+retrospectively protected by the new lock.
 
-For PT175: baseline OFF 60 s; 30, 40, …, 170, 175 °C; applied limits at most
+For the PT protocol: baseline OFF 60 s; 30, 40, …, 170 °C; applied limits at most
 22 V / 10 A / 50 W and no more than fresh controller maxima. Each stage requires
 60 s within ±0.2 °C with absolute OLS drift below 0.1 °C/min, then 300 s continuous
 stable observation. First complete qualification must occur within 600 s of the
@@ -74,9 +75,12 @@ command; the absolute stage deadline is 900 s, never extended by resets. A gap o
 more than 10 s between temperature observations (`MAX_SAMPLE_GAP_S`) restarts the
 window; successful ESI reads occasionally take up to ~5 s on the real controller.
 
-At 175 °C the effective band is **174.8–175.0 °C**. A hold is attempted, not
-promised: the first observed temperature above 175 °C stops heating and leaves the
-stage incomplete. This is a sampled software check, not a hardware thermal cutout.
+The first observed temperature above **175 °C** stops heating and leaves the stage
+incomplete. The regulation always overshoots its setpoint by a few mK (1–5 mK on
+every stage of the 2026-10-05 run), so each target must keep its ±0.2 °C band
+below this stop; the notebook refuses any other program. A 175 °C stage stopped
+that run at 175.001 °C, which is why the last stage is now 170 °C. This is a sampled
+software check, not a hardware thermal cutout.
 Pressure is recorded continuously; thermal qualification does not prove pressure
 equilibrium. Normal completion includes 900 s temperature/pressure observation
 after verified heater OFF, not a declaration that the assembly is cold.
@@ -92,7 +96,7 @@ operator recovery acknowledges physical safety/closed old processes but does not
 turn a false shutdown report into true. Nonzero HV commissioning is not authorized
 by these heater protocols. Its next discriminating checks need independent meter
 observations and the saved native ADC/range/readiness trace, without relaxing the
-three-round discharge criterion or assuming an ABI/ADC fault. PT175 keeps every
+three-round discharge criterion or assuming an ABI/ADC fault. The PT notebook keeps every
 discharge round in `metadata.json` (`discharge_observations`). During the
 2026-10-05 run, routine diagnostics on the selected negative range read about
 −0.06 V on both modules throughout, while the final check read 1324 V (HV1) and

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import functools
 import json
 import math
 import sys
@@ -313,7 +314,7 @@ def test_defaults_and_notebook_prose():
                  and isinstance(node.value, (ast.Constant, ast.Tuple))}
     assert constants["ARM_HEATING"] is True
     assert constants["BASELINE_S"] == 60 and constants["HOLD_S"] == 300 and constants["SAMPLE_S"] == 1
-    assert constants["TARGETS_C"] == tuple(range(30, 171, 10)) + (175,)
+    assert constants["TARGETS_C"] == tuple(range(30, 171, 10)) and constants["SAFETY_STOP_C"] == 175
     assert constants["QUALIFICATION_DEADLINE_S"] == 600 and constants["STAGE_DEADLINE_S"] == 900
     assert constants["COOLING_S"] == 900
     assert tuple(constants[key] for key in ("HEATER_VOLTAGE_V", "HEATER_CURRENT_A", "HEATER_POWER_W")) == (22, 10, 50)
@@ -323,7 +324,7 @@ def test_complete_program_uses_real_temperature_six_pressures_and_verified_stop(
     result = rig.run.run()
     metadata = report(result)
     assert metadata["outcome"] == "complete" and metadata["shutdown_confirmed"] is True
-    assert metadata["program_c"] == list(range(30, 171, 10)) + [175]
+    assert metadata["program_c"] == list(range(30, 171, 10))
     assert [c[1] for c in rig.calls if c[0] == "target"] == metadata["program_c"]
     assert rig.calls.count(("heater_on",)) == 1
     assert rig.calls.index(("heater_off",)) < rig.calls.index(("disconnect",)) < rig.calls.index(("pressure_close",))
@@ -335,7 +336,7 @@ def test_complete_program_uses_real_temperature_six_pressures_and_verified_stop(
     assert all(float(row["temperature_c"]) != float(row["target_temperature_c"]) for row in heated)
     assert all(row["pressure_observed_utc"] and row["temperature_observed_utc"] for row in heated)
     assert float(heated[0]["elapsed_s"]) >= 3
-    assert rig.clock.now >= 3 + 16 * (2 + 3) + 3
+    assert rig.clock.now >= 3 + 15 * (2 + 3) + 3
     assert all(stage["complete"] and stage["qualified_observation_s"] >= 3 for stage in metadata["stages"])
     assert metadata["cooling_complete"]
     assert any(row["phase"] == "cooling" and math.isfinite(float(row["temperature_c"])) for row in saved)
@@ -360,7 +361,7 @@ def test_warm_start_refuses_heating_without_skipping_stages(rig, temperature):
 def test_at_or_below_first_target_keeps_the_complete_ascending_program(rig, temperature):
     rig.esi.temperature = temperature
     rig.run.run()
-    assert report(rig.run)["program_c"] == list(range(30, 171, 10)) + [175]
+    assert report(rig.run)["program_c"] == list(range(30, 171, 10))
     assert report(rig.run)["outcome"] == "complete"
 
 
@@ -392,7 +393,7 @@ def test_incorrect_limit_readback_refuses_heating(rig):
     assert ("heater_on",) not in rig.calls
 
 
-@pytest.mark.parametrize("targets", [(25., 176.), (175., 100.), (math.nan,), (), (-1.,)])
+@pytest.mark.parametrize("targets", [(25., 176.), (175., 100.), (math.nan,), (), (-1.,), (175.,), (174.9,), (30., 174.8)])
 def test_invalid_target_program_has_no_hardware_access_or_output(ns, rig, targets):
     rig.run.targets = targets
     with pytest.raises(ValueError):
@@ -1878,16 +1879,27 @@ def test_no_stability_stops_before_next_target_or_cooling(rig):
     assert ("heater_off",) in rig.calls and report(rig.run)["shutdown_confirmed"]
 
 
-@pytest.mark.parametrize("temperature,complete", [(174.8, True), (175., True), (175.000001, False)])
-def test_final_175_band_and_strict_cutoff(rig, temperature, complete):
-    rig.run.targets = (175.,)
+@pytest.mark.parametrize("target,accepted", [(174.79, True), (174., True), (174.8, False), (175., False)])
+def test_every_target_keeps_its_band_below_the_safety_stop(rig, target, accepted):
+    # Run 2026-10-05: a 175 °C target reached 175.001 °C after 185 s and stopped the run.
+    rig.run.targets = (target,)
+    if accepted:
+        rig.run.validate()
+    else:
+        with pytest.raises(ValueError, match="band reaches the 175 °C safety stop"):
+            rig.run.validate()
+
+
+@pytest.mark.parametrize("temperature", [175., 175.001])
+def test_safety_stop_is_strict_and_names_the_measured_value(rig, temperature):
+    rig.run.targets = (170.,)
     rig.esi.diag_hook = lambda device: setattr(device, "temperature", temperature) if device.active else None
     rig.run.run()
-    metadata = report(rig.run)
-    assert metadata["stages"][0]["complete"] is complete
-    assert (metadata["outcome"] == "complete") is complete
-    assert metadata["shutdown_confirmed"]
-    assert any(row["phase"] == "cooling" for row in rows(rig.run)) is complete
+    data = report(rig.run)
+    stopped = "RuntimeError: Measured temperature 175.001 °C exceeds the 175 °C safety stop; heating stopped"
+    assert (stopped in data["errors"]) is (temperature > 175)
+    assert not any("sensor" in error for error in data["errors"])  # The 2026-10-05 message blamed the sensor.
+    assert data["shutdown_confirmed"] and not data["stages"][0]["complete"]
 
 
 def test_cooling_keeps_fresh_temperature_pressure_after_verified_off(rig):
@@ -1978,14 +1990,14 @@ def test_full_default_175_program_uses_real_60_and_300_second_windows(ns, rig):
     rig.run.run()
     data = report(rig.run)
     assert data["outcome"] == "complete" and data["shutdown_confirmed"]
-    assert data["program_c"] == list(range(30, 171, 10)) + [175]
-    assert len(data["stages"]) == 16
+    assert data["program_c"] == list(range(30, 171, 10))
+    assert len(data["stages"]) == 15
     for stage in data["stages"]:
         assert stage["first_qualified_s"] - stage["commanded_s"] == 60
         assert stage["completed_s"] - stage["commanded_s"] == 360
         assert stage["qualified_observation_s"] == 300 and stage["complete"]
     assert data["cooling_finished_s"] - data["cooling_started_s"] == 900
-    assert rig.clock.now == 60 + 16 * 360 + 900
+    assert rig.clock.now == 60 + 15 * 360 + 900
 
 
 def test_storage_stall_after_genuine_observation_cannot_hide_absolute_deadline(rig):
@@ -2028,7 +2040,7 @@ def test_expired_final_stage_still_sends_off_before_refusing_cooling(rig):
     def delayed_check():
         check()
         stage = rig.run.commanded_stage
-        if stage is not None and stage["target_c"] == 175 and stage["complete"]:
+        if stage is not None and stage["target_c"] == 170 and stage["complete"]:
             rig.clock.now += 901
     rig.run.guard.check = delayed_check
     rig.run.run()
@@ -2206,3 +2218,28 @@ def test_hot_start_refusal_is_explained_before_the_shutdown_wait(rig, capsys):
     assert "Shutting down: heater OFF" in output[stopped:output.index("<disconnect>")]
     assert not any(call[0] in {"target", "heater_on"} for call in rig.calls)
     assert report(rig.run)["initial_unheated_temperature_c"] == 44.3
+
+
+def test_default_program_completes_with_the_real_regulation_trace(ns, rig):
+    # The simulated heater used elsewhere sits 0.1 °C below its target forever, so a
+    # program that real regulation cannot hold still passed. Replay the measured
+    # 170 °C stage (2026-10-05) on every stage instead: it overshoots by a few mK.
+    trace = json.loads((ROOT / "tests/data/pt_regulation_170c.json").read_text(encoding="utf-8"))
+    residual = [mk / 1000 for mk in trace["residual_mk"]]
+    hold = residual[trace["qualified_from_s"]:]
+    assert max(residual) > 0  # Why a target at the safety stop can never be held.
+    rig.run.baseline_s, rig.run.hold_s, rig.run.cooling_s = 60., 300., 60.
+    rig.run.stability_factory = functools.partial(ns["TemperatureStability"], max_gap_s=ns["MAX_SAMPLE_GAP_S"])
+    def plant(device):
+        stage = rig.run.commanded_stage
+        if device.active and stage is not None:
+            second = int(rig.clock() - stage["commanded_s"])
+            offset = residual[second] if second < len(residual) else hold[(second - len(residual)) % len(hold)]
+            device.temperature = stage["target_c"] + offset
+    rig.esi.diag_hook = plant
+    rig.run.run()
+    data = report(rig.run)
+    assert data["outcome"] == "complete", data["errors"]
+    assert len(data["stages"]) == 15 and all(stage["complete"] for stage in data["stages"])
+    measured = [float(row["temperature_c"]) for row in rows(rig.run) if row["phase"] == "heating"]
+    assert max(measured) > 170 and max(measured) < ns["SAFETY_STOP_C"] - .2
