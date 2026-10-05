@@ -97,6 +97,13 @@ def probe(case, output):
             return 0
         raise AssertionError("A cached module hid the missing bundled protocol")
     module.getTestMode = lambda: case == "simulation"
+    # Windows power requests, simulated: held from ON until the port is confirmed closed.
+    awake_calls = []
+    module._protocol._power_api = lambda: SimpleNamespace(
+        create=lambda reason: awake_calls.append(("create", reason)) or len(awake_calls),
+        set=lambda handle, kind: awake_calls.append(("set", handle, kind)) or 1,
+        clear=lambda handle, kind: awake_calls.append(("clear", handle, kind)) or 1,
+        close=lambda handle: awake_calls.append(("close", handle)) or 1)
     logs = []
     settings = SimpleNamespace(configPath=Path(output), settings={}, loading=False, errorResetTime=10,
                                getFullSessionPath=lambda: Path(output))
@@ -432,9 +439,12 @@ def probe(case, output):
         wait(lambda: all(math.isfinite(ch.value) for ch in device.channels))
         if case == "simulation":
             assert not ports and "Simulation" in device.main_state
+            assert controller._awake is None and not awake_calls  # No hardware: no keep-awake.
         else:
             assert device.identification.startswith("TPG366,")
             assert len(ports) == 1
+            assert controller._awake.held and awake_calls == [
+                ("create", "ESIBD Explorer: TPG366 on TEST-USB is connected"), ("set", 1, 1)]
         if case in {"acquire", "reconnect", "render"}:
             first = device.channels[0]
             first.name = "Pressure chamber"
@@ -580,9 +590,12 @@ def probe(case, output):
             assert device.initialized and device.isOn()
             assert controller._retained_port is ports[0]
             wait(lambda: not controller._worker.is_alive())
+            assert controller._awake.held  # The port may still be open: keep the PC awake.
             ports[0].fail_close = False
             device.deviceOnAction.trigger()
         wait(lambda: not device.initialized and not device.isOn())
+        if case != "simulation":
+            assert not controller._awake.held and awake_calls[-2:] == [("clear", 1, 1), ("close", 1)]
         assert all(math.isnan(ch.value) for ch in device.channels)
         if case == "persistence":
             device.channels[0].name = "Sample chamber"

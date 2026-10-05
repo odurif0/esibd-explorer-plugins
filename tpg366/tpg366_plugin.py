@@ -401,6 +401,7 @@ class PressureController(DeviceController):
         self._generation = 0
         self._worker = None
         self._retained_port = None
+        self._awake = None
         self.gauges = ()
         self.interval_s = 1.0
         self.initialized = self.initializing = self.acquiring = False
@@ -429,6 +430,12 @@ class PressureController(DeviceController):
         baudrate = int(parent.baudrate)
         self.print("ON requested: simulation (no hardware)." if self._simulation else
                    f"ON requested: {port}, {baudrate} baud, 8N1, no flow control; Interval={self.interval_s * 1000:g} ms.")
+        if not self._simulation:
+            # Held until the worker confirms the port closed; a retained port keeps it.
+            self._awake = _protocol.SystemAwakeRequest(f"ESIBD Explorer: TPG366 on {port} is connected")
+            if not self._awake.hold(True) and sys.platform == "win32":
+                self.print("Windows refused the keep-awake request: disable sleep in the power plan "
+                           "while the gauges are read.", flag=PRINT.WARNING)
         self._worker = Thread(target=self._run, args=(self._generation, self._stop, port, baudrate, self._simulation),
                               name="TPG366 USB", daemon=True)
         self.initThread = self.acquisitionThread = self._worker
@@ -631,6 +638,8 @@ class PressureController(DeviceController):
         elif kind == "finished":
             self._stop.set()
             self._retained_port, error, close_error = payload
+            if self._retained_port is None and self._awake is not None:
+                self._awake.hold(False)
             self.initializing = self.acquiring = False
             self.initialized = self._retained_port is not None
             parent.recording = False
