@@ -2192,3 +2192,17 @@ def test_windows_sleep_counters_and_keep_awake_request(ns, monkeypatch):
     assert ns["suspended_seconds"]() == 3000.
     assert ns["keep_awake"](True) is True and ns["keep_awake"](False) is True
     assert states == [0x80000003, 0x80000000]
+
+
+def test_hot_start_refusal_is_explained_before_the_shutdown_wait(rig, capsys):
+    # Lab run 2026-10-05 18:29: 44.3 °C after the previous run; the reason only
+    # appeared after a minute of "shutdown pending", which looked like a COM failure.
+    rig.esi.temperature = 44.3
+    rig.esi.disconnect_hook = lambda: print("<disconnect>")
+    rig.run.run()
+    output = capsys.readouterr().out
+    stopped = output.index("Run stopped: ValueError: Initial temperature 44.3 °C exceeds the first target (30 °C)")
+    assert stopped < output.index("<disconnect>")
+    assert "Shutting down: heater OFF" in output[stopped:output.index("<disconnect>")]
+    assert not any(call[0] in {"target", "heater_on"} for call in rig.calls)
+    assert report(rig.run)["initial_unheated_temperature_c"] == 44.3
