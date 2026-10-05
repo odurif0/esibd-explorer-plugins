@@ -385,6 +385,90 @@ class TimeoutSafeDllMixin:
             self._raise_if_transport_poisoned()
 
 
+_POWER_REQUEST_SYSTEM_REQUIRED = 1  # POWER_REQUEST_TYPE PowerRequestSystemRequired
+
+
+def _reason_context_type():
+    """REASON_CONTEXT with POWER_REQUEST_CONTEXT_SIMPLE_STRING (Windows x64 layout)."""
+    import ctypes
+
+    class ReasonContext(ctypes.Structure):
+        # The union is sized for its detailed form: HMODULE, two ULONGs, LPWSTR*.
+        _fields_ = [("Version", ctypes.c_uint32), ("Flags", ctypes.c_uint32),
+                    ("SimpleReasonString", ctypes.c_wchar_p), ("_detailed_tail", ctypes.c_void_p * 2)]
+
+    return ReasonContext
+
+
+@functools.lru_cache(maxsize=1)
+def _power_api():
+    """kernel32 power-request functions (Windows 7+); raises elsewhere."""
+    import ctypes
+    from types import SimpleNamespace
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    reason_context = _reason_context_type()
+    kernel32.PowerCreateRequest.argtypes = [ctypes.POINTER(reason_context)]
+    kernel32.PowerCreateRequest.restype = ctypes.c_void_p
+    for name in ("PowerSetRequest", "PowerClearRequest"):
+        getattr(kernel32, name).argtypes = [ctypes.c_void_p, ctypes.c_int]
+        getattr(kernel32, name).restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    def create(reason):
+        context = reason_context(0, 1, reason)  # POWER_REQUEST_CONTEXT_VERSION, _SIMPLE_STRING
+        handle = kernel32.PowerCreateRequest(ctypes.byref(context))
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            raise OSError(ctypes.get_last_error(), "PowerCreateRequest failed")
+        return handle
+
+    return SimpleNamespace(create=create, set=kernel32.PowerSetRequest,
+                           clear=kernel32.PowerClearRequest, close=kernel32.CloseHandle)
+
+
+class SystemAwakeRequest:
+    """Keep Windows from sleeping on idle while an instrument port is claimed.
+
+    During sleep the outputs keep their last state with no software
+    supervision. Each holder owns its own Windows power request, so overlapping
+    holders never cancel each other, and ``powercfg /requests`` names the
+    instrument. A manual sleep, a closed lid or the power button are not
+    prevented. Outside Windows, or if the API fails, this is a no-op.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = str(reason)
+        self._handle = None
+        self._lock = threading.Lock()
+
+    @property
+    def held(self) -> bool:
+        return self._handle is not None
+
+    def hold(self, held: bool) -> bool:
+        """Set or clear the request; return whether it is held now. Never raises."""
+        with self._lock:
+            try:
+                if held and self._handle is None:
+                    api = _power_api()
+                    handle = api.create(self.reason)
+                    if not api.set(handle, _POWER_REQUEST_SYSTEM_REQUIRED):
+                        api.close(handle)
+                    else:
+                        self._handle = handle
+                elif not held and self._handle is not None:
+                    handle, self._handle = self._handle, None
+                    api = _power_api()
+                    try:
+                        api.clear(handle, _POWER_REQUEST_SYSTEM_REQUIRED)
+                    finally:
+                        api.close(handle)  # Closing the handle also ends the request.
+            except Exception:  # noqa: BLE001 - power management must never affect instrument control
+                pass
+            return self._handle is not None
+
+
 class DllPortClaimRegistryMixin:
     """Track DLL port claims across instances in the same Python process."""
 
@@ -438,7 +522,9 @@ class DllPortClaimRegistryMixin:
                         'ref': weakref.ref(self), 'owner': self,
                         'device_id': self.device_id, 'com': self.com, 'port': port,
                     }
-                    return
+            if not owners:
+                self._hold_system_awake(True)  # Outside the registry mutex.
+                return
             # Do not hold the registry mutex across any DLL call. The old
             # attempt has its own cleanup guard; competing opens recheck above.
             if (attempt == 0 and len(owners) == 1 and owners[0] is not self
@@ -459,6 +545,22 @@ class DllPortClaimRegistryMixin:
             self._register_connected_instance()
         else:
             self._unregister_connected_instance()
+        self._hold_system_awake(self._dll_port_claimed)
+
+    def _hold_system_awake(self, held: bool) -> None:
+        """Block idle sleep exactly while this instance claims its port, poisoned claims included."""
+        request = getattr(self, '_system_awake', None)
+        if request is None:
+            if not held:
+                return
+            request = self._system_awake = SystemAwakeRequest(
+                f"ESIBD Explorer: {self._INSTRUMENT_NAME} {getattr(self, 'device_id', '')} "
+                f"on COM{getattr(self, 'com', '?')} is connected")
+        if request.hold(held) != held and sys.platform == 'win32':
+            logger = getattr(self, 'logger', None)
+            if logger is not None:
+                logger.warning("Windows refused the keep-awake request: disable sleep in the power plan "
+                               "while instruments are connected.")
 
     def _warn_on_other_process_ports(self):
         cls = type(self)

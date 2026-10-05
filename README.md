@@ -102,6 +102,13 @@ verified shutdown instead of completing initialization.
 A new ON explicitly reconnects after cleanup; a native call that never returns
 or an unconfirmed closure can still require a restart.
 
+While a device's port is open (from ON until its closure is confirmed,
+including an unconfirmed shutdown), its plugin asks Windows not to sleep on
+idle: a sleeping PC leaves the outputs in their last state with no software
+supervision. `powercfg /requests` lists each connected device under SYSTEM
+("ESIBD Explorer: …"). A manual sleep, a closed lid or the power button are not
+prevented; disable sleep in the power plan of the lab PC as well.
+
 For HV devices, a verified disable is **not proof of complete electrical
 discharge**. ESI additionally checks both HV polarities on each module against
 its 1 V shutdown criterion before disconnecting (see `esi/README.md`). This
