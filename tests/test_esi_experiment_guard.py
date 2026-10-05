@@ -147,12 +147,45 @@ def test_old_marker_requires_evidence_and_declaration(guard_module, env, tmp_pat
 
 
 @pytest.mark.parametrize('missing', ['report.json', 'samples.csv'])
-def test_missing_legacy_evidence_refuses(guard_module, env, tmp_path, missing):
+def test_missing_legacy_evidence_is_recorded_and_still_needs_the_declaration(guard_module, env, tmp_path, missing):
     directory = tmp_path / 'plugins/esi/logs/esi_heater_characterization'
-    _, report = legacy(guard_module, directory)
+    marker, report = legacy(guard_module, directory)
     (report.parent / missing).unlink()
-    with pytest.raises(RuntimeError):
-        env().authorize_restart(input_fn=agree)
+    remaining = {path.name: path.read_bytes() for path in report.parent.iterdir()}
+    g = env()
+    with pytest.raises(RuntimeError, match='declaration'):
+        g.authorize_restart(input_fn=lambda _: '')
+    record = g.authorize_restart(input_fn=agree)[0]
+    assert missing in record['missing_evidence'][0]
+    archive = Path(record['archive'])
+    assert [path.name for path in (archive / 'missing').iterdir()] == ['000.json']
+    assert {path.name: path.read_bytes() for path in report.parent.iterdir()} == remaining  # nothing rewritten
+    d, r, data = initial(guard_module, g)
+    g.claim(d, r)
+    assert complete(guard_module, g, r, data)
+    assert not marker.exists()
+
+
+def test_deleted_run_folder_after_unconfirmed_shutdown_needs_declaration_not_manual_cleanup(guard_module, env, tmp_path):
+    # Lab case: a run kept its claim (shutdown unconfirmed), then its folder was deleted.
+    g = env(kind='pressure_temperature')
+    g.authorize_restart()
+    d, r, data = initial(guard_module, g)
+    g.claim(d, r)
+    g.mark_hardware_started()
+    assert g.finalize(shutdown_confirmed=False, owners_idle=True, auxiliary_closed=True, transport_poisoned=False) is False
+    g._release_unused()  # TEST ONLY: the old kernel exited
+    for path in sorted(d.rglob('*'), reverse=True):
+        path.unlink()
+    d.rmdir()
+    fresh = env(kind='pressure_temperature')
+    prompts = []
+    record = fresh.authorize_restart(input_fn=lambda prompt: prompts.append(prompt) or agree(prompt))[0]
+    assert prompts and record['physical_safety_declared'] is True
+    assert any('no longer exists' in absence for absence in record['missing_evidence'])
+    d2, r2, data2 = initial(guard_module, fresh, 'restarted')
+    fresh.claim(d2, r2)
+    assert complete(guard_module, fresh, r2, data2)
 
 
 def test_ambiguous_timestamp_only_pt_refuses(guard_module, env, tmp_path):
@@ -392,10 +425,15 @@ def test_interrupted_claim_recovery_requires_intact_evidence(guard_module, env, 
         save(r, data)
     elif damage == 'registry':
         g.registry.write_text('{}')
-    if damage:
+    if damage in ('com', 'registry'):
         with pytest.raises(RuntimeError):
             fresh = env(kind='pressure_temperature')
             fresh.authorize_restart(input_fn=lambda _: pytest.fail('Invalid evidence must refuse before prompt'))
+        return
+    if damage:  # deleted report or samples: recorded, recovery still needs the declaration
+        fresh = env(kind='pressure_temperature')
+        record = fresh.authorize_restart(input_fn=agree)[0]
+        assert record['missing_evidence'] and record['shutdown_confirmed'] is False
         return
     fresh = env(kind='pressure_temperature')
     records = fresh.authorize_restart(input_fn=agree)
