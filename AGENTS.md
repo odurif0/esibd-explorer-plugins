@@ -56,6 +56,7 @@ If family membership changes, also update `tests/test_plugin_family_parity.py` (
 
 ## Focused test guidance
 
+Tests run locally only: no GitHub Actions or other CI (the owner does not want tests run on GitHub).
 Run the smallest check that covers the change, then widen only if needed.
 
 ```bash
