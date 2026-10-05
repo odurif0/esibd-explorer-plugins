@@ -11,7 +11,7 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure", "transient_nak", "resync_unit_change",
+CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure", "nak_retransmitted", "transient_nak", "resync_unit_change",
          "simulation", "history", "settings", "reconnect", "render", "export", "pause", "queued_events", "statuses", "persistence", "pending_close", "pending_close_failure", "isolation", "negative", "global_action", "discovery", "port_names", "power_switch", "connection_diagnostics", "read_diagnostics", "open_diagnostics", "cards")
 
 
@@ -163,15 +163,17 @@ def probe(case, output):
             port.fail_close = True
         if case == "read_failure":
             port.responses["PRX"] = "garbage"
-        if case in {"transient_nak", "resync_unit_change"}:
-            def nak_second_prx(data):
-                if port.ack == b"\x15\r\n":
-                    port.ack = b"\x06\r\n"
-                if data == b"PRX\r" and port.writes.count(b"PRX\r") == 2:
+        if case in {"nak_retransmitted", "transient_nak", "resync_unit_change"}:
+            # One NAK is retransmitted within the poll; three NAKs (every
+            # transmission of the second poll) lose that sample.
+            naks = {2} if case == "nak_retransmitted" else {2, 3, 4}
+            def nak_prx(data):
+                port.ack = b"\x06\r\n"
+                if data == b"PRX\r" and port.writes.count(b"PRX\r") in naks:
                     port.ack = b"\x15\r\n"
                     if case == "resync_unit_change":
                         port.responses["UNI"] = "1"  # front panel changed during the outage
-            port.on_write = nak_second_prx
+            port.on_write = nak_prx
         if case == "negative":
             from test_tpg366_protocol import frame
             port.responses["PRX"] = frame(values=["-1.0000E-03"] * 6)
@@ -402,13 +404,20 @@ def probe(case, output):
             wait(lambda: "error — disconnected" in device.main_state, 8)
             text = "\n".join(str(entry) for entry in logs)
             assert "Pressure unit changed during resynchronization" in text, text
-            assert ports[0].writes.count(b"PRX\r") == 2, "no frame may be read in the new unit"
+            assert ports[0].writes.count(b"PRX\r") == 4, "no frame may be read in the new unit"
             assert not device.initialized and ports[0].close_count == 1
             return 0
-        if case == "transient_nak":
-            wait(lambda: bool(ports) and ports[0].writes.count(b"PRX\r") >= 3 and all(math.isfinite(ch.value) for ch in device.channels), 8)
+        if case == "nak_retransmitted":
+            wait(lambda: bool(ports) and ports[0].writes.count(b"PRX\r") >= 4 and all(math.isfinite(ch.value) for ch in device.channels), 8)
             text = "\n".join(str(entry) for entry in logs)
-            assert "Pressure sample missed" in text and "PRX [waiting for ACK]" in text and "NAK" in text, text
+            assert "answered NAK 1x during pressure acquisition" in text and "retransmitted" in text, text
+            assert "Pressure sample missed" not in text, text
+            assert ports[0].writes.count(b"AYT\r") == 1 and device.main_state == "Acquiring"
+            return 0
+        if case == "transient_nak":
+            wait(lambda: bool(ports) and ports[0].writes.count(b"PRX\r") >= 5 and all(math.isfinite(ch.value) for ch in device.channels), 8)
+            text = "\n".join(str(entry) for entry in logs)
+            assert "Pressure sample missed" in text and "PRX [waiting for ACK]" in text and "3 transmissions" in text, text
             assert "recovered after 1 failed" in text, text
             assert device.main_state == "Acquiring" and device.initialized and device.recording
             assert len(ports) == 1 and ports[0].close_count == 0

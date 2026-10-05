@@ -28,7 +28,8 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   power cycle. Inspect missing/off gauges without unplugging a powered gauge.
   Invalid channels must remain NaN/dashes while valid ones continue. Keep logs
   from any NAK/timeout; the reported intermittence is not physically explained yet.
-  A single NAK/timeout must now cost one sample (NaN gap, "recovered" log), and
+  A NAK is now retransmitted ("answered NAK ... retransmitted" log); a persistent
+  NAK or a timeout must cost one sample (NaN gap, "recovered" log), and
   three consecutive failures must still stop acquisition.
 - **AMPR:** at a safe low voltage and slow ramp, press OFF, then click ON/OFF again
   during the descent: outputs must go to 0 V at once and the PSU be disabled.

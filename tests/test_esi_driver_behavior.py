@@ -524,7 +524,8 @@ def test_inventory_notebook_has_portable_paths():
     source = "".join("".join(cell.get("source", [])) for cell in notebook["cells"])
     assert "lab_admin" not in source
     assert "REPO_ROOT" not in source
-    assert "Path.home() / 'ESIBD Explorer' / 'plugins' / 'esi'" in source
+    assert "Path.home() / 'ESIBD Explorer' / 'plugins'" in source  # Explorer's default plugin folder
+    assert r"Software\ESIBD LAB\ESIBD Explorer\General" in source  # Explorer's configured one
     assert "Path.cwd().parent / 'esi'" in source  # notebooks/ beside the esi/ plugin folder
     assert "report_path = (\n            PLUGIN_DIR /" in source
 

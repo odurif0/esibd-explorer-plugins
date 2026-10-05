@@ -2046,3 +2046,49 @@ def test_175_capability_required_even_if_subset_would_fit(rig):
     rig.run.run()
     assert not any(call[0] in {"target", "heater_on", "limits"} for call in rig.calls)
     assert report(rig.run)["outcome"] == "error"
+
+
+def _plugins_folder(root):
+    (root / "esi/vendor/runtime").mkdir(parents=True)
+    (root / "esi/vendor/runtime/__init__.py").write_text("")
+    (root / "tpg366/_runtime").mkdir(parents=True)
+    (root / "tpg366/_runtime/_tpg366.py").write_text("")
+    return root
+
+
+def test_notebook_run_from_elsewhere_finds_explorers_plugin_folder(ns, tmp_path):
+    # e.g. the notebook opened from a USB stick, plugins in Explorer's folder.
+    plugins = _plugins_folder(tmp_path / "ESIBD Explorer/plugins")
+    stick = tmp_path / "usb/ESIBD"
+    stick.mkdir(parents=True)
+    ns["explorer_plugin_dirs"] = lambda: [plugins]
+    assert ns["find_plugins"](notebook_dir=stick) == plugins
+    ns["explorer_plugin_dirs"] = lambda: [tmp_path / "missing"]
+    with pytest.raises(FileNotFoundError, match="Explorer's plugin folder.*missing.*PLUGINS_DIR"):
+        ns["find_plugins"](notebook_dir=stick)
+
+
+@pytest.mark.parametrize("stored, expected_first", [
+    ("D:/Lab/plugins", "D:/Lab/plugins"),
+    ("@Variant(\x00\x00)", None),  # a Qt-serialized object, not a plain path
+])
+def test_explorer_plugin_path_is_read_from_its_windows_settings(ns, monkeypatch, stored, expected_first):
+    import types
+    opened = []
+
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    winreg = types.ModuleType("winreg")
+    winreg.HKEY_CURRENT_USER = "HKCU"
+    winreg.OpenKey = lambda root, path: opened.append((root, path)) or Key()
+    winreg.QueryValueEx = lambda key, name: (stored, 1) if name == "Plugin path" else pytest.fail(name)
+    monkeypatch.setitem(sys.modules, "winreg", winreg)
+    found = ns["explorer_plugin_dirs"]()
+    assert opened == [("HKCU", r"Software\ESIBD LAB\ESIBD Explorer\General")]
+    assert found[-1] == Path.home() / "ESIBD Explorer" / "plugins"
+    assert (found[0] == Path(expected_first)) if expected_first else (len(found) == 1)
