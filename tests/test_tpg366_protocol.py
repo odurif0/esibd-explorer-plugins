@@ -64,7 +64,8 @@ class FakeSerial:
             assert self.command in protocol.READ_COMMANDS, f"Unexpected device command: {data!r}"
             self.buffer.extend(self.before_ack + self.ack)
             self.before_ack = b""
-            self.awaiting_enq = True
+            # A NAK rejects the string: nothing is pending, the host may resend it.
+            self.awaiting_enq = not self.ack.startswith(b"\x15")
         return len(data)
 
     def read(self, n):
@@ -84,7 +85,7 @@ class FakeSerial:
 
 
 def link(port=None):
-    return protocol.TPG366Link(port or FakeSerial(), Event(), timeout=.02)
+    return protocol.TPG366Link(port or FakeSerial(), Event(), timeout=.02, etx_settle_s=0.)
 
 
 def test_real_handshake_uses_enq_alone_and_never_waits_for_a_trailing_nak():
@@ -190,9 +191,47 @@ def test_startup_ack_survives_every_partial_stream_boundary():
 def test_initial_sync_does_not_discard_a_negative_ack_after_a_partial_line():
     port = FakeSerial()
     port.before_ack, port.ack = b"\n", b"\x15\r\n"
-    with pytest.raises(protocol.ProtocolError, match=r"AYT.*waiting for ACK.*NAK"):
-        link(port).initialize()
-    assert port.writes == [b"\x03", b"AYT\r"]
+    driver = link(port)
+    with pytest.raises(protocol.ProtocolError, match=r"AYT.*waiting for ACK.*NAK.*3 transmissions"):
+        driver.initialize()
+    assert port.writes == [b"\x03", b"AYT\r", b"AYT\r", b"AYT\r"]  # resent as documented, bounded
+    assert driver.nak_count == 3
+
+
+@pytest.mark.parametrize("command", ["AYT", "UNI"])
+def test_a_nak_is_followed_by_one_retransmission_as_documented(command):
+    # BG 5511 "Error detection protocol": NAK, then the host resends the mnemonic.
+    port = FakeSerial()
+    def nak_first_transmission(data):
+        port.ack = b"\x15\r\n" if port.writes.count(command.encode() + b"\r") == 1 else b"\x06\r\n"
+    port.on_write = nak_first_transmission
+    driver = link(port)
+    assert driver.query(command, synchronizing=command == "AYT") == port.responses[command]
+    assert port.writes == [command.encode() + b"\r"] * 2 + [b"\x05"]
+    assert driver.nak_count == 1
+
+
+def test_initialization_lets_etx_settle_and_purges_before_ayt():
+    port = FakeSerial()
+    waits = []
+    class Settle(Event):
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            port.buffer.extend(b"\x15\r\n")  # a late reply to the string ETX cleared
+            return False
+    driver = protocol.TPG366Link(port, Settle(), timeout=.02, etx_settle_s=.2)
+    driver.initialize()
+    assert waits == [.2]
+    assert port.writes[:2] == [b"\x03", b"AYT\r"] and driver.nak_count == 0
+
+
+def test_off_during_the_etx_pause_sends_nothing_more():
+    port = FakeSerial()
+    stop = Event()
+    stop.wait = lambda timeout=None: True  # OFF arrives during the settling pause
+    with pytest.raises(protocol.Cancelled):
+        protocol.TPG366Link(port, stop, timeout=.02, etx_settle_s=.2).initialize()
+    assert port.writes == [b"\x03"]
 
 
 @pytest.mark.parametrize("ack", [b"", b"\x06", b"\x06\r", b"\x06\n", b"\x06X\r\n",
@@ -246,7 +285,8 @@ def test_rejected_or_partial_ack_does_not_send_enq(ack):
     driver.port.ack = ack
     with pytest.raises(protocol.ProtocolError):
         driver.query("UNI")
-    assert driver.port.writes == [b"UNI\r"]
+    # Only a NAK is retransmitted (bounded); a timeout or corrupt ACK is not.
+    assert driver.port.writes == [b"UNI\r"] * (3 if ack.startswith(b"\x15") else 1)
 
 
 @pytest.mark.parametrize("synchronizing", [False, True])

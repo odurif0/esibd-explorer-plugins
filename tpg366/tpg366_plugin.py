@@ -454,8 +454,20 @@ class PressureController(DeviceController):
                                  parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
                                  timeout=.05, write_timeout=1.0, xonxoff=False, rtscts=False, dsrdtr=False)
             link = _protocol.TPG366Link(port, stop)
+            reported_naks = 0
+
+            def report_naks():
+                # Retransmissions after NAK follow the TPG 366 protocol; keep them visible.
+                nonlocal reported_naks
+                if link.nak_count > reported_naks:
+                    self.update.emit((generation, "retransmitted", (link.nak_count - reported_naks, link.nak_count, phase)))
+                    reported_naks = link.nak_count
+
             phase = "initialization"
-            link.initialize()
+            try:
+                link.initialize()
+            finally:
+                report_naks()
             identification, unit = link.identification, link.unit
             self.update.emit((generation, "ready", (link.identification, link.gauges)))
             failures, resync = 0, False
@@ -476,6 +488,7 @@ class PressureController(DeviceController):
                     phase = "pressure acquisition"
                     reading = link.read_pressures()
                 except _protocol.ProtocolError as exc:
+                    report_naks()
                     failures += 1
                     if failures >= _READ_FAILURE_LIMIT or not _transient_read_error(exc):
                         raise
@@ -483,6 +496,7 @@ class PressureController(DeviceController):
                     self.update.emit((generation, "missed", (
                         f"{port_name}, {baudrate} baud, 8N1; {phase}: {type(exc).__name__}: {exc}", time.time())))
                 else:
+                    report_naks()
                     if failures:
                         self.update.emit((generation, "recovered", failures))
                     failures = 0
@@ -563,7 +577,7 @@ class PressureController(DeviceController):
         if generation != self._generation:
             return
         parent = self.controllerParent
-        if kind in {"ready", "sample", "error", "missed", "resynchronized", "recovered"} and self._stop.is_set():
+        if kind in {"ready", "sample", "error", "missed", "resynchronized", "recovered", "retransmitted"} and self._stop.is_set():
             return  # No queued sample/initialization can revive an OFF request.
         if kind == "ready":
             identification, gauges = payload
@@ -602,6 +616,10 @@ class PressureController(DeviceController):
             self.print(f"Pressure sample missed, resynchronizing: {message}", flag=PRINT.WARNING)
         elif kind == "resynchronized":
             self.gauges = payload
+        elif kind == "retransmitted":
+            new, total, phase = payload
+            self.print(f"TPG366 answered NAK {new}x during {phase}; the command was retransmitted as the "
+                       f"TPG 366 protocol specifies ({total} NAK(s) since ON).", flag=PRINT.WARNING)
         elif kind == "recovered":
             parent._set_state("Simulation — no hardware" if self._simulation else "Acquiring", True)
             self.print(f"TPG366 communication recovered after {payload} failed transaction(s).")

@@ -20,6 +20,14 @@ class Cancelled(Exception):
     """The user stopped communication; do not issue another command."""
 
 
+class _Rejected(Exception):
+    """The controller answered NAK: the string was rejected and not executed."""
+
+    def __init__(self, ack: bytes):
+        super().__init__(ack)
+        self.ack = ack
+
+
 STATUS = (
     "OK", "Underrange", "Overrange", "Sensor error", "Sensor off",
     "No sensor", "Identification error",
@@ -69,13 +77,21 @@ def parse_pressures(reply: str, unit: int, received_at: float) -> Reading:
 class TPG366Link:
     """One bounded, synchronous serial connection; use from a worker thread."""
 
-    def __init__(self, port, cancelled: Event, timeout: float = 1.0):
+    # BG 5511 "Error detection protocol": after <NAK> (transmission or programming
+    # error) the host sends the mnemonic again. Read-only commands only; bounded.
+    NAK_RETRANSMISSIONS = 2
+
+    def __init__(self, port, cancelled: Event, timeout: float = 1.0, etx_settle_s: float = 0.2):
         self.port = port
         self.cancelled = cancelled
         self.timeout = timeout
+        # <ETX> clears the controller's input buffer. A command sent right behind
+        # it (often in the same USB packet) can be cleared too: NAK or no reply.
+        self.etx_settle_s = etx_settle_s
         self.identification = ""
         self.gauges: tuple[str, ...] = ()
         self.unit: int | None = None  # UNI code confirmed by the last transaction
+        self.nak_count = 0  # NAKs received; each was followed by a retransmission or an error
 
     def _check_cancelled(self):
         if self.cancelled.is_set():
@@ -102,6 +118,16 @@ class TPG366Link:
     def query(self, command: str, *, synchronizing: bool = False) -> str:
         if command not in READ_COMMANDS:
             raise ValueError(f"Not a supported read-only command: {command!r}")
+        for attempt in range(1, self.NAK_RETRANSMISSIONS + 2):
+            try:
+                return self._exchange(command, synchronizing)
+            except _Rejected as rejected:
+                self.nak_count += 1
+                if attempt > self.NAK_RETRANSMISSIONS:
+                    raise ProtocolError(f"{command} [waiting for ACK]: TPG366 returned NAK "
+                                        f"(received {rejected.ack!r}) to {attempt} transmissions.") from None
+
+    def _exchange(self, command: str, synchronizing: bool) -> str:
         deadline = time.monotonic() + self.timeout
         phase = "sending command"
         try:
@@ -119,7 +145,7 @@ class TPG366Link:
                 ack = self._line(deadline)
                 control = ack.lstrip(b"\r\n")
             if control == b"\x15":
-                raise ProtocolError(f"TPG366 returned NAK (received {ack!r}).")
+                raise _Rejected(ack)
             if control != b"\x06":
                 raise ProtocolError(f"Expected ACK for {command}, received {ack!r}.")
             phase = "sending ENQ"
@@ -135,6 +161,12 @@ class TPG366Link:
         self._check_cancelled()
         self.port.reset_input_buffer()
         self._write(b"\x03")  # stop automatic output / clear the command buffer
+        flush = getattr(self.port, "flush", None)
+        if callable(flush):
+            flush()  # the ETX has left the host before the settling pause starts
+        if self.cancelled.wait(self.etx_settle_s):
+            raise Cancelled
+        self.port.reset_input_buffer()
         self.identification = self.query("AYT", synchronizing=True)
         parts = self.identification.split(",")
         if len(parts) != 5 or parts[0].strip().replace(" ", "").upper() != "TPG366":

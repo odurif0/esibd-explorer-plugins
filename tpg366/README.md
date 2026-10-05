@@ -37,7 +37,9 @@ A failed port close leaves **Disconnect unconfirmed**; click OFF again to retry.
 - Underrange, overrange, sensor errors, switched-off or missing gauges, and
   identification errors appear separately in **Status**, with **NaN** data
   rather than zero or an old pressure. Other valid channels keep updating.
-- A NAK, timeout or corrupt frame costs that sample only: readings show NaN,
+- A command answered with NAK is retransmitted, as the TPG 366 protocol specifies
+  (at most twice; each NAK is logged). A persistent NAK, a timeout or a corrupt
+  frame costs that sample only: readings show NaN,
   the lost packet is recorded as a gap, and the plugin resynchronizes with the
   same read-only handshake as ON (ETX, `AYT`, `TID`; same controller required).
   Three consecutive failed transactions, a unit change, an unsupported unit or
@@ -55,6 +57,7 @@ and [operating manual](https://www.idealvac.com/files/manuals/Pfeiffer_MaxiGauge
 
 The driver uses read-only `AYT`, `TID`, `UNI` and `PRX` queries, validates ACK,
 then sends ENQ without an appended CR. ETX resets only the communication parser
-at connection. Protocol, shutdown races, histories, export and real Qt widgets
+at connection; the driver then waits 0.2 s before `AYT`, because ETX clears the
+controller's input buffer and could also clear a command sent right behind it. Protocol, shutdown races, histories, export and real Qt widgets
 are tested with a simulated instrument. **Validation on a physical TPG 366 is
 still required.**
