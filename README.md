@@ -145,7 +145,7 @@ Sibling plugins (`ampr_b`, `amx_b`, `psu_b`–`psu_e`) are copies of their
 canonical plugin. Edit the canonical one, then run
 `python3 tools/sync_family_siblings.py` (`--check` reports drift only). Because
 parity tests guarantee identical copies, behaviour tests run on the canonical
-copy unless `--all-siblings` is given. GitHub Actions runs the fast suite on
-each push and the full suite on release tags, against Explorer 1.0.2.
+copy unless `--all-siblings` is given. Tests run locally only (no CI);
+use `--all-siblings` with Explorer 1.0.2 before a release.
 
 Tests remain in this repository's `tests/` directory. They are not part of plugin folders or release archives.
