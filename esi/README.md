@@ -286,8 +286,10 @@ blocks heating rather than discarding uncertainty. With a valid central claim an
 intact original evidence, missing compatibility markers are recorded and require
 explicit operator recovery; they are never repaired automatically. Markers are
 released only after confirmed shutdown, finished owners and a durable final report.
-Missing/changed original evidence, preloaded runtimes, archive failures or a
-competing owner abort the restart. OS-held ownership lasts throughout the new run;
+Missing original evidence (for example a deleted run folder) is recorded in the
+archive and listed before the same explicit declaration; it is never reconstructed.
+Changed evidence, preloaded runtimes, archive failures or a competing owner abort
+the restart. OS-held ownership lasts throughout the new run;
 no automatic retry follows a further failure.
 
 Monitoring VoltOut, VoltHeat and CurrOut remain separate from voltage/power

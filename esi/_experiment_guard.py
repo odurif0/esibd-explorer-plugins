@@ -157,6 +157,14 @@ def _validate_port(report, com):
         raise RuntimeError('Unfinished run: report instrument identity is missing or differs')
 
 
+class MissingEvidence(RuntimeError):
+    """The original run evidence no longer exists (e.g. a deleted run folder).
+
+    Recovery then still requires the explicit operator declaration; the absence
+    is archived with it instead of leaving no software recovery path at all.
+    """
+
+
 def _evidence(marker, data, com):
     """Resolve one marker unambiguously; never choose the newest report."""
     stamp = timestamp(data.get('started_utc'))
@@ -167,6 +175,8 @@ def _evidence(marker, data, com):
             raise RuntimeError('Unfinished run: invalid registered report')
         if directory.is_symlink():
             raise RuntimeError('Unfinished run: linked run directory')
+        if not report_path.exists() and not report_path.is_symlink():
+            raise MissingEvidence(f'registered report {report_path} no longer exists')
         report = read_json(report_path)
         if timestamp(report.get('started_utc')) != stamp:
             raise RuntimeError('Unfinished run: registered report identity changed')
@@ -180,6 +190,8 @@ def _evidence(marker, data, com):
             candidates = [p for p in marker.parent.iterdir() if p.is_dir()]
         matched = []
         report_name = 'report.json' if marker.name == HEATER_MARKER else 'metadata.json'
+        if named is not None and not (candidates[0] / report_name).exists() and not candidates[0].is_symlink():
+            raise MissingEvidence(f'original report {candidates[0] / report_name} no longer exists')
         for candidate in candidates:
             report_path = candidate / report_name
             if candidate.is_symlink() or not report_path.is_file():
@@ -193,6 +205,8 @@ def _evidence(marker, data, com):
                 matches = False
             if matches:
                 matched.append((candidate, report_path, report))
+        if not matched:
+            raise MissingEvidence(f'no original report in {marker.parent} matches this marker')
         if len(matched) != 1:
             raise RuntimeError('Unfinished run: require exactly one matching original report')
         directory, report_path, report = matched[0]
@@ -206,6 +220,8 @@ def _evidence(marker, data, com):
         registered_shutdown = data.get('guard_version') == 1 and confirmation is True
         if not (pt_uncertain or registered_shutdown):
             raise RuntimeError('Unfinished run: missing or contradictory shutdown report')
+    if not (directory / 'samples.csv').exists() and not (directory / 'samples.csv').is_symlink():
+        raise MissingEvidence(f'samples {directory / "samples.csv"} no longer exist')
     regular_bytes(directory / 'samples.csv')
     files = {}
     for path in sorted(directory.rglob('*')):
@@ -330,6 +346,7 @@ class ExperimentGuard:
         markers = self._discover()
         files, sources = {}, {}
         runs = {}
+        missing = []
         for index, (path, (raw, data)) in enumerate(sorted(markers.items(), key=lambda item: str(item[0]))):
             if raw is None:
                 # Record absence, not fabricated marker bytes. The central claim
@@ -341,7 +358,15 @@ class ExperimentGuard:
                 continue
             archive_name = f'markers/{index:03d}.json'
             files[archive_name], sources[archive_name] = raw, str(path)
-            directory, report_path, contents = _evidence(path, data, self.com)
+            try:
+                directory, report_path, contents = _evidence(path, data, self.com)
+            except MissingEvidence as absence:
+                # Record the absence; never fabricate the missing report or samples.
+                name = f'missing/{index:03d}.json'
+                files[name] = json.dumps({'marker': str(path), 'missing': str(absence)}, sort_keys=True).encode()
+                sources[name] = str(path)
+                missing.append(str(absence))
+                continue
             key = str(report_path)
             if key not in runs:
                 prefix = f'runs/{len(runs):03d}/'
@@ -350,7 +375,7 @@ class ExperimentGuard:
                     files[prefix + name] = value
                     sources[prefix + name] = str(directory / name)
         hashes = {name: hashlib.sha256(value).hexdigest() for name, value in files.items()}
-        return {'markers': markers, 'files': files, 'sources': sources, 'hashes': hashes}
+        return {'markers': markers, 'files': files, 'sources': sources, 'hashes': hashes, 'missing': missing}
 
     def _unchanged(self, evidence):
         current = self._snapshot()
@@ -376,6 +401,8 @@ class ExperimentGuard:
                                                 sort_keys=True).encode()).hexdigest()
             phrase = 'RESTART ' + identity[:12]
             print('Previous run cleanup remains unresolved; original shutdown results are preserved.')
+            for absence in evidence['missing']:
+                print(f'Original evidence missing (recorded, not reconstructed): {absence}.')
             print('Restarting a kernel is not hardware OFF.')
             print(f'Operator declaration ONLY: equipment physically safe AND all former {self.port}/pressure-owning processes terminated.')
             if input_fn('Declare BOTH conditions and authorize one restart: ' + phrase + ': ') != phrase:
@@ -393,6 +420,7 @@ class ExperimentGuard:
                       'physical_safety_declared': True, 'previous_process_termination_declared': True,
                       'process_termination_verified_by_software': False, 'shutdown_confirmed': False,
                       'evidence_sha256': evidence['hashes'], 'original_paths': evidence['sources'],
+                      'missing_evidence': evidence['missing'],
                       'archive': str(archive), 'instrument': self.port}
             save_json(archive / 'operator-declaration.json', record)
             for folder in sorted((p for p in archive.rglob('*') if p.is_dir()), key=lambda p: len(p.parts), reverse=True):

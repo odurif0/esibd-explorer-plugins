@@ -1266,13 +1266,13 @@ def test_restart_requires_exact_new_run_specific_declaration(restart_case, answe
 
 
 @pytest.mark.parametrize('missing', ['report.json', 'samples.csv'])
-def test_restart_missing_required_evidence_never_prompts(restart_case, missing):
+def test_restart_with_missing_evidence_requires_and_records_the_declaration(restart_case, missing):
     c = restart_case
     (c.old / missing).unlink()
-    c.ns['input'] = lambda _: pytest.fail('No confirmation without required evidence')
-    with pytest.raises(RuntimeError, match='Unfinished|evidence'):
-        c.guard.authorize_restart(input_fn=c.ns['input'])
-    assert c.marker.read_bytes() == c.raw
+    prompts = []
+    with pytest.raises(RuntimeError, match='declaration'):
+        c.guard.authorize_restart(input_fn=lambda prompt: prompts.append(prompt) or '')
+    assert prompts and c.marker.read_bytes() == c.raw  # refused: nothing changed
 
 
 @pytest.mark.parametrize('kind', ['memory', 'namespace', 'source'])
