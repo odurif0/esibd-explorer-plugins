@@ -27,6 +27,7 @@ README_CONTRACTS: tuple[ReadmeContract, ...] = (
     ReadmeContract("dmmr", "DMMR", "DMMR"),
     ReadmeContract("esi", "ESI", "ESI"),
     ReadmeContract("mscan", "MScan", "MScan"),
+    ReadmeContract("transmission", "Transmission", "Transmission"),
     ReadmeContract("tpg366", "TPG366", "TPG366"),
     ReadmeContract("psu_a", "PSU_A", "PSU_A"),
     ReadmeContract("psu_b", "PSU_B", "PSU_B"),

@@ -2,7 +2,7 @@
 
 Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIBD-Explorer).
 
-13 device plugins and one standalone scan plugin (14 folders).
+13 device plugins and two standalone scan plugins (15 folders).
 
 ## Available Plugins
 
@@ -21,6 +21,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 | `amx_b`  | Controls AMX_B timing and displays expected CH0–CH3 signals |
 | `amx_hd` | Controls AMX HD frequency and timer modules |
 | `mscan`  | Scans quadrupole amplitude through AMX-linked PSU channels |
+| `transmission` | Optimizes ion transmission through the beamline apertures, stage by stage |
 | `tpg366` | Reads six Pfeiffer TPG 366 pressure inputs over USB |
 
 ## Quick Start
@@ -46,7 +47,8 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
    ├── amx_b/
    ├── amx_hd/
    ├── mscan/
-   └── tpg366/
+   ├── tpg366/
+   └── transmission/
    ```
 
 3. **Enable** the plugins you need in the Plugin Manager.
@@ -56,6 +58,12 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 For amplitude scans, see [MScan](mscan/README.md). Its axis is in volts, without
 m/z calibration. **Stopping a scan does not turn the HV outputs off.**
+
+To optimize the transmission through the inlet, funnel and quadrupoles, see
+[Transmission](transmission/README.md): describe the beamline once, choose the total
+ion current or a mass selected by a quadrupole (peak picked on an MScan spectrum or a
+quick sweep, in volts), choose the stages, then Optimize. It drives only the mapped
+channels, in small verified steps, and can run on a built-in simulated beamline.
 
 ## Host fixes and hardware validation
 

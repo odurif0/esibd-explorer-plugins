@@ -104,3 +104,40 @@ discharge round in `metadata.json` (`discharge_observations`). During the
 records every fresh conversion after each channel selection, with the raw
 ready/overflow flags and a native call trace: run it together with an independent
 HV measurement of both outputs.
+
+## Transmission optimizer
+
+- **Simulation first:** tick **Simulation**, run the total ion current, then a selected
+  mass (Pick on spectrum… → quick sweep of Q2 → click the 520 V peak); check the
+  display, the saved `…_transmission.h5`, **Keep** and **Revert**. No device is touched.
+- **Beamline:** in **Configure…**, map each setting, aperture current and gauge; the
+  panel must show "✓ n settings · n currents · n gauges". Give each driven channel
+  realistic Min/Max in its device plugin: the windows are clipped to them. For an RF
+  amplitude set by MScan's PSU rails, map both rails with gain +1.
+- **Selected mass:** open a real MScan file in Pick on spectrum…; the filter must be
+  recognised from the rails. Then make a short quick sweep around the peak at a safe
+  amplitude: the filter must move in steps of the sweep spacing and return to its
+  previous amplitude (also after Stop). Amplitudes are volts; m/z calibration stays
+  in MScan.
+- **Devices:** with the needed devices OFF (supplies at safe setpoints), the Devices
+  line must list them; Optimize must propose to turn them ON, do nothing on Cancel, and
+  on confirmation turn them ON through their own plugins, start the DMMR/TPG366
+  recording, then start the run. Check the ramps and setpoints in each device plugin.
+- **Dry run on hardware:** one stage, **Fine**, devices ON and current/pressure
+  channels **recording**. Verify that each request appears as a small step on the
+  device, that the readbacks settle before each measurement, and that Stop returns to
+  the stage start.
+- **Faults:** during a run, switch a driven device OFF and edit a driven setpoint by
+  hand: the run must stop with "is OFF" / "changed outside the optimizer" and send no
+  further command. On a PSU-driven element, lower Ilim just below the measured output
+  current at a safe low voltage: the run must stop with "reached Ilim" (HV stays as is). Set a watched gauge maximum below the actual pressure: the soft
+  interlock must stop and restore the stage start. The hardware interlock remains the
+  protective one.
+- **Criterion:** on one stage, compare the aperture current, the downstream current
+  and their sum (current panel) with the DMMR readings; a beam pushed off the aperture
+  must appear as "beam lost", never as an improvement. In mass mode, check on the
+  before/after spectra that the peak stays at the picked amplitude.
+- **Full run:** widen the windows progressively (Normal, then Wide); keep the HDF5
+  files of each run and the logs (**Logs…**: `<Data path>/logs/transmission/`), one
+  file per run, quick sweep and revert, with every step, window and decision. Check
+  for `gui_stall` events: a blocked Explorer GUI also delays the device histories.
