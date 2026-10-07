@@ -4,9 +4,9 @@ One plugin per device, plus standalone scan plugins.
 
 ## Current bundle
 
-14 standalone plugin folders: `ampr_a`, `ampr_b`, `amx_a`, `amx_b`, `amx_hd`, `dmmr`, `esi`, `mscan`, `psu_a`, `psu_b`, `psu_c`, `psu_d`, `psu_e`, `tpg366`.
+15 standalone plugin folders: `ampr_a`, `ampr_b`, `amx_a`, `amx_b`, `amx_hd`, `dmmr`, `esi`, `mscan`, `psu_a`, `psu_b`, `psu_c`, `psu_d`, `psu_e`, `tpg366`, `transmission`.
 
-The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, device-specific vendor headers/DLLs, and `vendor/runtime/error_codes.json`. `mscan` is a scan, with its own entrypoint, icon and LICENSE; no runtime, DLL or catalog. `tpg366` is a USB pressure device with its own `_runtime/_tpg366.py` ASCII protocol, icons and LICENSE; no vendor DLL or error catalog.
+The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, device-specific vendor headers/DLLs, and `vendor/runtime/error_codes.json`. `mscan` is a scan, with its own entrypoint, icon and LICENSE; no runtime, DLL or catalog. `tpg366` is a USB pressure device with its own `_runtime/_tpg366.py` ASCII protocol, icons and LICENSE; no vendor DLL or error catalog. `transmission` is a scan (MIT license) with its private `_runtime/` package (`_engine.py` optimizer, `_simulator.py` simulated beamline, `_beamline.py` simple-settings builder, `_log.py` JSON Lines logs written to `<Explorer data path>/logs/transmission/`); it drives other plugins' channels only through Explorer and imports none of them.
 
 ## Architecture
 
@@ -78,12 +78,12 @@ Real-Explorer tests validate the installed host only; the plugins target Explore
 - If `ESIBD_RELEASE_ZIP` is set, that archive is used; a missing path fails fast.
 - Otherwise the newest root `esibd-explorer-plugins-v*.zip` is inspected.
 - If no root release ZIP exists, the archive test skips.
-- Top-level ZIP entries must be exactly the 14 plugin folders.
+- Top-level ZIP entries must be exactly the 15 plugin folders.
 - Do not ship `README.md`, `tests/`, `__pycache__/`, `logs/`, `.pyc`, or `.gitignore`.
 
 ## Stale claims to avoid
 
 - Ignore legacy AMX folder references; current identities are `amx_a` / `amx_b`.
 - `amx_hd` is standalone, not part of AMX parity.
-- Count the bundle as 14 folders: 13 devices and MScan. The error catalog count remains 12.
+- Count the bundle as 15 folders: 13 devices, MScan and Transmission. The error catalog count remains 12.
 - The canonical error catalog is `amx_a`.

@@ -107,6 +107,9 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         bundled_files=("_heater_stability.py", "_experiment_guard.py", "_heater_limits.py"),
     ),
     PluginSpec("mscan", "MScan", "MScan", "mscan_plugin.py", None, "mscan", None, None, None),
+    PluginSpec("transmission", "Transmission", "Transmission", "transmission_plugin.py", None, "transmission", None, None, None,
+               bundled_files=("_runtime/__init__.py", "_runtime/_engine.py", "_runtime/_simulator.py", "_runtime/_beamline.py",
+                                             "_runtime/_log.py")),
     PluginSpec("tpg366", "TPG366", "TPG366", "tpg366_plugin.py", None, "tpg366", None, None, None,
                bundled_files=("_runtime/_tpg366.py", "_readout_panel.py", "tpg366.svg", "switch-medium_on.png", "switch-medium_off.png")),
     PluginSpec(
