@@ -5,8 +5,8 @@ Enable the `MScan` plugin in Explorer's Plugin Manager. Its panel is titled
 **msScan — AMX/PSU**, distinct from the built-in **msScan** that expects
 `AMP_Q1`/`AMP_Q2`. Those historical channels are not used here.
 
-Requires Explorer 1.0.2 and the PSU A–E, AMX A–B and DMMR plugins from the same
-bundle. The plugin uses Explorer's plotting, channel services and HDF5 format,
+Requires Explorer 1.0.2 and the PSU A–E, AMX A–B, DMMR and (for the quadrupole
+offset) AMPR A–B plugins from the same bundle. The plugin uses Explorer's plotting, channel services and HDF5 format,
 but has its own interface and scan protocol. No DLL or bundled runtime.
 
 ## Use
@@ -28,12 +28,36 @@ but has its own interface and scan protocol. No DLL or bundled runtime.
    The voltage range and **PSU Ilim** are grouped together above the scan settings.
    **After completion** shows each channel's return voltage and live measured
    current, e.g. `PSU_D_CH0: +4 V, Iget 32 mA`.
-5. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
+5. Optional: **Quadrupole offset (AMPR)** selects the AMPR channel (module and
+   channel) applying the quadrupole offset; **None** (default) leaves it alone.
+   During the scan it is set to **Offset coefficient (V/V)** × A at every
+   amplitude (default 0.2, negative allowed), together with the PSU rails.
+   **Offset readback** shows the AMPR Monitor and setpoint; during a scan, the
+   scan target and whether the AMPR confirmed it. See *Quadrupole offset* below.
+6. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
    or **Continuous**, with **Sweep rate (V/s)** and **Time step (s)**.
    Set the timing fields shown for that mode, described below.
-6. When **Status** shows **Ready to scan**, click **Start scan** in this panel.
+7. When **Status** shows **Ready to scan**, click **Start scan** in this panel.
    It becomes **Stop scan**. Explorer's general acquisition button starts device
    recording, not the amplitude scan.
+
+## Quadrupole offset
+
+The offset channel is an ordinary AMPR channel: switch it ON, in manual (not
+equation) control, with its AMPR ON. Start is refused if coefficient × the
+requested amplitude span leaves the channel's Min/Max or the AMPR module rating,
+if its initial value could not be restored there, or if its current setpoint is
+not confirmed by the AMPR. At each amplitude, the rails are commanded first, then
+the offset (rounded to the AMPR channel's display precision). No point is
+acquired (and, in continuous mode, no next command is sent) until the AMPR has
+confirmed **that** target by its hardware setpoint readback and its Monitor is
+within **Voltage tolerance**; a small offset step is not "confirmed" by tolerance
+alone. An offset edited or failing outside the scan, an AMPR OFF or a switch to
+equation control aborts the scan. Normal completion restores the initial offset
+with the PSU setpoints; Stop/error holds the last value. The HDF5 file keeps the
+coefficient, channel and initial value in the setup, and per point the commanded
+offset (`offset_target`) and its Monitor (`offset_v`); continuous scans also keep
+them in the raw observations.
 
 There is no Input/Output table or generic channel selector to configure.
 The **msScan** settings list belongs to this scan; Explorer's global

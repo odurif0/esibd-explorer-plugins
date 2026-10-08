@@ -10,6 +10,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections import deque
 import configparser
+import contextlib
 import json
 import math
 from pathlib import Path
@@ -216,10 +217,12 @@ class _Settings(SettingsManager):
                     if field in item and item[field] not in scan.PAIRS:
                         item[field] = scan.NO_PAIR
                 item[Parameter.ITEMS] = ','.join([scan.NO_PAIR, *scan.PAIRS])
-            if key in (scan.DETECTOR, scan.AMX):
+            if key in (scan.DETECTOR, scan.AMX, scan.OFFSET):
                 # Keep missing selections explicit, without phantom old choices.
                 if key == scan.DETECTOR:
                     choices = [scan.NO_SIGNAL, *[scan._module_label(c) for c in scan.pluginManager.DeviceManager.channels() if scan._is_dmmr(c)]]
+                elif key == scan.OFFSET:
+                    choices = [scan.NO_OFFSET, *[scan._offset_label(c) for c in scan.pluginManager.DeviceManager.channels() if scan._is_ampr(c)]]
                 else:
                     choices = ['None', *[p.name for p in scan.pluginManager.plugins if p.name in ('AMX_A', 'AMX_B')]]
                 choices.append(str(item[Parameter.VALUE]))
@@ -286,6 +289,10 @@ class MScan(Scan):
     AMPLITUDE_LIMITS = 'Allowed amplitude (V)'
     FINAL_VOLTAGES = 'After completion'
     CURRENT_LIMITS = 'PSU Ilim'
+    OFFSET = 'Quadrupole offset'
+    OFFSET_FACTOR = 'Offset coefficient'
+    OFFSET_READBACK = 'Offset readback'
+    NO_OFFSET = 'None'
     NO_SIGNAL = 'Select DMMR module'
     NO_PAIR = 'Select AMX pair'
     TIMEOUT = 'Settle timeout'
@@ -434,8 +441,24 @@ class MScan(Scan):
         ):
             settings[key] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
                 indicator=True, restore=False, toolTip=tooltip)
+        settings[self.OFFSET] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
+            parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel', event=self._offset_changed,
+            toolTip='AMPR channel (module, channel) applying the quadrupole offset. During the scan it is set to '
+                    'Offset coefficient × A at every amplitude, then verified: the AMPR hardware setpoint must confirm '
+                    'the scan target and its Monitor must be within Voltage tolerance before acquisition. Normal '
+                    'completion restores its initial value; Stop/error holds the last value. None: not driven.')
+        settings[self.OFFSET_FACTOR] = parameterDict(value=.2, minimum=-100., maximum=100.,
+            parameterType=PARAMETERTYPE.FLOAT, attr='offset_factor', event=self._offset_changed,
+            instantUpdate=False, displayDecimals=4,
+            toolTip='Offset = coefficient × A (V per V of amplitude A), applied to the selected AMPR channel. '
+                    'The commanded value is rounded to the AMPR channel display precision.')
+        settings[self.OFFSET_READBACK] = parameterDict(value='Not driven', parameterType=PARAMETERTYPE.LABEL,
+            indicator=True, restore=False,
+            toolTip='Offset channel readback: AMPR Monitor (measured) and its setpoint. During a scan: scan target, '
+                    'Monitor and whether the AMPR confirmed the target. Display only, never a command.')
         order = (self.AMX, self.OUTPUTS, self.SUPPLIES, self.FREQUENCY, self.DETECTOR, self.DMMR_INTERVAL,
-                 self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.RATE, self.FINAL_VOLTAGES,
+                 self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.RATE,
+                 self.OFFSET, self.OFFSET_FACTOR, self.OFFSET_READBACK, self.FINAL_VOLTAGES,
                  self.SETTLING, self.INTEGRATION, self.TIME_STEP, self.CADENCE, self.SAMPLES,
                  self.SCANTIME, self.STATUS, self.TIMEOUT, self.TOLERANCE)
         return {key: settings[key] for key in order}
@@ -524,19 +547,20 @@ class MScan(Scan):
         spin.textFromValue = lambda value: f'{value:.15f}'.rstrip('0').rstrip('.')
         spin.setValue(spin.value())
         labels = {self.INTEGRATION: 'Measurement per point (s)', self.RATE: 'Sweep rate (V/s)',
-                  self.TIMEOUT: 'Settle timeout (s)', self.TOLERANCE: 'Voltage tolerance (V)'}
+                  self.TIMEOUT: 'Settle timeout (s)', self.TOLERANCE: 'Voltage tolerance (V)',
+                  self.OFFSET: 'Quadrupole offset (AMPR)', self.OFFSET_FACTOR: 'Offset coefficient (V/V)'}
         for key, label in labels.items():
             self.settingsMgr.settings[key].setText(0, label)  # labels, not INI/HDF5 keys
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for spin in self.settingsTree.findChildren(QAbstractSpinBox):
             spin.setKeyboardTracking(False)
-        for key in (self.DETECTOR, self.AMX, self.OUTPUTS, self.MODE):
+        for key in (self.DETECTOR, self.AMX, self.OUTPUTS, self.MODE, self.OFFSET):
             combo = self.settingsMgr.settings[key].combo
             combo.setMaximumWidth(16777215)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
         for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
-                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS):
+                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK):
             label = self.settingsMgr.settings[key].label
             label.setMaximumHeight(16777215)
             label.setWordWrap(True)
@@ -565,7 +589,7 @@ class MScan(Scan):
 
     def _layout_readonly_fields(self):
         for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
-                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS):
+                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK):
             label = self.settingsMgr.settings[key].label
             self._fit_readonly_label(label)
         self.settingsTree.scheduleDelayedItemsLayout()
@@ -599,6 +623,162 @@ class MScan(Scan):
         if len(matches) != 1:
             raise ScanError(f'DMMR module {selection} is unavailable or ambiguous. Check DMMR discovery and selection.')
         return matches[0]
+
+    @staticmethod
+    def _is_ampr(channel):
+        try:
+            return (channel.getDevice().name.startswith('AMPR') and channel.real and channel.unit == 'V'
+                    and callable(getattr(channel, 'module_address', None))
+                    and callable(getattr(channel, 'channel_number', None)))
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _offset_label(channel):
+        return f'{channel.getDevice().name} M{channel.module_address()} CH{channel.channel_number()} — {channel.name}'
+
+    def _offset_changed(self):
+        if not self.loading and not self.settingsMgr.loading:
+            self._refresh_interface()
+
+    def _offset_source(self):
+        """The AMPR channel applying the quadrupole offset, or None when not driven."""
+        selection = str(getattr(self, 'offset_channel', self.NO_OFFSET)).strip()
+        if not selection or selection == self.NO_OFFSET:
+            return None
+        matches = [c for c in self.pluginManager.DeviceManager.channels() if self._is_ampr(c)
+                   and selection in (self._offset_label(c), c.name)]
+        if len(matches) != 1:
+            raise ScanError(f'Quadrupole offset channel {selection} is unavailable or ambiguous. Check the AMPR channels.')
+        return matches[0]
+
+    @staticmethod
+    def _offset_bounds(c, ctrl):
+        minimum = MScan._number(c, 'min', 'channel minimum', nonnegative=False)
+        maximum = MScan._number(c, 'max', 'channel maximum', nonnegative=False)
+        limit = getattr(ctrl, '_module_voltage_limit', None)
+        rating = float(limit(c.module_address())) if callable(limit) else math.inf
+        low, high = max(minimum, -rating), min(maximum, rating)
+        if low > high:
+            raise ScanError(f'{c.name}: no admissible offset range.')
+        return low, high
+
+    def _offset_plan(self, low, high):
+        """Read-only validation of the offset channel; None when the offset is not driven."""
+        c = self._offset_source()
+        if c is None:
+            return None
+        self._registered(c)
+        device = c.getDevice()
+        ctrl = device.controller
+        try:
+            factor = float(self.offset_factor)
+        except (AttributeError, TypeError, ValueError):
+            factor = math.nan
+        if not math.isfinite(factor):
+            raise ScanError('Offset coefficient must be finite.')
+        if not all(hasattr(ctrl, field) for field in ('_latest_setpoints', '_setpoint_lock', '_setpoint_cancel')):
+            raise ScanError(f'{c.name}: update MScan and AMPR plugins together; setpoint confirmation required.')
+        if not c.enabled:
+            raise ScanError(f'{c.name}: switch the AMPR offset channel ON.')
+        if not c.active:
+            raise ScanError(f'{c.name}: use manual (not equation) control for the offset.')
+        if not device.isOn() or not ctrl.initialized or ctrl.device is None:
+            raise ScanError(f'{c.name}: turn the AMPR ON.')
+        if any(bool(getattr(ctrl, flag, False)) for flag in ('initializing', 'transitioning', 'ramping')):
+            raise ScanError(f'{c.name}: wait for the AMPR transition to finish.')
+        if ctrl._setpoint_cancel.is_set():
+            raise ScanError(f'{c.name}: AMPR output shutdown requested.')
+        minimum, maximum = self._offset_bounds(c, ctrl)
+        first, last = sorted((factor * low, factor * high))
+        if first < minimum or last > maximum:
+            raise ScanError(f'{c.name}: offset {first:g}–{last:g} V (coefficient {factor:g} × A) exceeds '
+                            f'allowed {minimum:g}–{maximum:g} V.')
+        initial = self._number(c, 'value', 'offset setpoint', nonnegative=False)
+        if not minimum <= initial <= maximum:
+            raise ScanError(f'{c.name}: final offset restoration to {initial:g} V is outside allowed {minimum:g}–{maximum:g} V.')
+        o = dict(channel=c, name=c.name, device=device, controller=ctrl, backend=ctrl.device,
+                 token=ctrl._setpoint_cancel, key=(c.module_address(), c.channel_number()), factor=factor,
+                 initial=initial, expected=initial, requested=initial, written=False, observed=math.nan, ready=False)
+        state, detail = self._offset_request_state(o)
+        if state != 'confirmed':
+            raise ScanError(f'{c.name}: offset setpoint {initial:g} V not confirmed by the AMPR ({state}). {detail}'.strip())
+        if not math.isfinite(float(c.monitor)):
+            raise ScanError(f'{c.name}: no valid AMPR Monitor readback for the offset.')
+        return o
+
+    @staticmethod
+    def _offset_request_state(o):
+        """State of the AMPR's latest request for the offset channel, for the scan's own target."""
+        ctrl, c = o['controller'], o['channel']
+        with ctrl._setpoint_lock:
+            request = ctrl._latest_setpoints.get(o['key'])
+            fields = None if request is None else (request.channel, request.target, request.state, request.detail)
+        if fields is None:
+            if o['written']:
+                return 'pending', 'Waiting for the AMPR to take the scan target.'
+            # Untouched since its connection: the AMPR confirmed it at ON (AMPR's own default).
+            return str(getattr(c, '_ampr_setpoint_state', 'confirmed')), ''
+        owner, target, state, detail = fields
+        if owner is not c or not math.isclose(float(target), o['expected'], rel_tol=1e-10, abs_tol=1e-9):
+            return 'pending', 'Waiting for the AMPR to take the scan target.'
+        return str(state), str(detail)
+
+    def _offset_observation(self):
+        """GUI-only: offset readiness. Aborts on any change made outside the scan."""
+        o = self._plan.get('offset')
+        if not o:
+            return True
+        c, device, ctrl = o['channel'], o['device'], o['controller']
+        self._registered(c)
+        if (c.name != o['name'] or self._plugin(device.name) is not device or device.controller is not ctrl
+                or ctrl.device is not o['backend'] or ctrl._setpoint_cancel is not o['token'] or o['token'].is_set()
+                or not device.isOn() or not ctrl.initialized or not c.enabled or not c.active or not c.real):
+            raise ScanError(f'{o["name"]}: offset source changed or was stopped.')
+        if not math.isclose(float(c.value), o['expected'], rel_tol=1e-10, abs_tol=1e-9):
+            raise ScanError(f'{c.name}: offset changed outside the scan '
+                            f'(scan target {o["expected"]:g} V, new request {float(c.value):g} V).')
+        state, detail = self._offset_request_state(o)
+        if state in ('error', 'mismatch', 'stored'):
+            raise ScanError(f'{c.name}: offset setpoint {o["expected"]:g} V {state}. {detail}'.strip())
+        monitor = float(c.monitor)
+        busy = any(bool(getattr(ctrl, flag, False)) for flag in ('initializing', 'transitioning', 'ramping'))
+        o['observed'] = monitor
+        o['ready'] = (not busy and state == 'confirmed' and math.isfinite(monitor)
+                      and abs(monitor - o['expected']) <= self._plan['tolerance'])
+        return o['ready']
+
+    def _offset_target(self, amplitude):
+        o = self._plan.get('offset')
+        return None if not o else o['factor'] * float(amplitude)
+
+    def _offset_snapshot(self):
+        o = self._plan.get('offset')
+        return None if not o else (o['observed'], o['expected'])
+
+    def _not_ready(self, message):
+        """Name the offset when it, rather than the PSU, is what is not confirmed."""
+        o = (self._plan or {}).get('offset')
+        if o and not o['ready']:
+            return ScanError(f'Quadrupole offset {o["name"]}: target {o["expected"]:g} V not confirmed by the AMPR '
+                             f'or Monitor {o["observed"]:g} V outside tolerance. {message}')
+        return ScanError(message)
+
+    def _offset_readback_text(self, *, running=False):
+        o = (self._plan or {}).get('offset') if running else None
+        if running:
+            if not o:
+                return 'Not driven'
+            state = 'confirmed' if o['ready'] else 'waiting for confirmation'
+            return f'{o["name"]}: target {o["expected"]:+g} V, Monitor {o["observed"]:+.3f} V ({state})'
+        c = self._offset_source()
+        if c is None:
+            return 'Not driven'
+        factor = float(self.offset_factor)
+        lines = [f'{c.name}: Monitor {float(c.monitor):+.3f} V, set {float(c.value):+g} V']
+        if all(math.isfinite(float(v)) for v in (self.start, self.stop)):
+            lines.append(f'Scan: {factor:g} × A = {factor * float(self.start):+g} … {factor * float(self.stop):+g} V')
+        return '\n'.join(lines)
 
     def estimateScanTime(self):
         if not all(hasattr(self, attr) for attr in ('start', 'stop', 'step', 'settling_s', 'integration_s')):
@@ -816,6 +996,15 @@ class MScan(Scan):
             except ScanError:
                 current = 'Iget unavailable'
             lines.append(f'{r["name"]}: {"+" if r["number"] == 0 else "−"}{voltage:g} V, {current}')
+        if lines:
+            try:
+                o = (self._plan or {}).get('offset') if running else None
+                c = None if running else self._offset_source()
+                if o or c is not None:
+                    name, value = (o['name'], o['initial']) if o else (c.name, float(c.value))
+                    lines.append(f'{name}: {value:+g} V (quadrupole offset)')
+            except ScanError:
+                lines.append('Quadrupole offset: unavailable')
         return '\n'.join(lines) or 'Unavailable'
 
     def _refresh_completion(self, rails, *, running=False):
@@ -828,6 +1017,15 @@ class MScan(Scan):
             setting.value = text
         setting.label.setToolTip(f'{text}\n\n{setting.toolTip}')
 
+    def _refresh_offset_readback(self, *, running=False):
+        try:
+            text = self._offset_readback_text(running=running)
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            text = f'Unavailable: {exc}'
+        setting = self.settingsMgr.settings[self.OFFSET_READBACK]
+        if setting.value != text:
+            setting.value = text
+
     def _refresh_interface(self):
         if (self.loading or self.settingsMgr.loading or self.pluginManager.loading or self.pluginManager.closing):
             return
@@ -836,6 +1034,7 @@ class MScan(Scan):
             # Keep setup/readiness frozen during acquisition. Only observe Iget;
             # the return voltage must stay the initial target captured by the plan.
             self._refresh_completion(self._plan['rails'] if self._plan else [], running=True)
+            self._refresh_offset_readback(running=True)
             self._layout_readonly_fields()
             return
         channels = list(self.pluginManager.DeviceManager.channels())
@@ -876,6 +1075,20 @@ class MScan(Scan):
                 amx_setting.combo.addItems(choices)
             amx_setting.combo.setCurrentText(selected_amx)
             amx_setting.combo.blockSignals(previous)
+        offset_setting = self.settingsMgr.settings[self.OFFSET]
+        if not offset_setting.combo.view().isVisible():
+            ampr = sorted((c for c in channels if self._is_ampr(c)),
+                          key=lambda c: (c.getDevice().name, c.module_address(), c.channel_number(), c.name))
+            choices = [self.NO_OFFSET, *[self._offset_label(c) for c in ampr]]
+            selected_offset = str(offset_setting.value)
+            if selected_offset not in choices:
+                choices.append(selected_offset)  # never silently replace a lost selection
+            previous = offset_setting.combo.blockSignals(True)
+            if offset_setting.items != choices:
+                offset_setting.combo.clear()
+                offset_setting.combo.addItems(choices)
+            offset_setting.combo.setCurrentText(selected_offset)
+            offset_setting.combo.blockSignals(previous)
         self._acquisition_info()
         self.estimateScanTime()
         supplies, frequency = 'Select an AMX', 'Unavailable'
@@ -939,6 +1152,7 @@ class MScan(Scan):
         self.settingsMgr.settings[self.AMPLITUDE_LIMITS].label.setToolTip(limit_help)
         self.settingsMgr.settings[self.AMPLITUDE_LIMITS].setToolTip(0, limit_help)
         self._refresh_completion(rails)
+        self._refresh_offset_readback()
         # Same preflight as Start, but do not initialize data, bind a plan, log
         # warnings or touch a device. Keep the last outcome (including save errors).
         try:
@@ -1078,6 +1292,8 @@ class MScan(Scan):
                 rail_v=np.full((n, rails), np.nan), rail_i=np.full((n, rails), np.nan),
                 window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
                 samples=np.zeros((n, outputs), dtype=np.int64), finite_samples=np.zeros((n, outputs), dtype=np.int64))
+            if self._plan.get('offset'):
+                self._validation.update(offset_v=np.full(n, np.nan), offset_target=np.full(n, np.nan))
             self._cancel = Event()
             self.scan_status = 'Ready'
             return True
@@ -1244,7 +1460,8 @@ class MScan(Scan):
         for plugin in self.pluginManager.plugins:
             if plugin is not self and isinstance(plugin, Scan) and not plugin.finished:
                 raise ScanError(f'Finish {plugin.name} before starting this coupled scan.')
-        return dict(amx=amx, amx_controller=amx.controller, amx_backend=amx.controller.device,
+        offset = self._offset_plan(low, high)
+        return dict(amx=amx, offset=offset, amx_controller=amx.controller, amx_backend=amx.controller.device,
             selected=selected, links=links, waveform=waveform, rails=rails,
             expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),
             tolerance=float(self.voltage_tolerance), average=duration, wait=float(self.settling_s), mode=mode,
@@ -1264,6 +1481,11 @@ class MScan(Scan):
                             voltage_limit_v=r['voltage_capacity'], ilim_a=r['ilim'],
                             current_limit_a=r['current_capacity']) for r in rails],
                 amplitude_definition='Vpos=+A, Vneg=-A relative to PSU reference; external offset not included',
+                offset=None if offset is None else dict(
+                    channel=offset['name'], ampr=offset['device'].name, module=offset['key'][0], ampr_channel=offset['key'][1],
+                    coefficient=offset['factor'], initial_v=offset['initial'], final_v=offset['initial'],
+                    definition='Offset = coefficient × A, commanded on the AMPR channel at each amplitude '
+                               '(rounded to its display precision); verified by its setpoint readback and Monitor.'),
                 calibration='None; amplitude in V, not m/z', background_subtracted=False))
 
     def _observation(self):
@@ -1319,14 +1541,24 @@ class MScan(Scan):
                     self._check_current(c, ilim)
             ready &= (fresh and math.isfinite(current) and current >= 0 and math.isfinite(v)
                       and v >= 0 and abs(v - expected) <= p['tolerance'])
+        ready = self._offset_observation() and ready
         return ready, np.asarray(measured), np.asarray(currents), time.time()
 
-    def _command(self, targets, latest=None):
+    def _command(self, targets, latest=None, *, offset=None):
         # Validate *all* sources before the first write. No OFF/ON, ranges or
         # current-limit writes: use the standard Channel.value path only.
+        o = self._plan.get('offset')
+        if (o is None) != (offset is None):
+            raise ScanError('Quadrupole offset target missing or unexpected; no scan command sent.')
         if 'detector_interval_ms' in self._plan:
             self._check_detectors()
         self._observation()
+        if o is not None:
+            if any(bool(getattr(o['controller'], flag, False)) for flag in ('initializing', 'transitioning', 'ramping')):
+                raise ScanError(f'{o["name"]}: AMPR transition in progress; no scan command sent.')
+            minimum, maximum = self._offset_bounds(o['channel'], o['controller'])
+            if not math.isfinite(offset) or not minimum <= offset <= maximum:
+                raise ScanError(f'{o["name"]}: offset {offset:g} V exceeds allowed {minimum:g}–{maximum:g} V.')
         for rail, target in zip(self._plan['rails'], targets):
             c = rail['channel']
             if any(bool(getattr(rail['controller'], flag, False)) for flag in (
@@ -1347,6 +1579,14 @@ class MScan(Scan):
             if revision != rail['request_revision']:
                 rail['confirmed_vset'] = None
             rail['request_revision'] = revision
+        if o is not None:
+            c = o['channel']
+            before = float(c.value)
+            c.value = offset
+            # The channel rounds to its display precision: verify what was really requested.
+            commanded = float(c.value)
+            o['requested'], o['expected'], o['ready'] = offset, commanded, False
+            o['written'] |= not math.isclose(commanded, before, rel_tol=1e-10, abs_tol=1e-9)
         return started, time.time()
 
     def _check_detectors(self, sources=None):
@@ -1434,7 +1674,7 @@ class MScan(Scan):
             if since is not None and now - since >= seconds:
                 return volts
             if now >= deadline:
-                raise ScanError('PSU voltage settling timed out; no detector value assigned to this point.')
+                raise self._not_ready('PSU voltage settling timed out; no detector value assigned to this point.')
             self._pause()
 
     def _measure(self):
@@ -1445,7 +1685,7 @@ class MScan(Scan):
         while True:
             ready, volts, currents, wall = self._gui(self._observation)
             if not ready:
-                raise ScanError('PSU readback became invalid or left tolerance during acquisition.')
+                raise self._not_ready('PSU readback became invalid or left tolerance during acquisition.')
             if abs((wall - start) - (time.monotonic() - start_mono)) > .5:
                 raise ScanError('System clock changed during acquisition.')
             if time.monotonic() >= start_mono + self._plan['average']:
@@ -1456,10 +1696,12 @@ class MScan(Scan):
                 raise ScanError('Fresh detector data timed out.')
             self._pause()
 
-    def _store_point(self, index, start, end, volts, currents, values, *, continuous=False):
+    def _store_point(self, index, start, end, volts, currents, values, *, continuous=False, offset=None):
         validation = self._validation
         validation['window_start'][index], validation['window_end'][index] = start, end
         validation['rail_v'][index], validation['rail_i'][index] = volts, currents
+        if offset is not None:
+            validation['offset_v'][index], validation['offset_target'][index] = offset
         for j, (mean, count, finite) in enumerate(values):
             self.outputChannels[j].recordingData[index] = mean
             validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
@@ -1473,10 +1715,10 @@ class MScan(Scan):
             if self._cancel.is_set():
                 raise ScanStopped('Scan stopped.')
             self._bridge.status.emit(f'{index + 1}/{len(steps)}: settling at {amplitude:g} V')
-            self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails'])))
+            self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails']), offset=self._offset_target(a)))
             self._settle(p['wait'])
             self._bridge.status.emit(f'{index + 1}/{len(steps)}: acquiring at {amplitude:g} V')
-            self._store_point(index, *self._measure())
+            self._store_point(index, *self._measure(), offset=self._offset_snapshot())
 
     def _continuous_command(self, amplitude, latest=None, *, window_start=None):
         if latest is not None and time.monotonic() >= latest:
@@ -1486,7 +1728,8 @@ class MScan(Scan):
         self._require_time_step(self._plan['detectors'][0], self._plan['average'], window_start)
         # The deadline is checked on Qt, immediately before any setpoint write;
         # a late queued callback must not issue a catch-up command.
-        return self._command([float(amplitude)] * len(self._plan['rails']), latest=latest)
+        return self._command([float(amplitude)] * len(self._plan['rails']), latest=latest,
+                             offset=self._offset_target(amplitude))
 
     def _capture_continuous(self, raw, origin, cutoff, baselines, *, cancel=True):
         start = raw['detector_time'][-1] if raw['detector_time'] else origin
@@ -1505,16 +1748,17 @@ class MScan(Scan):
 
     def _continuous_windows(self, pending, raw, watermark):
         while pending and watermark >= pending[0][2]:
-            index, start, end, volts, currents = pending.popleft()
+            index, start, end, volts, currents, offset = pending.popleft()
             left, right = (bisect_right(raw['detector_time'], t) for t in (start, end))
             values = self._average_samples(np.asarray(raw['detector_current'][left:right]))
-            self._store_point(index, start, end, volts, currents, [values], continuous=True)
+            self._store_point(index, start, end, volts, currents, [values], continuous=True, offset=offset)
 
     def _run_continuous(self, steps):
         p = self._plan
         raw = self._validation['continuous'] = dict(
             command_start=np.full(len(steps), np.nan), command_end=np.full(len(steps), np.nan),
-            detector_time=[], detector_current=[], psu_time=[], psu_v=[], psu_i=[], psu_target=[], psu_ready=[])
+            detector_time=[], detector_current=[], psu_time=[], psu_v=[], psu_i=[], psu_target=[], psu_ready=[],
+            **(dict(offset_v=[], offset_target=[]) if p.get('offset') else {}))
         pending = deque()
         origin = baselines = cutoff = None
         try:
@@ -1538,13 +1782,17 @@ class MScan(Scan):
                 raw['psu_i'].append(currents.copy())
                 raw['psu_target'].append(list(p['expected']))
                 raw['psu_ready'].append(bool(ready))
+                offset_now = self._offset_snapshot()
+                if offset_now is not None:
+                    raw['offset_v'].append(offset_now[0])
+                    raw['offset_target'].append(offset_now[1])
                 if ready_seen and not ready:
-                    raise ScanError('PSU readback became invalid or left tolerance after reaching the continuous target.')
+                    raise self._not_ready('PSU readback became invalid or left tolerance after reaching the continuous target.')
                 # A first ready observation arriving after the deadline cannot
                 # prove that the PSU kept up, even if it has caught up by now.
                 ready_seen |= ready and now <= next_deadline
                 if not ready and now - last_command >= p['timeout']:
-                    raise ScanError('PSU voltage settling timed out during continuous acquisition.')
+                    raise self._not_ready('PSU voltage settling timed out during continuous acquisition.')
                 # A delayed closing timestamp can finalize an earlier window,
                 # but a new command requires a valid sample in the current one.
                 watermark = self._capture_continuous(raw, origin, cutoff if cutoff is not None else wall, baselines)
@@ -1555,8 +1803,8 @@ class MScan(Scan):
                 now = time.monotonic()
                 if index < len(steps) and now >= deadline:
                     if not ready or not ready_seen:
-                        raise ScanError('PSU target was not confirmed within the continuous time step. '
-                                        'Increase Time step; point not acquired and no next command sent.')
+                        raise self._not_ready('PSU target was not confirmed within the continuous time step. '
+                                              'Increase Time step; point not acquired and no next command sent.')
                     if now >= deadline + duration:
                         raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
                     if index + 1 < len(steps):
@@ -1573,7 +1821,7 @@ class MScan(Scan):
                         end = cutoff = time.time()
                     if end <= begin:
                         raise ScanError('System clock moved backwards during continuous acquisition.')
-                    pending.append((index, begin, end, volts.copy(), currents.copy()))
+                    pending.append((index, begin, end, volts.copy(), currents.copy(), offset_now))
                     index += 1
                     begin = end
                     if index < len(steps):
@@ -1601,8 +1849,9 @@ class MScan(Scan):
                 self._run_continuous(steps)
             else:
                 self._run_stepped(steps)
-            self._bridge.status.emit('Returning to initial PSU setpoints')
-            self._gui(lambda: self._command([r['initial'] for r in p['rails']]))
+            self._bridge.status.emit('Returning to initial PSU setpoints' + (' and offset' if p.get('offset') else ''))
+            self._gui(lambda: self._command([r['initial'] for r in p['rails']],
+                                            offset=p['offset']['initial'] if p.get('offset') else None))
             self._settle(p['wait'])
             validation['status'] = 'completed'
         except ScanStopped as exc:
@@ -1708,6 +1957,11 @@ class MScan(Scan):
             group.create_dataset('point_status', data=self._validation['point_status'], dtype=h5py.string_dtype('utf-8'))
             group['rail_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
             group['rail_i'].attrs['Unit'] = 'A (PSU readback at end of integration, not detector current)'
+            if 'offset_v' in self._validation:
+                for key in ('offset_v', 'offset_target'):
+                    group.create_dataset(key, data=self._validation[key])
+                group['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of the quadrupole offset channel)'
+                group['offset_target'].attrs['Unit'] = 'V (offset commanded on the AMPR channel, coefficient × A)'
             for key in ('window_start', 'window_end'):
                 group[key].attrs['Unit'] = 's since Unix epoch'
             if 'continuous' in self._validation:
@@ -1724,6 +1978,9 @@ class MScan(Scan):
                 raw['psu_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
                 raw['psu_i'].attrs['Unit'] = 'A (PSU current, not detector current)'
                 raw['psu_target'].attrs['Unit'] = 'V (requested PSU magnitudes)'
+                if 'offset_v' in raw:
+                    raw['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of the quadrupole offset channel)'
+                    raw['offset_target'].attrs['Unit'] = 'V (offset commanded on the AMPR channel)'
                 for key in ('command_start', 'command_end', 'detector_time', 'psu_time'):
                     raw[key].attrs['Unit'] = 's since Unix epoch'
                 group['rail_v'].attrs['Description'] = 'PSU observation at end of command interval; not synchronized to detector samples.'
@@ -1754,6 +2011,9 @@ class MScan(Scan):
                     # current measurement is invented for their old points.
                     self._validation['rail_i'] = (group['rail_i'][:] if 'rail_i' in group
                         else np.full_like(self._validation['rail_v'], np.nan))
+                    for key in ('offset_v', 'offset_target'):
+                        if key in group:
+                            self._validation[key] = group[key][:]
                     if 'Continuous' in group:
                         self._validation['continuous'] = {key: data[:] for key, data in group['Continuous'].items()}
                     self._validation.update(status=group.attrs['status'], error=group.attrs['error'],

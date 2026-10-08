@@ -64,6 +64,11 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   finite replies; a window without a new valid reply must not advance the scan.
   First check mappings at zero. Nonzero PSU/HV trials require their own approved
   envelope; stopping MScan does not turn off HV outputs.
+- **MScan quadrupole offset (2026-10-08):** select the AMPR offset channel and a
+  small coefficient; in a short stepped scan, check on an independent meter that
+  the offset follows coefficient × A at each point and returns to its initial value.
+  Then check that a continuous scan's Time step leaves the AMPR time to confirm each
+  target (otherwise it aborts, naming the offset).
 - **PSU_D:** check the selected module and reference/readback mapping at zero.
   Do not introduce an arbitrary software offset to match the plot. If disagreement
   remains, retain targets, native readbacks and independent meter readings.
