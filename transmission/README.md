@@ -44,7 +44,10 @@ power button, so a supply then applies the setpoints set in its plugin. The
 optimization or the sweep starts once every device is ready (at most 5 min; **■ Stop**
 cancels the wait and leaves the devices as they are). Transmission never turns the ESI
 ON, and leaves a device in transition alone; a channel whose plugin is not loaded is
-named with its plugin (enable it in the Plugin Manager, then restart Explorer).
+named with its plugin (enable it in the Plugin Manager, then restart Explorer). A PSU
+output gate that is OFF is reported (**output off**) but never switched from here:
+turn it ON in the PSU panel. A gate that goes OFF during a run stops it without any
+further command.
 
 During the run the panel shows the stage, the
 measurement count, the best gain so far and an upper bound of the time left; **■ Stop**

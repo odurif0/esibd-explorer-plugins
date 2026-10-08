@@ -62,7 +62,8 @@ def probe(path, output):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                   and node.name == "_sync_local_on_action")
-    ns = {}
+    synced = []  # The crash-resume record follows every ON-state sync; it only writes a file.
+    ns = {"_session_sync": lambda device: synced.append(bool(device.isOn()))}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
     parent = QWidget()
     parent.name = path.parent.name.upper()
@@ -106,6 +107,7 @@ def probe(path, output):
             sync()
         check(state)
         assert len(parent.calls) == commands_before, "Synchronization issued a command"
+        assert synced[-3:] == [state] * 3, synced
         parent.grab().save(str(output / f"{path.parent.name}-{'on' if state else 'off'}.png"))
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         assert parent.calls[-1] == (not state), "Next click must match the displayed action"

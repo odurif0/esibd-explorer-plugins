@@ -329,6 +329,139 @@ class _ESILiveDisplay(LiveDisplay):
                       padding=0, disableAutoRange=False)
 
 
+# ---- crash resume: identical in every device plugin (tests/test_crash_resume.py) ----
+# <Explorer config path>/<device>.session.json exists while the device is ON. A normal OFF or
+# Explorer close removes it; after a crash, the next Explorer reconnects the device in resume
+# mode: nothing is commanded, the hardware state is adopted and recording restarts.
+
+
+def _session_token() -> str:
+    """One token per Explorer process (a PID may be reused after a crash)."""
+    token = getattr(sys, "_esibd_explorer_session_token", None)
+    if token is None:
+        import uuid
+        token = uuid.uuid4().hex
+        sys._esibd_explorer_session_token = token
+    return token
+
+
+def _session_file(device: Any) -> "Path | None":
+    try:
+        folder = device.pluginManager.Settings.configPath
+        name = device.name
+    except AttributeError:
+        return None
+    return Path(folder) / f"{name}.session.json" if folder else None
+
+
+def _session_request(device: Any, on: bool) -> None:
+    """An operator ON or OFF request. After an OFF or a disconnection (Explorer closing included),
+    nothing is resumed, even if an unconfirmed shutdown brings the ON state back."""
+    device._session_closed = not on
+    _session_sync(device)
+
+
+def _session_sync(device: Any) -> None:
+    """Record the device as ON (with its port and recording state), or forget it. Never raises."""
+    if not getattr(device, "_session_ready", False):
+        return  # Until the resume decision at the end of finalizeInit, a crash record stays intact.
+    path = _session_file(device)
+    if path is None:
+        return
+    try:
+        on = bool(device.isOn()) if hasattr(device, "onAction") else False
+        if not on or getattr(device, "_session_closed", True):
+            path.unlink(missing_ok=True)
+            return
+        import json
+        import os
+        record = dict(device=device.name, com=str(getattr(device, "com", "")), token=_session_token(),
+                      recording=bool(getattr(device, "recording", False)), time=time.time())
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:  # noqa: BLE001 - a missing record only disables the resume
+        pass
+
+
+def _session_clear(device: Any) -> None:
+    """Disconnection or Explorer closing: never resumed."""
+    _session_request(device, False)
+
+
+def _session_left_on(device: Any) -> "dict | None":
+    """The record of an earlier Explorer process that stopped while this device was ON on this port."""
+    path = _session_file(device)
+    if path is None or not path.is_file():
+        return None
+    try:
+        import json
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(record, dict) or record.get("token") == _session_token()
+            or record.get("com") != str(getattr(device, "com", ""))):
+        return None
+    return record
+
+
+def _session_start(device: Any) -> None:
+    """End of finalizeInit: resume a device left ON by a crash, else start recording sessions."""
+    record = _session_left_on(device)
+    device._session_ready = True
+    if record is None:
+        _session_sync(device)  # Removes a stale record (other port, unreadable).
+        return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1500, lambda: _session_resume(device, record))
+
+
+def _session_resume(device: Any, record: dict) -> None:
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(record.get("time", 0))))
+    device.print(f"Explorer stopped while {device.name} was ON (last record {when}). Reconnecting to resume: "
+                 "the hardware state is adopted unchanged, nothing is switched or re-applied.", flag=PRINT.WARNING)
+    controller = getattr(device, "controller", None)
+    if controller is not None and hasattr(controller, "resume_session"):
+        controller.resume_session = True  # Controllers that declare it connect without any command.
+    device.setOn(True)
+    if record.get("recording"):
+        _session_restart_recording(device, time.monotonic() + 120.0)
+
+
+def _session_restart_recording(device: Any, deadline: float) -> None:
+    """Restart recording once the device accepts it (the plugins refuse it until really ON)."""
+    if getattr(device, "recording", False) or time.monotonic() > deadline or not device.isOn():
+        return
+    controller = getattr(device, "controller", None)
+    if getattr(controller, "initialized", False) and not getattr(controller, "resume_session", False):
+        toggle = getattr(device, "toggleRecording", None)
+        if callable(toggle):
+            toggle(on=True, manual=False)
+        if getattr(device, "recording", False):
+            _session_sync(device)
+            return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1000, lambda: _session_restart_recording(device, deadline))
+# ---- end crash resume ----
+
+
+def _set_parameter_quietly(channel: Any, constant: str, attr: str, value: Any) -> None:
+    """Set a channel parameter without its event (the caller holds the device's loading counter)."""
+    getter = getattr(channel, "getParameterByName", None)
+    parameter = getter(getattr(channel, constant, constant.title())) if callable(getter) else None
+    setter = getattr(parameter, "setValueWithoutEvents", None)
+    if callable(setter):
+        setter(value)
+    else:
+        setattr(channel, attr, value)
+
+
 def providePlugins() -> "list[type[Plugin]]":
     return [ESIDevice]
 
@@ -515,6 +648,7 @@ class ESIDevice(Device):
 
     def finalizeInit(self) -> None:
         super().finalizeInit()
+        _session_start(self)  # Resumes a device left ON by an Explorer crash.
         self._ensure_local_on_action()
         self._ensure_status_widgets()
         self._ensure_load_config_action()
@@ -592,6 +726,7 @@ class ESIDevice(Device):
         self._sync_local_on_action()
 
     def _sync_local_on_action(self) -> None:
+        _session_sync(self)  # Crash resume record follows the ON state.
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
@@ -766,6 +901,8 @@ class ESIDevice(Device):
                 _finish_spinbox_edit(getattr(parameter, "spin", None))
 
     def setOn(self, on: "bool | None" = None) -> None:
+        _session_request(self, bool(on) if on is not None
+                         else bool(self.isOn()) if hasattr(self, "onAction") else False)  # Crash resume record.
         if on is not None and hasattr(self, "onAction") and self.onAction.state is not on:
             self.onAction.state = on
         self._sync_local_on_action()
@@ -784,11 +921,17 @@ class ESIDevice(Device):
         if self.isOn():
             self._finish_setpoint_edits()
             # ON never energizes: every output starts deselected, its target or temperature kept.
-            self._deselect_outputs("ON")
+            # A crash resume instead adopts the outputs as they run (ESIController._adopt_hardware_state).
+            if not getattr(controller, "resume_session", False):
+                self._deselect_outputs("ON")
         if controller and getattr(controller, "initialized", False):
             controller.toggleOnFromThread(parallel=True)
         elif hasattr(self, "onAction") and self.isOn():
             self.initializeCommunication()
+
+    def toggleRecording(self, on: "bool | None" = None, manual: bool = True) -> None:
+        super().toggleRecording(on=on, manual=manual)
+        _session_sync(self)
 
     def _deselect_outputs(self, when: str) -> list[str]:
         """Set every HV/HEAT output selection OFF without any command; targets stay as they were."""
@@ -1684,6 +1827,7 @@ class ESIDevice(Device):
         self._deselect_outputs("start")
 
     def closeCommunication(self) -> None:
+        _session_clear(self)  # A disconnection or Explorer closing is never resumed.
         controller = getattr(self, "controller", None)
         if controller is not None:
             controller.shutdownCommunication()
@@ -1817,6 +1961,9 @@ class ESIController(DeviceController):
 
     controllerParent: ESIDevice
 
+    # Set by a crash-resume record: connect without any command and adopt the hardware state.
+    resume_session = False
+
     def __init__(self, controllerParent) -> None:
         super().__init__(controllerParent=controllerParent)
         self.device: Any | None = None
@@ -1908,6 +2055,19 @@ class ESIController(DeviceController):
                 # than activating or publishing this cancelled connection.
                 self.shutdownCommunication()
                 return
+            if self.resume_session:
+                # Crash resume: no enable, limit, safe-off or step command; identity and state reads only.
+                try:
+                    self.identity = self.device.collect_identity(
+                        timeout_s=float(self.controllerParent.poll_timeout_s))
+                    self._resume_snapshot = self.device.collect_diagnostics(
+                        timeout_s=float(self.controllerParent.poll_timeout_s))
+                except Exception as exc:  # noqa: BLE001 - never shut down a resumed source
+                    self._resume_snapshot = None
+                    self.print(f"Resume after an Explorer crash: ESI state unreadable ({exc}); communication "
+                               "stays open and nothing was commanded.", flag=PRINT.ERROR)
+                self.signalComm.initCompleteSignal.emit()
+                return
             self.device.set_global_active(
                 True,
                 timeout_s=float(self.controllerParent.connect_timeout_s),
@@ -1968,14 +2128,48 @@ class ESIController(DeviceController):
         # Explorer's DeviceController.initComplete would call updateValues(apply=True) when the device
         # is ON, i.e. re-apply every saved target and output selection: done here without it.
         if self.initialized:
+            if self.resume_session:
+                self._adopt_hardware_state()
             self.startAcquisition()
-            if self.controllerParent.isOn():
+            if self.controllerParent.isOn() and not self.resume_session:
                 self.toggleOnFromThread(parallel=True)
+            self.resume_session = False
         if self.initialized:
             self.print(
                 "ESI initialized with HV and heater outputs forced OFF. "
                 "Use the explicit output controls to energize HV1, HV2, or HEAT."
             )
+
+    def _adopt_hardware_state(self) -> None:
+        """Crash resume: show the ESI as it runs (targets and active outputs); nothing is sent."""
+        snapshot = getattr(self, "_resume_snapshot", None)
+        self._resume_snapshot = None
+        if snapshot is None:
+            return
+        self._apply_snapshot(snapshot)
+        parent = self.controllerParent
+        adopted = []
+        parent.loading = True  # No value or enable event: the hardware already holds these values.
+        try:
+            for channel in parent.getChannels():
+                if _is_current_channel(channel):
+                    continue
+                if channel.is_heat_channel():
+                    active = (self.heat_activation or {}).get("active") is True
+                    target, unit = self.heat_target_temperature_c, "°C"
+                else:
+                    address = channel.module_address()
+                    active = self.module_active.get(address) is True and self.global_enabled is True
+                    target, unit = self.targets.get(address, np.nan), "V"
+                if np.isfinite(target):
+                    _set_parameter_quietly(channel, "VALUE", "value", float(target))
+                _set_parameter_quietly(channel, "ENABLED", "enabled", bool(active))
+                channel.lastAppliedValue = channel.value
+                adopted.append(f"{channel.name} {'ON' if active else 'OFF'} {float(channel.value):g} {unit}")
+        finally:
+            parent.loading = False
+        self.print("Resumed after an Explorer crash: ESI adopted as it runs (" + ", ".join(adopted)
+                   + "); nothing was switched, forced OFF or re-applied.")
 
     def _refresh_available_configs(self) -> None:
         device = self.device
@@ -2537,6 +2731,7 @@ class ESIController(DeviceController):
 
     def _restore_off_ui_state(self) -> None:
         """Keep the UI from claiming ON after a failed transition."""
+        self.resume_session = False
         def _update_gui() -> None:
             sync_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_state):

@@ -675,6 +675,128 @@ def _wait_for_next_poll(controller: Any, started: float) -> None:
         time.sleep(min(remaining, _POLL_STOP_CHECK_S))
 
 
+# ---- crash resume: identical in every device plugin (tests/test_crash_resume.py) ----
+# <Explorer config path>/<device>.session.json exists while the device is ON. A normal OFF or
+# Explorer close removes it; after a crash, the next Explorer reconnects the device in resume
+# mode: nothing is commanded, the hardware state is adopted and recording restarts.
+
+
+def _session_token() -> str:
+    """One token per Explorer process (a PID may be reused after a crash)."""
+    token = getattr(sys, "_esibd_explorer_session_token", None)
+    if token is None:
+        import uuid
+        token = uuid.uuid4().hex
+        sys._esibd_explorer_session_token = token
+    return token
+
+
+def _session_file(device: Any) -> "Path | None":
+    try:
+        folder = device.pluginManager.Settings.configPath
+        name = device.name
+    except AttributeError:
+        return None
+    return Path(folder) / f"{name}.session.json" if folder else None
+
+
+def _session_request(device: Any, on: bool) -> None:
+    """An operator ON or OFF request. After an OFF or a disconnection (Explorer closing included),
+    nothing is resumed, even if an unconfirmed shutdown brings the ON state back."""
+    device._session_closed = not on
+    _session_sync(device)
+
+
+def _session_sync(device: Any) -> None:
+    """Record the device as ON (with its port and recording state), or forget it. Never raises."""
+    if not getattr(device, "_session_ready", False):
+        return  # Until the resume decision at the end of finalizeInit, a crash record stays intact.
+    path = _session_file(device)
+    if path is None:
+        return
+    try:
+        on = bool(device.isOn()) if hasattr(device, "onAction") else False
+        if not on or getattr(device, "_session_closed", True):
+            path.unlink(missing_ok=True)
+            return
+        import json
+        import os
+        record = dict(device=device.name, com=str(getattr(device, "com", "")), token=_session_token(),
+                      recording=bool(getattr(device, "recording", False)), time=time.time())
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:  # noqa: BLE001 - a missing record only disables the resume
+        pass
+
+
+def _session_clear(device: Any) -> None:
+    """Disconnection or Explorer closing: never resumed."""
+    _session_request(device, False)
+
+
+def _session_left_on(device: Any) -> "dict | None":
+    """The record of an earlier Explorer process that stopped while this device was ON on this port."""
+    path = _session_file(device)
+    if path is None or not path.is_file():
+        return None
+    try:
+        import json
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(record, dict) or record.get("token") == _session_token()
+            or record.get("com") != str(getattr(device, "com", ""))):
+        return None
+    return record
+
+
+def _session_start(device: Any) -> None:
+    """End of finalizeInit: resume a device left ON by a crash, else start recording sessions."""
+    record = _session_left_on(device)
+    device._session_ready = True
+    if record is None:
+        _session_sync(device)  # Removes a stale record (other port, unreadable).
+        return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1500, lambda: _session_resume(device, record))
+
+
+def _session_resume(device: Any, record: dict) -> None:
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(record.get("time", 0))))
+    device.print(f"Explorer stopped while {device.name} was ON (last record {when}). Reconnecting to resume: "
+                 "the hardware state is adopted unchanged, nothing is switched or re-applied.", flag=PRINT.WARNING)
+    controller = getattr(device, "controller", None)
+    if controller is not None and hasattr(controller, "resume_session"):
+        controller.resume_session = True  # Controllers that declare it connect without any command.
+    device.setOn(True)
+    if record.get("recording"):
+        _session_restart_recording(device, time.monotonic() + 120.0)
+
+
+def _session_restart_recording(device: Any, deadline: float) -> None:
+    """Restart recording once the device accepts it (the plugins refuse it until really ON)."""
+    if getattr(device, "recording", False) or time.monotonic() > deadline or not device.isOn():
+        return
+    controller = getattr(device, "controller", None)
+    if getattr(controller, "initialized", False) and not getattr(controller, "resume_session", False):
+        toggle = getattr(device, "toggleRecording", None)
+        if callable(toggle):
+            toggle(on=True, manual=False)
+        if getattr(device, "recording", False):
+            _session_sync(device)
+            return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1000, lambda: _session_restart_recording(device, deadline))
+# ---- end crash resume ----
+
+
 def providePlugins() -> "list[type[Plugin]]":
     """Return the plugins provided by this module."""
     return [DMMRDevice]
@@ -867,6 +989,7 @@ class DMMRDevice(Device):
 
     def finalizeInit(self) -> None:
         super().finalizeInit()
+        _session_start(self)  # Resumes a device left ON by an Explorer crash.
         if hasattr(self, "advancedAction"):
             self.advancedAction.toolTipFalse = (
                 f"Show expert columns and channel layout actions for {self.name}."
@@ -937,6 +1060,7 @@ class DMMRDevice(Device):
 
     def _sync_local_on_action(self) -> None:
         """Keep the local toolbar ON/OFF button synchronized with the device state."""
+        _session_sync(self)  # Crash resume record follows the ON state.
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
@@ -2242,9 +2366,11 @@ class DMMRDevice(Device):
 
         super().toggleRecording(on=on, manual=manual)
         self._sync_acquisition_controls()
+        _session_sync(self)
 
     def closeCommunication(self) -> None:
         """Close communication safely even if plugin finalization failed early."""
+        _session_clear(self)  # A disconnection or Explorer closing is never resumed.
         controller = self.controller if hasattr(self, "controller") else None
         controller_initialized = bool(getattr(controller, "initialized", False))
         forced_close_state = getattr(controller, "_forced_close_state", None)
@@ -2325,6 +2451,8 @@ class DMMRDevice(Device):
 
     def setOn(self, on: "bool | None" = None) -> None:
         """Toggle the DMMR without relying on a channel apply path."""
+        _session_request(self, bool(on) if on is not None
+                         else bool(self.isOn()) if hasattr(self, "onAction") else False)  # Crash resume record.
         controller = self.controller if hasattr(self, "controller") else None
         current_state = self.isOn() if hasattr(self, "onAction") else False
         requested_on = current_state if on is None else bool(on)
@@ -2730,6 +2858,9 @@ class DMMRController(DeviceController):
 
     controllerParent: DMMRDevice
 
+    # Set by a crash-resume record: connect without any command and adopt the hardware state.
+    resume_session = False
+
     def __init__(self, controllerParent) -> None:
         super().__init__(controllerParent=controllerParent)
         self.device: Any | None = None
@@ -3040,6 +3171,8 @@ class DMMRController(DeviceController):
         if getattr(self, '_initial_open_close_requested', False):
             self.shutdownCommunication()
             return
+        # Crash resume uses the normal ON: enabling acquisition does not change the experiment.
+        self.resume_session = False
         if self.device is not None and self.detected_module_ids:
             self.controllerParent._sync_channels_from_detected_modules(
                 self.detected_module_ids
@@ -3746,6 +3879,7 @@ class DMMRController(DeviceController):
 
     def _restore_off_ui_state(self) -> None:
         """Reset toolbar ON/OFF widgets back to OFF after a failed startup."""
+        self.resume_session = False
         def _update_gui() -> None:
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):

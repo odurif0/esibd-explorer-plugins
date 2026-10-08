@@ -39,7 +39,17 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
 - **AMPR:** at a safe low voltage and slow ramp, press OFF, then click ON/OFF again
   during the descent: outputs must go to 0 V at once and the PSU be disabled.
 - **PSU:** check the `Ramp step (V)` / `Ramp step interval (s)` defaults against
-  the measured output slew before relying on them.
+  the measured output slew before relying on them. Last values: with outputs OFF and
+  `Operating config` `-1`, set Vset/Ilim, disconnect, power-cycle the PSU and
+  reconnect: the panel must propose the previous values in italics and the PSU must
+  keep its own until a field is validated or the output is turned ON.
+- **Resume after a crash (all device plugins):** at safe low setpoints with outputs
+  ON and recording, end the Explorer process from the Task Manager (a simulated
+  crash), check with independent meters that the outputs stay unchanged, restart
+  Explorer: each device must reconnect by itself with "Resumed after an Explorer
+  crash … adopted", show the running values, restart recording, and no output may
+  change (no ramp, no zeroing, no config load). Then close Explorer normally and
+  restart it: nothing may reconnect by itself.
 - **Explorer 1.0.2 data files:** save ESI and DMMR data (Ctrl+S and on closing)
   and reopen them; the ESI export failed with Explorer 1.0.1 before v0.3.0. Check that
   the DMMR history length now matches its configured storage.

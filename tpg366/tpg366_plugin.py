@@ -124,6 +124,128 @@ def _serial_port_name(value):
     return f"COM{int(match.group(1))}" if match else port
 
 
+# ---- crash resume: identical in every device plugin (tests/test_crash_resume.py) ----
+# <Explorer config path>/<device>.session.json exists while the device is ON. A normal OFF or
+# Explorer close removes it; after a crash, the next Explorer reconnects the device in resume
+# mode: nothing is commanded, the hardware state is adopted and recording restarts.
+
+
+def _session_token() -> str:
+    """One token per Explorer process (a PID may be reused after a crash)."""
+    token = getattr(sys, "_esibd_explorer_session_token", None)
+    if token is None:
+        import uuid
+        token = uuid.uuid4().hex
+        sys._esibd_explorer_session_token = token
+    return token
+
+
+def _session_file(device: Any) -> "Path | None":
+    try:
+        folder = device.pluginManager.Settings.configPath
+        name = device.name
+    except AttributeError:
+        return None
+    return Path(folder) / f"{name}.session.json" if folder else None
+
+
+def _session_request(device: Any, on: bool) -> None:
+    """An operator ON or OFF request. After an OFF or a disconnection (Explorer closing included),
+    nothing is resumed, even if an unconfirmed shutdown brings the ON state back."""
+    device._session_closed = not on
+    _session_sync(device)
+
+
+def _session_sync(device: Any) -> None:
+    """Record the device as ON (with its port and recording state), or forget it. Never raises."""
+    if not getattr(device, "_session_ready", False):
+        return  # Until the resume decision at the end of finalizeInit, a crash record stays intact.
+    path = _session_file(device)
+    if path is None:
+        return
+    try:
+        on = bool(device.isOn()) if hasattr(device, "onAction") else False
+        if not on or getattr(device, "_session_closed", True):
+            path.unlink(missing_ok=True)
+            return
+        import json
+        import os
+        record = dict(device=device.name, com=str(getattr(device, "com", "")), token=_session_token(),
+                      recording=bool(getattr(device, "recording", False)), time=time.time())
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:  # noqa: BLE001 - a missing record only disables the resume
+        pass
+
+
+def _session_clear(device: Any) -> None:
+    """Disconnection or Explorer closing: never resumed."""
+    _session_request(device, False)
+
+
+def _session_left_on(device: Any) -> "dict | None":
+    """The record of an earlier Explorer process that stopped while this device was ON on this port."""
+    path = _session_file(device)
+    if path is None or not path.is_file():
+        return None
+    try:
+        import json
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(record, dict) or record.get("token") == _session_token()
+            or record.get("com") != str(getattr(device, "com", ""))):
+        return None
+    return record
+
+
+def _session_start(device: Any) -> None:
+    """End of finalizeInit: resume a device left ON by a crash, else start recording sessions."""
+    record = _session_left_on(device)
+    device._session_ready = True
+    if record is None:
+        _session_sync(device)  # Removes a stale record (other port, unreadable).
+        return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1500, lambda: _session_resume(device, record))
+
+
+def _session_resume(device: Any, record: dict) -> None:
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(record.get("time", 0))))
+    device.print(f"Explorer stopped while {device.name} was ON (last record {when}). Reconnecting to resume: "
+                 "the hardware state is adopted unchanged, nothing is switched or re-applied.", flag=PRINT.WARNING)
+    controller = getattr(device, "controller", None)
+    if controller is not None and hasattr(controller, "resume_session"):
+        controller.resume_session = True  # Controllers that declare it connect without any command.
+    device.setOn(True)
+    if record.get("recording"):
+        _session_restart_recording(device, time.monotonic() + 120.0)
+
+
+def _session_restart_recording(device: Any, deadline: float) -> None:
+    """Restart recording once the device accepts it (the plugins refuse it until really ON)."""
+    if getattr(device, "recording", False) or time.monotonic() > deadline or not device.isOn():
+        return
+    controller = getattr(device, "controller", None)
+    if getattr(controller, "initialized", False) and not getattr(controller, "resume_session", False):
+        toggle = getattr(device, "toggleRecording", None)
+        if callable(toggle):
+            toggle(on=True, manual=False)
+        if getattr(device, "recording", False):
+            _session_sync(device)
+            return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1000, lambda: _session_restart_recording(device, deadline))
+# ---- end crash resume ----
+
+
 def providePlugins():
     return [TPG366]
 
@@ -206,6 +328,7 @@ class TPG366(Device):
         self.onAction.toolTipTrue = "Stop TPG366 acquisition and disconnect; leave the gauges running."
         self.onAction.setToolTip(self.onAction.toolTipFalse)
         self._set_state("Disconnected", False)
+        _session_start(self)  # Reconnects (and records) gauges left ON by an Explorer crash.
 
     def _panel_edit(self, channel, attribute, value):
         if attribute == "name":
@@ -238,6 +361,7 @@ class TPG366(Device):
         for channel in self.channels:
             channel.updateColor()
         self._update_pressure_panel()
+        _session_sync(self)
 
     def loadConfiguration(self, file=None, useDefaultFile=False, append=False):
         # Prepopulate the physical six inputs, rather than Explorer's nine generic
@@ -275,6 +399,7 @@ class TPG366(Device):
 
     def setOn(self, on=None):
         requested = self.isOn() if on is None else bool(on)
+        _session_request(self, requested)  # Crash resume record.
         if requested:
             self.initializeCommunication()
         else:
@@ -308,6 +433,7 @@ class TPG366(Device):
             self.measureInterval()
 
     def closeCommunication(self):
+        _session_clear(self)  # A disconnection or Explorer closing is never resumed.
         self.recording = False
         self.controller.closeCommunication()
 

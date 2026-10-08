@@ -124,6 +124,12 @@ def device_on(device):
     return bool(initialized) if isinstance(initialized, (bool, np.bool_)) else bool(device.isOn())
 
 
+def output_off(channel):
+    """A PSU-like output gate reported OFF (its readback is then NaN and could not show it)."""
+    state = getattr(channel, "output_state", None)
+    return isinstance(state, str) and state.strip().upper() == "OFF"
+
+
 def device_busy(device):
     """What the device plugin is busy with (initialization, ON/OFF transition…), or ''."""
     controller = getattr(device, "controller", None)
@@ -448,6 +454,8 @@ class ExplorerInstrument(_engine.Instrument):
                 raise _engine.InstrumentError(f"{device.name} is OFF (driven channel {name})")
             if not (channel.enabled and channel.active and channel.real):
                 raise _engine.InstrumentError(f"{name}: enable it as an active real channel in {device.name}")
+            if output_off(channel):
+                raise _engine.InstrumentError(f"{name}: output OFF in {device.name}; turn it ON in the {device.name} panel")
             controller = getattr(device, "controller", None)
             for flag, what in self.DEVICE_BUSY.items():
                 if _flag(controller, flag):
@@ -1544,10 +1552,13 @@ class Transmission(Scan):
             if device is None:
                 continue
             busy = device_busy(device)
+            gates = [name for name in entry["driven"] if output_off(channels[name.strip().lower()])]
             if busy:
                 entry.update(state="busy", fix=f"{busy} in progress")
             elif not device_on(device):
                 entry.update(state="off", fix="turn it ON")
+            elif gates:  # Never switched from here: an HV gate is the operator's decision.
+                entry.update(state="output off", fix=f"turn the output ON in the {device.name} panel ({', '.join(gates)})")
             elif entry["measured"] and not getattr(device, "recording", True):
                 entry.update(state="not recording", fix="start its recording")
             else:
@@ -1659,6 +1670,11 @@ class Transmission(Scan):
             return
         elapsed = time.monotonic() - bringup["started"]
         report = {e["name"]: e for e in self.device_report(*(bringup["needed"] or self._needed()))}
+        blocked = [e for e in report.values() if e["state"] not in ("ready", "off", "not recording")]
+        if blocked:  # E.g. turned ON with an output gate still OFF: the operator's decision, not ours.
+            self.cancel_bringup("Not ready: " + "; ".join(f"{e['name']}: {e['fix']}" for e in blocked) + ".",
+                                log="devices_not_ready")
+            return
         pending = []
         for name in bringup["names"]:
             entry = report.get(name)

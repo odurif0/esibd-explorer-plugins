@@ -90,6 +90,17 @@ Each step adds its serial round trips, so the actual rate is below step / interv
 Reconfiguration retains the disable/verification sequence, and range switching
 still requires measured discharge. A failed check triggers output-disable recovery.
 
+**Last values.** While connected, the plugin remembers the `Vset` and `Ilim` the
+PSU holds (`<Explorer config path>/PSU_C_last_setpoints.json`, with the COM port).
+At the next connection in manual mode (`Operating config` `-1`), a channel whose
+output is OFF and whose PSU now holds other values (for example 0 V after a power
+cycle) gets its last values **proposed** in the panel, in italics: nothing is sent
+until you validate the field or turn the output ON, which applies the panel. A
+stored config, a live output, another PSU on this COM port or values outside the
+channel limits are never proposed; a setpoint requested by a scan, Transmission or
+UCM, a config load or a disconnection drops the proposal. After an Explorer crash,
+the PSU is adopted as it runs instead (see the main README).
+
 ## PSU Semantics
 
 The PSU can be used either through stored configs or by setting values

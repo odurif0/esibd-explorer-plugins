@@ -117,6 +117,23 @@ supervision. `powercfg /requests` lists each connected device under SYSTEM
 ("ESIBD Explorer: …"). A manual sleep, a closed lid or the power button are not
 prevented; disable sleep in the power plan of the lab PC as well.
 
+### After an Explorer crash
+
+A software crash does not interrupt an experiment: the instruments keep running.
+Each device plugin records, while it is ON, a small file
+`<Explorer config path>/<device>.session.json` (port, recording). OFF,
+disconnection and a normal Explorer close remove it. When Explorer starts and
+finds such a record left by a crashed Explorer for the same COM port, the plugin
+reconnects by itself and **adopts the hardware state unchanged**: no startup
+sequence, no forced OFF, no config load, no ramp and no re-applied setpoint. The
+channel values are aligned to the setpoints the device reports, and recording
+restarts if it was on. DMMR and TPG366 resume with their normal ON (measurement
+only). A device that was OFF is not contacted. A normal start keeps every device
+OFF; ESI outputs and PSU panels start as described in their READMEs.
+
+If the instrument was powered off meanwhile, the resume ends like a failed ON
+(a timed-out opening can lock the port until Explorer restarts).
+
 For HV devices, a verified disable is **not proof of complete electrical
 discharge**. ESI additionally checks both HV polarities on each module against
 its 1 V shutdown criterion before disconnecting (see `esi/README.md`). This
