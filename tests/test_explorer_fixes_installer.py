@@ -29,6 +29,15 @@ class Manager:
             self.confParser.read(self.pluginFile)
         if exists:
             confParser.read(self.pluginFile)
+class MainWindow:
+    def saveUiState(self):
+        qSet.setValue(GEOMETRY, self.saveGeometry())
+
+class PluginManager:
+    def loadPlugins(self):
+        self.finalizeInit()
+        self.afterFinalizeInit()
+        self.toggleVideoRecorder()
 ''')
     (root / "plugins.py").write_text('''def load(self, file):
     confParser.read(file)
@@ -84,3 +93,12 @@ def test_failure_writing_second_file_rolls_back_first(installer, package, tmp_pa
     with pytest.raises(OSError, match="Injected"):
         installer.install(package, backup_root=tmp_path / "backup")
     assert {path.name: path.read_bytes() for path in package.iterdir()} == original
+
+
+def test_dock_tab_order_fix_is_inserted_once_at_close_and_after_plugin_loading(installer, package):
+    text = installer.patch_core((package / "core.py").read_text())
+    assert installer.patch_core(text) == text
+    assert text.count("def _restore_dock_tab_order(") == 1
+    assert "        _save_dock_tab_order(self)\n        qSet.setValue(GEOMETRY" in text
+    assert "        self.afterFinalizeInit()\n        _restore_dock_tab_order(self.mainWindow)\n" in text
+    assert text.index("def _dock_tab_bars(") < text.index("\nclass PluginManager:")
