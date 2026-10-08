@@ -994,6 +994,128 @@ def _get_psu_driver_class() -> type[Any]:
         return _PSU_DRIVER_CLASS
 
 
+# ---- crash resume: identical in every device plugin (tests/test_crash_resume.py) ----
+# <Explorer config path>/<device>.session.json exists while the device is ON. A normal OFF or
+# Explorer close removes it; after a crash, the next Explorer reconnects the device in resume
+# mode: nothing is commanded, the hardware state is adopted and recording restarts.
+
+
+def _session_token() -> str:
+    """One token per Explorer process (a PID may be reused after a crash)."""
+    token = getattr(sys, "_esibd_explorer_session_token", None)
+    if token is None:
+        import uuid
+        token = uuid.uuid4().hex
+        sys._esibd_explorer_session_token = token
+    return token
+
+
+def _session_file(device: Any) -> "Path | None":
+    try:
+        folder = device.pluginManager.Settings.configPath
+        name = device.name
+    except AttributeError:
+        return None
+    return Path(folder) / f"{name}.session.json" if folder else None
+
+
+def _session_request(device: Any, on: bool) -> None:
+    """An operator ON or OFF request. After an OFF or a disconnection (Explorer closing included),
+    nothing is resumed, even if an unconfirmed shutdown brings the ON state back."""
+    device._session_closed = not on
+    _session_sync(device)
+
+
+def _session_sync(device: Any) -> None:
+    """Record the device as ON (with its port and recording state), or forget it. Never raises."""
+    if not getattr(device, "_session_ready", False):
+        return  # Until the resume decision at the end of finalizeInit, a crash record stays intact.
+    path = _session_file(device)
+    if path is None:
+        return
+    try:
+        on = bool(device.isOn()) if hasattr(device, "onAction") else False
+        if not on or getattr(device, "_session_closed", True):
+            path.unlink(missing_ok=True)
+            return
+        import json
+        import os
+        record = dict(device=device.name, com=str(getattr(device, "com", "")), token=_session_token(),
+                      recording=bool(getattr(device, "recording", False)), time=time.time())
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:  # noqa: BLE001 - a missing record only disables the resume
+        pass
+
+
+def _session_clear(device: Any) -> None:
+    """Disconnection or Explorer closing: never resumed."""
+    _session_request(device, False)
+
+
+def _session_left_on(device: Any) -> "dict | None":
+    """The record of an earlier Explorer process that stopped while this device was ON on this port."""
+    path = _session_file(device)
+    if path is None or not path.is_file():
+        return None
+    try:
+        import json
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(record, dict) or record.get("token") == _session_token()
+            or record.get("com") != str(getattr(device, "com", ""))):
+        return None
+    return record
+
+
+def _session_start(device: Any) -> None:
+    """End of finalizeInit: resume a device left ON by a crash, else start recording sessions."""
+    record = _session_left_on(device)
+    device._session_ready = True
+    if record is None:
+        _session_sync(device)  # Removes a stale record (other port, unreadable).
+        return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1500, lambda: _session_resume(device, record))
+
+
+def _session_resume(device: Any, record: dict) -> None:
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(record.get("time", 0))))
+    device.print(f"Explorer stopped while {device.name} was ON (last record {when}). Reconnecting to resume: "
+                 "the hardware state is adopted unchanged, nothing is switched or re-applied.", flag=PRINT.WARNING)
+    controller = getattr(device, "controller", None)
+    if controller is not None and hasattr(controller, "resume_session"):
+        controller.resume_session = True  # Controllers that declare it connect without any command.
+    device.setOn(True)
+    if record.get("recording"):
+        _session_restart_recording(device, time.monotonic() + 120.0)
+
+
+def _session_restart_recording(device: Any, deadline: float) -> None:
+    """Restart recording once the device accepts it (the plugins refuse it until really ON)."""
+    if getattr(device, "recording", False) or time.monotonic() > deadline or not device.isOn():
+        return
+    controller = getattr(device, "controller", None)
+    if getattr(controller, "initialized", False) and not getattr(controller, "resume_session", False):
+        toggle = getattr(device, "toggleRecording", None)
+        if callable(toggle):
+            toggle(on=True, manual=False)
+        if getattr(device, "recording", False):
+            _session_sync(device)
+            return
+    try:
+        from PyQt6.QtCore import QTimer
+    except ImportError:
+        return
+    QTimer.singleShot(1000, lambda: _session_restart_recording(device, deadline))
+# ---- end crash resume ----
+
+
 def providePlugins() -> "list[type[Plugin]]":
     return [PSUDevice]
 
@@ -1177,6 +1299,7 @@ class PSUDevice(Device):
 
     def finalizeInit(self) -> None:
         super().finalizeInit()
+        _session_start(self)  # Resumes a device left ON by an Explorer crash.
         self._ensure_local_on_action()
         self._ensure_interlock_action()
         self._ensure_status_widgets()
@@ -1644,6 +1767,10 @@ class PSUDevice(Device):
 
     def _submit_manual_panel_state(self, state: dict[str, Any]) -> None:
         controller = self.controller
+        self._drop_pending_setpoints({
+            ch: [field for key, field in (("voltage_values", "voltage"), ("current_limit_values", "current_limit"))
+                 if ch in (state.get(key) or {})]
+            for ch in _PSU_CHANNEL_IDS})
         # Commit the panel's draft to the same requested values used by UCM and
         # scans. Suppress only hardware dispatch, not Parameter.extraEvents.
         syncing = getattr(self, "_channelValueSyncing", False)
@@ -1697,6 +1824,140 @@ class PSUDevice(Device):
         if callable(stop):
             stop()
 
+    # ---- last PSU setpoints: proposed again in the panel at the next connection
+    _SETPOINT_TOLERANCE = 1e-6
+
+    def _setpoint_memory_file(self) -> "Path | None":
+        try:
+            folder = self.pluginManager.Settings.configPath
+        except AttributeError:
+            return None
+        return Path(folder) / f"{self.name}_last_setpoints.json" if folder else None
+
+    def _load_setpoint_memory(self) -> dict[str, Any]:
+        path = self._setpoint_memory_file()
+        if path is None or not path.is_file():
+            return {}
+        try:
+            import json
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _manual_mode(self) -> bool:
+        """No stored PSU config is selected: the panel values are the operator's."""
+        try:
+            return self._config_setting_value("operating_config") < 0
+        except Exception:  # noqa: BLE001 - settings unavailable (bare test objects)
+            return _coerce_int(getattr(self, "operating_config", -1), -1) < 0
+
+    def _setpoints_observed(self, controller: Any, *, busy: bool) -> None:
+        """After a housekeeping read (GUI thread): decide the prefill once per connection, then
+        remember the setpoints the PSU holds. Fields still proposed are not overwritten."""
+        path = self._setpoint_memory_file()
+        if busy or path is None or not getattr(controller, "initialized", False):
+            return  # Without Explorer's configuration folder there is nothing to remember or propose.
+        observed: dict[int, tuple[float, float]] = {}
+        for ch in _PSU_CHANNEL_IDS:
+            vset = _coerce_float((getattr(controller, "voltage_setpoint_values", {}) or {}).get(ch), np.nan)
+            ilim = _coerce_float((getattr(controller, "current_limit_values", {}) or {}).get(ch), np.nan)
+            if np.isfinite(vset) and np.isfinite(ilim) and vset >= 0 and ilim >= 0:
+                observed[ch] = (float(vset), float(ilim))
+        if not observed:
+            return
+        if not getattr(self, "_setpoint_prefill_decided", True):
+            self._setpoint_prefill_decided = True
+            self._decide_setpoint_prefill(controller, observed)
+        pending = getattr(self, "_pending_setpoints", {}) or {}
+        com = str(getattr(self, "com", ""))
+        memory = self._load_setpoint_memory()
+        channels = dict(memory.get("channels") or {}) if memory.get("com") == com else {}
+        changed = False
+        for ch, (vset, ilim) in observed.items():
+            record = dict(channels.get(str(ch)) or {})
+            fields = pending.get(ch, {})
+            for key, value, field in (("vset", vset, "voltage"), ("ilim", ilim, "current_limit")):
+                old = record.get(key)
+                if field in fields or (isinstance(old, (int, float))
+                                       and abs(float(old) - value) <= self._SETPOINT_TOLERANCE):
+                    continue
+                record[key] = value
+                record["time"] = time.time()
+                changed = True
+            channels[str(ch)] = record
+        if changed:
+            try:
+                import json
+                import os
+                temporary = path.with_name(path.name + ".tmp")
+                temporary.write_text(json.dumps({"com": com, "channels": channels}), encoding="utf-8")
+                os.replace(temporary, path)
+            except OSError:
+                pass
+
+    def _decide_setpoint_prefill(self, controller: Any, observed: dict[int, tuple[float, float]]) -> None:
+        self._pending_setpoints = {}
+        if not self._manual_mode():
+            return  # A stored PSU config decides the setpoints.
+        memory = self._load_setpoint_memory()
+        if memory.get("com") != str(getattr(self, "com", "")):
+            return  # Another PSU on this plugin: nothing to propose.
+        outputs = getattr(controller, "output_enabled_by_channel", {}) or {}
+        proposed = []
+        for ch, (vset, ilim) in observed.items():
+            if outputs.get(ch):
+                continue  # A live output keeps what the PSU runs.
+            record = (memory.get("channels") or {}).get(str(ch)) or {}
+            channel = self._channel_by_number(ch)
+            fields: dict[str, float] = {}
+            voltage, current = record.get("vset"), record.get("ilim")
+            if (isinstance(voltage, (int, float)) and np.isfinite(voltage)
+                    and abs(float(voltage) - vset) > self._SETPOINT_TOLERANCE):
+                low = max(_coerce_float(getattr(channel, "min", 0.0), 0.0), 0.0)
+                high = _coerce_float(getattr(channel, "max", np.inf), np.inf)
+                if low <= float(voltage) <= high:
+                    fields["voltage"] = float(voltage)
+            if (isinstance(current, (int, float)) and np.isfinite(current) and float(current) > 0
+                    and abs(float(current) - ilim) > self._SETPOINT_TOLERANCE):
+                ceiling = _coerce_float(getattr(channel, "hardware_current_limit", np.nan), np.nan)
+                if not np.isfinite(ceiling) or float(current) <= ceiling:
+                    fields["current_limit"] = float(current)
+            if fields:
+                self._pending_setpoints[ch] = fields
+                proposed.append(f"CH{ch} " + ", ".join(
+                    f"{'Vset' if key == 'voltage' else 'Ilim'} {value:g} {'V' if key == 'voltage' else 'A'}"
+                    for key, value in fields.items()))
+        if proposed:
+            self.print("Last PSU values proposed in the panel (" + "; ".join(proposed) + "). They are applied "
+                       "when you validate a field or turn the output ON.")
+
+    def _drop_pending_setpoints(self, fields_by_channel: "dict[int, Any] | None" = None) -> None:
+        """Forget proposed values: all of them, or the given {channel: fields}."""
+        pending = getattr(self, "_pending_setpoints", {}) or {}
+        if fields_by_channel is None:
+            pending = {}
+        else:
+            for ch, fields in fields_by_channel.items():
+                for field in fields:
+                    pending.get(ch, {}).pop(field, None)
+            pending = {ch: fields for ch, fields in pending.items() if fields}
+        self._pending_setpoints = pending
+
+    @staticmethod
+    def _mark_pending_field(widget: Any, pending: bool) -> None:
+        if widget is None or not hasattr(widget, "font"):
+            return
+        font = widget.font()
+        if font.italic() != pending:
+            font.setItalic(pending)
+            widget.setFont(font)
+        if not hasattr(widget, "_psu_base_tooltip"):
+            widget._psu_base_tooltip = widget.toolTip()
+        widget.setToolTip(
+            "Last value of the PSU, proposed: applied when you validate this field or turn the output ON."
+            if pending else widget._psu_base_tooltip)
+
     def _sync_manual_panel_from_controller(self) -> None:
         def _sync() -> None:
             self._cancel_manual_panel_apply()
@@ -1729,14 +1990,17 @@ class PSUDevice(Device):
                             if callable(block):
                                 block(False)
                     channel = self._channel_by_number(channel_index)
+                    proposed = (getattr(self, "_pending_setpoints", {}) or {}).get(channel_index, {})
                     self._set_control_value(
                         widgets.get("voltage"),
-                        _coerce_float(getattr(channel, "value", None), 0.0),
+                        proposed.get("voltage", _coerce_float(getattr(channel, "value", None), 0.0)),
                     )
                     self._set_control_value(
                         widgets.get("current_limit"),
-                        _coerce_float(current_limit_values.get(channel_index), 0.0),
+                        proposed.get("current_limit", _coerce_float(current_limit_values.get(channel_index), 0.0)),
                     )
+                    self._mark_pending_field(widgets.get("voltage"), "voltage" in proposed)
+                    self._mark_pending_field(widgets.get("current_limit"), "current_limit" in proposed)
             finally:
                 self._manualPanelSyncing = False
 
@@ -1909,6 +2173,7 @@ class PSUDevice(Device):
 
     def _sync_local_on_action(self) -> None:
         """Keep the local toolbar ON/OFF button synchronized with the device state."""
+        _session_sync(self)  # Crash resume record follows the ON state.
         action = getattr(self, "deviceOnAction", None)
         if action is None:
             return
@@ -2993,6 +3258,7 @@ class PSUDevice(Device):
         controller = getattr(self, "controller", None)
         if controller is None:
             return
+        self._drop_pending_setpoints()
         load_now = getattr(controller, "loadOperatingConfigNowFromThread", None)
         if callable(load_now):
             load_now(parallel=True)
@@ -3620,8 +3886,11 @@ class PSUDevice(Device):
 
         super().toggleRecording(on=on, manual=manual)
         self._sync_acquisition_controls()
+        _session_sync(self)
 
     def closeCommunication(self) -> None:
+        _session_clear(self)  # A disconnection or Explorer closing is never resumed.
+        self._drop_pending_setpoints()  # Proposed again at the next connection.
         self._stop_refresh_timer()
         controller = getattr(self, "controller", None)
         forced_close_state = getattr(controller, "_forced_close_state", None)
@@ -3677,6 +3946,8 @@ class PSUDevice(Device):
         self._update_status_widgets()
 
     def setOn(self, on: "bool | None" = None) -> None:
+        _session_request(self, bool(on) if on is not None
+                         else bool(self.isOn()) if hasattr(self, "onAction") else False)  # Crash resume record.
         controller = getattr(self, "controller", None)
         current_state = self.isOn() if hasattr(self, "onAction") else False
         transition_target = getattr(controller, "transition_target_on", None)
@@ -3961,6 +4232,9 @@ class PSUChannel(Channel):
     def valueChanged(self) -> None:
         if self.loading or getattr(self.channelParent, "_channelValueSyncing", False):
             return
+        drop = getattr(self.channelParent, "_drop_pending_setpoints", None)
+        if callable(drop):
+            drop({self.channel_number(): ["voltage"]})
         self.voltage_request_revision += 1
         self.channelParent._sync_channel_voltage(self)
         super().valueChanged()
@@ -4121,6 +4395,9 @@ class PSUController(DeviceController):
     """PSU hardware controller used by the ESIBD Explorer plugin."""
 
     controllerParent: PSUDevice
+
+    # Set by a crash-resume record: connect without any command and adopt the hardware state.
+    resume_session = False
 
     def __init__(self, controllerParent) -> None:
         super().__init__(controllerParent=controllerParent)
@@ -4421,6 +4698,9 @@ class PSUController(DeviceController):
         with self._manual_apply_state_lock:
             self._output_cancel.set()
             self._output_cancel = Event()
+        parent = self.controllerParent
+        parent._pending_setpoints = {}
+        parent._setpoint_prefill_decided = bool(self.resume_session)  # A resume adopts the PSU as it runs.
         # Create the token before the host starts the worker, never inside it:
         # an OFF arriving before the worker is scheduled must not be forgotten.
         super().initializeCommunication()
@@ -4536,6 +4816,11 @@ class PSUController(DeviceController):
         self.super_init_complete_called = True
         self._set_loaded_config_text("Connected")
         self._sync_status_to_gui()
+        if self.resume_session:
+            # Connecting sends no output command: the readbacks already mirror the PSU as it runs.
+            self.resume_session = False
+            self.print("Resumed after an Explorer crash: outputs, setpoints and limits adopted as they are; "
+                       "nothing was switched or re-applied.")
 
     def _startup_kwargs(self) -> dict[str, Any]:
         standby_config = _coerce_int(
@@ -5002,6 +5287,10 @@ class PSUController(DeviceController):
                         channel.lastAppliedValue = channel.value
         finally:
             parent._channelValueSyncing = syncing
+        if sync_setpoints:
+            observed = getattr(parent, "_setpoints_observed", None)
+            if callable(observed):
+                observed(self, busy=busy)
         self._schedule_readback_expiry(sample)
         self._schedule_readback_expiry(limits, limits=True)
 
@@ -6177,6 +6466,7 @@ class PSUController(DeviceController):
         return True
 
     def _restore_off_ui_state(self) -> None:
+        self.resume_session = False
         def _update_gui() -> None:
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):

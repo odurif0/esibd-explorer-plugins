@@ -782,6 +782,7 @@ def explorer_scenario(env):
 def devices_scenario(env, ctx):
     """Devices that are OFF or not recording are proposed for turning ON, never turned ON without consent."""
     globals().update(env)
+    import threading
     import time
     psu, dmmr, tpg, timer, sets = ctx["psu"], ctx["dmmr"], ctx["tpg"], ctx["timer"], ctx["sets"]
     FakeDevice, FakeChannel, wait_finished = ctx["FakeDevice"], ctx["FakeChannel"], env["wait_finished"]
@@ -836,6 +837,19 @@ def devices_scenario(env, ctx):
     assert "PSU_B: enable the PSU_B plugin (Plugin Manager), then restart Explorer" in message
     assert "ESI: turn it ON in the ESI plugin (never from Transmission)" in message
     assert esi.on_requests == []
+    # 4. A PSU output gate OFF: shown, never switched from here, and refused by the run check.
+    devices.remove(esi)
+    psu.controller = NS(transitioning=False)
+    ctx["knobs"]["Inlet"].output_state = "OFF"
+    report = {e["name"]: e for e in scan.device_report(["Inlet", "Funnel_exit"], ["A1"])}
+    assert report["PSU_SIM"]["state"] == "output off" and "(Inlet)" in report["PSU_SIM"]["fix"]
+    assert scan.start_devices(list(report.values())) is False and len(confirmations) == count
+    config = module._engine.parse_config(EXPLORER_CONFIG)
+    instrument = module.ExplorerInstrument(scan, config, threading.Event())
+    with pytest.raises(module._engine.InstrumentError, match="Inlet: output OFF in PSU_SIM"):
+        instrument.check()
+    ctx["knobs"]["Inlet"].output_state = "ON"
+    instrument.check()
     timer.stop()
     return 0
 

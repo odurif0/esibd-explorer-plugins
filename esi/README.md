@@ -36,6 +36,12 @@ an output is selected again. Neither ON nor the end of initialization re-applies
 saved target or selection (on 2026-10-07, ON still restarted a saved HV1 selection
 at its 1000 V target).
 
+The only exception is the resume after an Explorer crash (main README): if the ESI
+was ON when Explorer stopped, the next Explorer reconnects without the startup
+commands (no global enable, heater limits, forced OFF or step settings), reads the
+identity and diagnostics, and shows the outputs, targets and temperature as they
+run. Nothing is switched, so an experiment in progress continues.
+
 ## Operation and safety
 
 ### HV outputs
