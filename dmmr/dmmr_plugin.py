@@ -803,12 +803,88 @@ def providePlugins() -> "list[type[Plugin]]":
 
 
 class _DMMRLiveDisplay(LiveDisplay):
-    """Keep a constant picoamp signal visible without changing stored amperes."""
+    """Show currents in pA and keep the last acquisition visible, without changing stored amperes.
+
+    Only the tick labels are scaled, through the ``scale`` argument pyqtgraph passes to
+    ``AxisItem.tickStrings`` for SI prefixes (linear and logarithmic). ``AxisItem.setScale`` would
+    move the ticks and, in log mode, scale the exponents. The channel data, Explorer's
+    ``convertDataDisplay`` and the saved scan data stay in amperes: Explorer's scans save
+    ``ScanChannel.getRecordingData()``, which applies ``convertDataDisplay``, so converting there
+    would store pA labelled as A.
+    """
+
+    PICOAMPERE = 1e12
+
+    def initFig(self) -> None:
+        super().initFig()
+        for widget in getattr(self, "livePlotWidgets", []) or []:
+            labelled = getattr(widget, "axis_leftright", None)  # Stacked layout: one y axis per group.
+            axes = [labelled]
+            if labelled is None:
+                get_axis = getattr(widget, "getAxis", None)
+                axes = [get_axis(side) for side in ("left", "right")] if callable(get_axis) else []
+                labelled = axes[0] if axes else None
+            for axis in axes:
+                if axis is None or getattr(axis, "_dmmr_picoampere", False):
+                    continue
+                labels = axis.tickStrings  # Tick labels only: the curves stay in amperes.
+                axis.tickStrings = (lambda values, scale, spacing, labels=labels:
+                                    labels(values, scale * self.PICOAMPERE, spacing))
+                axis._dmmr_picoampere = True
+            if labelled is not None:
+                text_pen = getattr(labelled, "textPen", None)
+                color = text_pen().color().name() if callable(text_pen) else None
+                labelled.setLabel("Current", units="pA", **({"color": color} if color else {}))
+
+    def _frozen_end(self) -> "float | None":
+        """Last sample time while not recording: the display window ends there, not now.
+
+        Explorer anchors the window on the current time; after an acquisition stopped longer
+        ago than the display time, a redraw (e.g. a colour change) found no data and removed
+        every curve.
+        """
+        device = self.parentPlugin
+        if not isinstance(device, Device) or getattr(device, "recording", False) or device.time.size < 2:
+            return None
+        if self.getDisplayTime() == -1:
+            return None  # The whole history is shown anyway.
+        widgets = getattr(self, "livePlotWidgets", []) or []
+        view_box = widgets[0].getViewBox() if widgets else None
+        if view_box is not None and view_box.mouseEnabled()[0]:
+            return None  # A range chosen by the user is kept.
+        return float(device.time.get()[-1])
+
+    def getTimeAxes(self):
+        axes = super().getTimeAxes()
+        end = self._frozen_end()
+        if end is None:
+            return axes
+        device = self.parentPlugin
+        times = device.time.get()
+        i_min = int(np.argmin(np.abs(times - (end - self.getDisplayTime() * 60))))
+        manager = self.pluginManager.DeviceManager
+        n = (max(int((times.shape[0] - i_min) / manager.max_display_size), 1)
+             if manager.limit_display_size else 1)
+        axes[device.name] = i_min, None, n, device.time.get(index_min=i_min, n=n)
+        return axes
+
+    def plot(self, apply: bool = False) -> None:
+        end = self._frozen_end()
+        super().plot(apply=apply)
+        widgets = getattr(self, "livePlotWidgets", []) or []
+        if end is not None and widgets and not self.parentPlugin.plotting:
+            widgets[0].setXRange(end - self.getDisplayTime() * 60, end)  # x axis linked to all others
 
     def plotGroup(self, livePlotWidget, timeAxes, channels, apply) -> None:
         from pyqtgraph import ViewBox
 
         super().plotGroup(livePlotWidget, timeAxes, channels, apply)
+        for channel in channels:
+            curve = channel.plotCurve
+            name = curve.opts.get("name") if curve is not None else None
+            if isinstance(name, str) and name.endswith(" (A)"):
+                curve.opts["name"] = name[:-len(" (A)")] + " (pA)"  # As the y axis; the data stay in A.
+                self.updateLegend = True
         view_box = livePlotWidget if isinstance(livePlotWidget, ViewBox) else livePlotWidget.getViewBox()
         if view_box is None or not view_box.autoRangeEnabled()[1]:
             return  # Preserve the user's manual Y zoom.

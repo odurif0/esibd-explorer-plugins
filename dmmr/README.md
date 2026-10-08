@@ -81,6 +81,18 @@ conversions: manual polling has no conversion timestamp, and the firmware's
 ready-flag behavior still needs a hardware check. Recorded times are Explorer
 recording times, not simultaneous conversion times for all modules.
 
+## Live Plot
+
+The live plot reads in **pA**: the y axis is labelled `Current (pA)`, its ticks and
+the legend are in pA, in linear and logarithmic views. Only the labels are scaled:
+the recorded data, exported files and scans stay in amperes.
+
+When recording is stopped, the plot keeps the last display time of the recorded
+data (the window ends at the last sample, not at the current time), so a redraw
+such as a colour change no longer removes the curves of an acquisition stopped
+earlier than the display time. While recording, the window follows the current
+time as before; a range chosen with the mouse is kept.
+
 ## Startup Diagnostics
 
 If connection fails with the DMMR powered off, power it on and retry. The plugin
