@@ -52,26 +52,64 @@ its positive and negative connectors. The two modules are independent, but
 that module also energizes its unused connector; keep it isolated and treat
 it as live.
 
-The `POS` / `NEG` selection changes only the voltage ADC being read. It does
-not switch an output or change its polarity. The displayed voltage is the raw
-ADC readback; negative targets are never passed to the vendor target API.
+### Electrospray voltage readback
+
+Each module's voltage ADC reads one connector at a time. `ADC connector` (`POS` /
+`NEG`) on the card chooses the one wired to the electrospray; it is saved in the
+settings (`HV1 ADC connector`, `HV2 ADC connector`, default `POS`) and can be switched
+during an experiment. **It is a measurement selection only**: it never switches an
+output, changes its polarity or touches the target (CGC: `SetHVsupplyMeasRanges`
+selects the "measurement channels"; the current range is kept). The plugin selects
+and verifies it at each connection and after a config load, never during the OFF
+discharge check (which reads both connectors and then restores this choice), and not
+when resuming after an Explorer crash. The ADC is not switched back and forth during
+operation: readings right after a switch are the least reliable (see the
+2026-10-05 observations in SOFTWARE_TEST_PLAN).
+
+`ADC readback` shows the voltage of that connector (negative on `NEG`) only from a
+new conversion (data-ready flag set before the read) on the verified selection:
+
+- after a switch, the first two conversions and the first second are discarded
+  (`settling…`), provisionally until an independent meter qualifies the settling;
+- without a new conversion for 3 s (or three intervals), the last value is shown
+  as `stale` and no longer recorded;
+- an invalid reading, or an ADC on the other connector (`ADC on NEG, POS
+  requested`), is shown as such and never attributed to the electrospray.
+
+The HV channel's monitor (and the HDF recording) is this readback, `NaN` whenever
+it is not shown as a current value. It is the module's own measurement, not an
+independent measurement of the needle voltage. Negative targets are never passed to
+the vendor target API.
 
 Apply a typed voltage with Enter, Tab, or a click outside the field. A button
 that uses the target also reads the current field text; OFF stops without
 first applying a new target. Acquisition refreshes leave edits untouched.
-The heater's numeric target uses the same rule.
+The heater's numeric target uses the same rule. In the `Set` field, ↑/↓ change
+the target by 10 V, Ctrl+↑/↓ or Page Up/Down by 100 V; with the output ON, each
+step is applied at once through the software ramp.
 
 Initial activation sets and verifies the target while the module is in
-standby, then activates it. Changes to an active target use the software ramp
-(default: 500 V/s). Disabling an HV output requests zero immediately, then
+standby, then activates it; the module then rises with its own steps
+(`HVPSxMaxVoltStep` = 10.008 V; CGC does not document the step period). Changes to
+an active target use the software ramp: `Ramp rate (V/s)` in the ESI settings
+(steps every 0.1 s, 0 = immediate). Its default is 100 V/s for new settings; a
+saved value is kept. Disabling an HV output requests zero immediately, then
 verifies deactivation. A failed target change attempts the same rollback.
 
 HV generation requires both the controller-wide `SetEnable` state and the
 module's `SetModuleActivationState` state. The driver checks the target and
-both activation states. The panel separates `HW target` from `HV control` and
-`PWM set / measured`: an accepted target does not prove that regulation has
-started. At a nonzero target, an idle control bit or zero PWM set value
-indicates that it has not started.
+both activation states. `Set` is the requested target; `Applied target` is the
+target applied in the module, as the controller reports it (0 V while the output is
+OFF, each ramp step while ramping). It is not a measurement. The panel separates
+it from `HV control`, `PWM set` and `PWM measured`: an accepted target does not
+prove that regulation has started. At a nonzero target, an idle control bit or
+zero PWM set value indicates that it has not started.
+
+The outputs are DC. `PWM` refers to the module's internal high-voltage
+converter: `PWM set` and `PWM measured` are the voltage setpoint and measurement of
+that internal regulation (`GetHVsupplyParamsPWM`), separate from the measurement
+ADC shown as `ADC readback`. CGC's interface header names these values but does not
+document them further.
 
 The panel also shows the reported RGB LED color. Color alone is not a fault
 diagnosis: CGC uses red/blue for positive/negative outputs, and red+green

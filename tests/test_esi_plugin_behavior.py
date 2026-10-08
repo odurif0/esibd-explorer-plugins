@@ -28,6 +28,7 @@ def _install_esibd_stubs():
         EXP = "EXP"
         BOOL = "BOOL"
         LABEL = "LABEL"
+        COMBO = "COMBO"
 
     class _PluginTypeValue:
         def __init__(self, value):
@@ -429,6 +430,9 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
             calls.append(("max_steps", value, timeout_s))
             return {1: value, 2: value}
 
+        def select_hv_voltage_adc(self, address, *, negative, timeout_s):
+            calls.append(("adc", address, negative, timeout_s))
+
         def collect_diagnostics(self, timeout_s):
             calls.append(("diagnostics", timeout_s))
             return {"verified": True}
@@ -442,6 +446,7 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
         heat_voltage_limit_v=0.0,
         heat_current_limit_a=0.0,
         heat_power_limit_w=0.0,
+        hv2_adc_connector="NEG",
     )
     controller = module.ESIController(parent)
     controller.signalComm = types.SimpleNamespace(
@@ -459,6 +464,9 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
         ("identity", 2.0),
         ("safe_off", 5.0),
         ("max_steps", 10.008, 5.0),
+        # The voltage ADC reads each module's electrospray connector (HV1 default POS).
+        ("adc", 1, False, 2.0),
+        ("adc", 2, True, 2.0),
         ("diagnostics", 2.0),
         ("snapshot", {"verified": True}),
     ]
@@ -523,11 +531,8 @@ def test_operator_cards_keep_their_width_and_heat_panel_can_shrink():
     assert "heat_card.setMaximumWidth(_ESI_HEAT_CARD_WIDTH)" in source
     assert module._ESI_PANEL_STANDBY == "color: #d69e2e; font-weight: 600;"
     assert "else _ESI_PANEL_STANDBY" in source
-    assert "polarity = measurement_polarity.get(address)" in source
-    assert 'if polarity == "negative"' in source
-    assert 'if polarity == "positive"' in source
-    assert "({polarity_code} ADC)" in source
-    assert "{polarity_code} {measured:.1f} V" in source
+    assert "_adc_readback_text(adc_readback.get(address))" in source
+    assert 'widgets["pwm_set"]' in source and 'widgets["pwm_measured"]' in source
 
 
 def test_enabled_change_forces_hardware_apply():

@@ -702,6 +702,38 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
         self._hv_measurement_requests[address] = (*requested, True)
         return True
 
+    def select_hv_voltage_adc(
+        self, address: int, *, negative: bool, timeout_s: Optional[float] = None
+    ) -> None:
+        """Point the voltage ADC at one connector and verify it; keep the current range.
+
+        Measurement only: no output, target or activation command is sent.
+        """
+        self._require_connected()
+        address = self._validate_hv_address(address)
+        requested = bool(negative)
+        timeout = self._resolve_timeout(timeout_s)
+
+        def select_and_verify():
+            status, _negative, high_current = ESIBase.get_hv_supply_meas_ranges(self, address)
+            self._raise_on_status(status, f"get_measurement_ranges({address})")
+            high_current = bool(high_current)
+            status = ESIBase.set_hv_supply_meas_ranges(self, address, requested, high_current)
+            self._raise_on_status(status, f"select_hv_voltage_adc({address})")
+            status, observed_negative, observed_high = ESIBase.get_hv_supply_meas_ranges(self, address)
+            self._raise_on_status(status, f"verify_hv_voltage_adc({address})")
+            observed = bool(observed_negative), bool(observed_high)
+            if observed != (requested, high_current):
+                raise RuntimeError(
+                    f"ESI module {address} voltage ADC selection verification failed: "
+                    f"requested {(requested, high_current)}, controller reports {observed}"
+                )
+            self._hv_measurement_requests[address] = (requested, high_current, True)
+
+        self._call_locked_with_timeout(
+            select_and_verify, timeout * 3.0, f"select_hv_voltage_adc[{address}]"
+        )
+
     def set_global_active(self, active: bool, timeout_s: Optional[float] = None, *, cancel_event=None) -> bool:
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
@@ -1229,6 +1261,10 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                         ),
                         "negative_voltage": bool(voltage_negative),
                         "high_current_range": bool(current_high),
+                        # Ready before this read: a new conversion, not a repeat of the last one.
+                        "voltage_fresh": bool(
+                            int(module_data_flags[address]) & self.HV_ADC_V_READY
+                        ),
                     },
                     "target_v": float(target),
                     "voltage_valid": bool(valid_v),
