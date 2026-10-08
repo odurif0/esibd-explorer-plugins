@@ -544,7 +544,8 @@ def test_enabled_change_forces_hardware_apply():
     assert channel.applied is True
 
 
-def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
+def test_on_sequence_forces_every_output_off_and_energizes_nothing():
+    # 2026-10-07: ON restarted a saved HV1 selection at 1000 V. ON now opens the global gate only.
     module = _load_plugin()
     calls = []
 
@@ -552,25 +553,19 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
         def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("target", address, value))
 
+        def set_heater_temperature(self, value, timeout_s, *, cancel_event=None):
+            calls.append(("heat_target", value))
+
         def set_global_active(self, active, timeout_s):
             calls.append(("global", active))
 
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("module", address, active))
 
     channels = [
-        types.SimpleNamespace(
-            module_address=lambda: 1,
-            is_heat_channel=lambda: False,
-            enabled=True,
-            value=1200.0,
-        ),
-        types.SimpleNamespace(
-            module_address=lambda: 2,
-            is_heat_channel=lambda: False,
-            enabled=False,
-            value=2300.0,
-        ),
+        types.SimpleNamespace(module_address=lambda: 1, is_heat_channel=lambda: False, enabled=True, value=1000.0),
+        types.SimpleNamespace(module_address=lambda: 2, is_heat_channel=lambda: False, enabled=False, value=2300.0),
+        types.SimpleNamespace(module_address=lambda: 0, is_heat_channel=lambda: True, enabled=True, value=90.0),
     ]
     parent = types.SimpleNamespace(
         connect_timeout_s=5.0,
@@ -583,9 +578,7 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
     controller.device = FakeDevice()
     controller.initialized = True
     controller.heat_readback_valid = True
-    controller.applyValue = lambda channel: calls.append(
-        ("apply", channel.module_address(), channel.value if channel.enabled else 0.0)
-    )
+    controller.applyValue = lambda channel: calls.append(("apply", channel.module_address()))
 
     controller.toggleOn()
 
@@ -594,59 +587,151 @@ def test_on_sequence_starts_at_zero_then_activates_enabled_modules():
         ("module", 1, False),
         ("module", 2, False),
         ("global", True),
-        ("apply", 1, 1200.0),
     ]
+    assert controller.module_active == {1: False, 2: False} and controller.targets == {1: 0.0, 2: 0.0}
     assert controller.acquiring is True
 
 
-def test_on_sequence_programs_heat_target_before_activation():
+def test_init_complete_never_reapplies_saved_targets_or_selections():
+    # Explorer's DeviceController.initComplete calls updateValues(apply=True) when the device is ON.
     module = _load_plugin()
     calls = []
-
-    class FakeDevice:
-        def set_hv_module_target(self, address, value, timeout_s):
-            calls.append(("hv_target", address, value))
-
-        def set_heater_temperature(self, value, timeout_s, *, cancel_event=None):
-            assert cancel_event is controller._output_cancel
-            calls.append(("heat_target", value))
-
-        def set_global_active(self, active, timeout_s):
-            calls.append(("global", active))
-
-        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
-            if active and address == 0:
-                assert cancel_event is controller._output_cancel
-            calls.append(("module", address, active))
-
-    heat = types.SimpleNamespace(
-        module_address=lambda: 0,
-        is_heat_channel=lambda: True,
-        enabled=True,
-        value=90.0,
-    )
     parent = types.SimpleNamespace(
-        connect_timeout_s=5.0,
-        poll_timeout_s=3.0,
-        ramp_rate_v_s=0.0,
-        getChannels=lambda: [heat],
+        ensureFixedChannels=lambda **kwargs: calls.append("channels"),
         isOn=lambda: True,
+        updateValues=lambda **kwargs: calls.append(("updateValues", kwargs)),
     )
     controller = module.ESIController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-    controller.heat_readback_valid = True
+    controller.device = object()
+    controller.print = lambda *args, **kwargs: calls.append("print")
+    controller.toggleOnFromThread = lambda parallel=True: calls.append(("toggle", parallel))
+    module.DeviceController.initComplete = lambda self: calls.append("explorer initComplete")
 
-    controller.toggleOn()
+    controller.initComplete()
 
-    assert calls == [
-        ("module", 0, False),
-        ("module", 1, False),
-        ("module", 2, False),
-        ("global", True),
-        ("heat_target", 90.0),
-        ("module", 0, True),
-    ]
+    assert calls == ["channels", ("toggle", True), "print"]
+    assert controller.acquiring is True and controller.initialized is True
+
+
+class _ExplorerLikeChannel:
+    """Explorer 1.0.2: Channel.loading is a read-only view of the device's loading counter."""
+
+    def __init__(self, device, module_number, enabled, value, heat=False):
+        self.device, self.module, self.name = device, module_number, f"ESI_HV{module_number}"
+        self._enabled, self._value, self.heat = enabled, value, heat
+        self.events = []
+        self.VALUE, self.ENABLED = "Value", "Enabled"
+
+    @property
+    def loading(self):
+        return self.device.loading
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        self._value = value
+        self.events.append(("value", value, self.device.loading))
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value):
+        self._enabled = value
+        self.events.append(("enabled", value, self.device.loading))
+
+    def module_address(self):
+        return self.module
+
+    def is_heat_channel(self):
+        return self.heat
+
+    def getParameterByName(self, name):
+        return None  # Explorer returns None for a parameter this stand-in does not model.
+
+
+def _counting_device(module, channels):
+    class CountingESI(module.ESIDevice):
+        _count = 0
+
+        @property
+        def loading(self):
+            return self._count != 0
+
+        @loading.setter
+        def loading(self, value):  # Explorer's Plugin.loading counter
+            self._count += 1 if value else -1
+
+    device = object.__new__(CountingESI)
+    device.getChannels = lambda: channels
+    device.name = "ESI"
+    device.printed = []
+    device.print = lambda text, **kwargs: device.printed.append(text)
+    return device
+
+
+def test_draft_target_commit_works_with_explorer_read_only_channel_loading():
+    # 2026-10-07: ten panel actions failed with "property 'loading' of 'ESIChannel' object has no setter".
+    module = _load_plugin()
+    channels = []
+    device = _counting_device(module, channels)
+    channel = _ExplorerLikeChannel(device, 1, enabled=True, value=1000.0)
+    channels.append(channel)
+
+    class FocusedSpin:  # The operator typed 0 and clicked elsewhere.
+        def hasFocus(self):
+            return True
+
+        def blockSignals(self, value):
+            return False
+
+        def interpretText(self):
+            pass
+
+        def value(self):
+            return 0.0
+
+    device.esiHVCards = {1: {"target": FocusedSpin()}}
+
+    device._finish_setpoint_edits(channel)
+
+    assert channel.value == 0.0 and channel.events == [("value", 0.0, True)]  # Committed, event suppressed.
+    assert device._count == 0
+
+
+def test_saved_and_on_output_selections_start_off_with_targets_kept(monkeypatch):
+    module = _load_plugin()
+    channels = []
+    device = _counting_device(module, channels)
+    hv1 = _ExplorerLikeChannel(device, 1, enabled=True, value=1000.0)
+    hv2 = _ExplorerLikeChannel(device, 2, enabled=False, value=500.0)
+    heat = _ExplorerLikeChannel(device, 0, enabled=True, value=90.0, heat=True)
+    channels.extend([hv1, hv2, heat])
+    monkeypatch.setattr(module.Device, "loadConfiguration", lambda self, **kwargs: None, raising=False)
+
+    device.loadConfiguration(useDefaultFile=False)
+
+    assert [ch.enabled for ch in channels] == [False, False, False]
+    assert [ch.value for ch in channels] == [1000.0, 500.0, 90.0]
+    assert hv1.events == [("enabled", False, True)] and heat.events == [("enabled", False, True)]
+    assert device._count == 0
+    assert device.printed == ["Outputs start OFF at start: ESI_HV1 (target 1000 V kept), "
+                              "ESI_HV0 (target 90 °C kept). Select an output to energize it."]
+    hv1.enabled = True  # Selected again, then the plugin is switched ON.
+    toggles = []
+    device.controller = types.SimpleNamespace(initialized=True, initializing=False, transitioning=False,
+                                              toggleOnFromThread=lambda parallel=True: toggles.append(parallel))
+    device.onAction = types.SimpleNamespace(state=False)
+    device._sync_local_on_action = lambda: None
+    device.isOn = lambda: device.onAction.state
+
+    device.setOn(True)
+
+    assert hv1.enabled is False and hv1.value == 1000.0 and toggles == [True]
 
 
 def test_off_sequence_uses_driver_confirmed_disconnect():

@@ -86,7 +86,7 @@ def probe(family, output):
         status.setText(parent.main_state)
 
     parent._update_status_widgets = show_status
-    for method in ("_sync_local_on_action", "_set_on_ui_state", "setOn", "_finish_setpoint_edits"):
+    for method in ("_sync_local_on_action", "_set_on_ui_state", "setOn", "_finish_setpoint_edits", "_deselect_outputs"):
         if hasattr(cls, method):
             setattr(parent, method, MethodType(getattr(cls, method), parent))
     path = Path(module.__file__).parent

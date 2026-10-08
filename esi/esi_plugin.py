@@ -753,12 +753,13 @@ class ESIDevice(Device):
                 if power is not None and power.isEnabled() and _finish_spinbox_edit(power):
                     self.heat_power_limit_w = float(power.value())
             if _finish_spinbox_edit(target):
-                loading = getattr(ch, "loading", False)
-                ch.loading = True
+                # Suppress the value event while committing the draft; the caller applies it.
+                # Explorer 1.0.2: Channel.loading is read-only and reflects this device counter.
+                self.loading = True
                 try:
                     ch.value = float(target.value())
                 finally:
-                    ch.loading = loading
+                    self.loading = False
             else:
                 getter = getattr(ch, "getParameterByName", None)
                 parameter = getter(getattr(ch, "VALUE", "Value")) if callable(getter) else None
@@ -782,10 +783,42 @@ class ESIDevice(Device):
             return
         if self.isOn():
             self._finish_setpoint_edits()
+            # ON never energizes: every output starts deselected, its target or temperature kept.
+            self._deselect_outputs("ON")
         if controller and getattr(controller, "initialized", False):
             controller.toggleOnFromThread(parallel=True)
         elif hasattr(self, "onAction") and self.isOn():
             self.initializeCommunication()
+
+    def _deselect_outputs(self, when: str) -> list[str]:
+        """Set every HV/HEAT output selection OFF without any command; targets stay as they were."""
+        deselected = []
+        self.loading = True  # No enabled event: nothing is sent; the hardware is OFF or being forced OFF.
+        try:
+            for channel in self.getChannels():
+                if _is_current_channel(channel) or not getattr(channel, "enabled", False):
+                    continue
+                getter = getattr(channel, "getParameterByName", None)
+                try:
+                    parameter = getter(getattr(channel, "ENABLED", "Enabled")) if callable(getter) else None
+                except KeyError:
+                    parameter = None
+                setter = getattr(parameter, "setValueWithoutEvents", None)
+                if callable(setter):
+                    setter(False)
+                else:
+                    channel.enabled = False
+                unit = "°C" if channel.is_heat_channel() else "V"
+                deselected.append(f"{channel.name} (target {float(channel.value):g} {unit} kept)")
+        finally:
+            self.loading = False
+        if deselected:
+            self.print(f"Outputs start OFF at {when}: " + ", ".join(deselected)
+                       + ". Select an output to energize it.")
+        update = getattr(self, "_update_operator_panel", None)
+        if callable(update) and hasattr(self, "esiHVCards"):
+            update()
+        return deselected
 
     def _ensure_operator_panel(self) -> None:
         """Replace the channel table with a compact operator control panel."""
@@ -1647,6 +1680,8 @@ class ESIDevice(Device):
         super().loadConfiguration(file=file, useDefaultFile=False, append=append)
         if useDefaultFile:
             self.ensureFixedChannels(persist=True)
+        # A saved output selection is history, not a command: the plugin starts switched OFF.
+        self._deselect_outputs("start")
 
     def closeCommunication(self) -> None:
         controller = getattr(self, "controller", None)
@@ -1930,8 +1965,12 @@ class ESIController(DeviceController):
         self.initialized = self.device is not None
         if self.initialized:
             self._refresh_available_configs()
-        with contextlib.suppress(AttributeError):
-            super().initComplete()
+        # Explorer's DeviceController.initComplete would call updateValues(apply=True) when the device
+        # is ON, i.e. re-apply every saved target and output selection: done here without it.
+        if self.initialized:
+            self.startAcquisition()
+            if self.controllerParent.isOn():
+                self.toggleOnFromThread(parallel=True)
         if self.initialized:
             self.print(
                 "ESI initialized with HV and heater outputs forced OFF. "
@@ -2418,9 +2457,8 @@ class ESIController(DeviceController):
                 self.global_enabled = bool(
                     self.device.set_global_active(True, timeout_s=timeout)
                 )
-                for channel in self.controllerParent.getChannels():
-                    if not _is_current_channel(channel) and (channel.is_heat_channel() or channel.enabled):
-                        self.applyValue(channel)
+                # No output is energized here: HV1, HV2 and HEAT stay OFF until the operator
+                # selects them (the 2026-10-07 incident restarted a saved HV1 at 1000 V).
                 if not cancel.is_set():
                     self.startAcquisition()
             else:

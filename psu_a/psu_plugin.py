@@ -3281,13 +3281,13 @@ class PSUDevice(Device):
 
             channel.scaling = _PSU_TABLE_SCALING
             scaling_changed = getattr(channel, "scalingChanged", None)
-            previous_loading = getattr(channel, "loading", False)
+            # Explorer 1.0.2: Channel.loading is read-only and reflects this device counter.
+            self.loading = True
             try:
-                channel.loading = True
                 if callable(scaling_changed):
                     scaling_changed()
             finally:
-                channel.loading = previous_loading
+                self.loading = False
             normalized_channels.append(str(getattr(channel, "name", "Unknown")))
 
         if not normalized_channels:
