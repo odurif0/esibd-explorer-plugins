@@ -16,6 +16,8 @@ import importlib.util
 from importlib.metadata import PackageNotFoundError, distribution
 import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace as NS
 from typing import cast
 
@@ -157,3 +159,106 @@ def test_all_host_ini_readers_have_an_explicit_encoding(host_source):
                 readers.append((path.name, node.lineno))
                 assert any(keyword.arg == "encoding" for keyword in node.keywords), (path, node.lineno)
     assert len(readers) == 7
+
+
+def _method(tree, name, class_name=None):
+    return next(node for cls in tree.body if isinstance(cls, ast.ClassDef) and class_name in (None, cls.name)
+                for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def test_dock_tab_order_is_saved_before_the_geometry_and_restored_after_plugins_finalize(host_source):
+    tree = ast.parse((host_source / "core.py").read_text(encoding="utf-8"))
+    save = [ast.unparse(statement) for statement in _method(tree, "saveUiState").body]
+    assert save.index("_save_dock_tab_order(self)") == save.index("qSet.setValue(GEOMETRY, self.saveGeometry())") - 1
+    load = [ast.unparse(statement) for statement in _method(tree, "loadPlugins", "PluginManager").body
+            if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Constant)]
+    assert load[load.index("self.afterFinalizeInit()") + 1] == "_restore_dock_tab_order(self.mainWindow)"
+
+
+def test_dock_tab_order_survives_a_restart_in_real_qt(host_source, tmp_path):
+    """The patched helpers, on real Qt docks: the user's order, new docks last, bad data ignored."""
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(host_source / "core.py")],
+                            env=env, text=True, capture_output=True, timeout=60)
+    if result.returncode == 77:
+        pytest.skip(result.stdout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _dock_order_probe(core):
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication, QDockWidget, QLabel, QMainWindow, QTabBar
+    except ImportError:
+        print("PyQt6 unavailable")
+        return 77
+    tree = ast.parse(Path(core).read_text(encoding="utf-8"))
+    stored = {}
+    namespace = {"qSet": NS(value=lambda key, default=None: stored.get(key, default),
+                            setValue=lambda key, value: stored.__setitem__(key, value)),
+                 "DOCK_TAB_ORDER": "dockTabOrder"}
+    for name in ("_dock_tab_bars", "_save_dock_tab_order", "_restore_dock_tab_order"):
+        node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        compile_function(copy.deepcopy(node), namespace)
+    app = QApplication([])
+
+    def explorer(groups):
+        """Docks tabified in Explorer's default (alphabetical) order, one tab group per list."""
+        window = QMainWindow()
+        window.setDockOptions(QMainWindow.DockOption.AllowTabbedDocks | QMainWindow.DockOption.AllowNestedDocks
+                              | QMainWindow.DockOption.GroupedDragging)
+        window.setCentralWidget(QLabel("central"))
+        for area, titles in zip((Qt.DockWidgetArea.BottomDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea), groups):
+            first = None
+            for title in sorted(titles):
+                dock = QDockWidget(title, window)
+                dock.setObjectName(title)
+                dock.setWidget(QLabel(title))
+                if first is None:
+                    window.addDockWidget(area, dock)
+                    first = dock
+                else:
+                    window.tabifyDockWidget(first, dock)
+        window.show()
+        app.processEvents()
+        return window
+
+    def tabs(window):
+        return sorted(([bar.tabText(i) for i in range(bar.count())] for bar in namespace["_dock_tab_bars"](window)), key=len)
+
+    devices, displays = ["AMPR_A", "DMMR", "ESI", "MScan", "PSU_A"], ["Plot", "Text"]
+    window = explorer([devices, displays])
+    assert tabs(window) == [displays, devices]
+    bar = next(bar for bar in namespace["_dock_tab_bars"](window) if bar.count() == len(devices))
+    bar.moveTab(4, 3)  # the user drags PSU_A left, one tab at a time
+    bar.moveTab(3, 2)
+    bar.moveTab(2, 1)
+    bar.moveTab(1, 0)
+    app.processEvents()
+    user = ["PSU_A", "AMPR_A", "DMMR", "ESI", "MScan"]
+    assert tabs(window)[1] == user
+    namespace["_save_dock_tab_order"](window)
+    window.close()
+
+    restarted = explorer([devices, displays])
+    namespace["_restore_dock_tab_order"](restarted)
+    app.processEvents()
+    assert tabs(restarted) == [displays, user], tabs(restarted)
+    restarted.saveState()  # the dock area itself follows the tab bar, not only the labels
+    restarted.restoreState(restarted.saveState())
+    app.processEvents()
+    assert tabs(restarted) == [displays, user], tabs(restarted)
+
+    added = explorer([[*devices, "AMX_A"], displays])  # a plugin enabled since: last, not alphabetical
+    namespace["_restore_dock_tab_order"](added)
+    assert tabs(added)[1] == [*user, "AMX_A"], tabs(added)
+
+    stored["dockTabOrder"] = "{not json"
+    damaged = explorer([devices, displays])
+    namespace["_restore_dock_tab_order"](damaged)
+    assert tabs(damaged) == [displays, devices]
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_dock_order_probe(sys.argv[1]))

@@ -68,7 +68,10 @@ channels, in small verified steps, and can run on a built-in simulated beamline.
 ## Host fixes and hardware validation
 
 `install_explorer_fixes.py` installs the targeted Explorer fixes for small-current
-cursor labels, incomplete channel names and UTF-8 configuration reading. Run it
+cursor labels, incomplete channel names, UTF-8 configuration reading and the order
+of tabbed plugin docks (Explorer forgets a manual order at each restart; with the
+fix it is saved at closing and reapplied once the plugins are loaded, and plugins
+added since go last). Run it
 with Explorer's Python environment after closing Explorer and its notebooks;
 `--check` is read-only, and the original sources are backed up. Run it again after
 every Explorer update: upgrading Explorer replaces the patched files (the fixes

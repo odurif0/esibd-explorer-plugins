@@ -1,4 +1,4 @@
-"""Install the three targeted Explorer host fixes. No instrument is imported or opened.
+"""Install the targeted Explorer host fixes. No instrument is imported or opened.
 
 Run with Explorer's Python environment, with Explorer closed. --check is read-only.
 Existing sources are backed up; incompatible source layouts are refused before writing.
@@ -20,12 +20,56 @@ PLOT_HELPER = ("def _format_linear_plot_value(value: float) -> str:\n"
                "    return f'{value:.2e}' if 0 < abs(value) < .01 else f'{value:.2f}'\n\n\n")
 
 
+DOCK_TAB_ORDER_HELPER = (
+    "DOCK_TAB_ORDER = 'dockTabOrder'\n\n\n"
+    "def _dock_tab_bars(mainWindow):\n"
+    "    \"\"\"Tab bars of tabbed docks (ESIBD Explorer Plugins host fix).\"\"\"\n"
+    "    from PyQt6.QtCore import Qt  # noqa: PLC0415\n"
+    "    from PyQt6.QtWidgets import QTabBar  # noqa: PLC0415\n"
+    "    return [bar for bar in mainWindow.findChildren(QTabBar, options=Qt.FindChildOption.FindDirectChildrenOnly)\n"
+    "            if not bar.isHidden() and bar.count() > 1]\n\n\n"
+    "def _save_dock_tab_order(mainWindow):\n"
+    "    \"\"\"Remember the order of tabbed docks as arranged by the user; never blocks closing.\"\"\"\n"
+    "    import json  # noqa: PLC0415\n"
+    "    try:\n"
+    "        groups = [[bar.tabText(i) for i in range(bar.count())] for bar in _dock_tab_bars(mainWindow)]\n"
+    "        if groups:\n"
+    "            qSet.setValue(DOCK_TAB_ORDER, json.dumps(groups))\n"
+    "    except Exception:  # noqa: BLE001\n"
+    "        pass\n\n\n"
+    "def _restore_dock_tab_order(mainWindow):\n"
+    "    \"\"\"Reapply the remembered order with adjacent moves, like a mouse drag; new docks go last.\"\"\"\n"
+    "    import json  # noqa: PLC0415\n"
+    "    try:\n"
+    "        groups = json.loads(qSet.value(DOCK_TAB_ORDER, '[]'))\n"
+    "        for bar in _dock_tab_bars(mainWindow):\n"
+    "            titles = [bar.tabText(i) for i in range(bar.count())]\n"
+    "            saved = max(groups, key=lambda group: len(set(group) & set(titles)), default=[])\n"
+    "            order = [title for title in saved if title in titles]\n"
+    "            order += [title for title in titles if title not in order]\n"
+    "            for target, title in enumerate(order):\n"
+    "                index = [bar.tabText(i) for i in range(bar.count())].index(title)\n"
+    "                while index > target:  # one position at a time: a long move misorders Qt docks\n"
+    "                    bar.moveTab(index, index - 1)\n"
+    "                    index -= 1\n"
+    "    except Exception:  # noqa: BLE001 - the default order remains usable\n"
+    "        pass\n\n")
+
+
 def replace_once(text, old, new):
     if text.count(old) == 1:
         return text.replace(old, new, 1)
     if not text.count(old) and text.count(new) == 1:
         return text
     raise ValueError(f"Unsupported Explorer source around {old!r}; no files were written")
+
+
+def insert_once(text, anchor, addition, *, before=False):
+    """Insert next to a unique anchor; already installed when the combined text is present."""
+    combined = addition + anchor if before else anchor + addition
+    if text.count(combined) == 1:
+        return text
+    return replace_once(text, anchor, combined)
 
 
 def patch_core(text):
@@ -41,6 +85,12 @@ def patch_core(text):
                         "self.confParser.read(self.pluginFile, encoding=UTF8)")
     text = replace_once(text, "\n            confParser.read(self.pluginFile)",
                         "\n            confParser.read(self.pluginFile, encoding=UTF8)")
+    # The order of tabbed plugin docks survives a restart (Explorer saves only the geometry).
+    text = insert_once(text, "\nclass PluginManager:", "\n" + DOCK_TAB_ORDER_HELPER, before=True)
+    text = insert_once(text, "        qSet.setValue(GEOMETRY, self.saveGeometry())\n",
+                       "        _save_dock_tab_order(self)\n", before=True)
+    text = insert_once(text, "\n        self.afterFinalizeInit()\n",
+                       "        _restore_dock_tab_order(self.mainWindow)\n")
     ast.parse(text)
     return text
 
