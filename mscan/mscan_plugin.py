@@ -444,13 +444,14 @@ class MScan(Scan):
         settings[self.OFFSET] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel', event=self._offset_changed,
             toolTip='AMPR channel (module, channel) applying the quadrupole offset. During the scan it is set to '
-                    'Offset coefficient × A at every amplitude, then verified: the AMPR hardware setpoint must confirm '
+                    'U/V × A at every amplitude (U: DC offset, V: RF amplitude), then verified: the AMPR hardware setpoint must confirm '
                     'the scan target and its Monitor must be within Voltage tolerance before acquisition. Normal '
                     'completion restores its initial value; Stop/error holds the last value. None: not driven.')
         settings[self.OFFSET_FACTOR] = parameterDict(value=.2, minimum=-100., maximum=100.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_factor', event=self._offset_changed,
             instantUpdate=False, displayDecimals=4,
-            toolTip='Offset = coefficient × A (V per V of amplitude A), applied to the selected AMPR channel. '
+            toolTip='U/V: ratio of the DC offset U to the RF amplitude V (here the scanned amplitude A). '
+                    'The selected AMPR channel is set to U = U/V × A. '
                     'The commanded value is rounded to the AMPR channel display precision.')
         settings[self.OFFSET_READBACK] = parameterDict(value='Not driven', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
@@ -548,7 +549,7 @@ class MScan(Scan):
         spin.setValue(spin.value())
         labels = {self.INTEGRATION: 'Measurement per point (s)', self.RATE: 'Sweep rate (V/s)',
                   self.TIMEOUT: 'Settle timeout (s)', self.TOLERANCE: 'Voltage tolerance (V)',
-                  self.OFFSET: 'Quadrupole offset (AMPR)', self.OFFSET_FACTOR: 'Offset coefficient (V/V)'}
+                  self.OFFSET: 'Quadrupole offset (AMPR)', self.OFFSET_FACTOR: 'Offset coefficient (U/V)'}
         for key, label in labels.items():
             self.settingsMgr.settings[key].setText(0, label)  # labels, not INI/HDF5 keys
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -676,7 +677,7 @@ class MScan(Scan):
         except (AttributeError, TypeError, ValueError):
             factor = math.nan
         if not math.isfinite(factor):
-            raise ScanError('Offset coefficient must be finite.')
+            raise ScanError('Offset coefficient U/V must be finite.')
         if not all(hasattr(ctrl, field) for field in ('_latest_setpoints', '_setpoint_lock', '_setpoint_cancel')):
             raise ScanError(f'{c.name}: update MScan and AMPR plugins together; setpoint confirmation required.')
         if not c.enabled:
@@ -692,7 +693,7 @@ class MScan(Scan):
         minimum, maximum = self._offset_bounds(c, ctrl)
         first, last = sorted((factor * low, factor * high))
         if first < minimum or last > maximum:
-            raise ScanError(f'{c.name}: offset {first:g}–{last:g} V (coefficient {factor:g} × A) exceeds '
+            raise ScanError(f'{c.name}: offset U = {first:g}–{last:g} V (U/V {factor:g} × A) exceeds '
                             f'allowed {minimum:g}–{maximum:g} V.')
         initial = self._number(c, 'value', 'offset setpoint', nonnegative=False)
         if not minimum <= initial <= maximum:
@@ -777,7 +778,7 @@ class MScan(Scan):
         factor = float(self.offset_factor)
         lines = [f'{c.name}: Monitor {float(c.monitor):+.3f} V, set {float(c.value):+g} V']
         if all(math.isfinite(float(v)) for v in (self.start, self.stop)):
-            lines.append(f'Scan: {factor:g} × A = {factor * float(self.start):+g} … {factor * float(self.stop):+g} V')
+            lines.append(f'Scan: U = {factor:g} × A = {factor * float(self.start):+g} … {factor * float(self.stop):+g} V')
         return '\n'.join(lines)
 
     def estimateScanTime(self):
@@ -1484,7 +1485,7 @@ class MScan(Scan):
                 offset=None if offset is None else dict(
                     channel=offset['name'], ampr=offset['device'].name, module=offset['key'][0], ampr_channel=offset['key'][1],
                     coefficient=offset['factor'], initial_v=offset['initial'], final_v=offset['initial'],
-                    definition='Offset = coefficient × A, commanded on the AMPR channel at each amplitude '
+                    definition='DC offset U = coefficient (U/V) × RF amplitude A, commanded on the AMPR channel at each amplitude '
                                '(rounded to its display precision); verified by its setpoint readback and Monitor.'),
                 calibration='None; amplitude in V, not m/z', background_subtracted=False))
 
@@ -1961,7 +1962,7 @@ class MScan(Scan):
                 for key in ('offset_v', 'offset_target'):
                     group.create_dataset(key, data=self._validation[key])
                 group['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of the quadrupole offset channel)'
-                group['offset_target'].attrs['Unit'] = 'V (offset commanded on the AMPR channel, coefficient × A)'
+                group['offset_target'].attrs['Unit'] = 'V (DC offset U commanded on the AMPR channel, U/V × A)'
             for key in ('window_start', 'window_end'):
                 group[key].attrs['Unit'] = 's since Unix epoch'
             if 'continuous' in self._validation:
