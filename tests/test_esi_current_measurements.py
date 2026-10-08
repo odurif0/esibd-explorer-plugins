@@ -41,9 +41,11 @@ def snapshot():
         "main_state": {"name": "ST_ON"}, "enabled": True,
         "modules": {
             1: {"target_v": 100., "measured_v": 98., "voltage_valid": True,
-                "measured_a": 2.5e-9, "current_valid": True},
+                "measured_a": 2.5e-9, "current_valid": True,
+                "measurement": {"voltage_polarity": "positive", "voltage_fresh": True}},
             2: {"target_v": 200., "measured_v": 198., "voltage_valid": True,
-                "measured_a": -4.5e-9, "current_valid": True},
+                "measured_a": -4.5e-9, "current_valid": True,
+                "measurement": {"voltage_polarity": "positive", "voltage_fresh": True}},
         },
         "heat": {"monitor_temperature_c": 25., "monitor_current_a": .1,
                  "hardware_limits": {"max_temperature_c": 175.}, "valid": True,

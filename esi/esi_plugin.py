@@ -34,6 +34,13 @@ _RUNTIME_LOAD_LOCK = RLock()
 _GUI_DISPATCH_LOCK = RLock()
 _ESI_MAX_VOLTAGE = 3000.0
 _ESI_HV_MAX_VOLTAGE_STEP = 10.008
+# Voltage ADC readback of the electrospray connector. After a connector selection, conversions
+# are discarded until both limits pass (provisional, until an independent meter qualifies the
+# settling). Without a new conversion for the stale limit, nothing is shown or recorded.
+_ESI_ADC_CONNECTORS = ("POS", "NEG")
+_ESI_ADC_SETTLE_S = 1.0
+_ESI_ADC_SETTLE_CONVERSIONS = 2
+_ESI_ADC_STALE_MIN_S = 3.0
 _ESI_MAX_TEMPERATURE = 175.0
 _ESI_HEAT_MODULE = 0
 _ESI_HV_CHANNELS = ((1, 1), (2, 2))
@@ -70,6 +77,8 @@ _ESI_BTN_HV_ACTIVE = "QPushButton { background-color: #3182ce; color: #f8fafc; f
 _ESI_BTN_HV_OFF = "QPushButton { background-color: #374151; color: #bfdbfe; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
 _ESI_BTN_OFF_ACTIVE = "QPushButton { background-color: #4b5563; color: #e2e8f0; font-weight: 600; border-radius: 4px; }"
 _ESI_BTN_OFF_INACTIVE = "QPushButton { background-color: #374151; color: #94a3b8; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
+# ADC connector choice: a measurement, never styled like an energized output.
+_ESI_BTN_ADC_SELECTED = "QPushButton { background-color: #94a3b8; color: #0f172a; font-weight: 700; border-radius: 4px; }"
 _ESI_BTN_HEAT_ACTIVE = "QPushButton { background-color: #d97706; color: #1a1a2e; font-weight: 700; border-radius: 4px; }"
 _ESI_BTN_HEAT_OFF = "QPushButton { background-color: #374151; color: #fbbf24; font-weight: 600; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }"
 
@@ -231,6 +240,31 @@ def _get_esi_driver_class() -> type[Any]:
 
 
 _ESI_CURRENT_FUNCTION = "HV current"
+
+
+def _adc_connector(device: Any, address: int) -> str:
+    """The connector chosen for this module's voltage ADC (persistent device setting)."""
+    return "NEG" if str(getattr(device, f"hv{address}_adc_connector", "POS")) == "NEG" else "POS"
+
+
+def _adc_readback_text(readback: dict | None) -> tuple[str, str]:
+    """Panel text and style of the electrospray connector's ADC readback."""
+    if not readback:
+        return "n/a", _ESI_PANEL_NEUTRAL
+    state, requested = readback.get("state"), readback.get("requested")
+    value = readback.get("value", np.nan)
+    if state == "ok":
+        return f"{requested} {value:.1f} V", _ESI_PANEL_VALUE
+    if state == "mismatch":
+        selected = readback.get("selected") or "unknown"
+        return f"ADC on {selected}, {requested} requested", _ESI_PANEL_ERR
+    if state == "invalid":
+        return f"{requested} invalid", _ESI_PANEL_ERR
+    if state == "stale" and np.isfinite(value):
+        return f"{requested} stale ({value:.1f} V)", _ESI_PANEL_NEUTRAL
+    if state == "settling":
+        return f"{requested} settling…", _ESI_PANEL_NEUTRAL
+    return f"{requested} waiting for a reading", _ESI_PANEL_NEUTRAL
 
 
 def _is_current_channel(channel: Any) -> bool:
@@ -597,6 +631,8 @@ class ESIDevice(Device):
     CONNECT_TIMEOUT = "Connect timeout (s)"
     POLL_TIMEOUT = "Poll timeout (s)"
     RAMP_RATE = "Ramp rate (V/s)"
+    HV1_ADC = "HV1 ADC connector"
+    HV2_ADC = "HV2 ADC connector"
     HEAT_VOLTAGE_LIMIT = "Heat voltage limit (V)"
     HEAT_CURRENT_LIMIT = "Heat current limit (A)"
     HEAT_POWER_LIMIT = "Heat power limit (W)"
@@ -1009,7 +1045,7 @@ class ESIDevice(Device):
             sel_row = QHBoxLayout()
             sel_row.setContentsMargins(0, 0, 0, 0)
             sel_row.setSpacing(6)
-            btn_on = QPushButton("+/- ON")
+            btn_on = QPushButton("ON")
             btn_off = QPushButton("OFF")
             # A mouse click must not commit a pending voltage before OFF.
             btn_on.setFocusPolicy(Qt.FocusPolicy.TabFocus)
@@ -1041,15 +1077,53 @@ class ESIDevice(Device):
             target_value.setValue(0.0)
             target_value.setStyleSheet(_ESI_PANEL_VALUE)
             target_value.setFixedHeight(28)
+            target_value.setToolTip(
+                "Requested target magnitude for both connectors of this module. "
+                "↑/↓: ±10 V, Ctrl+↑/↓ or Page Up/Down: ±100 V. A typed value is applied "
+                "with Enter, Tab or a click outside the field."
+            )
             target_value.valueChanged.connect(
                 lambda val, addr=address: self._panel_target_changed(addr, val)
             )
+            adc_label = QLabel("ADC connector")
+            adc_label.setStyleSheet(_ESI_PANEL_NAME)
+            adc_label.setToolTip(
+                "Connector read by the voltage ADC: the electrospray's. Measurement only: "
+                "switching never changes an output, even during an experiment."
+            )
+            adc_row = QHBoxLayout()
+            adc_row.setContentsMargins(0, 0, 0, 0)
+            adc_row.setSpacing(6)
+            adc_group = QButtonGroup(card)
+            adc_group.setExclusive(True)
+            adc_buttons = []
+            for gid, connector in enumerate(_ESI_ADC_CONNECTORS):
+                adc_button = QPushButton(connector)
+                adc_button.setCheckable(True)
+                adc_button.setFixedHeight(24)
+                adc_button.setMinimumWidth(56)
+                adc_button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+                adc_button.setToolTip(adc_label.toolTip())
+                adc_group.addButton(adc_button, gid)
+                adc_row.addWidget(adc_button)
+                adc_buttons.append(adc_button)
+            adc_row.addStretch(1)
             measured_label = QLabel("ADC readback")
             measured_label.setStyleSheet(_ESI_PANEL_NAME)
+            measured_label.setToolTip(
+                "Voltage measured by the module's ADC on the selected connector: a readback, "
+                "only from a new conversion. Settling after a switch, stale or invalid "
+                "readings are shown as such and recorded as NaN."
+            )
             measured_value = QLabel("n/a")
             measured_value.setStyleSheet(_ESI_PANEL_VALUE)
-            hardware_target_label = QLabel("HW target")
+            hardware_target_label = QLabel("Applied target")
             hardware_target_label.setStyleSheet(_ESI_PANEL_NAME)
+            hardware_target_label.setToolTip(
+                "Target applied in the HV module, as the controller reports it: not a "
+                "measurement. 0 V while the output is OFF; follows the software ramp steps. "
+                "Green when it matches the requested Set (or 0 V when OFF)."
+            )
             hardware_target_value = QLabel("n/a")
             hardware_target_value.setStyleSheet(_ESI_PANEL_VALUE)
             module_gate_label = QLabel("Module")
@@ -1068,10 +1142,24 @@ class ESIDevice(Device):
             control_label.setStyleSheet(_ESI_PANEL_NAME)
             control_value = QLabel("n/a")
             control_value.setStyleSheet(_ESI_PANEL_VALUE)
-            pwm_label = QLabel("PWM set / measured")
-            pwm_label.setStyleSheet(_ESI_PANEL_NAME)
-            pwm_value = QLabel("n/a")
-            pwm_value.setStyleSheet(_ESI_PANEL_VALUE)
+            # The HV is DC; PWM drives the module's internal high-voltage converter.
+            pwm_set_label = QLabel("PWM set")
+            pwm_set_label.setStyleSheet(_ESI_PANEL_NAME)
+            pwm_set_label.setToolTip(
+                "Voltage setpoint of the module's internal regulation (GetHVsupplyParamsPWM). "
+                "The output is DC; PWM drives the internal HV converter. At a nonzero target, "
+                "0 V here means regulation has not started."
+            )
+            pwm_set_value = QLabel("n/a")
+            pwm_set_value.setStyleSheet(_ESI_PANEL_VALUE)
+            pwm_measured_label = QLabel("PWM measured")
+            pwm_measured_label.setStyleSheet(_ESI_PANEL_NAME)
+            pwm_measured_label.setToolTip(
+                "Voltage measured by the module's internal regulation (GetHVsupplyParamsPWM), "
+                "separate from the ADC readback."
+            )
+            pwm_measured_value = QLabel("n/a")
+            pwm_measured_value.setStyleSheet(_ESI_PANEL_VALUE)
             led_label = QLabel("Module LED")
             led_label.setStyleSheet(_ESI_PANEL_NAME)
             led_value = QLabel("n/a")
@@ -1091,14 +1179,18 @@ class ESIDevice(Device):
             grid.addWidget(gate_value, 3, 1)
             grid.addWidget(control_label, 4, 0)
             grid.addWidget(control_value, 4, 1)
-            grid.addWidget(pwm_label, 5, 0)
-            grid.addWidget(pwm_value, 5, 1)
-            grid.addWidget(led_label, 6, 0)
-            grid.addWidget(led_value, 6, 1)
-            grid.addWidget(measured_label, 7, 0)
-            grid.addWidget(measured_value, 7, 1)
-            grid.addWidget(current_label, 8, 0)
-            grid.addWidget(current_value, 8, 1)
+            grid.addWidget(pwm_set_label, 5, 0)
+            grid.addWidget(pwm_set_value, 5, 1)
+            grid.addWidget(pwm_measured_label, 6, 0)
+            grid.addWidget(pwm_measured_value, 6, 1)
+            grid.addWidget(led_label, 7, 0)
+            grid.addWidget(led_value, 7, 1)
+            grid.addWidget(adc_label, 8, 0)
+            grid.addLayout(adc_row, 8, 1)
+            grid.addWidget(measured_label, 9, 0)
+            grid.addWidget(measured_value, 9, 1)
+            grid.addWidget(current_label, 10, 0)
+            grid.addWidget(current_value, 10, 1)
             cl.addLayout(grid)
 
             cards_layout.addWidget(card)
@@ -1112,13 +1204,19 @@ class ESIDevice(Device):
                 "module_gate": module_gate_value,
                 "gate": gate_value,
                 "control": control_value,
-                "pwm": pwm_value,
+                "pwm_set": pwm_set_value,
+                "pwm_measured": pwm_measured_value,
                 "led": led_value,
                 "measured": measured_value,
                 "current": current_value,
+                "adc_group": adc_group,
+                "adc_buttons": adc_buttons,
             }
             sel_group.idClicked.connect(
                 lambda gid, addr=address: self._panel_output_selected(addr, gid)
+            )
+            adc_group.idClicked.connect(
+                lambda gid, addr=address: self._panel_adc_selected(addr, gid)
             )
         layout.addWidget(cards_row)
 
@@ -1250,6 +1348,18 @@ class ESIDevice(Device):
         if not getattr(self, "loading", False):
             self.heat_power_limit_w = float(value)  # Existing persistent setting; its event applies it.
 
+    def _adc_connector_changed(self, address: int) -> None:
+        controller = getattr(self, "controller", None)
+        if not getattr(self, "loading", False) and controller is not None and controller.initialized:
+            controller.selectVoltageAdcFromThread(address)
+        self._update_operator_panel()
+
+    def _panel_adc_selected(self, address: int, gid: int) -> None:
+        if not getattr(self, "loading", False):
+            # Persistent setting; its event switches the ADC.
+            setattr(self, f"hv{address}_adc_connector", _ESI_ADC_CONNECTORS[gid])
+        self._update_operator_panel()
+
     def _heat_power_limit_changed(self) -> None:
         controller = getattr(self, "controller", None)
         if not getattr(self, "loading", False) and controller is not None and controller.initialized:
@@ -1328,7 +1438,7 @@ class ESIDevice(Device):
         module_led_rgb = getattr(controller, "module_led_rgb", {}) or {}
         pwm_voltage_set = getattr(controller, "pwm_voltage_set", {}) or {}
         pwm_voltage_measured = getattr(controller, "pwm_voltage_measured", {}) or {}
-        measurement_polarity = getattr(controller, "measurement_polarity", {}) or {}
+        adc_readback = getattr(controller, "adc_readback", {}) or {}
         global_enabled = getattr(controller, "global_enabled", None)
         state = getattr(controller, "main_state", "Disconnected")
         stopping = state == _ESI_STOPPING
@@ -1354,6 +1464,16 @@ class ESIDevice(Device):
                     target_value = abs(float(channel.value))
                     break
 
+            requested_adc = _ESI_ADC_CONNECTORS.index(_adc_connector(self, address))
+            for gid, adc_button in enumerate(widgets["adc_buttons"]):
+                adc_button.blockSignals(True)
+                adc_button.setChecked(gid == requested_adc)
+                adc_button.blockSignals(False)
+                # The OFF check owns the ADC selection; while disconnected, only the setting changes.
+                adc_button.setEnabled(not (stopping or uncertain))
+                adc_button.setStyleSheet(
+                    _ESI_BTN_ADC_SELECTED if gid == requested_adc else _ESI_BTN_OFF_INACTIVE
+                )
             if inactive:
                 card.setStyleSheet(inactive_style)
                 for btn in (btn_on, btn_off):
@@ -1366,7 +1486,8 @@ class ESIDevice(Device):
                     "module_gate",
                     "gate",
                     "control",
-                    "pwm",
+                    "pwm_set",
+                    "pwm_measured",
                     "led",
                     "measured",
                     "current",
@@ -1391,7 +1512,7 @@ class ESIDevice(Device):
                 continue
 
             for key, widget in widgets.items():
-                if key not in ("card", "sel_group", "btn_on", "btn_off"):
+                if key not in ("card", "sel_group", "btn_on", "btn_off", "adc_group", "adc_buttons"):
                     widget.setEnabled(True)
                     widget.setStyleSheet(_ESI_PANEL_VALUE)
             for btn in (btn_on, btn_off):
@@ -1478,18 +1599,9 @@ class ESIDevice(Device):
             )
             pwm_set = pwm_voltage_set.get(address, np.nan)
             pwm_measured = pwm_voltage_measured.get(address, np.nan)
-            polarity = measurement_polarity.get(address)
-            polarity_code = (
-                "NEG"
-                if polarity == "negative"
-                else "POS"
-                if polarity == "positive"
-                else "?"
-            )
-            widgets["pwm"].setText(
-                f"{pwm_set:.1f} / {pwm_measured:.1f} V ({polarity_code} ADC)"
-                if np.isfinite(pwm_set) and np.isfinite(pwm_measured)
-                else "n/a"
+            widgets["pwm_set"].setText(f"{pwm_set:.1f} V" if np.isfinite(pwm_set) else "n/a")
+            widgets["pwm_measured"].setText(
+                f"{pwm_measured:.1f} V" if np.isfinite(pwm_measured) else "n/a"
             )
             led_rgb = module_led_rgb.get(address)
             led_colors = {
@@ -1505,13 +1617,10 @@ class ESIDevice(Device):
             led_text = led_colors.get(tuple(led_rgb), "n/a") if led_rgb is not None else "n/a"
             widgets["led"].setText(led_text)
             widgets["led"].setStyleSheet(_ESI_PANEL_VALUE)
-            measured = values.get(address, np.nan)
             current = currents.get(address, np.nan)
-            widgets["measured"].setText(
-                f"{polarity_code} {measured:.1f} V"
-                if np.isfinite(measured)
-                else "n/a"
-            )
+            adc_text, adc_style = _adc_readback_text(adc_readback.get(address))
+            widgets["measured"].setText(adc_text)
+            widgets["measured"].setStyleSheet(adc_style)
             widgets["current"].setText(
                 f"{current * 1e9:.2f} nA" if np.isfinite(current) else "n/a"
             )
@@ -1646,7 +1755,7 @@ class ESIDevice(Device):
             attr="poll_timeout_s",
         )
         settings[f"{self.name}/{self.RAMP_RATE}"] = parameterDict(
-            value=500.0,
+            value=100.0,
             minimum=0.0,
             maximum=_ESI_MAX_VOLTAGE,
             toolTip=(
@@ -1657,6 +1766,19 @@ class ESIDevice(Device):
             parameterType=PARAMETERTYPE.FLOAT,
             attr="ramp_rate_v_s",
         )
+        for address, label in ((1, self.HV1_ADC), (2, self.HV2_ADC)):
+            settings[f"{self.name}/{label}"] = parameterDict(
+                value="POS",
+                items=",".join(_ESI_ADC_CONNECTORS),
+                fixedItems=True,
+                toolTip=(
+                    f"Connector of HV{address} read by its voltage ADC: the electrospray's. "
+                    "Measurement only: never switches or changes an output."
+                ),
+                parameterType=PARAMETERTYPE.COMBO,
+                attr=f"hv{address}_adc_connector",
+                event=lambda address=address: self._adc_connector_changed(address),
+            )
         for label, attr, tooltip in (
             (
                 self.HEAT_VOLTAGE_LIMIT,
@@ -1983,6 +2105,14 @@ class ESIController(DeviceController):
         self.pwm_voltage_set: dict[int, float] = {}
         self.pwm_voltage_measured: dict[int, float] = {}
         self.measurement_polarity: dict[int, str | None] = {}
+        # Electrospray connector readback: last accepted conversion per module, and the
+        # settling state after this controller switched the ADC (none at start or on resume).
+        self.adc_readback: dict[int, dict[str, Any]] = {}
+        self._adc_lock = RLock()
+        self._adc_command_lock = RLock()
+        self._adc_selected_at = {address: float("-inf") for address in _ESI_HV_MODULES}
+        self._adc_settle_count = dict.fromkeys(_ESI_HV_MODULES, _ESI_ADC_SETTLE_CONVERSIONS)
+        self._adc_last = {address: (np.nan, float("-inf")) for address in _ESI_HV_MODULES}
         self.global_enabled: bool | None = None
         self.initialized = False
         self.main_state = "Disconnected"
@@ -2095,6 +2225,8 @@ class ESIController(DeviceController):
                 _ESI_HV_MAX_VOLTAGE_STEP,
                 timeout_s=float(self.controllerParent.connect_timeout_s),
             )
+            for address in _ESI_HV_MODULES:
+                self._select_voltage_adc(address)
             snapshot = self.device.collect_diagnostics(
                 timeout_s=float(self.controllerParent.poll_timeout_s)
             )
@@ -2272,6 +2404,9 @@ class ESIController(DeviceController):
             device.load_config(config_index, timeout_s=timeout_s)
             self.loaded_config_text = f"Config {config_index}"
             self.print(f"Loaded ESI config {config_index}.")
+            with self._adc_command_lock:
+                for address in _ESI_HV_MODULES:
+                    self._select_voltage_adc(address)
         except Exception as exc:
             self.errorCount += 1
             self.print(
@@ -2308,6 +2443,9 @@ class ESIController(DeviceController):
             self.measurement_polarity = {
                 address: None for address in _ESI_HV_MODULES
             }
+            self.adc_readback = {}
+            with self._adc_lock:
+                self._adc_last = {address: (np.nan, float("-inf")) for address in _ESI_HV_MODULES}
             self.global_enabled = None
             self.heat_activation = {}
             self.heat_readback_valid = False
@@ -2321,6 +2459,70 @@ class ESIController(DeviceController):
             refresh = getattr(self.controllerParent, '_update_operator_panel', None)
             if callable(refresh):
                 _invoke_gui_callback(refresh)
+
+    def _adc_stale_s(self) -> float:
+        interval_s = float(getattr(self.controllerParent, "interval", 1000)) / 1000.
+        return max(_ESI_ADC_STALE_MIN_S, 3. * interval_s)
+
+    def _accept_adc_reading(self, address: int, module: dict, now: float) -> float:
+        """Electrospray connector voltage: only a verified selection and a new, settled conversion."""
+        requested = _adc_connector(self.controllerParent, address)
+        measurement = module.get("measurement", {}) or {}
+        selected = {"positive": "POS", "negative": "NEG"}.get(measurement.get("voltage_polarity"))
+        readback = {"requested": requested, "selected": selected, "value": np.nan}
+        self.adc_readback[address] = readback
+        with self._adc_lock:
+            if selected != requested or not module.get("voltage_valid"):
+                readback["state"] = "mismatch" if selected != requested else "invalid"
+                self._adc_last[address] = (np.nan, float("-inf"))
+                return np.nan
+            if measurement.get("voltage_fresh", True):
+                if (self._adc_settle_count[address] < _ESI_ADC_SETTLE_CONVERSIONS
+                        or now - self._adc_selected_at[address] < _ESI_ADC_SETTLE_S):
+                    self._adc_settle_count[address] += 1
+                    readback["state"] = "settling"
+                    return np.nan
+                self._adc_last[address] = (float(module["measured_v"]), now)
+            value, accepted_at = self._adc_last[address]
+        if not np.isfinite(value):
+            readback["state"] = "waiting"
+            return np.nan
+        readback["value"] = value
+        if now - accepted_at > self._adc_stale_s():
+            readback["state"] = "stale"
+            return np.nan
+        readback["state"] = "ok"
+        return value
+
+    def _select_voltage_adc(self, address: int) -> None:
+        """Point the voltage ADC at the electrospray connector. Measurement only."""
+        negative = _adc_connector(self.controllerParent, address) == "NEG"
+        with self._adc_lock:
+            self._adc_settle_count[address] = 0
+            self._adc_last[address] = (np.nan, float("-inf"))
+            self._adc_selected_at[address] = time.monotonic()
+        try:
+            self.device.select_hv_voltage_adc(
+                address, negative=negative, timeout_s=float(self.controllerParent.poll_timeout_s))
+        except Exception as exc:  # noqa: BLE001 - the readback shows the mismatch; outputs untouched
+            self.errorCount += 1
+            self.print(f"HV{address} voltage ADC not switched to {'NEG' if negative else 'POS'}: {exc}",
+                       flag=PRINT.ERROR)
+        finally:
+            with self._adc_lock:
+                self._adc_selected_at[address] = time.monotonic()  # Settling starts after the switch.
+
+    def selectVoltageAdcFromThread(self, address: int) -> None:
+        cancel = self._output_cancel  # Capture before worker dispatch, never revive queued work.
+
+        def select():
+            with self._adc_command_lock:
+                if (cancel.is_set() or self.device is None or not self.initialized
+                        or self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed")):
+                    return  # The OFF check owns the ADC selection and restores it.
+                self._select_voltage_adc(address)
+
+        Thread(target=select, daemon=True).start()
 
     def readNumbers(self) -> None:
         if self.main_state == _ESI_STOPPING:
@@ -2874,6 +3076,8 @@ class ESIController(DeviceController):
         self.pwm_voltage_set = {}
         self.pwm_voltage_measured = {}
         self.measurement_polarity = {}
+        self.adc_readback = {}
+        now = time.monotonic() if observed_at is None else observed_at
         self.global_enabled = bool(snapshot.get("enabled", False))
         for address, module in snapshot["modules"].items():
             address = int(address)
@@ -2898,9 +3102,7 @@ class ESIController(DeviceController):
             self.measurement_polarity[address] = (
                 polarity if polarity in ("positive", "negative") else None
             )
-            self.values[address] = (
-                float(module["measured_v"]) if module["voltage_valid"] else np.nan
-            )
+            self.values[address] = self._accept_adc_reading(address, module, now)
             self.currents[address] = (
                 float(module["measured_a"]) if module["current_valid"] else np.nan
             )

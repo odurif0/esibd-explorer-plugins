@@ -101,6 +101,13 @@ target kept, and an independent meter must read no HV until HV1 is selected. Typ
 new target and click an output selector before pressing Enter: the target must be
 taken, without any error in the Explorer log.
 
+**ESI electrospray readback (2026-10-08):** set each card's `ADC connector` to the
+electrospray's connector. With an independent HV probe on that connector, compare
+`ADC readback` at 0, 500, 1000 and 2000 V (and with the spray running): note the
+deviations, then switch POS/NEG on the card at a fixed target and check that the
+probe does not move (measurement only) and how long `settling…` lasts before the
+readings agree again. Unplug nothing and do not change the target during the switch.
+
 Supervise the run, keep the PC awake and verify the supplied load/materials and
 physical safeguards. Stop, invalid temperature, no valid pressure, dialogue errors
 or uncertain output state stop the protocol. TPG366 is not a vacuum interlock.

@@ -548,7 +548,7 @@ def test_diagnostics_use_complete_state_snapshot(driver_modules, monkeypatch):
             0x0F,
             0xF00C,
             0x0001,
-            [0x04, 0x10, 0x50, 0x00, 0x04],
+            [0x04, 0x10, 0x40, 0x00, 0x04],  # Module 2: current ready, no new voltage.
             [0x0100, 0x4100, 0xC100, 0x0000, 0x8000],
         ),
     )
@@ -669,15 +669,17 @@ def test_diagnostics_use_complete_state_snapshot(driver_modules, monkeypatch):
         "voltage_polarity": "positive",
         "negative_voltage": False,
         "high_current_range": True,
+        "voltage_fresh": True,
     }
     assert snapshot["modules"][2]["measurement"] == {
         "voltage_polarity": "negative",
         "negative_voltage": True,
         "high_current_range": False,
+        "voltage_fresh": False,
     }
     assert snapshot["modules"][1]["pwm"]["period_s"] == 1.0
     assert "period_us" not in snapshot["modules"][1]["pwm"]
-    assert snapshot["modules"][2]["data_ready_flags"] == 0x50
+    assert snapshot["modules"][2]["data_ready_flags"] == 0x40
 
 
 def test_module_target_api_is_unsigned_and_keeps_compatibility_alias(
@@ -896,6 +898,56 @@ def test_hv_measurement_selector_keeps_other_failures_blocking(
         controller.select_hv_measurement(1, negative=False, timeout_s=0.5)
 
     assert controller._hv_measurement_requests == {}
+
+
+def _voltage_adc_rig(driver_module, base_module, monkeypatch, ranges, *, report=None):
+    controller = _controller(driver_module)
+    controller.connected = True
+    calls = []
+
+    def set_ranges(_self, address, negative, high_current):
+        calls.append(("set", address, negative, high_current))
+        ranges[address] = (negative, high_current)
+        return 0
+
+    monkeypatch.setattr(base_module.ESIBase, "set_hv_supply_meas_ranges", set_ranges)
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "get_hv_supply_meas_ranges",
+        lambda _self, address: (calls.append(("get", address)) or 0,
+                                *(report or ranges)[address]),
+    )
+    # Anything else would be an output, target, activation or heater command.
+    for name in [name for name in vars(base_module.ESIBase)
+                 if name.startswith("set_") and name != "set_hv_supply_meas_ranges"]:
+        monkeypatch.setattr(base_module.ESIBase, name,
+                            lambda *_args, name=name: pytest.fail(f"unexpected {name}"))
+    return controller, calls
+
+
+def test_voltage_adc_selection_keeps_the_current_range_and_commands_nothing_else(
+    driver_modules, monkeypatch,
+):
+    _runtime, driver_module, base_module = driver_modules
+    ranges = {1: (False, True)}  # POS selected, high current range.
+    controller, calls = _voltage_adc_rig(driver_module, base_module, monkeypatch, ranges)
+
+    controller.select_hv_voltage_adc(1, negative=True, timeout_s=0.5)
+
+    assert calls == [("get", 1), ("set", 1, True, True), ("get", 1)]
+    assert ranges[1] == (True, True)
+    assert controller._hv_measurement_requests[1] == (True, True, True)
+
+
+def test_voltage_adc_selection_rejects_an_unconfirmed_readback(driver_modules, monkeypatch):
+    _runtime, driver_module, base_module = driver_modules
+    controller, _calls = _voltage_adc_rig(
+        driver_module, base_module, monkeypatch, {2: (False, False)}, report={2: (False, False)})
+
+    with pytest.raises(RuntimeError, match="voltage ADC selection verification failed"):
+        controller.select_hv_voltage_adc(2, negative=True, timeout_s=0.5)
+
+    assert 2 not in controller._hv_measurement_requests
 
 
 def test_only_lab_hv_addresses_are_commandable(driver_modules):

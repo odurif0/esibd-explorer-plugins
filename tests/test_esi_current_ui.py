@@ -259,7 +259,9 @@ def probe(case, output):
 
         for channel in device.channels:
             channel._parameters = {"Value": BoundParameter(channel, "value"), "Enabled": BoundParameter(channel, "enabled")}
-        controller._apply_snapshot(snapshot())
+        data = snapshot()
+        data["modules"][1]["pwm"] = {"voltage_set_v": 100., "voltage_measured_v": 97.5}
+        controller._apply_snapshot(data)
         controller.updateValues()
         device._ensure_operator_panel()
         window.show()
@@ -267,6 +269,32 @@ def probe(case, output):
         assert device.esiHVCards[1]["current"].text() == "2.50 nA"
         assert device.esiHVCards[2]["current"].text() == "-4.50 nA"
         assert "98.0" in device.esiHVCards[1]["measured"].text()
+        if case == "panel":
+            card = device.esiHVCards[1]
+            # One row each for the internal regulation's setpoint and measurement.
+            assert (card["pwm_set"].text(), card["pwm_measured"].text()) == ("100.0 V", "97.5 V")
+            assert device.esiHVCards[2]["pwm_set"].text() == device.esiHVCards[2]["pwm_measured"].text() == "n/a"
+            assert card["hardware_target"].text() == "100.0 V"
+            labels = [label.text() for label in card["card"].findChildren(QtWidgets.QLabel)]
+            assert {"Applied target", "PWM set", "PWM measured", "ADC readback"} <= set(labels)
+            assert not {"HW target", "Set readback", "PWM set / measured"} & set(labels)
+            assert card["btn_on"].text() == "ON"
+            # ↑ steps 10 V, Ctrl+↑ and Page Up 100 V (Qt's x10 step modifier).
+            spin = card["target"]
+            assert spin.singleStep() == 10.
+            assert "Ctrl" in spin.toolTip() and "100 V" in spin.toolTip()
+            # The voltage ADC reads the electrospray connector; switching it is a click on the card.
+            pos, neg = card["adc_buttons"]
+            assert (pos.text(), neg.text(), pos.isChecked(), neg.isChecked()) == ("POS", "NEG", True, False)
+            assert card["measured"].text() == "POS 98.0 V"
+            QTest.mouseClick(neg, QtCore.Qt.MouseButton.LeftButton)
+            app.processEvents()
+            assert device.hv1_adc_connector == "NEG" and neg.isChecked() and not pos.isChecked()
+            # Until the hardware reports the new selection, no voltage is attributed to it.
+            controller._apply_snapshot(data)
+            device._update_operator_panel()
+            assert card["measured"].text() == "ADC on POS, NEG requested"
+            device.hv1_adc_connector = "POS"
         window.grab().save(str(output / "esi-current-panel.png"))
         if case in HEAT_CASES:
             data = snapshot()
@@ -429,6 +457,8 @@ def probe(case, output):
                 assert not widgets["btn_on"].isChecked()
                 assert not widgets["btn_on"].isEnabled()
                 assert not widgets["target"].isEnabled()
+                # The OFF check owns the ADC selection; while disconnected, only the setting changes.
+                assert all(button.isEnabled() == (case == "off") for button in widgets["adc_buttons"])
                 if case == "stopping":
                     assert "POS 12.50" in widgets["measured"].text()
                     assert "NEG -11.00" in widgets["measured"].text()
