@@ -66,7 +66,7 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   envelope; stopping MScan does not turn off HV outputs.
 - **MScan quadrupole offset (2026-10-08):** select the AMPR offset channel and a
   small coefficient; in a short stepped scan, check on an independent meter that
-  the offset follows coefficient × A at each point and returns to its initial value.
+  the offset follows U = U/V × A at each point and returns to its initial value.
   Then check that a continuous scan's Time step leaves the AMPR time to confirm each
   target (otherwise it aborts, naming the offset).
 - **PSU_D:** check the selected module and reference/readback mapping at zero.

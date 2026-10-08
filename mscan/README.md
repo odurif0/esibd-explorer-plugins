@@ -30,8 +30,9 @@ but has its own interface and scan protocol. No DLL or bundled runtime.
    current, e.g. `PSU_D_CH0: +4 V, Iget 32 mA`.
 5. Optional: **Quadrupole offset (AMPR)** selects the AMPR channel (module and
    channel) applying the quadrupole offset; **None** (default) leaves it alone.
-   During the scan it is set to **Offset coefficient (V/V)** × A at every
+   During the scan it is set to U = **Offset coefficient (U/V)** × A at every
    amplitude (default 0.2, negative allowed), together with the PSU rails.
+   U is the DC offset and V the RF amplitude, here the scanned amplitude A.
    **Offset readback** shows the AMPR Monitor and setpoint; during a scan, the
    scan target and whether the AMPR confirmed it. See *Quadrupole offset* below.
 6. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
@@ -44,7 +45,7 @@ but has its own interface and scan protocol. No DLL or bundled runtime.
 ## Quadrupole offset
 
 The offset channel is an ordinary AMPR channel: switch it ON, in manual (not
-equation) control, with its AMPR ON. Start is refused if coefficient × the
+equation) control, with its AMPR ON. Start is refused if U/V × the
 requested amplitude span leaves the channel's Min/Max or the AMPR module rating,
 if its initial value could not be restored there, or if its current setpoint is
 not confirmed by the AMPR. At each amplitude, the rails are commanded first, then

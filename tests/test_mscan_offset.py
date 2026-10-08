@@ -252,7 +252,7 @@ def test_hdf5_keeps_offset_readback_target_and_metadata(rig, tmp_path):
 def test_readback_and_completion_texts(rig):
     add_offset(rig)
     s = rig.scan
-    assert s._offset_readback_text() == 'Q_offset: Monitor +5.000 V, set +5 V\nScan: 0.2 × A = +2 … +6 V'
+    assert s._offset_readback_text() == 'Q_offset: Monitor +5.000 V, set +5 V\nScan: U = 0.2 × A = +2 … +6 V'
     prepare(rig)
     assert s._offset_readback_text(running=True).startswith('Q_offset: target +5 V')
     assert s._completion_text(s._plan['rails'], running=True).splitlines()[-1] == 'Q_offset: +5 V (quadrupole offset)'
