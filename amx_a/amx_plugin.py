@@ -3311,12 +3311,13 @@ class AMXDevice(Device):
         for ch in [channel] if channel is not None else self.getChannels():
             width = (getattr(self, "amxPanelCards", {}).get(ch.pulser_number(), {}) or {}).get("width")
             if _finish_spinbox_edit(width):
-                loading = getattr(ch, "loading", False)
-                ch.loading = True
+                # Suppress the value event while committing the draft; the caller applies it.
+                # Explorer 1.0.2: Channel.loading is read-only and reflects this device counter.
+                self.loading = True
                 try:
                     ch.value = float(width.value())
                 finally:
-                    ch.loading = loading
+                    self.loading = False
             else:
                 getter = getattr(ch, "getParameterByName", None)
                 parameter = getter(getattr(ch, "VALUE", "Value")) if callable(getter) else None

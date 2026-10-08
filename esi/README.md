@@ -29,6 +29,13 @@ It zeros the HV and heater targets, verifies disable, and configures the
 volatile HV maximum-step values described below. Initialization finishes with
 HV and heater outputs OFF; output activation requires an operator command.
 
+**The plugin always starts switched OFF.** When Explorer starts and when ON is
+pressed, the HV1, HV2 and HEAT output selections are set OFF without any command;
+their last targets and temperature are kept and shown, and are applied only when
+an output is selected again. Neither ON nor the end of initialization re-applies a
+saved target or selection (on 2026-10-07, ON still restarted a saved HV1 selection
+at its 1000 V target).
+
 ## Operation and safety
 
 ### HV outputs

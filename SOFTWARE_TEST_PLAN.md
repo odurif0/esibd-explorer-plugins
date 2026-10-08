@@ -85,6 +85,12 @@ Pressure is recorded continuously; thermal qualification does not prove pressure
 equilibrium. Normal completion includes 900 s temperature/pressure observation
 after verified heater OFF, not a declaration that the assembly is cold.
 
+**ESI start (fixed after 2026-10-07):** with HV1 selected at a nonzero target, close
+Explorer, restart it and press ON: the panel must show every output OFF with the
+target kept, and an independent meter must read no HV until HV1 is selected. Type a
+new target and click an output selector before pressing Enter: the target must be
+taken, without any error in the Explorer log.
+
 Supervise the run, keep the PC awake and verify the supplied load/materials and
 physical safeguards. Stop, invalid temperature, no valid pressure, dialogue errors
 or uncertain output state stop the protocol. TPG366 is not a vacuum interlock.
