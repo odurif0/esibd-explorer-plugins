@@ -1,0 +1,37 @@
+[package]
+name = "esibd-native-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license-file = "../LICENSES.md"
+
+[features]
+test-backend = []
+default = ["esi", "psu", "amx", "amx_hd", "ampr", "dmmr", "tpg366", "mscan", "transmission"]
+esi = []
+psu = []
+amx = []
+amx_hd = []
+ampr = []
+dmmr = []
+tpg366 = ["dep:serialport"]
+mscan = []
+transmission = ["dep:nalgebra", "dep:argmin", "dep:argmin-math", "dep:rand", "dep:rand_pcg"]
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+libloading = "=0.8.9"
+sha2 = "0.10"
+nalgebra = { version = "=0.35.0", default-features = false, features = ["std"], optional = true }
+argmin = { version = "=0.11.0", default-features = false, optional = true }
+argmin-math = { version = "0.5", features = ["vec"], optional = true }
+rand = { version = "=0.10.2", optional = true }
+rand_pcg = { version = "=0.10.2", optional = true }
+serialport = { version = "=4.10.1", default-features = false, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.52.0", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }

@@ -116,6 +116,16 @@ def _load_module():
     return _import_plugin_module()
 
 
+def _new_controller(module):
+    instance = object.__new__(module.AMPRController)
+    instance.device = None
+    instance._native_session_token = object()
+    instance._native_initialization_ready = None
+    instance._native_initialization_required = False
+    instance._native_shutdown_unconfirmed = False
+    return instance
+
+
 def test_bootstrap_config_is_replaced_from_detected_modules():
     module = _load_module()
     default_item = {
@@ -369,7 +379,7 @@ def test_controller_refreshes_detected_module_voltage_limits():
                 },
             }
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = FakeDevice()
     controller.controllerParent = types.SimpleNamespace(
         module_voltage_limits={},
@@ -525,7 +535,7 @@ def test_read_numbers_skips_acquisition_before_successful_initialization():
                 4: {"measured": 44.0},
             }
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = FakeDevice()
     controller.controllerParent = types.SimpleNamespace(
         getChannels=lambda: [FakeChannel()],
@@ -568,7 +578,7 @@ def test_read_numbers_blocks_channel_acquisition_until_st_on():
                 4: {"measured": 44.0},
             }
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = FakeDevice()
     controller.controllerParent = types.SimpleNamespace(
         getChannels=lambda: [FakeChannel()],
@@ -611,7 +621,7 @@ def test_read_numbers_reads_voltages_only_once_st_on_is_reached():
                 4: {"measured": 44.0},
             }
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = FakeDevice()
     controller.controllerParent = types.SimpleNamespace(
         getChannels=lambda: [FakeChannel()],
@@ -734,7 +744,7 @@ def test_update_values_clears_monitor_styles_when_device_turns_off():
         "Monitor": FakeParameter(monitor_widget), "Enabled": FakeParameter(widget)
     }.get(name)
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.values = {(2, 1): 11.0}
     controller.main_state = "ST_ON"
     controller.detected_modules_text = "2"
@@ -790,7 +800,7 @@ def test_update_values_reapplies_monitor_styles_while_device_is_on():
         "Monitor": FakeParameter(monitor_widget), "Enabled": FakeParameter(widget)
     }.get(name)
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.initialized = True
     controller.values = {(2, 1): 11.0}
     controller.main_state = "ST_ON"
@@ -989,7 +999,7 @@ def test_fake_numbers_does_not_invent_ampr_monitors():
         def channel_number(self):
             return 4
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.controllerParent = types.SimpleNamespace(
         getChannels=lambda: [FakeChannel()],
         isOn=lambda: True,
@@ -1005,7 +1015,7 @@ def test_fake_numbers_does_not_invent_ampr_monitors():
 def test_run_initialization_logs_explicit_failure():
     module = _load_module()
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = None
     controller.detected_module_ids = []
     controller.detected_modules_text = ""
@@ -1040,23 +1050,18 @@ def test_run_initialization_logs_explicit_failure():
     ]
 
 
-def test_run_initialization_logs_process_backend_fallback_warning():
+def test_run_initialization_uses_native_backend_without_inline_fallback(tmp_path):
     module = _load_module()
 
     class FakeDriver:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self._process_backend_disabled_reason = (
-                "AMPR process isolation startup failed; "
-                "falling back to inline controller: "
-                "worker timed out during worker startup"
-            )
 
         def connect(self, timeout_s):
             self.timeout_s = timeout_s
 
     emitted = []
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = None
     controller.detected_module_ids = []
     controller.detected_modules_text = ""
@@ -1071,6 +1076,9 @@ def test_run_initialization_logs_process_backend_fallback_warning():
         baudrate=230400,
         connect_timeout_s=5.0,
         name="AMPR",
+        pluginManager=types.SimpleNamespace(
+            Settings=types.SimpleNamespace(dataPath=tmp_path)
+        ),
     )
     controller._dispose_device = lambda: None
     controller._refresh_module_scan = lambda: None
@@ -1087,14 +1095,14 @@ def test_run_initialization_logs_process_backend_fallback_warning():
 
     assert emitted == [True]
     assert controller.initializing is False
-    assert logs == [
-        (
-            "AMPR process isolation startup failed; "
-            "falling back to inline controller: "
-            "worker timed out during worker startup",
-            module.PRINT.WARNING,
-        )
-    ]
+    assert controller.device.kwargs == {
+        "device_id": "ampr_com5",
+        "com": 5,
+        "baudrate": 230400,
+        "native_backend": True,
+        "log_dir": tmp_path / "logs" / "ampr",
+    }
+    assert logs == []
 
 
 def test_refresh_module_scan_ignores_bootstrap_module_zero_warning():
@@ -1109,7 +1117,7 @@ def test_refresh_module_scan_ignores_bootstrap_module_zero_warning():
         def scan_modules(self):
             return [2]
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = FakeDevice()
     controller.detected_module_ids = []
     controller.detected_modules_text = ""
@@ -1221,7 +1229,7 @@ def test_apply_value_skips_hardware_writes_until_psu_is_on():
         def channel_number(self):
             return 1
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.lock = FakeLock()
     controller.errorCount = 0
     controller.device = FakeDevice()
@@ -1266,7 +1274,7 @@ def test_toggle_on_runs_full_initialize_sequence_when_switching_on():
         device = FakeDevice()
         state_calls = []
         logs = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = device
         controller.errorCount = 0
@@ -1330,7 +1338,7 @@ def test_toggle_on_runs_shutdown_when_switching_off():
         device = FakeDevice()
         state_calls = []
         logs = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = device
         controller.errorCount = 0
@@ -1360,7 +1368,7 @@ def test_toggle_on_runs_shutdown_when_switching_off():
             module.DeviceController.toggleOn = original_toggle_on
 
     assert device.calls == ["shutdown"]
-    assert state_calls == ["sync", "dispose"]
+    assert state_calls == ["sync", "dispose", "sync"]
     assert stop_calls == ["stop"]
     assert logs == [
         ("Starting AMPR shutdown sequence.", None),
@@ -1397,7 +1405,7 @@ def test_toggle_on_does_not_log_success_outside_st_on():
         device = FakeDevice()
         logs = []
         ui_states = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = device
         controller.errorCount = 0
@@ -1484,7 +1492,7 @@ def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
     try:
         device = FakeDevice()
         logs = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = device
         controller.errorCount = 0
@@ -1571,7 +1579,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
     try:
         device = FakeDevice()
         logs = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = device
         controller.errorCount = 0
@@ -1609,6 +1617,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
         ("AMPR shutdown sequence completed.", None),
         ("sync", None),
         ("dispose", None),
+        ("sync", None),
     ]
 
 
@@ -1678,7 +1687,7 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
     try:
         device = FakeDevice()
         logs = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = device
         controller.errorCount = 0
@@ -1844,7 +1853,7 @@ def test_toggle_on_failure_logs_runtime_diagnostics():
     try:
         logs = []
         ui_states = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.lock = FakeLock()
         controller.device = FakeDevice()
         controller.errorCount = 0
@@ -1898,7 +1907,7 @@ def test_shutdown_communication_runs_full_device_shutdown():
         logs = []
         synced = []
         disposed = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.device = device
         controller.errorCount = 0
         controller.main_state = "ST_ON"
@@ -1924,7 +1933,7 @@ def test_shutdown_communication_runs_full_device_shutdown():
         ("Starting AMPR shutdown sequence.", None),
         ("AMPR shutdown sequence completed.", None),
     ]
-    assert synced == [("Disconnected", [], "")]
+    assert synced == [("Disconnected", [], ""), ("Disconnected", [], "")]
     assert disposed == [True]
     assert controller.initialized is False
 
@@ -1955,7 +1964,7 @@ def test_shutdown_communication_logs_diagnostics_on_failure():
     try:
         logs = []
         disposed = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.device = FakeDevice()
         controller.errorCount = 0
         controller.main_state = "ST_ON"
@@ -2014,7 +2023,7 @@ def test_update_values_clears_monitor_when_channel_or_device_is_off():
         channel_number=lambda: 2,
     )
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.values = {(2, 1): 100.0, (2, 2): 200.0}
     controller.controllerParent = types.SimpleNamespace(
         isOn=lambda: False,
@@ -2040,7 +2049,7 @@ def test_read_numbers_clears_existing_values_when_state_leaves_st_on():
         def channel_number(self):
             return 1
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = types.SimpleNamespace()
     controller.initialized = True
     controller.values = {(2, 1): 10.0, (2, 2): 20.0}
@@ -2063,7 +2072,7 @@ def test_toggle_on_clears_transition_when_device_is_missing():
     module.DeviceController.toggleOn = lambda self: None
     try:
         restored_states = []
-        controller = object.__new__(module.AMPRController)
+        controller = _new_controller(module)
         controller.device = None
         controller.transitioning = True
         controller.transition_target_on = True
@@ -2156,7 +2165,7 @@ def test_update_state_ignores_device_state_read_before_disposal():
             controller.device = None
             return self.NO_ERR, "0x00000002", "ST_ON"
 
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.device = FakeDevice()
     controller.initialized = False
     controller.main_state = "Disconnected"
@@ -2197,7 +2206,7 @@ def test_channel_target_voltages_skips_invalid_channels():
         return channel
 
     printed = []
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.controllerParent = types.SimpleNamespace(
         isOn=lambda: True,
         getChannels=lambda: [
@@ -2217,7 +2226,7 @@ def test_channel_target_voltages_skips_invalid_channels():
 def test_safe_query_state_uses_setting_or_default():
     """Without the poll_timeout_s setting the default 5.0 applies (no crash)."""
     module = _load_module()
-    controller = object.__new__(module.AMPRController)
+    controller = _new_controller(module)
     controller.controllerParent = types.SimpleNamespace()  # no poll_timeout_s
 
     class FakeDevice:

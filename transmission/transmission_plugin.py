@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, Q
 from esibd.core import INOUT, PARAMETERTYPE, PRINT, TreeWidget, getTestMode, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
 
-_RUNTIME_FILES = ("__init__.py", "_engine.py", "_simulator.py", "_beamline.py", "_log.py")
+_RUNTIME_FILES = ("__init__.py", "_engine.py", "_simulator.py", "_beamline.py", "_log.py", "_native_engine.py", "_native_worker.py")
 
 
 def _load_runtime():
@@ -55,14 +55,14 @@ def _load_runtime():
             module = importlib.util.module_from_spec(spec)
             sys.modules[name] = module
             spec.loader.exec_module(module)
-        return tuple(importlib.import_module(f"{name}.{part}") for part in ("_engine", "_simulator", "_beamline", "_log"))
+        return tuple(importlib.import_module(f"{name}.{part}") for part in ("_engine", "_simulator", "_beamline", "_log", "_native_engine", "_native_worker"))
     except BaseException:
         for key in [key for key in sys.modules if key == name or key.startswith(name + ".")]:
             sys.modules.pop(key, None)
         raise
 
 
-_engine, _simulator, _beamline, _log = _load_runtime()
+_engine, _simulator, _beamline, _log, _native_engine, _native_worker = _load_runtime()
 
 LEVEL_LABELS = (("fine", "Fine"), ("normal", "Normal"), ("wide", "Wide"))
 SIMULATION_SETTINGS = dict(settle_s=0.5, average_s=1.0, seed=1)
@@ -197,6 +197,8 @@ class _GuiBridge(QObject):
     @pyqtSlot(object)
     def execute(self, call):
         try:
+            if self.plugin._closing:
+                raise _engine.InstrumentError("Transmission is closing; Explorer action refused")
             if call.expired.is_set():
                 raise _engine.InstrumentError("Explorer request expired before it ran")
             call.result = call.action()
@@ -207,7 +209,8 @@ class _GuiBridge(QObject):
 
     @pyqtSlot(str)
     def set_status(self, text):
-        self.plugin.show_progress(text)
+        if not self.plugin._closing:
+            self.plugin.show_progress(text)
 
 
 class ExplorerInstrument(_engine.Instrument):
@@ -273,22 +276,18 @@ class ExplorerInstrument(_engine.Instrument):
                 timing["end"] = time.perf_counter()
         call = _Call(timed)
         posted = time.perf_counter()
-        if QThread.currentThread() == self.bridge.thread():
-            self.bridge.execute(call)
-        else:
-            self.bridge.request.emit(call)
-            if not call.done.wait(self.GUI_TIMEOUT_S):
-                call.expired.set()  # A delayed Qt callback must not write later.
+        try:
+            result = self.plugin._dispatch_gui_call(call, self.GUI_TIMEOUT_S)
+        except _engine.InstrumentError:
+            if call.expired.is_set() and not self.plugin._closing:
                 self._record("gui_timeout", waited_s=self.GUI_TIMEOUT_S, action=getattr(action, "__qualname__", ""))
-                raise _engine.InstrumentError(f"Explorer did not respond within {self.GUI_TIMEOUT_S:g} s")
+            raise
         if "start" in timing:
             latency, duration = timing["start"] - posted, timing["end"] - timing["start"]
             self._latency.append((latency, duration))
             if latency > self.SLOW_GUI_S:
                 self._record("gui_slow", latency_s=latency, duration_s=duration, action=getattr(action, "__qualname__", ""))
-        if call.error is not None:
-            raise call.error
-        return call.result
+        return result
 
     def measuring(self, active):
         if active:
@@ -812,7 +811,8 @@ class _SpectrumDialog(QDialog):
 
         def work():
             outcome = self.plugin.quick_sweep(key, amplitudes, self.signals.point.emit, self.cancel)
-            self.signals.done.emit(outcome)
+            if not self.plugin._closing:
+                self.signals.done.emit(outcome)
         self.worker = Thread(target=work, name="Transmission sweep", daemon=True)
         self.worker.start()
 
@@ -1037,6 +1037,11 @@ class Transmission(Scan):
         self._spectra = {}
         self._result = None
         self._optimizer = None
+        self._native_lock = Lock()
+        self._native_workers = {}  # Includes children being configured, not only running optimizers.
+        self._gui_calls = set()
+        self._closing = False
+        self._sweep_cancel = None
         self._config_used = ""
         self._simulated_run = False
         self._worker = None
@@ -1107,8 +1112,69 @@ class Transmission(Scan):
         """<Explorer data path>/logs/transmission: collected with the data, never inside the plugin."""
         return Path(self.pluginManager.Settings.dataPath) / "logs" / "transmission"
 
+    def _new_native_optimizer(self, config, instrument, **kwargs):
+        with self._native_lock:
+            if self._closing:
+                raise _engine.InstrumentError("Transmission is closing")
+        worker = _native_worker.NativeWorkerProxy(Path(__file__).resolve().parent, "transmission", {},
+                                                  log_dir=self.log_directory())
+        try:
+            with self._native_lock:
+                if self._closing:
+                    raise _engine.InstrumentError("Transmission closed during native startup")
+                self._native_workers[worker] = None
+            optimizer = _native_engine.Optimizer(config, instrument, worker=worker, **kwargs)
+            with self._native_lock:
+                if self._closing:
+                    raise _engine.InstrumentError("Transmission closed during native configuration")
+                self._native_workers[worker] = optimizer
+            return optimizer
+        except BaseException:
+            try:
+                worker.close(grace_s=0)
+            finally:
+                with self._native_lock:
+                    self._native_workers.pop(worker, None)
+            raise
+
+    def _request_native_stop(self):
+        self._cancel.set()
+        with self._native_lock:
+            sweep_cancel = self._sweep_cancel
+            optimizers = [o for o in self._native_workers.values() if o is not None]
+        if sweep_cancel is not None:
+            sweep_cancel.set()
+        for optimizer in optimizers:
+            optimizer.request_stop()  # Also interrupts an in-flight native GP fit.
+
+    def _native_active(self):
+        with self._native_lock:
+            return any(o is None or o._active for o in self._native_workers.values())
+
+    @staticmethod
+    def _native_available(optimizer):
+        return (optimizer is not None and not optimizer._failed and not optimizer._closed
+                and not optimizer.worker.closed)
+
+    def _retire_native_optimizer(self, optimizer):
+        if optimizer is None:
+            return True
+        try:
+            if not optimizer.close(close_worker=True):
+                return False
+        except Exception as exc:  # noqa: BLE001 - cleanup must not leave the scan panel locked
+            self.print(f"Native worker cleanup failed: {exc}; hardware state is not confirmed.", flag=PRINT.WARNING)
+            return False
+        finally:
+            if optimizer.worker.closed:
+                with self._native_lock:
+                    self._native_workers.pop(optimizer.worker, None)
+        return optimizer.worker.closed
+
     def session(self, event, **data):
         """GUI actions and run outcomes, across sessions (rotating file). Never raises."""
+        if self._closing and event not in ("plugin_close", "native_force_close"):
+            return
         try:
             folder = self.log_directory()
             with self._log_lock:
@@ -1144,12 +1210,16 @@ class Transmission(Scan):
 
     # ---------------------------------------------------------------- live redraws (Qt thread)
     def _plot_requested(self, force):
+        if self._closing:
+            return
         self._plot_pending = True
         self._plot_force = self._plot_force or force
         self._maybe_plot()
 
     def set_measuring(self, active):
         """Called when an averaging window opens or closes; redraws wait for it to close."""
+        if self._closing:
+            return
         self._measuring = bool(active)
         if not active:
             self._maybe_plot()
@@ -1174,6 +1244,8 @@ class Transmission(Scan):
 
     def _watch(self, log):
         """While a log is open, record every Qt-thread freeze longer than 0.5 s (plots, other plugins, Explorer)."""
+        if self._closing:
+            return
         self._watched = log
         if self._watchdog is None:
             self._watchdog = QTimer()
@@ -1283,6 +1355,8 @@ class Transmission(Scan):
         return _beamline.normalize(_simulator.BEAMLINE) if self._simulated() else self.beamline_map
 
     def refresh_panel(self):
+        if self._closing:
+            return
         panel = self.panel
         if panel is None:
             return
@@ -1353,7 +1427,8 @@ class Transmission(Scan):
         return True, "Optimize the selected stages."
 
     def _busy(self):
-        return not self.finished or self.recording or self._reverting or self._sweeping or self._bringup is not None
+        return (self._closing or not self.finished or self.recording or self._reverting or self._sweeping
+                or self._bringup is not None or self._native_active())
 
     def _plan(self, beamline):
         state = self.state
@@ -1454,13 +1529,20 @@ class Transmission(Scan):
 
         The panel stays busy until the filter is back, even if the dialog is closed meanwhile.
         """
+        with self._native_lock:
+            if self._closing:
+                return dict(status="error", reason="Transmission is closing", amplitude=[], current=[], sem=[])
+            self._sweep_cancel = cancel
         self._sweeping = True  # Usually already set on the Qt thread by the dialog, before this worker started.
         self._bridge.refresh.emit()
         try:
             return self._quick_sweep(filter_key, amplitudes, on_point, cancel)
         finally:
             self._sweeping = False
-            self._bridge.refresh.emit()
+            with self._native_lock:
+                self._sweep_cancel = None
+            if not self._closing:
+                self._bridge.refresh.emit()
 
     def _quick_sweep(self, filter_key, amplitudes, on_point, cancel):
         try:
@@ -1481,30 +1563,43 @@ class Transmission(Scan):
         if isinstance(instrument, ExplorerInstrument):
             instrument.log = log.write
         self._bridge.watch.emit(log)
+        optimizer = None
         try:
-            optimizer = _engine.Optimizer(config, instrument, log=log.write,
+            optimizer = self._new_native_optimizer(config, instrument, log=log.write,
                                           on_event=lambda kind, data: on_point(data["amplitude"], data["current"])
-                                          if kind == "sweep" else None)
+                                          if kind == "sweep" and not self._closing else None)
             outcome = optimizer.spectrum(amplitudes, measure)
         except Exception as exc:  # noqa: BLE001 - reported to the dialog, kept in the log
             log.write("exception", traceback=traceback.format_exc())
             outcome = dict(status="error", reason=f"{type(exc).__name__}: {exc}", amplitude=[], current=[], sem=[])
         finally:
-            self._bridge.unwatch.emit()
+            self._retire_native_optimizer(optimizer)
+            if not self._closing:
+                self._bridge.unwatch.emit()
             log.close()
         self.session("quick_sweep", filter=filter_key, points=len(amplitudes), status=outcome["status"],
                      reason=outcome["reason"], log=str(log.path) if log.path else None)
         return outcome
 
     def _gui_call(self, action):
-        call = _Call(action)
-        if QThread.currentThread() == self._bridge.thread():
-            self._bridge.execute(call)
-        else:
-            self._bridge.request.emit(call)
-            if not call.done.wait(10):
-                call.expired.set()
-                raise _engine.InstrumentError("Explorer did not respond within 10 s")
+        return self._dispatch_gui_call(_Call(action), 10.0)
+
+    def _dispatch_gui_call(self, call, timeout_s):
+        with self._native_lock:
+            if self._closing:
+                raise _engine.InstrumentError("Transmission is closing; Explorer action refused")
+            self._gui_calls.add(call)
+        try:
+            if QThread.currentThread() == self._bridge.thread():
+                self._bridge.execute(call)
+            else:
+                self._bridge.request.emit(call)
+                if not call.done.wait(timeout_s):
+                    call.expired.set()  # A delayed Qt callback must not write later.
+                    raise _engine.InstrumentError(f"Explorer did not respond within {timeout_s:g} s")
+        finally:
+            with self._native_lock:
+                self._gui_calls.discard(call)
         if call.error is not None:
             raise call.error
         return call.result
@@ -1584,6 +1679,8 @@ class Transmission(Scan):
         return f"{entry['name']} ({self._roles(entry)})"
 
     def refresh_devices(self):
+        if self._closing:
+            return
         panel = self.panel
         if panel is None:
             return
@@ -1718,6 +1815,7 @@ class Transmission(Scan):
         self.refresh_panel()
 
     def stop_optimization(self):
+        self._request_native_stop()
         self.session("stop_requested", recording=self.recording, reverting=self._reverting,
                      starting_devices=self._bringup is not None)
         if self._bringup is not None:
@@ -1726,8 +1824,6 @@ class Transmission(Scan):
         if self.recording:
             self.recording = False
             self.toggleRecording()
-        else:
-            self._cancel.set()  # Also stops a revert in progress.
 
     def _configuration(self):
         if self.state["advanced"]:
@@ -1745,15 +1841,23 @@ class Transmission(Scan):
     def initScan(self):
         if self._dummy_initialization:
             return False
+        if self._closing or self._native_active() or self._reverting or self._sweeping:
+            self.show_progress("Wait until the current Transmission operation has finished.")
+            return False
         self._cancel = Event()
         try:
             text, config = self._configuration()
             instrument = self._instrument(config, self._cancel)
-            optimizer = _engine.Optimizer(config, instrument, on_event=self._on_event)
-        except (_engine.ConfigError, _engine.InstrumentError, OSError) as exc:
+            previous = getattr(self, "_optimizer", None)
+            optimizer = self._new_native_optimizer(config, instrument, on_event=self._on_event)
+        except Exception as exc:  # noqa: BLE001 - startup/protocol failures are not retried
             self.show_progress(f"Cannot start: {exc}")
             self.print(f"Cannot start: {exc}", flag=PRINT.WARNING)
             self.session("cannot_start", reason=str(exc), state=self.state, traceback=traceback.format_exc())
+            return False
+        if not self._retire_native_optimizer(previous):
+            self._retire_native_optimizer(optimizer)
+            self.show_progress("Cannot start: the previous native child could not be retired.")
             return False
         self._optimizer, self._config_used, self._simulated_run = optimizer, text, self._simulated()
         self._records, self._stages_meta, self._spectra, self._result, self._eval_times = [], [], {}, None, []
@@ -1780,6 +1884,8 @@ class Transmission(Scan):
 
     def _on_event(self, kind, data):
         # Worker thread: plain data only; the GUI is updated through signals.
+        if self._closing:
+            return
         if kind == "stage":
             stage = data["stage"]
             self._stages_meta.append(dict(name=stage.name, knobs=[k.name for k in stage.knobs],
@@ -1819,28 +1925,33 @@ class Transmission(Scan):
         return text
 
     def runScan(self, recording):
+        optimizer = self._optimizer
         try:
-            self._result = self._optimizer.run()
+            self._result = optimizer.run()
         except Exception as exc:  # noqa: BLE001 - never leave the scan running
-            self._result = dict(status="error", reason=f"{type(exc).__name__}: {exc}", stages=list(self._optimizer.results),
-                                initial=dict(self._optimizer.initial), final=dict(self._optimizer.commanded),
-                                evaluations=len(self._optimizer.history), spectra={}, checks={})
+            self._result = dict(status="error", reason=f"{type(exc).__name__}: {exc}", stages=list(optimizer.results),
+                                initial=dict(optimizer.initial), final=dict(optimizer.commanded),
+                                evaluations=len(optimizer.history), spectra={}, checks={})
             self._run_log.write("exception", traceback=traceback.format_exc())
             self.print(f"Optimization failed: {exc}", flag=PRINT.ERROR)
         finally:
-            optimizer = self._optimizer
-            self._decided = all(math.isclose(optimizer.commanded.get(c, v), v, rel_tol=1e-9, abs_tol=1e-9)
-                                for c, v in optimizer.initial.items())
+            unchanged = all(math.isclose(optimizer.commanded.get(c, v), v, rel_tol=1e-9, abs_tol=1e-9)
+                            for c, v in optimizer.initial.items())
             result = self._result or {}
+            self._decided = (unchanged or self._closing or not self._native_available(optimizer)
+                             or result.get("status") in ("error", "instrument error", "configuration error"))
+            if self._decided:
+                self._retire_native_optimizer(optimizer)
             summary = self.result_summary()
             self._run_log.write("summary", status=result.get("status"), reason=result.get("reason"), line=summary,
                                 stages=result.get("stages"), checks=result.get("checks"), target=result.get("target"),
-                                changed=not self._decided)
+                                changed=not unchanged)
             self.session("run_end", status=result.get("status"), reason=result.get("reason"), summary=summary,
                          file=self.file, log=str(self._run_log.path) if self._run_log.path else None)
-            self._bridge.status.emit(self._status_line())
-            self.signalComm.updateRecordingSignal.emit(False)
-            self.signalComm.scanUpdateSignal.emit(True)
+            if not self._closing:
+                self._bridge.status.emit(self._status_line())
+                self.signalComm.updateRecordingSignal.emit(False)
+                self.signalComm.scanUpdateSignal.emit(True)
 
     def _status_line(self):
         result = self._result or {}
@@ -1884,6 +1995,8 @@ class Transmission(Scan):
         return "\n".join(lines)
 
     def scanUpdate(self, done=False):
+        if self._closing:
+            return
         if done:
             self._unwatch()
             if self._run_log is not None:
@@ -1906,7 +2019,7 @@ class Transmission(Scan):
     def recording(self, value):
         # DeviceManager also stops scans through this property, not only the button.
         if not value:
-            self._cancel.set()
+            self._request_native_stop()
         Scan.recording.fset(self, value)
 
     @property
@@ -1916,12 +2029,12 @@ class Transmission(Scan):
     @finished.setter
     def finished(self, value):
         Scan.finished.fset(self, value)
-        if value and hasattr(self, "_bridge"):
+        if value and hasattr(self, "_bridge") and not self._closing:
             self._bridge.refresh.emit()
 
     def toggleRecording(self):
         if not self.recording:
-            self._cancel.set()
+            self._request_native_stop()
         elif self._reverting or self._sweeping or self._bringup is not None:
             self.print("Wait until the revert, the quick sweep or the devices have finished.", flag=PRINT.WARNING)
             self.recording = False
@@ -1938,7 +2051,13 @@ class Transmission(Scan):
         self.refresh_panel()
 
     def keep(self):
+        if self._busy():
+            self.print("Wait until the optimization has finished.", flag=PRINT.WARNING)
+            return
         self.session("keep", log=str(self._run_log.path) if self._run_log is not None and self._run_log.path else None)
+        if not self._retire_native_optimizer(self._optimizer):
+            self.show_progress("Native cleanup failed; no channel was changed.")
+            return
         self._decided = True
         self.show_progress("Optimized settings kept.")
         self.refresh_panel()
@@ -1950,40 +2069,81 @@ class Transmission(Scan):
         if self._optimizer is None or not self._optimizer.initial:
             self.show_progress("Nothing to revert.")
             return
+        optimizer = self._optimizer
+        if not self._native_available(optimizer):
+            self.show_progress("Native session is closed or failed; revert will not be retried.")
+            return
         self._cancel = Event()
-        self._optimizer.instrument.cancel = self._cancel
+        optimizer.instrument.cancel = self._cancel
         self._decided = True
         self._reverting = True
         self.show_progress("Reverting to the settings before the last run…")
-        log = self._open_run_log("revert", file=self.file, initial=self._optimizer.initial, commanded=self._optimizer.commanded,
+        log = self._open_run_log("revert", file=self.file, initial=optimizer.initial, commanded=optimizer.commanded,
                                  run_log=str(self._run_log.path) if self._run_log is not None and self._run_log.path else None)
-        self._optimizer.log = log.write
-        if isinstance(self._optimizer.instrument, ExplorerInstrument):
-            self._optimizer.instrument.log = log.write
+        optimizer.log = log.write
+        if isinstance(optimizer.instrument, ExplorerInstrument):
+            optimizer.instrument.log = log.write
         self._watch(log)
 
         def work():
             try:
-                outcome = self._optimizer.restore_initial()
+                outcome = optimizer.restore_initial()
             except Exception as exc:  # noqa: BLE001 - never leave the panel locked
                 outcome = dict(status="error", reason=f"{type(exc).__name__}: {exc}")
                 log.write("exception", traceback=traceback.format_exc())
             finally:
+                self._retire_native_optimizer(optimizer)
                 self._reverting = False
-                self._bridge.unwatch.emit()
+                if not self._closing:
+                    self._bridge.unwatch.emit()
                 log.close()
             self.session("revert", status=outcome["status"], reason=outcome["reason"], file=self.file,
                          log=str(log.path) if log.path else None)
-            self._bridge.status.emit(f"Revert {outcome['status']}" + (f": {outcome['reason']}" if outcome["reason"] else "."))
-            self._bridge.refresh.emit()
+            if not self._closing:
+                self._bridge.status.emit(f"Revert {outcome['status']}" + (f": {outcome['reason']}" if outcome["reason"] else "."))
+                self._bridge.refresh.emit()
         self._worker = Thread(target=work, name=f"{self.name} revert", daemon=True)
         self._worker.start()
         self.refresh_panel()
 
     def close(self):
-        self._cancel.set()
+        with self._native_lock:
+            if self._closing:
+                return
+            self._closing = True
+            workers = dict(self._native_workers)
+            for optimizer in workers.values():
+                if optimizer is not None:
+                    optimizer._closed = True  # Forbid even non-cancellable recovery actions before reaping.
+            calls = list(self._gui_calls)
+            self._gui_calls.clear()
+        for call in calls:
+            call.expired.set()
+            call.error = _engine.InstrumentError("Transmission closed before Explorer completed its action")
+            call.done.set()
+        self._request_native_stop()
+        # Qt can no longer drain recovery actions while its plugin is closing.
+        # Reap, rather than block that thread or claim OFF/restoration succeeded.
+        active = any(o is None or o._active for o in workers.values())
+        if active:
+            self.session("native_force_close", outputs_confirmed_off=False, restoration_confirmed=False,
+                         reason="Explorer is closing; pending channel actions are refused")
+        for worker in workers:
+            try:
+                worker.close(grace_s=0)
+            except Exception as exc:  # noqa: BLE001 - still retire the other independently supervised children
+                self.print(f"Native worker close failed: {exc}; hardware state is not confirmed.", flag=PRINT.WARNING)
+            finally:
+                with self._native_lock:
+                    self._native_workers.pop(worker, None)
+        self._bringup = None
+        for timer in (self._bringup_timer, self._device_timer):
+            if timer is not None:
+                timer.stop()
         self._unwatch()
         self.session("plugin_close")
+        if self._run_log is not None:
+            self._run_log.close()
         if self._session_log is not None:
             self._session_log.close()
         return super().close()

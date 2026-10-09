@@ -6,7 +6,7 @@ CGC's `EDH` means options E + D + **H, "High Frequency Resolution"** (2 digital
 oscillators with 10 Hz resolution, 16 pulse generators, timing resolution < 0.1 ns,
 jitter < 0.5 ns; [CGC 19AMX options](https://www.cgc-instruments.com/en/Products/Switches/19AMX/Preconfigured/Options)).
 
-This is the HD sibling of the `amx_a/` and `amx_b/` plugins. The HD variant is
+This is the standalone HD variant alongside `amx_a/` and `amx_b/`. It is
 a **different controller** than the normal AMX: it ships its own vendor DLL
 (`COM-HVAMX4EDH.dll`), uses a stream-based API, exposes **timers** instead of
 pulsers, has **500 configuration slots** (vs 126), an **8-value housekeeping**
@@ -14,13 +14,13 @@ readback, and a distinct state encoding (`STATE_ON = 0x0001`, with a new
 `STATE_STANDBY = 0x0000`). See the plan/audit notes for the full normal-vs-HD
 delta.
 
-The plugin is self-contained: it embeds the minimal private runtime it needs,
-including the AMX HD driver files and the vendor `COM-HVAMX4EDH.dll`.
+The plugin is self-contained: it bundles its native Rust worker, Python GUI
+adapters and reference driver files, and the vendor `COM-HVAMX4EDH.dll`.
 
 ## Requirements
 
 - ESIBD Explorer `1.0.2`
-- Windows for real hardware communication
+- Windows x86-64 for real vendor-DLL hardware communication
 - No separate `ESIBD_core` installation is required for the plugin itself
 
 ## Activation
@@ -31,6 +31,26 @@ including the AMX HD driver files and the vendor `COM-HVAMX4EDH.dll`.
 3. Set the Explorer `plugin path` to that `plugins` folder.
 4. Restart ESIBD Explorer.
 5. Enable the `AMX_HD` plugin in the Plugin Manager.
+
+## Native Worker
+
+Production communication runs in this plugin's separate native Rust process,
+`native/esibd-amx_hd-worker.exe` (Windows x86-64). The supervisor selects
+that exact plugin-local file from `native/manifest.json` and verifies its
+SHA-256, family and protocol before use. Missing or mismatched files fail
+startup; workers are not searched on PATH.
+
+The Explorer GUI and thin facade adapters remain Python. The older Python
+device implementation is retained as a reference for tests and notebooks,
+not as a production fallback. No external or bundled private Python worker
+interpreter, Explorer fork or separate `ESIBD_core` installation is required.
+Each plugin instance owns its worker; no running worker is shared with siblings.
+
+Worker logs are written under
+`<Explorer data path>/logs/amx_hd/native/amx_hd/`, never inside the plugin.
+The v0.5 native port has local mock-DLL, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
 
 ## Device Configuration
 
@@ -98,22 +118,26 @@ not hard-code a channel count. Each timer channel exposes:
 - measured duty-cycle monitor
 - width and burst readbacks
 
-## Process Backend
+## Connection Failures
 
-The bundled runtime runs inside Explorer. Process isolation is disabled:
-a spawned interpreter cannot import the private bundled modules. A timed-out
-connection is never reused. For a failed initial Open only, a later OFF/close or
-ON request can release it after the native call returns and port closure is
-confirmed. Otherwise it stays `Connection pending`, without output commands.
-`Disconnected` confirms port closure, not HV discharge. Other DLL timeouts still
-require hardware OFF and an Explorer restart.
+A failed or timed-out connection is never reused. A returned failed initial
+Open is cleaned up without output commands; `Connection pending` remains until
+port cleanup or worker retirement is confirmed. `Disconnected` confirms
+communication closure, not hardware OFF or HV discharge.
 
-OFF/close during initialization cancels startup. If the connection completes
-without a timeout, a normal verified shutdown follows. Starting again requires
-an explicit ON; the cancelled startup is never resumed automatically.
+OFF/close cancels startup. If Open succeeds after a close request, a normal
+verified shutdown follows. Only an explicit ON rearms startup; cancelled
+requests and old writes are never replayed automatically.
+
+Crashes and hung DLL calls are isolated to this plugin's worker. OFF/close can
+cancel, terminate and reap an unresponsive child without stopping other workers.
+After retirement, a fresh explicit ON starts a new worker without requiring an
+Explorer restart. Process termination does not prove outputs are OFF or
+discharged: use the hardware interlock/front panel when shutdown cannot be
+verified, and treat the displayed uncertainty separately from port ownership.
 
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `amx_hd/` directory
-together, including the embedded `vendor/` subtree and the
+together, including the bundled `vendor/` and `native/` subtrees and the
 `COM-HVAMX4EDH.dll`.

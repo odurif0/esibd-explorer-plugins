@@ -27,6 +27,14 @@ class PluginSpec:
     bundled_files: tuple[str, ...] = ()
 
 
+def _native_bundled_files(family: str) -> tuple[str, ...]:
+    portable = family in {"mscan", "transmission", "tpg366"}
+    supervisor = "_runtime/_native_worker.py" if portable else "vendor/runtime/_native_worker.py"
+    return ("native/manifest.json", f"native/esibd-{family}-worker.exe",
+            *((f"native/esibd-{family}-worker",) if portable else ()),
+            "native/source.zip", "native/THIRD_PARTY_NOTICES.txt", supervisor)
+
+
 PLUGIN_SPECS: tuple[PluginSpec, ...] = (
     PluginSpec(
         "ampr_a",
@@ -38,6 +46,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "ampr",
         "COM-AMPR-12.h",
         "COM-AMPR-12.dll",
+        bundled_files=_native_bundled_files("ampr"),
     ),
     PluginSpec(
         "ampr_b",
@@ -49,6 +58,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "ampr",
         "COM-AMPR-12.h",
         "COM-AMPR-12.dll",
+        bundled_files=_native_bundled_files("ampr"),
     ),
     PluginSpec(
         "amx_a",
@@ -60,6 +70,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "amx",
         "COM-HVAMX4ED.h",
         "COM-HVAMX4ED.dll",
+        bundled_files=_native_bundled_files("amx"),
     ),
     PluginSpec(
         "amx_b",
@@ -71,6 +82,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "amx",
         "COM-HVAMX4ED.h",
         "COM-HVAMX4ED.dll",
+        bundled_files=_native_bundled_files("amx"),
     ),
     PluginSpec(
         "amx_hd",
@@ -82,6 +94,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         None,
         "COM-HVAMX4EDH.h",
         "COM-HVAMX4EDH.dll",
+        bundled_files=_native_bundled_files("amx_hd"),
     ),
     PluginSpec(
         "dmmr",
@@ -93,6 +106,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         None,
         "COM-DMMR-8.h",
         "COM-DMMR-8.dll",
+        bundled_files=_native_bundled_files("dmmr"),
     ),
     PluginSpec(
         "esi",
@@ -104,24 +118,17 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         None,
         "COM-ESI-CTRL.h",
         "COM-ESI-CTRL.dll",
-        bundled_files=("_heater_stability.py", "_experiment_guard.py", "_heater_limits.py",
-                       "vendor/runtime/esi/_process.py", *(f"vendor/python/{name}" for name in (
-                           "manifest.json", "LICENSE.txt", "python.exe", "pythonw.exe", "python.cat",
-                           "python3.dll", "python314.dll", "python314.zip", "python314._pth",
-                           "vcruntime140.dll", "vcruntime140_1.dll", "libcrypto-3.dll", "libssl-3.dll",
-                           "libffi-8.dll", "libtommath.dll", "sqlite3.dll", "pyexpat.pyd", "select.pyd",
-                           "unicodedata.pyd", "winsound.pyd", "_asyncio.pyd", "_bz2.pyd", "_ctypes.pyd",
-                           "_decimal.pyd", "_elementtree.pyd", "_hashlib.pyd", "_lzma.pyd", "_multiprocessing.pyd",
-                           "_overlapped.pyd", "_queue.pyd", "_remote_debugging.pyd", "_socket.pyd", "_sqlite3.pyd",
-                           "_ssl.pyd", "_uuid.pyd", "_wmi.pyd", "_zoneinfo.pyd", "_zstd.pyd",
-                       ))),
+        bundled_files=(*_native_bundled_files("esi"), "_heater_stability.py", "_experiment_guard.py",
+                       "_heater_limits.py", "vendor/runtime/esi/_process.py"),
     ),
-    PluginSpec("mscan", "MScan", "MScan", "mscan_plugin.py", None, "mscan", None, None, None),
+    PluginSpec("mscan", "MScan", "MScan", "mscan_plugin.py", None, "mscan", None, None, None,
+               bundled_files=(*_native_bundled_files("mscan"), "_runtime/_native_scan.py")),
     PluginSpec("transmission", "Transmission", "Transmission", "transmission_plugin.py", None, "transmission", None, None, None,
-               bundled_files=("_runtime/__init__.py", "_runtime/_engine.py", "_runtime/_simulator.py", "_runtime/_beamline.py",
-                                             "_runtime/_log.py")),
+               bundled_files=(*_native_bundled_files("transmission"), "_runtime/__init__.py", "_runtime/_engine.py",
+                              "_runtime/_simulator.py", "_runtime/_beamline.py", "_runtime/_log.py", "_runtime/_native_engine.py")),
     PluginSpec("tpg366", "TPG366", "TPG366", "tpg366_plugin.py", None, "tpg366", None, None, None,
-               bundled_files=("_runtime/_tpg366.py", "_readout_panel.py", "tpg366.svg", "switch-medium_on.png", "switch-medium_off.png")),
+               bundled_files=(*_native_bundled_files("tpg366"), "_runtime/_tpg366.py", "_runtime/_native_link.py",
+                              "_readout_panel.py", "tpg366.svg", "switch-medium_on.png", "switch-medium_off.png")),
     PluginSpec(
         "psu_a",
         "PSU_A",
@@ -132,6 +139,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "psu",
         "COM-HVPSU2D.h",
         "COM-HVPSU2D.dll",
+        bundled_files=_native_bundled_files("psu"),
     ),
     PluginSpec(
         "psu_b",
@@ -143,6 +151,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "psu",
         "COM-HVPSU2D.h",
         "COM-HVPSU2D.dll",
+        bundled_files=_native_bundled_files("psu"),
     ),
     PluginSpec(
         "psu_c",
@@ -154,6 +163,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "psu",
         "COM-HVPSU2D.h",
         "COM-HVPSU2D.dll",
+        bundled_files=_native_bundled_files("psu"),
     ),
     PluginSpec(
         "psu_d",
@@ -165,6 +175,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "psu",
         "COM-HVPSU2D.h",
         "COM-HVPSU2D.dll",
+        bundled_files=_native_bundled_files("psu"),
     ),
     PluginSpec(
         "psu_e",
@@ -176,6 +187,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "psu",
         "COM-HVPSU2D.h",
         "COM-HVPSU2D.dll",
+        bundled_files=_native_bundled_files("psu"),
     ),
 )
 

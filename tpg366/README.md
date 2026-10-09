@@ -3,14 +3,39 @@
 USB pressure acquisition for the Pfeiffer MaxiGauge TPG 366, with six channels.
 Requires ESIBD Explorer 1.0.2 and its existing `pyserial` dependency; no vendor DLL.
 
+## Native Worker
+
+Production USB communication runs in an isolated native Rust worker on Windows
+x86-64 (`native/esibd-tpg366-worker.exe`) or Linux x86-64
+(`native/esibd-tpg366-worker`). The supervisor selects that exact plugin-local
+binary from `native/manifest.json` and verifies its SHA-256, family and protocol.
+Missing or mismatched files fail startup; no worker is searched on PATH.
+The Explorer GUI and data/exception adapter remain Python; the Python ASCII
+protocol implementation is retained as a test/notebook reference, not a
+production fallback. No external or private Python worker interpreter or
+Explorer fork is required.
+
+OFF/close cancels communication and can terminate and reap an unresponsive
+worker. A crash or hang is isolated to this plugin; other workers keep running.
+After retirement, only an explicit ON reconnects, without restarting Explorer
+or replaying old requests. Port closure or worker exit does not mean that the
+physical gauges are OFF; this plugin never sends gauge-OFF commands.
+Worker logs are under
+`<Explorer data path>/logs/tpg366/native/tpg366/`, never inside the plugin.
+The v0.5 native port has local mock-serial, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. Software checks do not qualify the physical gauges.
+
 ## Use
 
 1. Copy the plugin into Explorer's plugin directory; keep the whole `tpg366/` directory
-   together. Enable the `TPG366` plugin in the Plugin Manager.
+   together, including `_runtime/` and `native/`.
+   Enable the `TPG366` plugin in the Plugin Manager.
 2. Connect the controller's rear **USB-B** socket to the PC. Select its COM port
    in **Settings → TPG366**: both `21` and `COM21` select Windows port COM21.
-   If Windows does not expose a COM port, install the FTDI virtual COM-port
-   driver described in the operating manual.
+   On Linux, use the USB serial device path (for example `/dev/ttyUSB0`) with
+   permission to access it. If Windows does not expose a COM port, install the
+   FTDI virtual COM-port driver described in the operating manual.
 3. Match **Baud rate** to the controller's USB setting (default: **9600**, 8N1).
 4. Press **ON**. The six inputs appear as **P1–P6**; rename them as needed.
    The default interval is **1000 ms**, with all six inputs read per cycle.

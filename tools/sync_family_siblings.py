@@ -2,8 +2,8 @@
 
 Siblings stay self-contained (no symlinks, no shared imports): each one keeps a
 full copy of the canonical entrypoint and runtime tree. Only the single
-``name = "..."`` declaration of the Device class differs. Edit the canonical
-plugin, then run:
+``name = "..."`` declaration of the Device class differs. README copies retain
+their own plugin name and folder. Edit the canonical plugin, then run:
 
     python3 tools/sync_family_siblings.py          # rewrite sibling copies
     python3 tools/sync_family_siblings.py --check  # report drift, change nothing
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ast
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -25,6 +26,14 @@ FAMILIES = {
     "amx": ("amx_a", ("amx_b",), "amx_plugin.py"),
     "psu": ("psu_a", ("psu_b", "psu_c", "psu_d", "psu_e"), "psu_plugin.py"),
 }
+
+
+def _regular_path(path: Path) -> None:
+    for candidate in (path, *path.parents):
+        if candidate.is_symlink():
+            raise ValueError(f"Symlink not permitted: {candidate}")
+    if path.exists() and not (path.is_dir() or stat.S_ISREG(path.stat().st_mode)):
+        raise ValueError(f"Non-regular plugin asset: {path}")
 
 
 def _device_name_literal(source: str, path: Path) -> tuple[int, int, int]:
@@ -47,6 +56,8 @@ def _device_name_literal(source: str, path: Path) -> tuple[int, int, int]:
 
 
 def _sibling_source(canonical: Path, sibling: Path) -> bytes:
+    _regular_path(canonical)
+    _regular_path(sibling)
     canonical_text = canonical.read_text(encoding="utf-8")
     sibling_text = sibling.read_text(encoding="utf-8")
     line, start, end = _device_name_literal(sibling_text, sibling)
@@ -58,8 +69,13 @@ def _sibling_source(canonical: Path, sibling: Path) -> bytes:
 
 
 def _runtime_files(root: Path) -> dict[Path, Path]:
-    return {path.relative_to(root): path for path in sorted(root.rglob("*"))
-            if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts}
+    _regular_path(root)
+    files = {}
+    for path in sorted(root.rglob("*")):
+        _regular_path(path)
+        if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts:
+            files[path.relative_to(root)] = path
+    return files
 
 
 def sync(root: Path = REPO_ROOT, *, check: bool = False) -> list[str]:
@@ -67,7 +83,10 @@ def sync(root: Path = REPO_ROOT, *, check: bool = False) -> list[str]:
     drift: list[str] = []
     for canonical_folder, siblings, entrypoint in FAMILIES.values():
         canonical_entry = root / canonical_folder / entrypoint
-        canonical_runtime = _runtime_files(root / canonical_folder / "vendor" / "runtime")
+        canonical_trees = {
+            relative: _runtime_files(root / canonical_folder / relative)
+            for relative in (Path("vendor/runtime"), Path("native"))
+        }
         for sibling_folder in siblings:
             sibling_entry = root / sibling_folder / entrypoint
             expected = _sibling_source(canonical_entry, sibling_entry)
@@ -75,19 +94,33 @@ def sync(root: Path = REPO_ROOT, *, check: bool = False) -> list[str]:
                 drift.append(str(sibling_entry.relative_to(root)))
                 if not check:
                     sibling_entry.write_bytes(expected)
-            sibling_runtime_root = root / sibling_folder / "vendor" / "runtime"
-            sibling_runtime = _runtime_files(sibling_runtime_root)
-            for relative, source in canonical_runtime.items():
-                target = sibling_runtime_root / relative
-                if relative not in sibling_runtime or target.read_bytes() != source.read_bytes():
-                    drift.append(str(target.relative_to(root)))
-                    if not check:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(source, target)
-            for relative in sorted(set(sibling_runtime) - set(canonical_runtime)):
-                drift.append(f"{(sibling_runtime_root / relative).relative_to(root)} (extra)")
+            canonical_readme = root / canonical_folder / "README.md"
+            sibling_readme = root / sibling_folder / "README.md"
+            _regular_path(canonical_readme)
+            _regular_path(sibling_readme)
+            readme = canonical_readme.read_text(encoding="utf-8")
+            expected_readme = readme.replace(canonical_folder, sibling_folder).replace(
+                canonical_folder.upper(), sibling_folder.upper()).encode("utf-8")
+            if not sibling_readme.is_file() or sibling_readme.read_bytes() != expected_readme:
+                drift.append(str(sibling_readme.relative_to(root)))
                 if not check:
-                    (sibling_runtime_root / relative).unlink()
+                    sibling_readme.write_bytes(expected_readme)
+            for tree, canonical_runtime in canonical_trees.items():
+                sibling_runtime_root = root / sibling_folder / tree
+                sibling_runtime = _runtime_files(sibling_runtime_root)
+                for relative, source in canonical_runtime.items():
+                    target = sibling_runtime_root / relative
+                    _regular_path(target)
+                    if relative not in sibling_runtime or target.read_bytes() != source.read_bytes():
+                        drift.append(str(target.relative_to(root)))
+                        if not check:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(source, target)
+                            shutil.copymode(source, target)
+                for relative in sorted(set(sibling_runtime) - set(canonical_runtime)):
+                    drift.append(f"{(sibling_runtime_root / relative).relative_to(root)} (extra)")
+                    if not check:
+                        (sibling_runtime_root / relative).unlink()
     return drift
 
 

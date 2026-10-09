@@ -4,6 +4,14 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 13 device plugins and two standalone scan plugins (15 folders).
 
+Version v0.5 introduces isolated native workers for all 15 plugins.
+Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
+no Explorer fork, external Python, private interpreter or shared device process
+is needed. **Real-hardware qualification is pending.** Local software, simulated
+instrument and target-Explorer checks do not certify physical shutdown or safe
+access. See [RUST_MIGRATION.md](RUST_MIGRATION.md) for validation and remaining
+hardware checks; qualify the devices before routine experimental use.
+
 ## Available Plugins
 
 | Plugin   | Description |
@@ -26,7 +34,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.4.2.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -98,37 +106,38 @@ For the other device plugins:
   standby configuration `-1` keeps the outputs disabled).
 - **OFF** requests and verifies shutdown, then closes communication. Success is
   shown as **Disconnected**; the next ON reconnects.
-- Without process isolation, **Shutdown unconfirmed** means shutdown or
-  port closure failed. The button
-  remains ON so the next click retries OFF, and Explorer's closing warning stays
-  active. This button state is not confirmation that outputs are enabled. If a
-  DLL call is blocked, make the instrument safe locally and restart Explorer.
+- If shutdown cannot be verified while communication is still usable,
+  **Shutdown unconfirmed** keeps the connection available for another OFF attempt.
+  This button state is not confirmation that outputs are enabled.
+- If a worker crashes, exceeds its deadline or is forcibly disconnected,
+  **Disconnected: shutdown unconfirmed** means that its process was released,
+  not that hardware outputs are OFF. The button is OFF and a new ON creates a
+  fresh worker. Make the instrument safe locally before reconnecting or touching it.
 
-**ESI is isolated in its own process.** If its DLL blocks or crashes, OFF or
-closing communication releases that worker and stops ESI acquisition without
-stopping other devices. A new ON creates a fresh connection. If shutdown could
-not be verified, the plugin shows **Disconnected: shutdown unconfirmed** with a
-persistent warning: disconnection does not prove the HV or heater is OFF. Make
-the instrument safe locally before touching it; see [ESI](esi/README.md).
+**Every device is isolated in its own native process.** Stopping one plugin does
+not stop the others, even if a vendor DLL never returns. Late results from the old
+connection cannot reactivate its button or replacement. Writes are never replayed
+automatically after a worker failure. TPG366 is read-only; its worker failure
+stops acquisition and invalidates readings, without changing gauge settings.
 
-**Standalone Explorer needs no external Python for ESI.** Its worker uses a private
-64-bit interpreter inside `esi/vendor/python/`, without searching PATH or using a
-Microsoft Store alias. The complete plugin folder must be kept together.
+**Standalone Explorer needs no additional Python installation.** The plugin-local
+worker executable loads its own bundled DLL or serial protocol. A missing or
+modified binary fails connection visibly; there is no interpreter lookup, host
+launcher, inline DLL fallback or dependency on another plugin. Keep the complete
+plugin folder, including `native/manifest.json`, binaries, sources and notices.
 The current `STATE_ON` badge is green; a previous unconfirmed shutdown remains
 separately visible as a warning icon and red summary until discharge is verified.
-ESI driver logs are stored in `<Explorer data path>/logs/esi/`, with bounded
-rotation, rather than in the installed plugin folder. Existing logs are retained.
+ESI checks are described in [ESI](esi/README.md). Worker logs are stored under
+`<Explorer data path>/logs/<device>/native/<family>/`, with an 8 MiB cap per session,
+not in the installed plugin folder. Existing logs are retained.
 
 A failed initial port opening uses **Connection pending** instead, with the
 DMMR button OFF rather than falsely indicating initialized operation. OFF or
 closing communication cleans up that opening without output commands. The
-driver instance and port reservation remain until the native call has ended
-and closure is confirmed. This confirms port closure, not the hardware output
-state. If opening succeeds after a close request, the plugin runs its normal
-verified shutdown instead of completing initialization.
-A new ON explicitly reconnects after cleanup; without process isolation,
-a native call that never returns or an unconfirmed closure can still require a
-restart.
+driver instance and port reservation remain until closure or process termination
+is confirmed. This does not confirm the hardware output state. A cancelled
+connection cannot publish a late initialized state. A new ON explicitly reconnects
+after cleanup; the blocked call is contained inside the retired worker.
 
 While a device's port is open (from ON until its closure is confirmed,
 including an unconfirmed shutdown), its plugin asks Windows not to sleep on
@@ -151,8 +160,8 @@ restarts if it was on. DMMR and TPG366 resume with their normal ON (measurement
 only). A device that was OFF is not contacted. A normal start keeps every device
 OFF; ESI outputs and PSU panels start as described in their READMEs.
 
-If the instrument was powered off meanwhile, the resume ends like a failed ON
-(without process isolation, a timed-out opening can lock the port until Explorer restarts).
+If the instrument was powered off meanwhile, the resume ends like a failed ON;
+a timed-out worker is retired instead of requiring an Explorer restart.
 
 For HV devices, a verified disable is **not proof of complete electrical
 discharge**. ESI additionally checks both HV polarities on each module against
@@ -163,9 +172,14 @@ safety procedure before touching hardware.
 ## Requirements
 
 - ESIBD Explorer `1.0.2` on Windows
-- ESI includes a private 64-bit Python for its isolated worker in standalone
-  Explorer; no external Python installation is needed. A Python-based Explorer
-  uses its own interpreter.
+- Windows 10 or later, x86-64, for the bundled vendor DLLs and native workers
+  ([Rust target requirements](https://doc.rust-lang.org/rustc/platform-support.html)).
+  No additional Python or Rust installation is needed to run a complete plugin folder.
+- Linux x86-64 workers are also supplied for TPG366, MScan and Transmission.
+  The currently built binaries require glibc 2.34 (TPG366/MScan) or 2.35
+  (Transmission), plus the system `libgcc_s`; Transmission also uses `libm`.
+  These are measured binary requirements, not Rust's generic Linux minimum.
+  DLL-backed hardware remains Windows-only. Rust and Cargo are build tools only.
 
 
 ## Notebooks
@@ -186,6 +200,12 @@ python3 -m pytest -q --all-siblings      # release validation: every sibling cop
 ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
 
+Use the v0.5 native archive for release checks, selected explicitly with
+`ESIBD_RELEASE_ZIP`. The historical v0.4.2 ZIP is intentionally unchanged and
+cannot validate the native bundle. The v0.5 release provides the archive's
+SHA-256; earlier packaging-test evidence is recorded in
+[RUST_MIGRATION.md](RUST_MIGRATION.md).
+
 The real-Explorer tests use the installed `esibd-explorer` (or
 `ESIBD_EXPLORER_SOURCE` / `ESIBD_QT_PYTHON`). They validate the release host only
 when that is Explorer `1.0.2`; the session header shows the host and the summary
@@ -202,5 +222,22 @@ canonical plugin. Edit the canonical one, then run
 parity tests guarantee identical copies, behaviour tests run on the canonical
 copy unless `--all-siblings` is given. Tests run locally only (no CI);
 use `--all-siblings` with Explorer 1.0.2 before a release.
+
+Native development checks and local packaging:
+
+```bash
+python3 tools/generate_native_abi.py --check
+cargo test --locked --offline --manifest-path native/Cargo.toml --features test-backend
+python3 tools/build_native_workers.py --target x86_64-pc-windows-gnu --deploy
+python3 tools/build_native_workers.py --check
+python3 tools/sync_native_sources.py --check
+python3 tools/sync_family_siblings.py --check
+```
+
+The build selects one family per executable and records binary/source hashes.
+Native sources and third-party notices accompany each plugin; GPL corresponding
+sources for MScan and TPG366 include vendored build dependencies. See
+[native/LICENSES.md](native/LICENSES.md). Source availability is not a hardware
+qualification or an automatic release.
 
 Tests remain in this repository's `tests/` directory. They are not part of plugin folders or release archives.

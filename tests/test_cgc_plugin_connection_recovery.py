@@ -3,6 +3,8 @@
 The eleven runtimes are covered through their family's controller; sibling
 entrypoint equivalence is enforced separately by the family parity tests.
 """
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -12,13 +14,16 @@ from test_shutdown_confirmation_regressions import FAMILIES, controller_for
 
 
 @pytest.fixture
-def plugin(rig, monkeypatch):
-    return build_plugin(rig, monkeypatch)
+def plugin(rig, monkeypatch, tmp_path):
+    return build_plugin(rig, monkeypatch, data_path=tmp_path)
 
 
-def build_plugin(rig, monkeypatch):
+def build_plugin(rig, monkeypatch, *, data_path=None):
     module, controller, messages = controller_for(rig.family)
     parent = controller.controllerParent
+    # The Qt subprocess probes also call this test-only builder without fixtures.
+    parent.pluginManager = SimpleNamespace(Settings=SimpleNamespace(
+        dataPath=Path(tempfile.gettempdir()) if data_path is None else Path(data_path)))
     parent.com, parent.baudrate = 15, 9600
     parent.connect_timeout_s = parent.poll_timeout_s = .05
     parent.heat_voltage_limit_v = parent.heat_current_limit_a = parent.heat_power_limit_w = 0
@@ -61,6 +66,8 @@ def build_plugin(rig, monkeypatch):
         if hasattr(rig.base, name):
             monkeypatch.setattr(rig.base, name, lambda self, *a, **kw:
                                 rig.hw.invoke('diagnostic_read', self, result=(0, 0, 'ST_OFF')))
+    # Inject the inline Python reference explicitly for these DLL fault tests;
+    # production initialization still selects the native worker with no fallback.
     monkeypatch.setattr(module, FAMILIES[rig.family][2], lambda: factory)
     controller.signalComm = SimpleNamespace(
         initCompleteSignal=SimpleNamespace(emit=lambda: successes.append(True)))

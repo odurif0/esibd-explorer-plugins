@@ -1,4 +1,4 @@
-"""Full Explorer classes + real Qt, with only the serial instrument simulated.
+"""Real Explorer/Qt with an explicitly injected native facade and reference ASCII engine.
 
 Optional OS screenshot / Matplotlib widgets are not used by these probes.
 Subprocess isolation avoids the older tests' global ESIBD/Qt module stubs.
@@ -18,7 +18,7 @@ CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "rea
 @pytest.mark.parametrize("case", CASES)
 def test_real_explorer_pressure_plugin(case, tmp_path):
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), case, str(tmp_path)],
+        [os.environ.get('ESIBD_QT_PYTHON', sys.executable), str(Path(__file__).resolve()), case, str(tmp_path)],
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "XDG_CONFIG_HOME": str(tmp_path / "config")},
         capture_output=True, text=True, timeout=30)
     if result.returncode == 77:
@@ -105,7 +105,7 @@ def probe(case, output):
         clear=lambda handle, kind: awake_calls.append(("clear", handle, kind)) or 1,
         close=lambda handle: awake_calls.append(("close", handle)) or 1)
     logs = []
-    settings = SimpleNamespace(configPath=Path(output), settings={}, loading=False, errorResetTime=10,
+    settings = SimpleNamespace(configPath=Path(output), dataPath=Path(output), settings={}, loading=False, errorResetTime=10,
                                getFullSessionPath=lambda: Path(output))
     manager = SimpleNamespace(Device=plugins.Device, ChannelManager=plugins.ChannelManager, Scan=plugins.Scan,
                               SettingsManager=plugins.SettingsManager, Settings=settings,
@@ -199,7 +199,46 @@ def probe(case, output):
         port.close = checked_close
         return port
 
-    module.serial.Serial = open_port
+    class ReferenceWorker:
+        """Inject the reference ASCII engine for widget/race probes, not production fallback."""
+
+        def __init__(self, plugin_root, family, config, *, log_dir):
+            assert family == 'tpg366'
+            assert Path(log_dir) == Path(output) / 'logs' / 'tpg366'
+            self.config, self.link, self.closed = config, None, False
+
+        def call_method(self, method, *, rpc_timeout_s, _cancel_event, on_progress):
+            assert not self.closed
+            if self.link is None:
+                try:
+                    port = open_port(port=self.config['port'], baudrate=self.config['baudrate'],
+                                     timeout=.05, write_timeout=1.)
+                except OSError as exc:
+                    raise OSError(f'opening USB port: {exc}') from exc
+                self.link = module._protocol.TPG366Link(port, _cancel_event)
+            try:
+                if method == 'initialize':
+                    self.link.initialize()
+                    return dict(identification=self.link.identification, gauges=self.link.gauges, unit=self.link.unit)
+                assert method == 'read_pressures', method
+                from dataclasses import asdict
+                return asdict(self.link.read_pressures())
+            except module._protocol.ProtocolError as exc:
+                exc.native_error_kind = 'ProtocolError'
+                raise
+            finally:
+                on_progress({'family': 'tpg366', 'nak_count': self.link.nak_count})
+
+        def cancel(self):
+            return True  # The shared local Event is checked by the reference ASCII engine.
+
+        def close(self, *, grace_s):
+            if self.link is not None:
+                self.link.port.close()
+            self.closed = True
+            return True
+
+    module._load_protocol('_native_worker').NativeWorkerProxy = ReferenceWorker
     # Exercise widget-backed settings as well as real Channel.Parameter wrappers.
     label = QtWidgets.QLabel()
     def state_setter(self, value):
@@ -478,7 +517,8 @@ def probe(case, output):
             assert controller._generation == generation and len(ports) == 1
             if case == "pending_close_failure":
                 wait(lambda: "unconfirmed" in device.main_state)
-                assert device.initialized and controller._retained_port is ports[0]
+                assert device.initialized and controller._retained_port.proxy.link.port is ports[0]
+                assert controller._retained_port.is_open and ports[0].is_open
                 ports[0].fail_close = False
                 device.setOn(False)
             wait(lambda: not device.initialized)
@@ -615,7 +655,8 @@ def probe(case, output):
         if case == "disconnect_failure":
             wait(lambda: "unconfirmed" in device.main_state)
             assert device.initialized and device.isOn()
-            assert controller._retained_port is ports[0]
+            assert controller._retained_port.proxy.link.port is ports[0]
+            assert controller._retained_port.is_open and ports[0].is_open
             wait(lambda: not controller._worker.is_alive())
             assert controller._awake.held  # The port may still be open: keep the PC awake.
             ports[0].fail_close = False

@@ -1991,7 +1991,7 @@ def test_load_operating_config_now_rejects_invalid_config_slot():
     ]
 
 
-def test_run_initialization_disables_process_backend_for_plugin_runtime(monkeypatch):
+def test_run_initialization_selects_native_backend_for_plugin_runtime(monkeypatch, tmp_path):
     module = _load_module()
     captured_kwargs = {}
 
@@ -2030,14 +2030,16 @@ def test_run_initialization_disables_process_backend_for_plugin_runtime(monkeypa
         main_state="",
         output_summary="",
         available_configs_text="",
+        pluginManager=types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path)),
     )
 
     controller = module.PSUController(parent)
     controller.runInitialization()
 
     assert captured_kwargs["device_id"] == "psu_com3"
-    assert captured_kwargs["logger"] is not None
-    assert captured_kwargs["allow_process_backend"] is False
+    assert not {"logger", "thread_lock", "hk_thread"}.intersection(captured_kwargs)
+    assert captured_kwargs["native_backend"] is True
+    assert captured_kwargs["log_dir"] == tmp_path / "logs" / "psu"
     assert captured_kwargs["connect_timeout_s"] == 5.0
 
 

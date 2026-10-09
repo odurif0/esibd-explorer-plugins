@@ -9,7 +9,574 @@ from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
+from test_mscan import module, rig  # noqa: F401 -- fixtures only; native tests never run the Python reference.
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize('outcome', ['error', 'raised-error', 'transport-error', 'stopped', 'raised-stopped', 'completed'])
+def test_native_terminal_status_logs_once_and_closes_worker(module, monkeypatch, tmp_path, outcome):
+    from threading import Event
+
+    events, errors, loaded = [], [], []
+    message = 'Native worker transport deadline expired.' if outcome == 'transport-error' else 'PSU_A_CH0: source changed or was stopped.'
+    status = 'error' if outcome == 'transport-error' else outcome.removeprefix('raised-')
+    validation = dict(status=status, error=message if status != 'completed' else '',
+                      point_status=['not acquired'])
+    scan = NS(_plan=object(), _cancel=Event(), _native_worker=None, _gui=lambda action, **kwargs: action(),
+              _validation=dict(status='running', error='', point_status=['not acquired']),
+              pluginManager=NS(Settings=NS(dataPath=tmp_path)),
+              _bridge=NS(status=NS(emit=lambda value: events.append(('status', value)))),
+              signalComm=NS(updateRecordingSignal=NS(emit=lambda value: events.append(('recording', value))),
+                            scanUpdateSignal=NS(emit=lambda value: events.append(('update', value)))),
+              print=lambda text, flag: errors.append((text, flag)))
+    scan._queue_completion = lambda action: scan._gui(action, cancel=False)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('The native entrypoint must not use the Python reference or hardware directly.')
+    scan._run_scan_python_reference = forbidden
+    worker = NS(call_method=forbidden, close=lambda **kwargs: events.append(('close', kwargs)))
+
+    def create_worker(plugin_dir, family, config, *, log_dir):
+        assert plugin_dir == ROOT / 'mscan' and family == 'mscan' and config == {}
+        assert log_dir == tmp_path / 'logs' / 'mscan'
+        return worker
+
+    class TerminalAdapter:
+        def __init__(self, owner, call, *, emit_completion):
+            assert owner is scan and call is worker.call_method
+            assert emit_completion is False
+        def run(self):
+            assert scan._native_worker is worker
+            if outcome == 'raised-error':
+                raise module.ScanError(message)
+            if outcome == 'transport-error':
+                raise TimeoutError(message)
+            if outcome == 'raised-stopped':
+                raise module.ScanStopped(message)
+            # The native adapter returns terminal errors without raising and
+            # replaces validation when applying its exported result.
+            scan._validation = validation
+
+    def load_native(part):
+        loaded.append(part)
+        return {'_native_worker': NS(NativeWorkerProxy=create_worker),
+                '_native_scan': NS(NativeScanAdapter=TerminalAdapter)}[part]
+    monkeypatch.setattr(module, '_load_native_runtime', load_native)
+    module.MScan.runScan(scan, lambda: True)
+
+    assert loaded == ['_native_worker', '_native_scan']
+    assert scan._validation['status'] == status
+    assert scan._validation['point_status'] == [status]
+    expected_errors = [(f'Scan aborted: {message}', module.PRINT.ERROR)] if status == 'error' else []
+    assert errors == expected_errors
+    assert events == [('close', {'grace_s': 0}),
+                      ('status', status.capitalize() + (': ' + message if status != 'completed' else '')),
+                      ('recording', False), ('update', True)]
+    assert scan._native_worker is None
+
+
+@pytest.mark.parametrize('emit_completion', [None, False], ids=['standalone-default', 'entrypoint-owned'])
+@pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
+def test_native_adapter_completion_owner_preserves_point_updates(module, monkeypatch, emit_completion, transport_error):
+    from threading import Event
+    import numpy as np
+
+    notifications = []
+    scan = NS(_cancel=Event(), _plan={'metadata': {}},
+              _validation=dict(status='running', error='', point_status=['not acquired'] * 2,
+                               rail_v=np.full((2, 1), np.nan), rail_i=np.full((2, 1), np.nan),
+                               window_start=np.full(2, np.nan), window_end=np.full(2, np.nan),
+                               samples=np.zeros((2, 1), dtype=int), finite_samples=np.zeros((2, 1), dtype=int)),
+              outputChannels=[NS(recordingData=np.full(2, np.nan))],
+              _gui=lambda action, **kwargs: action(),
+              signalComm=NS(updateRecordingSignal=NS(emit=lambda value: notifications.append(('recording', value))),
+                            scanUpdateSignal=NS(emit=lambda value: notifications.append(('update', value)))))
+    failure = TimeoutError('Native worker transport deadline expired.')
+    def unavailable(*args):
+        raise failure
+    kwargs = {} if emit_completion is None else {'emit_completion': emit_completion}
+    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable, **kwargs)
+    adapter._bind()
+    adapter._apply_updates(dict(state='acquiring', status='running', updates=[
+        dict(index=0, mean=13., rail_v=[10.], rail_i=[.1], window_start=1., window_end=2.,
+             samples=2, finite_samples=2, status='acquired')]))
+    assert notifications == [('update', False)]
+    notifications.clear()
+
+    def start():
+        if transport_error:
+            raise failure
+        adapter._running.set()
+    def export_result():
+        if transport_error:
+            raise failure
+        return dict(data=[13., 15.], metadata={'native': True},
+                    validation=dict(status='completed', error='', point_status=['acquired'] * 2))
+    monkeypatch.setattr(adapter, 'start', start)
+    monkeypatch.setattr(adapter, 'step', adapter._running.clear)
+    monkeypatch.setattr(adapter, 'export_result', export_result)
+    if transport_error:
+        with pytest.raises(TimeoutError, match='Native worker transport deadline expired'):
+            adapter.run()
+        assert scan._validation['status'] == 'error'
+        assert scan._validation['error'] == str(failure)
+        assert scan._validation['point_status'] == ['acquired', 'error']
+        assert scan.outputChannels[0].recordingData[0] == 13.
+        assert np.isnan(scan.outputChannels[0].recordingData[1])
+    else:
+        adapter.run()
+        assert scan._validation['status'] == 'completed'
+        assert scan._plan['metadata'] == {'native': True}
+        assert scan.outputChannels[0].recordingData.tolist() == [13., 15.]
+    expected = [('recording', False), ('update', True)] if emit_completion is None else []
+    assert notifications == expected
+    assert not adapter._running.is_set()
+
+
+@pytest.mark.parametrize(('native_confirmation', 'native_revision', 'python_confirmation'),
+                         [(10., 1, None), (None, 1, 10.), (99., 0, 10.)],
+                         ids=['sync-native', 'keep-confirmed-on-none', 'ignore-stale-revision'])
+def test_native_prewrite_rejects_hardware_change_after_point_update(rig, native_confirmation, native_revision,
+                                                                 python_confirmation):
+    scan = rig.scan
+    def forbidden(*args, **kwargs):
+        raise AssertionError('This native-adapter test must not run the Python reference.')
+    scan.runScan = forbidden
+    scan._command([10., 10.])
+    psu = rig.psus[0]
+    psu.controller._manual_apply_worker_running = False
+    for rail in scan._plan['rails']:
+        c = rail['channel']
+        c._value = c.monitor = c.voltage_setpoint_readback = 10.
+        rail['confirmed_vset'] = python_confirmation
+    channel = psu.channels[0]
+    revision = channel.voltage_request_revision
+    adapter = rig.module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden, emit_completion=False)
+    adapter._bind()
+    action = dict(session=7, action_id=2, expected_revisions=[1, 1], restore=False,
+                  index=1, targets=[20., 20.], latest_mono=None, offset=None)
+    adapter._status = dict(session=7, state='await_command', status='running', error='', action=action,
+                           revisions=[native_revision] * 2, confirmed_vset=[native_confirmation] * 2,
+                           updates=[dict(index=0, mean=10., rail_v=[10., 10.], rail_i=[.002, .002],
+                                         window_start=1., window_end=2., samples=2, finite_samples=2, status='acquired')])
+    published = []
+    def change_hardware_after_point(done):
+        assert done is False and scan.outputChannels[0].recordingData[0] == 10.
+        channel._value = channel.monitor = channel.voltage_setpoint_readback = 10.001
+        published.append(done)
+    scan.signalComm.scanUpdateSignal.emit = change_hardware_after_point
+    adapter._apply_updates(adapter._status)
+    with pytest.raises(rig.module.ScanError, match='PSU setpoint changed outside the scan'):
+        adapter._command_on_gui(action)
+    assert published == [False]
+    assert psu.writes == [(0, 10.), (1, 10.)]  # No next amplitude or restoration write.
+    assert rig.psus[1].writes == []
+    assert psu.isOn()
+    assert channel.value == channel.voltage_setpoint_readback == 10.001
+    assert channel.voltage_request_revision == revision == 1
+    assert [r['request_revision'] for r in scan._plan['rails']] == [1, 1]
+    assert [r['confirmed_vset'] for r in scan._plan['rails']] == [10., 10.]
+
+
+def test_native_late_updates_cannot_publish_into_replaced_plan(module):
+    from threading import Event
+
+    validation = dict(status='running', error='', point_status=['not acquired'])
+    notifications = []
+    scan = NS(_plan=object(), _cancel=Event(), _validation=validation, _gui=lambda action, **kwargs: action(),
+              signalComm=NS(scanUpdateSignal=NS(emit=notifications.append)))
+    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, lambda *args: None)
+    adapter._bind()
+    scan._plan = object()
+    with pytest.raises(RuntimeError, match='plan was replaced'):
+        adapter._apply_updates(dict(state='finished', status='completed', error='', updates=[]))
+    assert scan._validation is validation
+    assert validation == dict(status='running', error='', point_status=['not acquired'])
+    assert not notifications
+
+
+@pytest.mark.parametrize('replacement', ['plan', 'cancel'])
+@pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
+def test_native_late_finish_cannot_overwrite_replacement(module, monkeypatch, replacement, transport_error):
+    from threading import Event
+    import numpy as np
+
+    notifications = []
+    initial_plan = {'metadata': {'initial': True}}
+    scan = NS(_plan=initial_plan, _cancel=Event(), scan_status='Original running',
+              _validation=dict(status='running', error='', point_status=['not acquired']),
+              outputChannels=[NS(recordingData=np.full(1, np.nan))],
+              signalComm=NS(updateRecordingSignal=NS(emit=lambda value: notifications.append(('recording', value))),
+                            scanUpdateSignal=NS(emit=lambda value: notifications.append(('update', value)))))
+    new_plan = {'metadata': {'replacement': True}}
+    new_validation = dict(status='running', error='', point_status=['not acquired'])
+    new_data = np.asarray([222.])
+    queued = []
+    def gui(action, **kwargs):
+        assert kwargs == {'cancel': False}
+        queued.append(action.__name__)
+        if replacement == 'plan':
+            scan._plan = new_plan
+        else:
+            scan._cancel = Event()
+            initial_plan['metadata'] = {'replacement': True}
+        scan._validation = new_validation
+        scan.outputChannels = [NS(recordingData=new_data)]
+        scan.scan_status = 'Replacement running'
+        return action()
+    scan._gui = gui
+    failure = TimeoutError('Original worker transport deadline expired.')
+    def unavailable(*args):
+        raise failure
+    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable)
+    adapter._bind()
+    monkeypatch.setattr(adapter, 'start', adapter._running.set)
+    monkeypatch.setattr(adapter, 'step', adapter._running.clear)
+    def export_result():
+        if transport_error:
+            raise failure
+        return dict(data=[99.], metadata={'original_result': True},
+                    validation=dict(status='completed', error='', point_status=['acquired']))
+    monkeypatch.setattr(adapter, 'export_result', export_result)
+    if transport_error:
+        with pytest.raises(TimeoutError, match='Original worker transport deadline expired'):
+            adapter.run()
+    else:
+        with pytest.raises(RuntimeError, match='replaced'):
+            adapter.run()
+    assert queued == ['finish']
+    assert scan._validation is new_validation
+    assert new_validation == dict(status='running', error='', point_status=['not acquired'])
+    assert scan.outputChannels[0].recordingData is new_data and new_data.tolist() == [222.]
+    assert scan._plan['metadata'] == {'replacement': True}
+    assert scan.scan_status == 'Replacement running'
+    assert not notifications
+
+
+@pytest.mark.parametrize('replacement', ['plan', 'cancel', 'worker', 'all'])
+@pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
+def test_native_old_finally_only_retires_its_worker(module, monkeypatch, tmp_path, replacement, transport_error):
+    from threading import Event
+
+    events, errors = [], []
+    original_plan, original_cancel = object(), Event()
+    validation = dict(status='running', error='', point_status=['not acquired'])
+    new_validation = dict(status='running', error='', point_status=['not acquired'])
+    replacement_plan, replacement_cancel = object(), Event()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Never close the replacement worker or run the Python reference.')
+    new_worker = NS(close=forbidden)
+    old_worker = NS(closed=False, call_method=forbidden)
+    def close(**kwargs):
+        assert kwargs == {'grace_s': 0}
+        old_worker.closed = True
+        events.append(('close', 'original'))
+    old_worker.close = close
+    scan = NS(_plan=original_plan, _cancel=original_cancel, _native_worker=None, _validation=validation,
+              pluginManager=NS(Settings=NS(dataPath=tmp_path)), _run_scan_python_reference=forbidden,
+              _bridge=NS(status=NS(emit=lambda value: events.append(('status', value)))),
+              signalComm=NS(updateRecordingSignal=NS(emit=lambda value: events.append(('recording', value))),
+                            scanUpdateSignal=NS(emit=lambda value: events.append(('update', value)))),
+              print=lambda text, flag: errors.append((text, flag)))
+    publications = []
+    def gui(action, **kwargs):
+        assert kwargs == {'cancel': False}
+        if old_worker.closed:
+            # Replace while the final callback is queued, not before its GUI guard.
+            publications.append(action.__name__)
+            if replacement in ('plan', 'all'):
+                scan._plan = replacement_plan
+            if replacement in ('cancel', 'all'):
+                scan._cancel = replacement_cancel
+            if replacement in ('worker', 'all'):
+                scan._native_worker = new_worker
+            scan._validation = new_validation
+        return action()
+    scan._gui = gui
+    scan._queue_completion = lambda action: scan._gui(action, cancel=False)
+    class Adapter:
+        def __init__(self, owner, rpc, *, emit_completion):
+            assert owner is scan and rpc is old_worker.call_method and emit_completion is False
+        def run(self):
+            if transport_error:
+                raise TimeoutError('Original worker expired.')
+            validation['status'] = 'completed'
+    runtimes = {'_native_worker': NS(NativeWorkerProxy=lambda *args, **kwargs: old_worker),
+                '_native_scan': NS(NativeScanAdapter=Adapter)}
+    monkeypatch.setattr(module, '_load_native_runtime', runtimes.__getitem__)
+    module.MScan.runScan(scan, lambda: True)
+    assert publications == ['finish']
+    assert old_worker.closed and events == [('close', 'original')]
+    assert not errors
+    assert scan._validation is new_validation
+    assert new_validation == dict(status='running', error='', point_status=['not acquired'])
+    assert scan._native_worker is (new_worker if replacement in ('worker', 'all') else None)
+    assert scan._plan is (replacement_plan if replacement in ('plan', 'all') else original_plan)
+    assert scan._cancel is (replacement_cancel if replacement in ('cancel', 'all') else original_cancel)
+
+
+@pytest.mark.parametrize('replacement', ['plan', 'cancel'])
+@pytest.mark.parametrize('dispatch', ['bind', 'snapshot', 'command', 'updates'])
+def test_native_adapter_rejects_replaced_origin_before_dispatch(module, replacement, dispatch):
+    from threading import Event
+
+    notifications = []
+    original_plan, original_cancel = {'metadata': {'original': True}}, Event()
+    validation = dict(status='running', error='', point_status=['not acquired'])
+    scan = NS(_plan=original_plan, _cancel=original_cancel, _validation=validation,
+              _gui=lambda action, **kwargs: action(),
+              signalComm=NS(scanUpdateSignal=NS(emit=notifications.append)))
+    def forbidden(*args):
+        raise AssertionError('A replaced session must not read hardware, execute RPCs or publish data.')
+    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden)
+    if dispatch != 'bind':
+        adapter._bind()
+    replacement_plan, replacement_cancel = object(), Event()
+    def replace():
+        if replacement == 'plan':
+            scan._plan = replacement_plan
+        else:
+            scan._cancel = replacement_cancel
+    def gui(action, **kwargs):
+        replace()  # Replacement occurs after queueing, before channel access.
+        return action()
+    scan._gui = gui
+    if dispatch == 'bind':
+        replace()
+    callbacks = {'bind': adapter._bind, 'snapshot': adapter.snapshot,
+                 'command': lambda: scan._gui(lambda: adapter._command_on_gui({})),
+                 'updates': lambda: adapter._apply_updates({})}
+    with pytest.raises(RuntimeError, match='replaced'):
+        callbacks[dispatch]()
+    assert scan._validation is validation and validation['status'] == 'running'
+    assert original_plan == {'metadata': {'original': True}}
+    assert not notifications
+    adapter.cancel()
+    assert original_cancel.is_set() and not replacement_cancel.is_set()
+    assert adapter._plan is (None if dispatch == 'bind' else original_plan)
+
+
+@pytest.mark.parametrize('replacement', ['plan', 'cancel', 'worker', 'all'])
+def test_native_worker_startup_cannot_claim_replaced_session(module, monkeypatch, tmp_path, replacement):
+    from threading import Event
+
+    events, errors = [], []
+    original_plan, original_cancel = object(), Event()
+    replacement_plan, replacement_cancel = object(), Event()
+    new_validation = dict(status='running', error='', point_status=['not acquired'])
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Do not adopt the replacement session, close its worker or fall back to Python.')
+    new_worker = NS(close=forbidden)
+    worker = NS(call_method=forbidden, close=lambda **kwargs: events.append(('close', kwargs)))
+    scan = NS(_plan=original_plan, _cancel=original_cancel, _native_worker=None,
+              _validation=dict(status='running', error='', point_status=['not acquired']),
+              pluginManager=NS(Settings=NS(dataPath=tmp_path)), _run_scan_python_reference=forbidden,
+              _gui=lambda action, **kwargs: action(),
+              _bridge=NS(status=NS(emit=lambda value: events.append(('status', value)))),
+              signalComm=NS(updateRecordingSignal=NS(emit=lambda value: events.append(('recording', value))),
+                            scanUpdateSignal=NS(emit=lambda value: events.append(('update', value)))),
+              print=lambda text, flag: errors.append((text, flag)))
+    scan._queue_completion = lambda action: scan._gui(action, cancel=False)
+    def startup(*args, **kwargs):
+        if replacement in ('plan', 'all'):
+            scan._plan = replacement_plan
+        if replacement in ('cancel', 'all'):
+            scan._cancel = replacement_cancel
+        if replacement in ('worker', 'all'):
+            scan._native_worker = new_worker
+        scan._validation = new_validation
+        return worker
+    loaded = []
+    def runtime(name):
+        loaded.append(name)
+        assert name == '_native_worker', 'A replaced startup must not construct or bind an adapter.'
+        return NS(NativeWorkerProxy=startup)
+    monkeypatch.setattr(module, '_load_native_runtime', runtime)
+    module.MScan.runScan(scan, lambda: True)
+    assert loaded == ['_native_worker']
+    assert events == [('close', {'grace_s': 0})] and not errors
+    assert scan._validation is new_validation
+    assert new_validation == dict(status='running', error='', point_status=['not acquired'])
+    assert scan._native_worker is (new_worker if replacement in ('worker', 'all') else None)
+    assert scan._plan is (replacement_plan if replacement in ('plan', 'all') else original_plan)
+    assert scan._cancel is (replacement_cancel if replacement in ('cancel', 'all') else original_cancel)
+    assert not replacement_cancel.is_set()
+
+
+def test_native_cancel_during_startup_completes_only_after_close(module, monkeypatch, tmp_path):
+    from threading import Event
+
+    events, closed = [], []
+    scan = NS(_plan=object(), _cancel=Event(), _native_worker=None,
+              _validation=dict(status='running', error='', point_status=['not acquired']),
+              pluginManager=NS(Settings=NS(dataPath=tmp_path)), _gui=lambda action, **kwargs: action())
+    scan._queue_completion = lambda action: scan._gui(action, cancel=False)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('A stopped startup must not run an adapter or the Python reference.')
+    def emit(kind, value):
+        assert closed and scan._native_worker is None
+        events.append((kind, value))
+    scan._bridge = NS(status=NS(emit=lambda value: emit('status', value)))
+    scan.signalComm = NS(updateRecordingSignal=NS(emit=lambda value: emit('recording', value)),
+                         scanUpdateSignal=NS(emit=lambda value: emit('update', value)))
+    scan.print = forbidden
+    worker = NS(call_method=forbidden, close=lambda **kwargs: closed.append(kwargs))
+    def startup(*args, **kwargs):
+        scan._cancel.set()
+        return worker
+    def runtime(name):
+        assert name == '_native_worker'
+        return NS(NativeWorkerProxy=startup)
+    monkeypatch.setattr(module, '_load_native_runtime', runtime)
+    module.MScan.runScan(scan, lambda: True)
+    assert closed == [{'grace_s': 0}]
+    assert events == [('status', 'Stopped: Scan stopped before native start.'),
+                      ('recording', False), ('update', True)]
+    assert scan._validation['point_status'] == ['stopped']
+
+
+def test_native_transport_exception_survives_unavailable_gui(module, monkeypatch):
+    from threading import Event
+
+    failure = TimeoutError('Original native transport deadline expired.')
+    validation = dict(status='running', error='', point_status=['not acquired'])
+    scan = NS(_plan={}, _cancel=Event(), _validation=validation)
+    def unavailable(*args):
+        raise failure
+    def gui(action, **kwargs):
+        raise RuntimeError('Qt response timed out before publication.')
+    scan._gui = gui
+    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable)
+    adapter._bind()
+    monkeypatch.setattr(adapter, 'start', unavailable)
+    with pytest.raises(TimeoutError) as caught:
+        adapter.run()
+    assert caught.value is failure
+    assert scan._validation is validation and validation['status'] == 'running'
+    assert not adapter._running.is_set()
+
+
+@pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
+def test_native_failed_close_never_announces_reaped_or_done(module, monkeypatch, tmp_path, transport_error):
+    from threading import Event
+
+    events, publications = [], []
+    failure = TimeoutError('Native worker reap was not confirmed.')
+    scan = NS(_plan=object(), _cancel=Event(), _native_worker=None,
+              _validation=dict(status='running', error='', point_status=['not acquired']),
+              pluginManager=NS(Settings=NS(dataPath=tmp_path)))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Failed close must not log a final outcome, emit done or use the reference.')
+    scan.print = forbidden
+    scan._queue_completion = forbidden
+    scan._bridge = NS(status=NS(emit=forbidden))
+    scan.signalComm = NS(updateRecordingSignal=NS(emit=forbidden), scanUpdateSignal=NS(emit=forbidden))
+    def gui(action, **kwargs):
+        publications.append(action.__name__)
+        return action()
+    scan._gui = gui
+    def close(**kwargs):
+        assert kwargs == {'grace_s': 0}
+        events.append('close-failed')
+        raise failure
+    worker = NS(call_method=forbidden, close=close)
+    class Adapter:
+        def __init__(self, owner, rpc, *, emit_completion):
+            assert owner is scan and rpc is worker.call_method and emit_completion is False
+        def run(self):
+            if transport_error:
+                raise TimeoutError('Original transport expired.')
+            scan._validation['status'] = 'completed'
+    runtimes = {'_native_worker': NS(NativeWorkerProxy=lambda *args, **kwargs: worker),
+                '_native_scan': NS(NativeScanAdapter=Adapter)}
+    monkeypatch.setattr(module, '_load_native_runtime', runtimes.__getitem__)
+    with pytest.raises(TimeoutError) as caught:
+        module.MScan.runScan(scan, lambda: True)
+    assert caught.value is failure
+    assert publications == ['claim'] and events == ['close-failed']
+    assert scan._native_worker is worker
+
+
+@pytest.mark.parametrize('replacement', ['current', 'plan', 'cancel', 'worker', 'all'])
+def test_native_delayed_completion_only_publishes_current_session(module, monkeypatch, tmp_path, replacement):
+    from threading import Event
+
+    events, queued = [], []
+    original_plan, original_cancel = object(), Event()
+    validation = dict(status='running', error='', point_status=['not acquired'])
+    new_validation = dict(status='running', error='', point_status=['not acquired'])
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Do not close a replacement worker, log an error or use the reference.')
+    worker = NS(closed=False, call_method=forbidden)
+    def close(**kwargs):
+        assert kwargs == {'grace_s': 0}
+        worker.closed = True
+        events.append(('close', 'original'))
+    worker.close = close
+    new_worker = NS(close=forbidden)
+    scan = NS(_plan=original_plan, _cancel=original_cancel, _native_worker=None, _validation=validation,
+              pluginManager=NS(Settings=NS(dataPath=tmp_path)), print=forbidden,
+              _run_scan_python_reference=forbidden, _gui=lambda action, **kwargs: action())
+    scan._queue_completion = lambda action: module.MScan._queue_completion(scan, action)
+    def emit(kind, value):
+        assert worker.closed and scan._native_worker is None
+        events.append((kind, value))
+    scan._bridge = NS(thread=lambda: object(), request=NS(emit=queued.append),
+                      status=NS(emit=lambda value: emit('status', value)))
+    scan.signalComm = NS(updateRecordingSignal=NS(emit=lambda value: emit('recording', value)),
+                         scanUpdateSignal=NS(emit=lambda value: emit('update', value)))
+    class Adapter:
+        def __init__(self, owner, rpc, *, emit_completion):
+            assert owner is scan and rpc is worker.call_method and emit_completion is False
+        def run(self):
+            validation['status'] = 'completed'
+    runtimes = {'_native_worker': NS(NativeWorkerProxy=lambda *args, **kwargs: worker),
+                '_native_scan': NS(NativeScanAdapter=Adapter)}
+    monkeypatch.setattr(module, '_load_native_runtime', runtimes.__getitem__)
+    module.MScan.runScan(scan, lambda: True)
+    assert events == [('close', 'original')]
+    assert worker.closed and scan._native_worker is worker
+    assert len(queued) == 1
+    call = queued[0]
+    assert call.action.__name__ == 'finish' and call.cancel is None and not call.done.is_set()
+    if replacement in ('plan', 'all'):
+        scan._plan = object()
+    if replacement in ('cancel', 'all'):
+        scan._cancel = Event()
+    if replacement in ('worker', 'all'):
+        scan._native_worker = new_worker
+    if replacement != 'current':
+        scan._validation = new_validation
+    # The GUI resumes beyond the normal 5s command deadline. This pure GUI
+    # completion remains queued; its ownership guard runs only on delivery.
+    monkeypatch.setattr(module, 'time', NS(monotonic=lambda: 10.))
+    assert not call.expired.is_set()
+    module._GuiBridge.execute(scan._bridge, call)
+    assert call.done.is_set() and call.error is None
+    if replacement == 'current':
+        assert events == [('close', 'original'), ('status', 'Completed'), ('recording', False), ('update', True)]
+        assert validation['point_status'] == ['completed'] and scan._native_worker is None
+    else:
+        assert events == [('close', 'original')]
+        assert scan._validation is new_validation
+        assert new_validation == dict(status='running', error='', point_status=['not acquired'])
+        assert scan._native_worker is (new_worker if replacement in ('worker', 'all') else None)
+
+
+def test_native_command_dispatch_still_expires_without_late_write(module, monkeypatch):
+    from threading import Event
+
+    queued, writes = [], []
+    scan = NS(_cancel=Event(), _bridge=NS(thread=lambda: object(), request=NS(emit=queued.append)))
+    clock = iter([0., 6.])
+    monkeypatch.setattr(module, 'time', NS(monotonic=lambda: next(clock)))
+    with pytest.raises(module.ScanError, match='Qt response timed out'):
+        module.MScan._gui(scan, lambda: writes.append(70.))
+    assert len(queued) == 1 and queued[0].expired.is_set()
+    module._GuiBridge.execute(scan._bridge, queued[0])
+    assert queued[0].done.is_set() and isinstance(queued[0].error, module.ScanStopped)
+    assert not writes
 
 
 @pytest.mark.parametrize(('scenario', 'scale'), [
@@ -84,7 +651,7 @@ def run(scenario, target, app_holder=None):
     dm.updateStaticPlot = lambda: None
     exports = []
     dm.exportConfiguration = lambda file: exports.append(file)
-    manager.Settings = NS(loading=True, configPath=target / 'config', dependencyPath=ROOT / 'mscan',
+    manager.Settings = NS(loading=True, configPath=target / 'config', dataPath=target, dependencyPath=ROOT / 'mscan',
         sourceCodePath=ROOT / 'mscan/mscan_plugin.py', sessionPath=target,
         measurementNumber=1, getFullSessionPath=lambda: target, saveSettings=lambda **kw: None)
     manager.Settings.configPath.mkdir(exist_ok=True)
@@ -246,6 +813,23 @@ def run(scenario, target, app_holder=None):
             settings_file.write_text(seed, encoding='utf-8-sig' if scenario == 'windows-bom' else 'utf-8')
         calls_before_settings = list(hw.calls)
     scan.initGUI()
+    native_completions, native_saves = [], []
+    if scenario == 'auto-save':
+        native = mscan._load_native_runtime('_native_worker')
+        original_proxy, created = native.NativeWorkerProxy, []
+        class ObservedWorker(original_proxy):
+            def __init__(self, *args, **kwargs):
+                assert 'command' not in kwargs  # Keep the real manifest-verified packaged executable.
+                super().__init__(*args, **kwargs)
+                created.append(self)
+        native.NativeWorkerProxy = ObservedWorker
+        def observe_completion(done):
+            if done:
+                worker = created[-1]
+                native_completions.append((worker._process.poll() is not None,
+                                           worker._closed, scan._native_worker is None))
+        scan.signalComm.scanUpdateSignal.connect(observe_completion)
+        scan.signalComm.saveScanCompleteSignal.connect(lambda: native_saves.append(scan._native_worker is None))
     scan_layout.insertWidget(0, scan.titleBar)
     if scenario.startswith('windows-'):
         if scenario == 'windows-save':
@@ -1059,12 +1643,12 @@ def run(scenario, target, app_holder=None):
         QTest.qWait(30)
         window.grab().save(str(target / 'continuous-ready.png'))
         if scenario == 'continuous-deadline':
-            original = scan._continuous_command
-            def late_callback(amplitude, latest=None, **kwargs):
+            original = scan._command
+            def late_callback(targets, latest=None, **kwargs):
                 if latest is not None:
                     time.sleep(.85)  # Qt callback arrives too late: no stale command permitted.
-                return original(amplitude, latest, **kwargs)
-            scan._continuous_command = late_callback
+                return original(targets, latest=latest, **kwargs)
+            scan._command = late_callback
         QTest.mouseClick(start_button, Qt.MouseButton.LeftButton)
         thread = scan.runThread
         assert thread is not None and start_button.text() == 'Stop scan'
@@ -1270,6 +1854,9 @@ def run(scenario, target, app_holder=None):
         while not scan.finished and time.monotonic() < deadline:
             QTest.qWait(10)
         assert scan.finished and scan.file in exports, (scan.scan_status, exports)
+        assert native_completions == [(True, True, True)], native_completions
+        assert native_saves == [True], native_saves
+        assert exports.count(scan.file) == 1
     print('RESULT', scan._validation, 'HW', hw.calls)
     assert start_button.text() == 'Start scan'
     assert start_button.isEnabled() == (scenario == 'auto-save')  # wait until the file has been saved

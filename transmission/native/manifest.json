@@ -1,0 +1,46 @@
+{
+  "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+  "family": "transmission",
+  "protocol": 1,
+  "source": {
+    "file": "source.zip",
+    "sha256": "67120e535548e18e81884c2989bee19b2158d44a2fb9fae113a60355747a3590",
+    "size_bytes": 535220,
+    "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+    "vendored": false
+  },
+  "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+  "targets": {
+    "linux-x86_64": {
+      "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "features": [
+        "transmission"
+      ],
+      "file": "esibd-transmission-worker",
+      "sha256": "da313b9652ccad9433890f359ce19bc7756219beff588a344c8642475b376d70",
+      "size_bytes": 1170840,
+      "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "windows-x86_64": {
+      "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "features": [
+        "transmission"
+      ],
+      "file": "esibd-transmission-worker.exe",
+      "sha256": "576b661f3f824c3b113113658c88cf92861022dd5583a292fc25caf8e57877f0",
+      "size_bytes": 1159680,
+      "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+      "target": "x86_64-pc-windows-gnu"
+    }
+  },
+  "third_party_notices": {
+    "file": "THIRD_PARTY_NOTICES.txt",
+    "sha256": "502bec6d6f50a0a03297875452bc122c43e67dccd7101a08f598cb6b2926cd5c",
+    "size_bytes": 747548
+  },
+  "validation": "hardware-not-validated",
+  "worker_version": "0.1.0"
+}

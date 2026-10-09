@@ -116,6 +116,8 @@ def rig(module):
         getChannelByName=lambda name: next((c for c in all_channels if c.name.lower() == name.lower()), None))
     scan.pluginManager = manager
     scan._gui = lambda action, **kw: action()
+    # This non-Qt rig executes post-reap notifications synchronously as well.
+    scan._queue_completion = lambda action: scan._gui(action, cancel=False)
     scan._bridge = NS(status=NS(emit=lambda text: setattr(scan, 'scan_status', text)))
     scan.signalComm = NS(scanUpdateSignal=NS(emit=lambda done: None), updateRecordingSignal=NS(emit=lambda value: None))
     scan.print = lambda *a, **kw: None
@@ -143,6 +145,9 @@ def rig(module):
         detector_device.time.data.append(time.time())
         detector.values.data.append(r.current())
     scan._pause = pause
+    # This fixture exercises the retained Python reference only. Native worker
+    # and production entrypoint coverage live in native/worker/tests/mscan_*.rs.
+    scan.runScan = scan._run_scan_python_reference
     detector_device.time.data.append(time.time() - .01)
     detector.values.data.append(40.)
     return r

@@ -2,13 +2,13 @@
 
 Drives AMPR_B high-voltage channels and monitors measured output voltages.
 
-The plugin is self-contained: it embeds the minimal private runtime it needs,
-including the AMPR driver files and vendor DLL.
+The plugin is self-contained: it bundles its native Rust worker, Python GUI
+adapters and reference driver files, and the AMPR vendor DLL.
 
 ## Requirements
 
 - ESIBD Explorer `1.0.2`
-- Windows for real hardware communication
+- Windows x86-64 for real vendor-DLL hardware communication
 - No separate `ESIBD_core` installation is required for the plugin itself
 
 ## Activation
@@ -20,10 +20,25 @@ including the AMPR driver files and vendor DLL.
 4. Restart ESIBD Explorer.
 5. Enable the `AMPR_B` plugin in the Plugin Manager.
 
-The plugin lazily loads its bundled local `vendor/runtime` package under a
-private Python module namespace when communication is initialized. If that
-bundled copy is missing, the plugin fails explicitly because the installation
-is incomplete.
+## Native Worker
+
+Production communication runs in this plugin's separate native Rust process,
+`native/esibd-ampr-worker.exe` (Windows x86-64). The supervisor selects
+that exact plugin-local file from `native/manifest.json` and verifies its
+SHA-256, family and protocol before use. Missing or mismatched files fail
+startup; workers are not searched on PATH.
+
+The Explorer GUI and thin facade adapters remain Python. The older Python
+device implementation is retained as a reference for tests and notebooks,
+not as a production fallback. No external or bundled private Python worker
+interpreter, Explorer fork or separate `ESIBD_core` installation is required.
+Each plugin instance owns its worker; no running worker is shared with siblings.
+
+Worker logs are written under
+`<Explorer data path>/logs/ampr_b/native/ampr/`, never inside the plugin.
+The v0.5 native port has local mock-DLL, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
 
 ## Device Configuration
 
@@ -76,11 +91,15 @@ disables the PSU at once. Such a click never turns the outputs back on.
 
 If the initial port opening fails, shutdown or closing communication cleans
 up that opening without output commands. `Connection pending` stays visible
-until the native opening has ended and closure is confirmed. This is port
+until its port cleanup or worker retirement is confirmed. This is port
 cleanup, not confirmation of the HV output state. The backend and port
-reservation are retained in the meantime; a new ON explicitly reconnects
-after cleanup. A call that never returns or a failed closure may still require
-an Explorer restart. This cleanup does not apply to a timeout during operation.
+reservation are retained until cleanup or worker retirement; a new ON explicitly
+reconnects afterwards. Failed-Open cleanup is not used for an operational timeout.
+Crashes or hung DLL calls are isolated to this plugin's worker. OFF/close can
+cancel, terminate and reap it without stopping other workers; a fresh explicit
+ON then creates a new worker without an Explorer restart or replay of old writes.
+Worker termination proves neither hardware OFF nor electrical discharge: use
+the hardware interlock/front panel when shutdown cannot be verified.
 If Open succeeds after a close request, normal verified shutdown runs instead
 of completing initialization.
 
@@ -92,4 +111,4 @@ A confirmed OFF does not certify complete electrical discharge.
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `ampr_b/` directory
-together, including the embedded `vendor/` subtree.
+together, including the bundled `vendor/` and `native/` subtrees.

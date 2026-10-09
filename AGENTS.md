@@ -6,7 +6,7 @@ One plugin per device, plus standalone scan plugins.
 
 15 standalone plugin folders: `ampr_a`, `ampr_b`, `amx_a`, `amx_b`, `amx_hd`, `dmmr`, `esi`, `mscan`, `psu_a`, `psu_b`, `psu_c`, `psu_d`, `psu_e`, `tpg366`, `transmission`.
 
-The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, device-specific vendor headers/DLLs, and `vendor/runtime/error_codes.json`. `mscan` is a scan, with its own entrypoint, icon and LICENSE; no runtime, DLL or catalog. `tpg366` is a USB pressure device with its own `_runtime/_tpg366.py` ASCII protocol, icons and LICENSE; no vendor DLL or error catalog. `transmission` is a scan (MIT license) with its private `_runtime/` package (`_engine.py` optimizer, `_simulator.py` simulated beamline, `_beamline.py` simple-settings builder, `_log.py` JSON Lines logs written to `<Explorer data path>/logs/transmission/`); it drives other plugins' channels only through Explorer and imports none of them.
+All 15 folders own `native/` binaries, a hash manifest, source archive and third-party notices, plus a private Python native-worker supervisor. The 12 DLL-backed device folders also own their entrypoint, icons, Python facade/reference runtime, device-specific vendor headers/DLLs, and `vendor/runtime/error_codes.json`. `mscan` has its own `_runtime/_native_scan.py` action adapter, icon and GPL LICENSE; no DLL or catalog. `tpg366` has `_runtime/_native_link.py`, a reference `_tpg366.py` ASCII protocol, icons and GPL LICENSE; no vendor DLL or catalog. `transmission` (MIT) has `_runtime/_native_engine.py`, reference/configuration `_engine.py`, `_simulator.py`, `_beamline.py` and `_log.py`; it drives other plugins' channels only through Explorer and imports none of them.
 
 ## Architecture
 
@@ -14,6 +14,10 @@ The 12 DLL-backed device folders own their entrypoint, icons, bundled runtime, d
 - Bundled runtimes load privately through `importlib.util.spec_from_file_location` into `_esibd_bundled_*` modules.
 - Loader code registers those modules in `sys.modules` and does not mutate `sys.path`.
 - Missing bundled runtime raises `ModuleNotFoundError`.
+- Production communications/scan engines use one Rust process per active plugin. Never fall back to inline DLLs, Python workers, a shared daemon or an external interpreter. Python remains for Explorer GUI/channel adapters and explicit reference/notebook tests.
+- A dead or hung native worker must be stoppable and reconnectable independently. Reaping a process never confirms hardware OFF or discharge; retain the warning and invalid readings.
+- `native/` is build-time shared Rust source only. Deploy one family feature per executable. No tests run on GitHub.
+- Generate/check ABI and error-catalog copies with `python3 tools/generate_native_abi.py`; sync the private Python supervisor with `python3 tools/sync_native_sources.py`. Family sync also copies plugin-local `native/` assets.
 
 ## Parity canonicals
 
@@ -66,6 +70,10 @@ python3 -m pytest -q --all-siblings   # release validation
 python3 -m pytest -q tests/test_plugin_family_parity.py
 python3 -m pytest -q 'tests/test_plugin_family_parity.py::test_sibling_family_matches_canonical[amx]'
 ESIBD_RELEASE_ZIP=/path/to/file.zip python3 -m pytest -q tests/test_release_archive_integrity.py
+cargo test --locked --offline --manifest-path native/Cargo.toml --features test-backend
+python3 tools/generate_native_abi.py --check
+python3 tools/sync_native_sources.py --check
+python3 tools/build_native_workers.py --check
 ```
 
 Real-Explorer tests validate the installed host only; the plugins target Explorer
@@ -80,6 +88,8 @@ Real-Explorer tests validate the installed host only; the plugins target Explore
 - If no root release ZIP exists, the archive test skips.
 - Top-level ZIP entries must be exactly the 15 plugin folders.
 - Do not ship `README.md`, `tests/`, `__pycache__/`, `logs/`, `.pyc`, or `.gitignore`.
+- Native binaries, manifests, corresponding sources and license notices must be tracked and validated before building. Do not stage the user's work just to test packaging; use an isolated temporary checkout.
+- MScan/TPG366 source archives include vendored corresponding build dependencies. Preserve per-component licenses, including MPL-2.0 serialport, rather than relabeling the worker tree as a blanket MIT work.
 
 ## Stale claims to avoid
 

@@ -14,11 +14,12 @@ import time
 import types
 
 import pytest
+from conftest import PLUGIN_SPECS
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_ENTRYPOINTS = sorted(
-    path for path in ROOT.glob("*/*_plugin.py")
-    if path.parent.name not in {"mscan", "transmission"}
+    ROOT / spec.folder / spec.entrypoint for spec in PLUGIN_SPECS
+    if spec.folder not in {"mscan", "transmission"}
 )
 START, END = "# ---- crash resume: identical", "# ---- end crash resume ----"
 
@@ -187,14 +188,16 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
     channels.extend([hv1, hv2, heat])
     controller = module.ESIController(parent)
     emitted = []
-    controller.signalComm = types.SimpleNamespace(initCompleteSignal=types.SimpleNamespace(emit=lambda: emitted.append(1)))
+    controller.signalComm = types.SimpleNamespace(
+        initializationReady=types.SimpleNamespace(emit=lambda ticket: emitted.append(ticket)))
     controller.initializing = True
     controller.resume_session = True
     monkeypatch.setattr(module, "_get_esi_driver_class", lambda: FakeDriver)
 
     controller.runInitialization()
 
-    assert calls == [("connect",), ("identity",), ("diagnostics",), ("configs",)] and emitted == [1]
+    assert calls == [("connect",), ("identity",), ("diagnostics",), ("configs",)]
+    assert emitted == [(controller._connection_generation, controller.device)]
 
     def apply_snapshot(snapshot):
         assert snapshot == {"running": True}
@@ -210,7 +213,7 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
     parent.ensureFixedChannels = lambda **kwargs: None
     parent.isOn = lambda: True
 
-    controller.initComplete()
+    controller.initComplete(emitted[0])
 
     assert (hv1.enabled, hv1.value) == (True, 1000.0) and (hv2.enabled, hv2.value) == (False, 0.0)
     assert (heat.enabled, heat.value) == (False, 90.0)
@@ -281,6 +284,9 @@ def test_ampr_resume_adopts_the_setpoints_it_holds_without_ramp_or_apply():
     controller.device, controller.detected_module_ids, controller.detected_modules_text = object(), [], "2"
     controller.main_state, controller.resume_session, controller._cancel_ramp = "ST_ON", True, False
     controller._initial_open_close_requested = False
+    controller._native_session_token = object()
+    controller._native_initialization_required = True
+    controller._native_initialization_ready = (controller._native_session_token, controller.device)
     controller.initializeValues = lambda reset=False: None
     controller._sync_status_to_gui = lambda **kwargs: None
     controller.startAcquisition = record("startAcquisition")
@@ -290,6 +296,7 @@ def test_ampr_resume_adopts_the_setpoints_it_holds_without_ramp_or_apply():
 
     controller.initComplete()
 
+    assert controller._native_initialization_ready is None
     assert "updateValues" not in record.calls and "toggle" not in record.calls and "transition" not in record.calls
     assert controller.resume_session is True  # Waiting for the first poll's setpoints.
     controller._last_output_targets = {(2, 1): 30.0, (2, 2): 0.0}
@@ -354,6 +361,9 @@ def test_psu_resume_only_connects_and_dmmr_resume_is_a_normal_on():
     controller.controllerParent = types.SimpleNamespace(_sync_channels=lambda: None)
     controller._output_cancel = types.SimpleNamespace(is_set=lambda: False)
     controller.device, controller.resume_session = object(), True
+    controller._native_session_token = object()
+    controller._native_initialization_required = True
+    controller._native_initialization_ready = (controller._native_session_token, controller.device)
     controller.initializeValues = lambda reset=False: None
     controller._set_loaded_config_text = lambda text: None
     controller._sync_status_to_gui = lambda **kwargs: None
@@ -362,6 +372,7 @@ def test_psu_resume_only_connects_and_dmmr_resume_is_a_normal_on():
 
     controller.initComplete()
 
+    assert controller._native_initialization_ready is None
     assert controller.resume_session is False and "nothing was switched" in printed[0]
 
     from test_dmmr_plugin_behavior import _load_module as load_dmmr
@@ -370,9 +381,13 @@ def test_psu_resume_only_connects_and_dmmr_resume_is_a_normal_on():
     controller = module.DMMRController.__new__(module.DMMRController)
     controller._initial_open_close_requested, controller.resume_session = False, True
     controller.device, controller.detected_module_ids = None, []
+    controller._native_session_token = object()
+    controller._native_initialization_required = True
+    controller._native_initialization_ready = (controller._native_session_token, controller.device)
     controller.initializeValues = lambda reset=False: None
     controller._sync_status_to_gui = lambda **kwargs: None
     controller.print = lambda *args, **kwargs: None
     controller.controllerParent = types.SimpleNamespace(isOn=lambda: True)
     controller.initComplete()
+    assert controller._native_initialization_ready is None
     assert controller.resume_session is False  # The DMMR's normal ON follows (measurement only).

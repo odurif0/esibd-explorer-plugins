@@ -1,27 +1,20 @@
 # ESI Plugin
 
 Controls the CGC ESI electrospray source with two HVPS-3kB modules and one
-HEAT-CTRL-2410 heater. The plugin includes its private driver runtime, vendor
-header, and 64-bit Windows DLL.
+HEAT-CTRL-2410 heater. The plugin includes its private Python GUI adapter, vendor
+header, 64-bit Windows DLL and independently supervised Rust worker.
 
 ## Requirements
 
 - ESIBD Explorer `1.0.2` on Windows for hardware communication.
-- A standalone (frozen) Explorer needs **no external Python installation**. The
-  DLL runs in a separate ESI worker using the private 64-bit Python `3.14.8` in
-  `vendor/python/`. This interpreter is launched by its exact plugin-local path;
-  PATH, Microsoft Store aliases and `ESIBD_ESI_WORKER_PYTHON` are not consulted.
-  Keep the complete `esi/` folder: a missing private interpreter refuses connection
-  rather than loading the DLL in Explorer. The official distribution's license and
-  SHA-256 manifest are included. Maintainers can reproduce it with
-  `python3 tools/vendor_esi_python.py /path/to/python-3.14.8-embed-amd64.zip`.
-- A Python-based Explorer runs the DLL in a separate, terminable ESI process using
-  its own interpreter. The worker needs only Python's standard library. Isolation
-  startup failures refuse connection instead of silently loading the DLL inline.
-  A `pythonw.exe` selection is replaced by its sibling `python.exe` (the worker
-  requires standard I/O, but its console window stays hidden). Startup and process
-  failures include the interpreter command, exit status and bounded stderr tail
-  in Explorer's log; handled startup exceptions also retain their traceback.
+- Standalone and Python-based Explorer use the same plugin-local native worker,
+  with **no external or private Python interpreter**. Keep `native/manifest.json`,
+  `native/esibd-esi-worker.exe`, sources, notices and the bundled DLL together.
+  The launcher verifies the binary SHA-256 before starting it. Missing, modified,
+  wrong-family or incompatible workers refuse connection; they never load a DLL
+  inline or fall back to a host launcher, PATH or Microsoft Store alias.
+  Startup/process errors include the executable, exit status and bounded stderr
+  tail. No Rust toolchain is needed on the instrument PC.
 - CGC ESI controller with HEAT-CTRL-2410 at address 0 and HVPS-3kB modules at
   addresses 1 and 2.
 - Controller firmware `0x0100` dated July 13, 2026, with the matching July 14
@@ -37,10 +30,16 @@ header, and 64-bit Windows DLL.
 
 No notebook or JSON report is required to enable or use the plugin.
 
-Driver logs are written to `<Explorer data path>/logs/esi/`, not the plugin
-folder. The selected directory is reported in Explorer's log at connection.
-The per-device log rotates at 1 MB with three backups. Existing logs are not
-moved or deleted. Notebook experiment reports keep their explicit output paths.
+The v0.5 native port has local mock-DLL, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
+
+Worker logs are written to `<Explorer data path>/logs/esi/native/esi/`, not the
+plugin folder. The selected base directory is reported at connection. Each
+connection has a JSON Lines log capped at 8 MiB, containing requests, DLL-call
+entry/exit timings, progress, errors and worker termination. Existing logs are
+not moved or deleted. Notebook reference-driver logs and experiment reports keep
+their explicit output paths.
 
 Initialization checks the controller type (`0x8ED6`) and module inventory:
 `ESI_HEAT` at address 0 (`0xDB1C`), and `ESI_HV1` / `ESI_HV2` at addresses 1 / 2
@@ -193,8 +192,8 @@ Local OFF disables and verifies module 0, then zeros and reads back its target,
 without stopping the HV modules. Zero temperature alone is not proof of OFF.
 Global OFF and configuration loading also require confirmed heater deactivation;
 a failure leaves output shutdown unconfirmed. The Explorer plugin attempts to
-release communication so ESI can be reconnected independently. A poisoned inline
-transport retains its owner: closing beside an outstanding native call is unsafe.
+release its native worker so ESI can be reconnected independently. There is no
+inline DLL transport in the Explorer plugin.
 Notebook drivers retain their inline owner's reservation when shutdown cannot be
 verified.
 
@@ -216,6 +215,13 @@ If port opening or a later DLL call blocks or crashes,
 the ESI worker is terminated and its COM handle is released. This affects ESI only.
 OFF and the communication close action can also terminate an in-flight command.
 A new ON explicitly creates a fresh worker.
+
+Startup has a 30 s process budget. The normal DLL-call budget is the configured
+I/O timeout (5 s by default); DLL entry/exit telemetry lets the parent watchdog
+identify the blocked export even inside a longer initialization, ramp or discharge
+operation. Multi-call operations also have a separate overall deadline. These are
+upper bounds, not fixed waits or guarantees that hardware settles within them.
+Cancellation/termination does not undo a write already accepted by the device.
 
 Queued commands are cancelled, and a late result cannot reactivate
 the UI or a replacement connection. Failed activations are never replayed.
@@ -443,4 +449,7 @@ ESI-Controller.exe 16 -xs ESI-current-before.cfg -t
 ## Portability
 
 To copy this plugin to another machine, keep the whole `esi/` directory
-together, including the embedded `vendor/` subtree.
+together, including `vendor/` and `native/`. The old private Python distribution
+is not needed or shipped. Python notebook drivers remain explicit reference tools,
+not a fallback for Explorer. See [RUST_MIGRATION.md](../RUST_MIGRATION.md) for the
+separate mock, host, Wine and physical-hardware validation gates.

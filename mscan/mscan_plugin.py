@@ -11,10 +11,12 @@ from bisect import bisect_right
 from collections import deque
 import configparser
 import contextlib
+import importlib.util
 import json
 import math
 from pathlib import Path
 from threading import Event
+import sys
 import time
 from typing import Any, Callable
 
@@ -25,6 +27,25 @@ from PyQt6.QtWidgets import QAbstractSpinBox, QComboBox, QFileDialog, QHeaderVie
 
 from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
+
+
+def _load_native_runtime(part):
+    path = Path(__file__).resolve().parent / "_runtime" / f"{part}.py"
+    if not path.is_file():
+        raise ModuleNotFoundError(f"Missing bundled MScan native adapter: {path}")
+    name = f"_esibd_bundled_mscan{part}"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ModuleNotFoundError(f"Cannot load bundled MScan native adapter: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    return sys.modules[name]
 
 
 def providePlugins():
@@ -1662,6 +1683,14 @@ class MScan(Scan):
             raise call.error
         return call.result
 
+    def _queue_completion(self, action):
+        # Only post-reap GUI completion uses this queue, never hardware commands.
+        call = _Call(action, None)
+        if QThread.currentThread() == self._bridge.thread():
+            self._bridge.execute(call)
+        else:
+            self._bridge.request.emit(call)
+
     def _pause(self, seconds=None):
         if self._cancel.wait(self.POLL_S if seconds is None else max(0., seconds)):
             raise ScanStopped('Scan stopped.')
@@ -1841,7 +1870,8 @@ class MScan(Scan):
                 except Exception:
                     pass  # retain the original failure; no fabricated replacement samples
 
-    def runScan(self, recording):
+    def _run_scan_python_reference(self, recording):
+        """Retained reference for cross-language tests, never a production fallback."""
         validation = self._validation
         try:
             p = self._plan
@@ -1850,9 +1880,10 @@ class MScan(Scan):
                 self._run_continuous(steps)
             else:
                 self._run_stepped(steps)
-            self._bridge.status.emit('Returning to initial PSU setpoints' + (' and offset' if p.get('offset') else ''))
+            self._bridge.status.emit('Returning to initial PSU setpoints' +
+                                     (' and offset' if p.get('offset') else ''))
             self._gui(lambda: self._command([r['initial'] for r in p['rails']],
-                                            offset=p['offset']['initial'] if p.get('offset') else None))
+                                           offset=p['offset']['initial'] if p.get('offset') else None))
             self._settle(p['wait'])
             validation['status'] = 'completed'
         except ScanStopped as exc:
@@ -1865,10 +1896,59 @@ class MScan(Scan):
                 if status == 'not acquired':
                     validation['point_status'][index] = validation['status']
                     break
-            self._bridge.status.emit(validation['status'].capitalize() + (': ' + validation['error'] if validation['error'] else ''))
-            # Stop/error never restores, re-enables or queues another voltage.
+            self._bridge.status.emit(validation['status'].capitalize() +
+                                     (': ' + validation['error'] if validation['error'] else ''))
             self.signalComm.updateRecordingSignal.emit(False)
             self.signalComm.scanUpdateSignal.emit(True)
+
+    def runScan(self, recording):
+        origin_plan, origin_cancel = self._plan, self._cancel
+        worker = None
+        failure = None
+        try:
+            worker = _load_native_runtime("_native_worker").NativeWorkerProxy(
+                Path(__file__).resolve().parent, "mscan", {},
+                log_dir=Path(self.pluginManager.Settings.dataPath) / "logs" / "mscan")
+            def claim():
+                if self._plan is not origin_plan or self._cancel is not origin_cancel:
+                    raise ScanStopped('MScan session was replaced during native worker startup.')
+                if getattr(self, '_native_worker', None) is not None:
+                    raise ScanStopped('Native MScan worker was replaced during startup.')
+                self._native_worker = worker
+                if origin_cancel.is_set():
+                    raise ScanStopped('Scan stopped before native start.')
+                return _load_native_runtime("_native_scan").NativeScanAdapter(
+                    self, worker.call_method, emit_completion=False)
+            adapter = self._gui(claim, cancel=False)
+            adapter.run()
+        except ScanStopped as exc:
+            failure = ('stopped', str(exc))
+        except Exception as exc:
+            failure = ('error', str(exc))
+        finally:
+            if worker is not None:
+                worker.close(grace_s=0)
+            def finish():
+                owns_worker = getattr(self, '_native_worker', None) is worker
+                if owns_worker:
+                    self._native_worker = None
+                if not owns_worker or self._plan is not origin_plan or self._cancel is not origin_cancel:
+                    return
+                validation = self._validation
+                if failure is not None:
+                    validation['status'], validation['error'] = failure
+                if validation['status'] == 'error':
+                    self.print(f'Scan aborted: {validation["error"]}', flag=PRINT.ERROR)
+                for index, status in enumerate(validation['point_status']):
+                    if status == 'not acquired':
+                        validation['point_status'][index] = validation['status']
+                        break
+                self._bridge.status.emit(validation['status'].capitalize() +
+                                         (': ' + validation['error'] if validation['error'] else ''))
+                # Stop/error never restores, re-enables or queues another voltage.
+                self.signalComm.updateRecordingSignal.emit(False)
+                self.signalComm.scanUpdateSignal.emit(True)
+            self._queue_completion(finish)
 
     @property
     def recording(self):
@@ -1879,6 +1959,9 @@ class MScan(Scan):
         # DeviceManager also stops scans through this property (not the button).
         if not value:
             self._cancel.set()
+            worker = getattr(self, "_native_worker", None)
+            if worker is not None:
+                worker.cancel()
         Scan.recording.fset(self, value)
 
     @property
@@ -1911,6 +1994,9 @@ class MScan(Scan):
 
     def close(self):
         self._cancel.set()
+        worker = getattr(self, "_native_worker", None)
+        if worker is not None:
+            worker.close(grace_s=0)
         return super().close()
 
     def closeGUI(self):

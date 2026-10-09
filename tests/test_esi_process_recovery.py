@@ -1,6 +1,8 @@
-"""Real ESI worker processes, with a fake instrument instead of a Windows DLL."""
+"""Native facade selection and legacy Python-worker fault references."""
 
+import hashlib
 import importlib.util
+import json
 import sys
 import threading
 from pathlib import Path
@@ -57,6 +59,7 @@ class Controller:
 
 @pytest.fixture
 def workers(tmp_path):
+    # Deliberate Python-process reference injection, never a production fallback.
     spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -72,6 +75,26 @@ def workers(tmp_path):
     yield create
     for proxy in created:
         proxy.close()
+
+
+@pytest.fixture
+def legacy_bundle(tmp_path, monkeypatch):
+    """Synthetic legacy bundle: no dependency on retired production Python files."""
+    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    directory = tmp_path / "esi/vendor/python"
+    directory.mkdir(parents=True)
+    files = {}
+    for name in ("python.exe", "python314.dll", "python314.zip", "python314._pth"):
+        data = f"test-only legacy bundle: {name}\n".encode("ascii")
+        (directory / name).write_bytes(data)
+        files[name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    manifest = {"version": "test-only", "files": files,
+                "uncompressed_bytes": sum(file["bytes"] for file in files.values())}
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "esi/vendor/runtime/esi/_process.py"))
+    return module, directory
 
 
 def test_private_worker_roundtrip_bytes_and_native_stdout(workers):
@@ -282,36 +305,49 @@ def test_readback_recovery_resets_consecutive_errors_without_replaying_outputs()
     assert calls == ["read", "read"]
 
 
-def test_frozen_explorer_uses_only_private_python_not_path_or_override(monkeypatch):
-    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def test_frozen_legacy_reference_uses_only_mock_bundle_not_path_or_override(legacy_bundle, monkeypatch):
+    module, directory = legacy_bundle
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", "C:/Python/python.exe")
     monkeypatch.setattr(sys, "executable", "C:/Explorer/ESIBD Explorer.exe")
-    assert module._worker_python() == [str(WORKER.parents[2] / "python/python.exe")]
+    assert module._worker_python() == [str(directory / "python.exe")]
 
 
-def test_frozen_plugin_constructs_isolated_facade_not_inline_dll(monkeypatch, tmp_path):
+def test_frozen_plugin_constructs_native_facade_without_inline_or_external_python(monkeypatch, tmp_path):
     import importlib
+    import subprocess
 
     module = _load_plugin()
     driver = module._get_esi_driver_class()
     process_module = importlib.import_module(driver.__module__.rsplit(".", 1)[0] + "._process")
+    native_module = importlib.import_module(driver.__module__.rsplit(".", 2)[0] + "._native_worker")
     calls, messages, constructed = [], [], []
 
     class FakeProxy:
-        closed = False
+        def __init__(self, plugin_root, family, config, **options):
+            constructed.append((self, plugin_root, family, config, options))
+            self.closed = False
+            self.session = "native-esi-constructor-test"
+            self.identity = {"family": family, "protocol": native_module.PROTOCOL}
+            self._lifecycle = dict.fromkeys(native_module.LIFECYCLE_ATTRIBUTES, False)
+            self._lifecycle.update(_transport_error="", _failed_open_cleanup_outcome=None)
 
-        def __init__(self, **kwargs):
-            constructed.append(kwargs)
+        def lifecycle_attribute(self, name):
+            return self._lifecycle[name]
+
+        def get_attribute(self, name, **kwargs):
+            pytest.fail(f"lifecycle {name} must use the native reply cache, not an RPC")
 
         def call_method(self, name, *args, **kwargs):
             assert controller.device._backend_mode == "process"
             assert name in ("connect", "disconnect")
             calls.append(name)
             if name == "connect":
+                # A failed native Open may retain its partial handle until cleanup.
+                self._lifecycle.update(_open_failed=True, _dll_port_claimed=True)
                 raise RuntimeError("simulated port unavailable")
+            self._lifecycle.update(connected=False, _dll_port_claimed=False,
+                                   _failed_open_released=True)
             return True
 
         def wait_for_idle(self, timeout_s):
@@ -321,17 +357,19 @@ def test_frozen_plugin_constructs_isolated_facade_not_inline_dll(monkeypatch, tm
             self.closed = True
             return True
 
-    def create_proxy(kwargs):
-        assert process_module._worker_python() == [str(WORKER.parents[2] / "python/python.exe")]
-        return FakeProxy(**kwargs)
-
     def unexpected_inline(*args, **kwargs):
         pytest.fail("standalone Explorer must not load the vendor DLL inline")
+
+    def unexpected_python(*args, **kwargs):
+        pytest.fail("native ESI must not construct a Python worker or search for external Python")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", "C:/Explorer/ESIBD Explorer.exe")
     monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", "C:/WindowsApps/python.exe")
-    monkeypatch.setattr(process_module, "ESIProcessProxy", create_proxy)
+    monkeypatch.setattr(native_module, "NativeWorkerProxy", FakeProxy)
+    monkeypatch.setattr(process_module, "ESIProcessProxy", unexpected_python)
+    monkeypatch.setattr(process_module, "_worker_python", unexpected_python)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_python)
     monkeypatch.setattr(driver._PROCESS_CONTROLLER_CLASS, "__init__", unexpected_inline)
     parent = SimpleNamespace(com=16, baudrate=230400, connect_timeout_s=.2,
                              pluginManager=SimpleNamespace(Settings=SimpleNamespace(dataPath=tmp_path)))
@@ -341,27 +379,29 @@ def test_frozen_plugin_constructs_isolated_facade_not_inline_dll(monkeypatch, tm
 
     controller.runInitialization()
 
-    assert len(constructed) == 1 and constructed[0]["com"] == 16
+    assert len(constructed) == 1
+    proxy, plugin_root, family, config, options = constructed[0]
+    assert plugin_root == Path(module.__file__).parent and family == "esi"
+    assert proxy.session and proxy.identity == {"family": "esi", "protocol": native_module.PROTOCOL}
+    assert config["com"] == 16 and config["baudrate"] == 230400
+    assert config["device_id"] == "esi_com16"
+    assert config["log_dir"] == options["log_dir"] == tmp_path / "logs/esi"
+    assert options["startup_timeout_s"] == driver._PROCESS_STARTUP_TIMEOUT_S
     assert calls == ["connect", "disconnect"]
+    assert proxy.closed and proxy.lifecycle_attribute("_failed_open_released")
     assert controller.device is None and not controller.initializing
     assert controller.main_state == "Disconnected"
-    assert sum("plugin's private Python" in message for message in messages) == 1
+    assert sum("plugin-local native Rust worker" in message for message in messages) == 1
+    assert not any("private Python" in message for message in messages)
     assert any("initialization failed on COM16: simulated port unavailable" in message for message in messages)
 
 
 @pytest.mark.parametrize("missing", ["python.exe", "python314.dll", "python314.zip", "python314._pth"])
-def test_incomplete_private_python_fails_without_external_or_inline_fallback(tmp_path, monkeypatch, missing):
+def test_incomplete_legacy_bundle_fails_without_external_or_inline_fallback(legacy_bundle, monkeypatch, missing):
     import shutil
 
-    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    directory = tmp_path / "esi/vendor/python"
-    directory.mkdir(parents=True)
-    for name in ("python.exe", "python314.dll", "python314.zip", "python314._pth"):
-        if name != missing:
-            (directory / name).touch()
-    monkeypatch.setattr(module, "__file__", str(tmp_path / "esi/vendor/runtime/esi/_process.py"))
+    module, directory = legacy_bundle
+    (directory / missing).unlink()
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", str(sys.executable))
     monkeypatch.setattr(shutil, "which", lambda *args: pytest.fail("must not search PATH"))
@@ -477,19 +517,29 @@ def test_cancelled_initialization_does_not_leave_connecting_status():
     assert c.main_state == "Disconnected" and not c.initializing
 
 
-def test_isolation_startup_failure_does_not_fall_back_to_inline(monkeypatch):
+def test_native_startup_failure_does_not_fall_back_to_inline_or_python(monkeypatch):
     import importlib
+    import subprocess
 
     module = _load_plugin()
     driver = module._get_esi_driver_class()
     process_module = importlib.import_module(driver.__module__.rsplit(".", 1)[0] + "._process")
+    native_module = importlib.import_module(driver.__module__.rsplit(".", 2)[0] + "._native_worker")
+
     def fail(*args, **kwargs):
-        raise RuntimeError("no worker interpreter")
-    monkeypatch.setattr(process_module, "ESIProcessProxy", fail)
+        raise RuntimeError("no native worker executable")
+
+    def unexpected_python(*args, **kwargs):
+        pytest.fail("native startup failure must not launch a Python worker")
+
+    monkeypatch.setattr(native_module, "NativeWorkerProxy", fail)
+    monkeypatch.setattr(process_module, "ESIProcessProxy", unexpected_python)
+    monkeypatch.setattr(process_module, "_worker_python", unexpected_python)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_python)
     monkeypatch.setattr(driver._PROCESS_CONTROLLER_CLASS, "__init__",
                         lambda *args, **kwargs: pytest.fail("DLL must not load in Explorer"))
-    with pytest.raises(RuntimeError, match="no worker interpreter"):
-        driver(device_id="esi_test", com=16, process_backend=True)
+    with pytest.raises(RuntimeError, match="no native worker executable"):
+        driver(device_id="esi_test", com=16, native_backend=True)
 
 
 @pytest.mark.parametrize("override", [False, True])

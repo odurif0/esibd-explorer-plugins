@@ -152,6 +152,7 @@ def compare_pair(canonical: PluginSpec, sibling: PluginSpec, root: Path) -> list
     return [
         *compare_sources(plugin_source(root, canonical), plugin_source(root, sibling)),
         *compare_runtime_trees(runtime_root(root, canonical), runtime_root(root, sibling)),
+        *compare_runtime_trees(root / canonical.folder / "native", root / sibling.folder / "native"),
     ]
 
 

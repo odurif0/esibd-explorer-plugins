@@ -2,13 +2,13 @@
 
 Reads DMMR module currents and monitors live picoammeter measurements.
 
-The plugin is self-contained: it embeds the minimal private runtime it needs,
-including the DMMR driver files and vendor DLL.
+The plugin is self-contained: it bundles its native Rust worker, Python GUI
+adapters and reference driver files, and the DMMR vendor DLL.
 
 ## Requirements
 
 - ESIBD Explorer `1.0.2`
-- Windows for real hardware communication
+- Windows x86-64 for real vendor-DLL hardware communication
 - No separate `ESIBD_core` installation is required for the plugin itself
 
 ## Activation
@@ -20,10 +20,25 @@ including the DMMR driver files and vendor DLL.
 4. Restart ESIBD Explorer.
 5. Enable the `DMMR` plugin in the Plugin Manager.
 
-The plugin lazily loads its bundled local `vendor/runtime` package under a
-private Python module namespace when communication is initialized. If that
-bundled copy is missing, the plugin fails explicitly because the installation
-is incomplete.
+## Native Worker
+
+Production communication runs in this plugin's separate native Rust process,
+`native/esibd-dmmr-worker.exe` (Windows x86-64). The supervisor selects
+that exact plugin-local file from `native/manifest.json` and verifies its
+SHA-256, family and protocol before use. Missing or mismatched files fail
+startup; workers are not searched on PATH.
+
+The Explorer GUI and thin facade adapters remain Python. The older Python
+device implementation is retained as a reference for tests and notebooks,
+not as a production fallback. No external or bundled private Python worker
+interpreter, Explorer fork or separate `ESIBD_core` installation is required.
+Each plugin instance owns its worker; no running worker is shared with siblings.
+
+Worker logs are written under
+`<Explorer data path>/logs/dmmr/native/dmmr/`, never inside the plugin.
+The v0.5 native port has local mock-DLL, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
 
 ## Device Configuration
 
@@ -98,15 +113,18 @@ time as before; a range chosen with the mouse is kept.
 ## Startup Diagnostics
 
 If connection fails with the DMMR powered off, power it on and retry. The plugin
-keeps the old attempt until its opening call returns and port closure is confirmed,
+keeps the old attempt until failed-Open cleanup or worker retirement is confirmed,
 then permits a new connection. OFF, Disconnect and Explorer closure clean up only
 that failed opening, without sending acquisition commands. Until closure is
 confirmed, the backend remains reserved and `Connection pending` keeps the button
 ON for another OFF attempt; this does not mean acquisition started. An OFF request
 before the connection worker starts prevents opening; during opening it cancels
-subsequent activation. Only a fresh ON rearms startup. `Disconnected` requires
-confirmed closure of any opened port. A persistently blocked DLL or unconfirmed closure can still require
-restarting Explorer. This recovery never applies to a timeout after opening.
+subsequent activation. Only a fresh ON rearms startup. Failed-Open cleanup is not
+used for a timeout after opening. A crash or hung DLL call is isolated to this
+plugin's worker: OFF/close can cancel, terminate and reap it, leaving other
+workers running. After retirement, a new explicit ON starts a fresh worker
+without restarting Explorer or replaying old writes. Port closure or process
+termination does not confirm that the hardware acquisition gates are OFF.
 
 Each ON attempt captures the native DLL startup exchanges, including failed-start
 cleanup, into `esibd explorer.log` under `[DMMR startup]` / `[DMMR native]`.
@@ -119,10 +137,11 @@ rate before rechecking settings. Configuration writes are never replayed.
 A lost enable ACK still triggers OFF, not another enable. Shutdown has its own
 single recovery attempt and confirms both OFF flags before closing the port.
 
-Capture stops before continuous polling. The raw file in `dmmr/logs/` is reused
-on each attempt and trimmed to 64 KiB after closing. A blocked DLL is never
-closed concurrently: any partial capture is reported, and Explorer must be
-restarted. An unavailable capture is explicitly reported, not silently omitted.
+Capture stops before continuous polling. The raw file
+`<Explorer data path>/logs/dmmr/dmmr_startup_com*.log` is reused on each attempt
+and trimmed to 64 KiB after closing. A blocked DLL is never closed concurrently:
+any partial capture is reported, and the supervisor can retire its worker.
+An unavailable capture is explicitly reported, not silently omitted.
 
 ## Read Errors
 
@@ -133,9 +152,10 @@ A second error before valid replies from all modules, or a fourth incident
 within 60 seconds, stops acquisition. A blocked DLL is never retried or closed
 concurrently. This checks new replies, not fresh ADC conversions.
 
-Keep `dmmr/logs/dmmr_protocol_com*.jsonl*` with the Explorer log. The protocol
-log records clear-on-read port diagnostics before another transaction; it
-rotates at 1 MB with three backups. `−13` alone does not identify automatic mode.
+Keep `<Explorer data path>/logs/dmmr/dmmr_protocol_com*.jsonl*` with the Explorer
+log and native worker logs. The protocol log records clear-on-read port
+diagnostics before another transaction; it rotates at 1 MB with three backups.
+`−13` alone does not identify automatic mode.
 
 ## Optional Zero Check
 
@@ -156,4 +176,4 @@ The notebook lives in `notebooks/`, outside the plugin release ZIP.
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `dmmr/` directory
-together, including the embedded `vendor/` subtree.
+together, including the bundled `vendor/` and `native/` subtrees.
