@@ -551,6 +551,33 @@ def probe(case, output):
             assert [channel.gauge for channel in device.channels] == list(controller.gauges)
             app.processEvents()
             assert device.grab().save(str(Path(output) / "tpg366-cards.png"))
+            wait(lambda: device.time.size >= 6)
+            plot = core.PlotWidget(parentPlugin=None, groupLabel="TPG366")
+            plot.init()
+            plot.finalizeInit()
+            live = device.liveDisplay
+            live.livePlotWidgets = [plot]
+            def draw(**kwargs):
+                live.plotGroup(plot, {device.name: (0, None, 1, device.time.get())}, device.channels, True)
+            live.plot = draw
+            live.recordingAction = SimpleNamespace(state=device.recording)
+            device.liveDisplayActive = lambda: True
+            draw()
+            first = device.channels[0]
+            assert first.plotCurve.name() == "Sample chamber (mbar)"
+            device.toggleRecording(on=False)
+            timeline, values = device.time.get().copy(), first.values.get().copy()
+            editor = panel.cards[id(first)][2]
+            editor.setText("Pressure cell")
+            editor.editingFinished.emit()
+            assert first.plotCurve.name() == "Pressure cell (mbar)"
+            np.testing.assert_array_equal(device.time.get(), timeline)
+            np.testing.assert_array_equal(first.values.get(), values)
+            device.toggleRecording(on=True)
+            editor.setText("Beamline pressure")
+            editor.editingFinished.emit()
+            wait(lambda: first.plotCurve is not None)
+            assert first.plotCurve.name() == "Beamline pressure (mbar)"
         if case in {"render", "export"}:
             wait(lambda: device.time.size >= 6 and all(np.isfinite(ch.values.get()[-2:]).all() for ch in device.channels))
             plot = core.PlotWidget(parentPlugin=None, groupLabel="TPG366")

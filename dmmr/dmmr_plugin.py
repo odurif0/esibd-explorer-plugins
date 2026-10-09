@@ -2579,6 +2579,17 @@ class DMMRChannel(Channel):
     measurement_range = np.nan
     channelParent: DMMRDevice
 
+    @property
+    def legendName(self) -> str:
+        return self.label.strip() or self.name
+
+    def nameChanged(self) -> None:
+        super().nameChanged()
+        self.updateDisplay()  # Explorer only refreshes renamed OUT channels by default.
+
+    def labelChanged(self) -> None:
+        self.updateDisplay()
+
     def getDefaultChannel(self) -> dict[str, dict]:
         self.module: int
 
@@ -2608,6 +2619,7 @@ class DMMRChannel(Channel):
         # Explorer's TEXT widget strips Unicode even on programmatic updates.
         channel[self.LABEL] = parameterDict(
             value="", parameterType=PARAMETERTYPE.LABEL, attr="label",
+            event=self.labelChanged,
             toolTip="Human-readable module label; does not rename recorded channels.",
         )
         channel[self.RANGE_MODE] = parameterDict(

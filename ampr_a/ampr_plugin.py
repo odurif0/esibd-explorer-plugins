@@ -1775,6 +1775,7 @@ class AMPRChannel(Channel):
 
     def nameChanged(self) -> None:
         super().nameChanged()
+        self.updateDisplay()  # Explorer only refreshes renamed OUT channels by default.
         self._log_channel_event(f"Name changed to {self.name!r}.")
 
     def valueChanged(self) -> None:

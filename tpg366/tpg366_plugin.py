@@ -338,6 +338,9 @@ class TPG366(Device):
         if getattr(channel, attribute) != value:
             # Preserve Explorer's original Parameter callbacks and persistence.
             setattr(channel, attribute, value)
+            if attribute == "name":
+                # TEXT parameters only emit their event after edits in their own widget.
+                channel.getParameterByName(channel.NAME).changedEvent()
         self._update_pressure_panel()
 
     def _update_pressure_panel(self):

@@ -1994,6 +1994,10 @@ class ESIChannel(Channel):
     FUNCTION = "Function"
     channelParent: ESIDevice
 
+    def nameChanged(self) -> None:
+        super().nameChanged()
+        self.updateDisplay()  # Explorer only refreshes renamed OUT channels by default.
+
     def getDefaultChannel(self) -> dict[str, dict]:
         self.module: int
         channel = super().getDefaultChannel()

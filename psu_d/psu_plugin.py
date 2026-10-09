@@ -4055,6 +4055,10 @@ class PSUChannel(Channel):
     # Channel.value. Neither housekeeping nor acquisition increments it.
     voltage_request_revision = 0
 
+    def nameChanged(self) -> None:
+        super().nameChanged()
+        self.updateDisplay()  # Explorer only refreshes renamed OUT channels by default.
+
     def getDefaultChannel(self) -> dict[str, dict]:
         self.id: int
         self.output_state: str
