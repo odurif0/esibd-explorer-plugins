@@ -7,6 +7,12 @@ header, and 64-bit Windows DLL.
 ## Requirements
 
 - ESIBD Explorer `1.0.2` on Windows for hardware communication.
+- The Explorer plugin runs its DLL in a separate, terminable ESI process. An
+  installed Python-based Explorer uses its own interpreter. A frozen Explorer
+  needs Python 3.10 or newer (64-bit), found beside Explorer or through `py` /
+  `python` on PATH; `ESIBD_ESI_WORKER_PYTHON` can specify its `python.exe` path.
+  The worker needs only Python's standard library. Isolation startup failures
+  refuse connection instead of silently loading the DLL in Explorer.
 - CGC ESI controller with HEAT-CTRL-2410 at address 0 and HVPS-3kB modules at
   addresses 1 and 2.
 - Controller firmware `0x0100` dated July 13, 2026, with the matching July 14
@@ -166,7 +172,9 @@ experimental temperature criteria, not proof of pressure equilibrium or safety.
 Local OFF disables and verifies module 0, then zeros and reads back its target,
 without stopping the HV modules. Zero temperature alone is not proof of OFF.
 Global OFF and configuration loading also require confirmed heater deactivation;
-a failure prevents port closure and leaves shutdown unconfirmed.
+a failure leaves output shutdown unconfirmed. The Explorer plugin still releases
+communication so ESI can be reconnected independently; notebook drivers retain
+their inline owner's reservation when shutdown cannot be verified.
 
 Advanced voltage/current settings and the existing power setting use `0` to
 retain the device limit (shown as `Keep device limit` for power), not to request
@@ -179,18 +187,20 @@ The target cannot exceed the temperature maximum reported by the device.
 
 ### ON / OFF
 
-ON connects and starts operation according to the selected outputs. Review
-their targets and activation states before switching ON.
+ON connects with all output selections OFF. Review targets before explicitly
+enabling an HV output or the heater.
 
-If the initial port opening fails, OFF or closing communication cleans up
-that opening without attempting an HV shutdown. The state stays
-`Connection pending` while the native Open or Close call is unfinished or closure is not
-confirmed; the backend and port reservation are retained. Confirmed closure
-sets `Disconnected`, without certifying the HV output state; a new ON
-explicitly reconnects. A call that never returns
-or a failed closure may still require an Explorer restart. This cleanup does
-not apply to a timeout during operation. If Open succeeds after a close
-request, normal verified shutdown runs instead of completing initialization.
+If port opening or a later DLL call blocks or crashes, the ESI worker is terminated
+and its COM handle is released. This affects ESI only. OFF and the communication
+close action can also terminate an in-flight command: queued commands are cancelled,
+and a late result cannot reactivate the UI or the replacement connection. A new ON
+explicitly creates a fresh worker; it never replays a failed activation.
+
+After a CGC receive/protocol error (`-7` through `-14`, or `-100`), the next serialized
+I/O operation first uses the manufacturer's `Purge` recovery routine. The failed
+command is not retried. Successful readback resets the consecutive-error count;
+persistent errors close communication. Output requests are logged with their
+module, ON/OFF state and target so future failures can be correlated with HT clicks.
 
 For an established connection, global OFF first disables the outputs, then
 displays `Stopping: checking HV`.
@@ -202,10 +212,13 @@ deadline; a blocked DLL is handled by the transport watchdog.
 The ADC selection is switched and checked for each polarity, old samples are
 discarded, and the data-ready flags must clear then signal a new conversion.
 The initial selections are restored unless the transport is unusable. Invalid
-readings, unproven ADC freshness, a timeout, or a failed port closure leave
-`Shutdown unconfirmed`; the controller is retained and the next click retries
-OFF. The button stays ON during checking or uncertainty so OFF remains
-accessible; this does not mean that an output is confirmed active.
+readings, unproven ADC freshness, a timeout, or a failed port closure leave output
+shutdown unconfirmed. Explorer releases the communication owner anyway and displays
+`Disconnected: shutdown unconfirmed`, with recording stopped and the connection
+button OFF. ON can reconnect ESI without restarting Explorer or other devices.
+The red shutdown warning remains visible after reconnecting until a subsequent
+shutdown actually verifies discharge. Closing a COM handle or killing the worker
+does not disable physical outputs or certify discharge.
 
 The cards show both voltage readings and the current while checking. Current
 readings must be valid, but there is **no current threshold** until its accuracy
@@ -217,7 +230,7 @@ next ON reconnects. Saved output selections are not changed.
 It cannot verify disconnected loads or replace an independent voltage check.
 If shutdown is unconfirmed, use the physical interlock/front panel and the
 instrument's safety procedure. A DLL blocked during operation requires an
-Explorer restart.
+ESI worker termination, which the plugin performs without restarting Explorer.
 
 The cards wrap in narrow panels, with scrollbars when needed. The mouse wheel
 does not edit setpoints.

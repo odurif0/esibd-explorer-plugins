@@ -71,6 +71,7 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
         self.connected = False
         self._transport_poisoned = False
         self._transport_error = None
+        self._communication_error = None
         self._module_inventory: dict[int, dict] = {}
         self._hv_measurement_requests: dict[int, tuple[bool, bool, bool]] = {}
         self.thread_lock = thread_lock or threading.Lock()
@@ -104,9 +105,25 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
 
     def _raise_on_status(self, status: int, action: str):
         if status != self.NO_ERR:
+            if (-14 <= status <= -7 or status == -100) and action not in {"close_port", "force_close_port"}:
+                self._communication_error = f"{action}: {self.format_status(status)}"
             raise RuntimeError(f"ESI {action} failed: {self.format_status(status)}")
 
-    def connect(self, timeout_s: float = 5.0) -> bool:
+    def _call_locked_with_timeout(self, method, timeout_s, step_name, *args, **kwargs):
+        def call():
+            error = getattr(self, "_communication_error", None)
+            if error is not None:
+                # CGC prescribes Purge after communication errors. Serialize it with
+                # all native I/O and never replay the failed output command.
+                self.logger.warning(f"Restoring ESI communication with CGC Purge after {error}")
+                status = ESIBase.purge(self)
+                self._raise_on_status(status, "purge")
+                self._communication_error = None
+            return method(*args, **kwargs)
+
+        return super()._call_locked_with_timeout(call, timeout_s, step_name)
+
+    def connect(self, timeout_s: float = 5.0, *, preserve_outputs: bool = False) -> bool:
         """Connect, validate identity, inventory modules, and force HV OFF."""
         already_connected = self._connection_is_ready()
         timeout = self._resolve_timeout(timeout_s)
@@ -138,12 +155,14 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                 )
 
             self.connected = True
-            self._prepare_safe_inventory(timeout)
-            self.force_safe_off(timeout_s=timeout)
+            if not preserve_outputs:
+                self._prepare_safe_inventory(timeout)
+                self.force_safe_off(timeout_s=timeout)
             modules = self.discover_modules(timeout_s=timeout)
             self.logger.info(
                 f"Connected on COM{self.com} at {actual_baud} baud; "
-                f"modules={sorted(modules)}; HV and heater outputs forced OFF"
+                f"modules={sorted(modules)}; "
+                + ("existing outputs preserved" if preserve_outputs else "HV and heater outputs forced OFF")
             )
             return True
         except Exception:
@@ -151,7 +170,7 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
             # been validated, disconnect must verify HV OFF/discharge too;
             # never discard an uncertain output state with a raw port close.
             self._finish_initial_open()
-            if opened and not self._transport_poisoned:
+            if opened and not self._transport_poisoned and not preserve_outputs:
                 try:
                     self.disconnect(timeout_s=timeout)
                 except Exception as cleanup_error:
@@ -1538,6 +1557,22 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
         self._set_port_claimed(False)
         return True
 
+    def force_close_transport(self, timeout_s: Optional[float] = None) -> bool:
+        """Release communication without claiming that HV/heater shutdown succeeded."""
+        # Inline notebook owners cannot safely close beside a timed-out native call.
+        # Explorer uses a worker process instead and can terminate that owner.
+        self._raise_if_transport_poisoned()
+        if not self._dll_port_claimed and not self.connected:
+            return True
+        timeout = self._resolve_timeout(timeout_s)
+        # Close is local port cleanup, not an instrument command; do not precede it
+        # with Purge, which could also fail on the broken communication stream.
+        status = super()._call_locked_with_timeout(ESIBase.close_port, timeout, "force_close_port", self)
+        self._raise_on_status(status, "force_close_port")
+        self.connected = False
+        self._set_port_claimed(False)
+        return True
+
 
 class ESI(ProcessIsolatedClientMixin):
     """Public ESI facade with optional worker-process isolation on Windows."""
@@ -1548,7 +1583,7 @@ class ESI(ProcessIsolatedClientMixin):
     _PROCESS_TIMEOUT_RULES = {
         "connect": (30.0, 10.0, 90.0),
         "collect_identity": (25.0, 10.0, 90.0),
-        "collect_diagnostics": (15.0, 10.0, 60.0),
+        "collect_diagnostics": (20.0, 5.0, 10.0),
         "get_heat_configuration": (8.0, 10.0, 45.0),
         "configure_heat_limits": (8.0, 10.0, 45.0),
         "configure_hv_max_voltage_steps": (8.0, 10.0, 45.0),
@@ -1558,7 +1593,7 @@ class ESI(ProcessIsolatedClientMixin):
         "set_heater_temperature": (10.0, 10.0, 30.0),
         "set_output_active": (12.0, 10.0, 45.0),
         "force_safe_off": (8.0, 10.0, 45.0),
-        "disconnect": (10.0, 10.0, 60.0),
+        "disconnect": (12.0, _ESIController.DISCHARGE_TIMEOUT_S + 5.0, 10.0),
     }
     NO_ERR = ESIBase.NO_ERR
     DEVICE_TYPE = ESIBase.DEVICE_TYPE
@@ -1588,6 +1623,18 @@ class ESI(ProcessIsolatedClientMixin):
             "dll_path": dll_path,
             "log_dir": log_dir,
         }
+        if process_backend:
+            from ._process import ESIProcessProxy
+
+            if logger is not None or thread_lock is not None:
+                raise ValueError("An isolated ESI worker cannot share a logger or thread lock")
+            backend_kwargs.pop("logger")
+            backend_kwargs.pop("thread_lock")
+            # Failure to start isolation must not silently load the DLL in Explorer.
+            object.__setattr__(self, "_backend", ESIProcessProxy(backend_kwargs))
+            object.__setattr__(self, "_backend_mode", "process")
+            object.__setattr__(self, "_process_backend_disabled_reason", "")
+            return
         self._initialize_process_backend(
             backend_kwargs=backend_kwargs,
             incompatible_objects={"logger": logger, "thread_lock": thread_lock},
@@ -1597,3 +1644,23 @@ class ESI(ProcessIsolatedClientMixin):
                 "cannot recover a COM port after a vendor call blocks."
             ),
         )
+
+    def __getattr__(self, name):
+        if object.__getattribute__(self, "_backend_mode") == "process":
+            backend = object.__getattribute__(self, "_backend")
+            if name in {"_open_failed", "_opening_in_progress", "_failed_open_released"}:
+                return False  # Terminating the worker retires even a failed/blocked Open.
+            if name == "_transport_poisoned":
+                return backend.closed
+        return super().__getattr__(name)
+
+    def force_close_transport(self, timeout_s: Optional[float] = None) -> bool:
+        backend = object.__getattribute__(self, "_backend")
+        if object.__getattribute__(self, "_backend_mode") == "process":
+            return backend.close()
+        return backend.force_close_transport(timeout_s=timeout_s)
+
+    def wait_for_idle(self, timeout_s: float = 1.) -> bool:
+        if object.__getattribute__(self, "_backend_mode") == "process":
+            return object.__getattribute__(self, "_backend").wait_for_idle(timeout_s)
+        return True

@@ -1201,9 +1201,9 @@ def test_process_rpc_budgets_cover_batched_dll_operations(driver_modules):
 
     assert driver._rpc_timeout_for("connect", {"timeout_s": 5.0}) == 160.0
     assert driver._rpc_timeout_for("collect_identity", {"timeout_s": 3.0}) == 90.0
-    assert driver._rpc_timeout_for("collect_diagnostics", {"timeout_s": 3.0}) == 60.0
+    assert driver._rpc_timeout_for("collect_diagnostics", {"timeout_s": 3.0}) >= 3.0 * 20.0 + 5.0
     assert driver._rpc_timeout_for("force_safe_off", {"timeout_s": 5.0}) == 50.0
-    assert driver._rpc_timeout_for("disconnect", {"timeout_s": 5.0}) == 60.0
+    assert driver._rpc_timeout_for("disconnect", {"timeout_s": 5.0}) >= 60.0 + 5.0 * 12.0
     assert driver._rpc_timeout_for("get_heat_configuration", {"timeout_s": 3.0}) == 45.0
 
 

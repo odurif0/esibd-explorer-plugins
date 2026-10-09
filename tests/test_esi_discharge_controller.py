@@ -40,22 +40,20 @@ def test_complete_shutdown_with_runtime(control, rig):
     assert not c.discharge_readings
 
 
-def test_voltage_still_high_keeps_off_retryable(control, rig):
+def test_voltage_still_high_releases_communication_without_claiming_safe_off(control, rig):
     rig.values[2, True] = [-100.]
     c = control.controller
     assert not c.shutdownCommunication()
-    assert c.main_state == "Shutdown unconfirmed"
-    assert c.initialized and c.device is rig.driver
-    assert control.parent.onAction.state
+    assert c.main_state == control.module._ESI_DISCONNECTED_UNCONFIRMED
+    assert not c.initialized and c.device is None
+    assert not control.parent.onAction.state
     assert not c.acquiring
-    assert ("close",) not in rig.calls
+    assert rig.calls[-1] == ("close",)
     c._apply_snapshot(snapshot())
     c._on_discharge_progress({"modules": {}})
-    assert c.main_state == "Shutdown unconfirmed"
+    assert c.main_state == control.module._ESI_DISCONNECTED_UNCONFIRMED
     assert any("discharge" in message for message in control.messages)
-    rig.values[2, True] = [-.3]
-    assert c.shutdownCommunication()
-    assert c.main_state == "Disconnected" and not control.parent.onAction.state
+    assert not c.shutdownCommunication(), "communication closure must not certify output shutdown"
 
 
 def test_background_readback_cannot_erase_shutdown_check(control, rig):
@@ -81,7 +79,7 @@ def test_on_cannot_bypass_pending_shutdown(control, rig, state):
     assert c.main_state != "Disconnected"
 
 
-def test_initialization_failure_keeps_backend_if_discharge_cannot_be_verified(control, rig, monkeypatch):
+def test_initialization_failure_releases_backend_if_discharge_cannot_be_verified(control, rig, monkeypatch):
     c = control.controller
     c.device = None
     c.main_state = "Disconnected"
@@ -90,31 +88,32 @@ def test_initialization_failure_keeps_backend_if_discharge_cannot_be_verified(co
     control.parent.baudrate = 230400
     rig.values[1, False] = [100.]
     c.runInitialization()
-    assert c.device is rig.driver and c.initialized
-    assert c.main_state == "Shutdown unconfirmed"
-    assert control.parent.onAction.state
-    assert ("close",) not in rig.calls
+    assert c.device is None and not c.initialized
+    assert c.main_state == control.module._ESI_DISCONNECTED_UNCONFIRMED
+    assert not control.parent.onAction.state
+    assert rig.calls[-1] == ("close",)
     assert not c.initializing
 
 
-def test_reinitialize_must_not_discard_an_unconfirmed_backend(control, rig, monkeypatch):
+def test_reinitialize_releases_old_port_and_waits_for_an_explicit_new_on(control, rig, monkeypatch):
     c = control.controller
     rig.values[1, False] = [100.]
     constructed = []
     monkeypatch.setattr(control.module, "_get_esi_driver_class", lambda: constructed.append(True))
     c.runInitialization()
-    assert c.device is rig.driver and c.initialized
-    assert c.main_state == "Shutdown unconfirmed"
+    assert c.device is None and not c.initialized
+    assert c.main_state == control.module._ESI_DISCONNECTED_UNCONFIRMED
     assert not constructed
+    assert c._dispose_device() is True, "the released port must permit the next ON"
 
 
 def test_failed_on_rollback_requires_discharge_not_just_disable(control, rig):
     rig.values[1, False] = [50.]
     confirmed, _ = control.controller._force_safe_off_after_failure()
     assert not confirmed
-    assert control.controller.device is rig.driver
-    assert control.controller.main_state == "Shutdown unconfirmed"
-    assert ("close",) not in rig.calls
+    assert control.controller.device is None
+    assert control.controller.main_state == control.module._ESI_DISCONNECTED_UNCONFIRMED
+    assert rig.calls[-1] == ("close",)
 
 
 def test_late_poll_after_confirmed_close_does_not_resurrect_on(control, rig):
