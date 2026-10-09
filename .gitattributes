@@ -1,0 +1,5 @@
+# Preserve verified runtime bytes across Windows and Linux checkouts.
+esi/vendor/python/* -text
+# Retain the official license and path configuration without whitespace changes.
+esi/vendor/python/LICENSE.txt whitespace=-blank-at-eol,-blank-at-eof,cr-at-eol
+esi/vendor/python/python314._pth whitespace=cr-at-eol

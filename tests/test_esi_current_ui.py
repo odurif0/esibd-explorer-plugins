@@ -18,7 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STABILITY_CASES = ("heat_stable", "heat_stabilizing", "heat_stale", "heat_expired", "heat_reset")
 HEAT_CASES = (*STABILITY_CASES, "heat_controls", "heat_failed_edit", "heat_active", "heat_blocked", "heat_invalid_sensor", "heat_unknown", "heat_poll_error", "heat_off", "heat_stuck_off", "heat_quantized")
-CASES = ("widgets", "panel", "groups", "horizontal", "vertical", "stacked", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
+CASES = ("widgets", "status_warning", "panel", "groups", "horizontal", "vertical", "stacked", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -166,6 +166,41 @@ def probe(case, output):
                 ch.plotCurve.curveParent.removeItem(ch.plotCurve)
                 ch.plotCurve = None
         channel.clearPlotCurve = clear
+
+    if case == "status_warning":
+        window = QtWidgets.QMainWindow()
+        device.titleBar = QtWidgets.QToolBar()
+        window.addToolBar(device.titleBar)
+        device.titleBarLabel = QtWidgets.QLabel("ESI")
+        device.titleBar.addWidget(device.titleBarLabel)
+        device.com = 16
+        device.interlock_state = "OK"
+        device.heat_status = "OFF"
+        device.detected_modules = "HV1, HV2, HEAT"
+        device.main_state = controller.main_state = "STATE_ON"
+        device.shutdown_unconfirmed = controller.shutdown_unconfirmed = True
+        device._update_operator_panel = lambda: None
+        device._ensure_status_widgets()
+        window.show()
+        for width in (400, 1280):
+            window.resize(width, 180)
+            QTest.qWait(30)
+            assert device.statusBadgeLabel.text() == "STATE_ON"
+            assert "#2f855a" in device.statusBadgeLabel.styleSheet()
+            assert device.shutdownWarningLabel.isVisible()
+            assert not device.shutdownWarningLabel.pixmap().isNull()
+            assert device.shutdownWarningLabel.width() == 20
+            assert device.titleBar.rect().contains(QtCore.QRect(
+                device.shutdownWarningLabel.mapTo(device.titleBar, QtCore.QPoint()),
+                device.shutdownWarningLabel.size()))
+            assert "Previous HV/heater shutdown unconfirmed" in device.statusSummaryLabel.text()
+            assert "#f87171" in device.statusSummaryLabel.styleSheet()
+            window.grab().save(str(output / f"esi-state-warning-{width}.png"))
+        device.shutdown_unconfirmed = False
+        device._update_status_widgets()
+        assert device.shutdownWarningLabel.isHidden()
+        assert "#f87171" not in device.statusSummaryLabel.styleSheet()
+        return 0
 
     if case == "widgets":
         # Execute the real Channel.initGUI and Parameter widgets, not an imagined

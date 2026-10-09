@@ -804,6 +804,8 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
         address: int,
         active: bool,
         timeout_s: Optional[float] = None,
+        *,
+        cancel_event=None,
     ) -> bool:
         """Set the module HVC toggle and verify it through PWM status."""
         self._require_connected()
@@ -817,6 +819,7 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
             f"set_hv_module_active[{address}]",
             address,
             requested,
+            cancel_event,
         )
         self._raise_on_status(status, f"set_hv_module_active({address})")
         self._raise_on_status(
@@ -831,9 +834,11 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
         return observed
 
     def _set_hv_module_active_unlocked(
-        self, address: int, requested: bool
+        self, address: int, requested: bool, cancel_event=None
     ) -> tuple[int, int, bool]:
         self._raise_if_transport_poisoned()
+        if requested:
+            self._check_heat_read_permission(cancel_event)
         status = ESIBase.set_module_activation_state(
             self, address, requested
         )
@@ -906,9 +911,9 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
     def _check_heat_read_permission(self, cancel_event=None) -> None:
         self._raise_if_transport_poisoned()
         if getattr(self, "_transport_poisoned", None) is not False:
-            raise RuntimeError("ESI transport state is unknown; heater operation refused")
+            raise RuntimeError("ESI transport state is unknown; output operation refused")
         if cancel_event is not None and cancel_event.is_set():
-            raise InterruptedError("ESI heater operation cancelled")
+            raise InterruptedError("ESI output operation cancelled")
 
     def _get_heat_monitoring_unlocked(self, timeout: float, cancel_event=None):
         """Wait for MON_RDY under the caller's lock, then read exactly once.
@@ -1066,8 +1071,9 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                 raise RuntimeError("ESI heater OFF failed: " + "; ".join(failures))
             return False
         if active:
-            self.set_hv_module_active(address, True, timeout_s=timeout)
-            self.set_global_active(True, timeout_s=timeout)
+            self.set_hv_module_active(address, True, timeout_s=timeout, cancel_event=cancel_event)
+            self.set_global_active(True, timeout_s=timeout, cancel_event=cancel_event)
+            self._check_heat_read_permission(cancel_event)
             return True
         self.set_hv_module_target(address, 0.0, timeout_s=timeout)
         self.set_hv_module_active(address, False, timeout_s=timeout)
@@ -1437,7 +1443,10 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
         A ready bit must clear after draining old data and then rise: repeatedly
         reading a cached zero (even with Valid=True) cannot prove discharge.
         """
+        last_step = ""
+
         def verify():
+            nonlocal last_step
             deadline = time.monotonic() + self.DISCHARGE_TIMEOUT_S
             saved_ranges = {}
             readings = {address: {"positive_v": math.nan, "negative_v": math.nan,
@@ -1445,8 +1454,10 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                         for address in self.HV_MODULE_ADDRESSES}
             consecutive = 0
             ready_mask = self.HV_ADC_V_READY | self.HV_ADC_I_READY
+            primary_error = None
 
             def checked(function, *args):
+                nonlocal last_step
                 self._raise_if_transport_poisoned()
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
@@ -1455,12 +1466,13 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                         f"for {self.DISCHARGE_SAMPLES} consecutive rounds within "
                         f"{self.DISCHARGE_TIMEOUT_S:g} s. Last readings: {readings}"
                     )
+                last_step = f"{function.__name__}(module {args[0]})" if args else function.__name__
                 result = function(self, *args)
                 self._raise_if_transport_poisoned()
                 if time.monotonic() >= deadline:
                     raise RuntimeError("ESI discharge unconfirmed: ADC response arrived after the discharge deadline")
                 status = result[0] if isinstance(result, tuple) else result
-                self._raise_on_status(status, function.__name__)
+                self._raise_on_status(status, last_step)
                 return result[1:] if isinstance(result, tuple) else ()
 
             def notify():
@@ -1518,20 +1530,34 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                     consecutive = consecutive + 1 if below_limit else 0
                     notify()
                 self.logger.info(f"HV discharge verified: {readings}")
+            except Exception as exc:
+                primary_error = exc
+                raise
             finally:
                 self._hv_measurement_requests.clear()
-                if not self._transport_poisoned:
+                if not self._transport_poisoned and not getattr(self, "_communication_error", None):
                     for address, selection in saved_ranges.items():
-                        self._raise_if_transport_poisoned()
-                        status = ESIBase.set_hv_supply_meas_ranges(self, address, *selection)
-                        self._raise_if_transport_poisoned()
-                        self._raise_on_status(status, f"restore ADC selection({address})")
+                        try:
+                            self._raise_if_transport_poisoned()
+                            last_step = f"restore ADC selection({address})"
+                            status = ESIBase.set_hv_supply_meas_ranges(self, address, *selection)
+                            self._raise_if_transport_poisoned()
+                            self._raise_on_status(status, f"restore ADC selection({address})")
+                        except Exception as cleanup_error:
+                            if primary_error is None:
+                                raise
+                            raise RuntimeError(f"{primary_error}; ADC restoration also failed: {cleanup_error}") from primary_error
 
         # Keep the DLL lock throughout the mux/ready/read sequence: a background
         # diagnostic must not consume the samples used for shutdown confirmation.
-        self._call_locked_with_timeout(
-            verify, self.DISCHARGE_TIMEOUT_S + timeout, "verify_hv_discharge"
-        )
+        try:
+            self._call_locked_with_timeout(
+                verify, self.DISCHARGE_TIMEOUT_S + timeout, "verify_hv_discharge"
+            )
+        except RuntimeError as exc:
+            if self._transport_poisoned and last_step:
+                raise RuntimeError(f"{exc}; last discharge operation: {last_step}") from exc
+            raise
 
     def disconnect(self, timeout_s: Optional[float] = None, *, on_discharge=None) -> bool:
         timeout = self._resolve_timeout(timeout_s)
@@ -1559,8 +1585,8 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
 
     def force_close_transport(self, timeout_s: Optional[float] = None) -> bool:
         """Release communication without claiming that HV/heater shutdown succeeded."""
-        # Inline notebook owners cannot safely close beside a timed-out native call.
-        # Explorer uses a worker process instead and can terminate that owner.
+        # Inline owners cannot safely close beside a timed-out native call.
+        # Only a process-isolated owner can be terminated to release its port.
         self._raise_if_transport_poisoned()
         if not self._dll_port_claimed and not self.connected:
             return True

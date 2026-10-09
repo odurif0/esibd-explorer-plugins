@@ -6,6 +6,8 @@ __pycache__/
 *.egg-info/
 .claude/
 *.zip
+!esi/vendor/python/*.pyd
+!esi/vendor/python/python314.zip
 
 # runtime device logs (created at runtime, never shipped)
 logs/

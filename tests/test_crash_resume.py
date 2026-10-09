@@ -144,7 +144,7 @@ def test_a_crash_record_schedules_a_resume_that_reconnects_and_restarts_recordin
 
 # ---------------------------------------------------------------- per plugin: nothing commanded
 
-def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch):
+def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch, tmp_path):
     from test_esi_plugin_behavior import _ExplorerLikeChannel, _counting_device, _load_plugin
 
     module = _load_plugin()
@@ -171,8 +171,13 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
             calls.append(("diagnostics",))
             return {"running": True}
 
+        def list_configs(self, timeout_s):
+            calls.append(("configs",))
+            return []
+
     channels = []
     parent = _counting_device(module, channels)
+    parent.pluginManager = types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path))
     for key, value in dict(com=16, baudrate=230400, connect_timeout_s=5.0, poll_timeout_s=2.0,
                            heat_voltage_limit_v=10.0, heat_current_limit_a=1.0, heat_power_limit_w=5.0).items():
         setattr(parent, key, value)
@@ -189,7 +194,7 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
 
     controller.runInitialization()
 
-    assert calls == [("connect",), ("identity",), ("diagnostics",)] and emitted == [1]
+    assert calls == [("connect",), ("identity",), ("diagnostics",), ("configs",)] and emitted == [1]
 
     def apply_snapshot(snapshot):
         assert snapshot == {"running": True}
@@ -212,6 +217,7 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
     assert all(loading for event in hv1.events + heat.events for loading in event[2:])  # No event fired.
     assert toggles == [] and controller.resume_session is False and controller.acquiring is True
     assert any("adopted as it runs" in text for kind, *rest in calls if kind == "print" for text in rest)
+    assert not any("outputs forced OFF" in text for kind, *rest in calls if kind == "print" for text in rest)
 
 
 def test_esi_on_during_a_resume_keeps_the_running_outputs_selected():

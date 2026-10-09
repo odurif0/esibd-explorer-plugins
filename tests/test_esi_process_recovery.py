@@ -282,22 +282,155 @@ def test_readback_recovery_resets_consecutive_errors_without_replaying_outputs()
     assert calls == ["read", "read"]
 
 
-def test_frozen_explorer_uses_explicit_python_instead_of_relaunching_explorer(monkeypatch):
+def test_frozen_explorer_uses_only_private_python_not_path_or_override(monkeypatch):
     spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", "C:/Python/python.exe")
-    assert module._worker_python() == ["C:/Python/python.exe"]
+    monkeypatch.setattr(sys, "executable", "C:/Explorer/ESIBD Explorer.exe")
+    assert module._worker_python() == [str(WORKER.parents[2] / "python/python.exe")]
+
+
+def test_frozen_plugin_constructs_isolated_facade_not_inline_dll(monkeypatch, tmp_path):
+    import importlib
+
+    module = _load_plugin()
+    driver = module._get_esi_driver_class()
+    process_module = importlib.import_module(driver.__module__.rsplit(".", 1)[0] + "._process")
+    calls, messages, constructed = [], [], []
+
+    class FakeProxy:
+        closed = False
+
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+
+        def call_method(self, name, *args, **kwargs):
+            assert controller.device._backend_mode == "process"
+            assert name in ("connect", "disconnect")
+            calls.append(name)
+            if name == "connect":
+                raise RuntimeError("simulated port unavailable")
+            return True
+
+        def wait_for_idle(self, timeout_s):
+            return True
+
+        def close(self):
+            self.closed = True
+            return True
+
+    def create_proxy(kwargs):
+        assert process_module._worker_python() == [str(WORKER.parents[2] / "python/python.exe")]
+        return FakeProxy(**kwargs)
+
+    def unexpected_inline(*args, **kwargs):
+        pytest.fail("standalone Explorer must not load the vendor DLL inline")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "C:/Explorer/ESIBD Explorer.exe")
+    monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", "C:/WindowsApps/python.exe")
+    monkeypatch.setattr(process_module, "ESIProcessProxy", create_proxy)
+    monkeypatch.setattr(driver._PROCESS_CONTROLLER_CLASS, "__init__", unexpected_inline)
+    parent = SimpleNamespace(com=16, baudrate=230400, connect_timeout_s=.2,
+                             pluginManager=SimpleNamespace(Settings=SimpleNamespace(dataPath=tmp_path)))
+    controller = module.ESIController(parent)
+    controller.print = lambda message, **kwargs: messages.append(message)
+    controller.initializing = True
+
+    controller.runInitialization()
+
+    assert len(constructed) == 1 and constructed[0]["com"] == 16
+    assert calls == ["connect", "disconnect"]
+    assert controller.device is None and not controller.initializing
+    assert controller.main_state == "Disconnected"
+    assert sum("plugin's private Python" in message for message in messages) == 1
+    assert any("initialization failed on COM16: simulated port unavailable" in message for message in messages)
+
+
+@pytest.mark.parametrize("missing", ["python.exe", "python314.dll", "python314.zip", "python314._pth"])
+def test_incomplete_private_python_fails_without_external_or_inline_fallback(tmp_path, monkeypatch, missing):
+    import shutil
+
+    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    directory = tmp_path / "esi/vendor/python"
+    directory.mkdir(parents=True)
+    for name in ("python.exe", "python314.dll", "python314.zip", "python314._pth"):
+        if name != missing:
+            (directory / name).touch()
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "esi/vendor/runtime/esi/_process.py"))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", str(sys.executable))
+    monkeypatch.setattr(shutil, "which", lambda *args: pytest.fail("must not search PATH"))
+    with pytest.raises(RuntimeError, match="Bundled ESI Python is incomplete") as error:
+        module._worker_python()
+    assert str(directory / missing) in str(error.value)
+
+
+def test_duplicate_transport_release_does_not_close_same_owner_twice():
+    module = _load_plugin()
+    entered, finish = threading.Event(), threading.Event()
+    calls, results = [], []
+    action = SimpleNamespace(state=True)
+    parent = SimpleNamespace(connect_timeout_s=.2, onAction=action, recording=True)
+    controller = module.ESIController(parent)
+    controller.initialized = controller.acquiring = True
+    controller.print = lambda *args, **kwargs: None
+
+    def close_transport(**kwargs):
+        calls.append("close")
+        entered.set()
+        assert finish.wait(3.)
+        return True
+
+    owner = SimpleNamespace(force_close_transport=close_transport, close=lambda: None)
+    controller.device = owner
+    thread = threading.Thread(target=lambda: results.append(controller._release_failed_transport(owner)))
+    try:
+        thread.start()
+        assert entered.wait(3.)
+        assert controller._release_failed_transport(owner) is False
+        assert controller.device is owner
+        assert calls == ["close"]
+    finally:
+        finish.set()
+        thread.join(3.)
+    assert not thread.is_alive() and results == [True]
+    assert controller.device is None and not controller.initialized and not controller.acquiring
+    assert not action.state and not parent.recording
+    assert controller.shutdown_unconfirmed
+    assert controller.main_state == module._ESI_DISCONNECTED_UNCONFIRMED
+    assert controller._release_failed_transport(owner) is False
+    assert calls == ["close"]
+
+
+def test_interrupting_a_discharge_check_logs_uncertainty_not_a_native_crash():
+    module = _load_plugin()
+    controller = module.ESIController(SimpleNamespace(connect_timeout_s=.2, recording=True))
+    controller.device = SimpleNamespace(force_close_transport=lambda **kwargs: True, close=lambda: None)
+    controller.initialized = True
+    controller.main_state = module._ESI_STOPPING
+    controller._output_lock = SimpleNamespace(acquire=lambda **kwargs: False)
+    messages = []
+    controller.print = lambda message, **kwargs: messages.append(message)
+    assert controller.shutdownCommunication() is False
+    assert "discharge check is still running" in messages[0]
+    assert "shutdown remains unconfirmed" in messages[0]
+    assert controller.device is None and controller.shutdown_unconfirmed
+    assert controller.main_state == module._ESI_DISCONNECTED_UNCONFIRMED
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="verify private bootstrap before the Windows DLL load")
-def test_real_private_runtime_bootstraps_in_worker_without_host_modules():
+def test_real_private_runtime_bootstraps_in_worker_without_host_modules(tmp_path):
     spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     with pytest.raises(RuntimeError, match="CGC ESI is supported only on Windows"):
-        module.ESIProcessProxy({"device_id": "bootstrap_test", "com": 16}, startup_timeout_s=5.)
+        module.ESIProcessProxy({"device_id": "bootstrap_test", "com": 16,
+                               "log_dir": str(tmp_path / "data/logs/esi")}, startup_timeout_s=5.)
 
 
 def test_retired_owner_cannot_restore_on_via_a_queued_gui_callback(monkeypatch):
@@ -357,3 +490,84 @@ def test_isolation_startup_failure_does_not_fall_back_to_inline(monkeypatch):
                         lambda *args, **kwargs: pytest.fail("DLL must not load in Explorer"))
     with pytest.raises(RuntimeError, match="no worker interpreter"):
         driver(device_id="esi_test", com=16, process_backend=True)
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_worker_uses_console_python_when_explorer_uses_pythonw(tmp_path, monkeypatch, override):
+    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    windowed = tmp_path / "pythonw.exe"
+    console = tmp_path / "python.exe"
+    console.touch()
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(sys, "executable", str(windowed))
+    if override:
+        monkeypatch.setenv("ESIBD_ESI_WORKER_PYTHON", str(windowed))
+    else:
+        monkeypatch.delenv("ESIBD_ESI_WORKER_PYTHON", raising=False)
+    assert module._worker_python() == [str(console)]
+    console.unlink()
+    with pytest.raises(RuntimeError, match="requires python.exe, not pythonw.exe"):
+        module._worker_python()
+
+
+def test_startup_crash_reports_interpreter_exit_code_and_stderr(tmp_path):
+    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fake = tmp_path / "crashing_controller.py"
+    fake.write_text("import os, sys\nprint('bootstrap failure marker', file=sys.stderr, flush=True)\nos._exit(23)\n")
+    with pytest.raises(RuntimeError) as error:
+        module.ESIProcessProxy({}, controller_file=str(fake), startup_timeout_s=5.)
+    message = str(error.value)
+    assert "ESI worker startup failed" in message
+    assert sys.executable in message
+    assert "23 (0x00000017)" in message
+    assert "bootstrap failure marker" in message
+
+
+def test_startup_exception_keeps_the_python_traceback(tmp_path):
+    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fake = tmp_path / "invalid_controller.py"
+    fake.write_text("raise RuntimeError('controller import failure')\n")
+    with pytest.raises(RuntimeError) as error:
+        module.ESIProcessProxy({}, controller_file=str(fake), startup_timeout_s=5.)
+    message = str(error.value)
+    assert "controller import failure" in message
+    assert "Traceback (most recent call last)" in message
+    assert str(fake) in message
+
+
+def test_runtime_crash_keeps_its_exit_status(workers):
+    proxy = workers()
+    with pytest.raises(RuntimeError) as error:
+        proxy.call_method("crash", rpc_timeout_s=2.)
+    assert "7 (0x00000007)" in str(error.value)
+    assert "interpreter=" in str(error.value)
+    assert proxy.closed and not proxy._stderr_reader.is_alive()
+
+
+def test_stderr_is_drained_without_deadlock_or_unbounded_storage(tmp_path):
+    spec = importlib.util.spec_from_file_location("esi_process_test", WORKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fake = tmp_path / "noisy_controller.py"
+    fake.write_text('''
+import os
+class Controller:
+    def flood(self):
+        os.write(2, b"x" * (1024 * 1024) + b"tail marker")
+        os._exit(29)
+''')
+    proxy = module.ESIProcessProxy({}, controller_file=str(fake), startup_timeout_s=5.)
+    try:
+        with pytest.raises(RuntimeError) as error:
+            proxy.call_method("flood", rpc_timeout_s=5.)
+        assert "tail marker" in str(error.value)
+        assert "29 (0x0000001D)" in str(error.value)
+        assert len(proxy._stderr_tail) <= 8192
+    finally:
+        proxy.close()
