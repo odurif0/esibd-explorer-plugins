@@ -365,8 +365,10 @@ def test_panel_controls_one_target_and_one_output_state_per_module():
     ]
 
 
-def test_initialization_uses_isolated_backend_and_reports_com_on_failure(monkeypatch):
+@pytest.mark.parametrize("frozen", [False, True])
+def test_initialization_selects_backend_and_reports_com_on_failure(monkeypatch, frozen, tmp_path):
     module = _load_plugin()
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     constructor_kwargs = []
     messages = []
 
@@ -388,6 +390,7 @@ def test_initialization_uses_isolated_backend_and_reports_com_on_failure(monkeyp
         com=16,
         baudrate=230400,
         connect_timeout_s=5.0,
+        pluginManager=types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path)),
     )
     controller = module.ESIController(parent)
     controller.print = lambda message, **kwargs: messages.append(message)
@@ -398,28 +401,37 @@ def test_initialization_uses_isolated_backend_and_reports_com_on_failure(monkeyp
 
     assert constructor_kwargs[0]["com"] == 16
     assert constructor_kwargs[0]["process_backend"] is True
+    assert constructor_kwargs[0]["log_dir"] == tmp_path / "logs" / "esi"
     assert "allow_negative" not in constructor_kwargs[0]
+    private_python_messages = [message for message in messages if "plugin's private Python" in message]
+    assert len(private_python_messages) == int(frozen)
+    if frozen:
+        assert "no external Python installation required" in private_python_messages[0]
+    assert not any("isolation is disabled" in message.lower() for message in messages)
     assert any("initialization failed on COM16" in message for message in messages)
     assert controller.device is None
     assert controller.initializing is False
 
 
+@pytest.mark.parametrize("frozen", [False, True])
 def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
-    monkeypatch,
+    monkeypatch, frozen, tmp_path,
 ):
     module = _load_plugin()
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     calls = []
+    constructor_kwargs = []
 
     class FakeDriver:
         _process_backend_disabled_reason = ""
 
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            constructor_kwargs.append(kwargs)
 
         def connect(self, timeout_s):
             calls.append(("connect", timeout_s))
 
-        def set_global_active(self, active, timeout_s):
+        def set_global_active(self, active, timeout_s, *, cancel_event=None):
             calls.append(("global", active, timeout_s))
 
         def collect_identity(self, timeout_s):
@@ -450,6 +462,7 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
         heat_current_limit_a=0.0,
         heat_power_limit_w=0.0,
         hv2_adc_connector="NEG",
+        pluginManager=types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path)),
     )
     controller = module.ESIController(parent)
     controller.signalComm = types.SimpleNamespace(
@@ -461,6 +474,7 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
 
     controller.runInitialization()
 
+    assert constructor_kwargs[0]["process_backend"] is True
     assert calls == [
         ("connect", 5.0),
         ("global", True, 5.0),
@@ -475,6 +489,59 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
     ]
     assert emitted == [True]
     assert controller.initializing is False
+
+
+@pytest.mark.parametrize("state,expected_color", [
+    ("STATE_ON", "#2f855a"), ("ST_ON", "#2f855a"),
+    ("Shutdown unconfirmed", "#c53030"), ("Communication lost", "#c53030"),
+    ("Disconnected: shutdown unconfirmed", "#c53030"),
+])
+def test_current_status_color_does_not_conflate_previous_shutdown_warning(state, expected_color):
+    module = _load_plugin()
+    device = object.__new__(module.ESIDevice)
+    device.main_state = state
+    device.shutdown_unconfirmed = True
+    assert expected_color in device._status_badge_style()
+
+
+def test_reconnected_status_is_green_but_shutdown_warning_remains_red():
+    module = _load_plugin()
+    device = object.__new__(module.ESIDevice)
+    device.com = 16
+    device.main_state = "STATE_ON"
+    device.shutdown_unconfirmed = True
+    device.interlock_state = "OK"
+    device.heat_status = "OFF"
+    device.detected_modules = "HV1, HV2, HEAT"
+
+    class Label:
+        def setText(self, value):
+            self.text = value
+        def setToolTip(self, value):
+            self.tooltip = value
+        def setStyleSheet(self, value):
+            self.style = value
+        def setVisible(self, value):
+            self.visible = value
+
+    device.statusBadgeLabel = Label()
+    device.shutdownWarningLabel = Label()
+    device.statusSummaryLabel = Label()
+    device._sync_load_config_action = lambda: None
+    device._update_operator_panel = lambda: None
+    device._update_status_widgets()
+    assert device.statusBadgeLabel.text == "STATE_ON"
+    assert "#2f855a" in device.statusBadgeLabel.style
+    assert "Previous HV/heater shutdown unconfirmed" in device.statusSummaryLabel.text
+    assert "#f87171" in device.statusSummaryLabel.style
+    assert device.shutdownWarningLabel.visible
+    assert "does not certify discharge" in device.statusBadgeLabel.tooltip
+    assert device.shutdown_unconfirmed
+    device.shutdown_unconfirmed = False
+    device._update_status_widgets()
+    assert "Previous HV/heater" not in device.statusSummaryLabel.text
+    assert "#f87171" not in device.statusSummaryLabel.style
+    assert not device.shutdownWarningLabel.visible
 
 
 def test_init_complete_resumes_pending_on_toggle():
@@ -564,7 +631,7 @@ def test_on_sequence_forces_every_output_off_and_energizes_nothing():
         def set_heater_temperature(self, value, timeout_s, *, cancel_event=None):
             calls.append(("heat_target", value))
 
-        def set_global_active(self, active, timeout_s):
+        def set_global_active(self, active, timeout_s, *, cancel_event=None):
             calls.append(("global", active))
 
         def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
@@ -822,7 +889,7 @@ def test_active_hv_target_change_uses_configured_ramp(monkeypatch):
             calls.append(("target", address, value, timeout_s))
             return value
 
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active, timeout_s))
             return active
 
@@ -939,7 +1006,7 @@ def test_invalid_heat_readback_blocks_nonzero_target_and_forces_off():
         def set_heater_temperature(self, target, timeout_s):
             calls.append(("temperature", target))
 
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active))
 
     parent = types.SimpleNamespace(poll_timeout_s=2.0, isOn=lambda: True)
@@ -1045,7 +1112,7 @@ def test_disabling_hv_uses_module_output_gate():
     calls = []
 
     class FakeDevice:
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active, timeout_s))
 
     parent = types.SimpleNamespace(
@@ -1077,7 +1144,7 @@ def test_hv_pair_applies_one_unsigned_module_target_without_adc_selection():
             calls.append(("target", address, value, timeout_s))
             return value
 
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active, timeout_s))
             return active
 
@@ -1112,10 +1179,10 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     calls = []
 
     class FakeDevice:
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("module", address, active))
 
-        def set_global_active(self, active, timeout_s):
+        def set_global_active(self, active, timeout_s, *, cancel_event=None):
             calls.append(("global", active))
             raise RuntimeError("activation failed")
 
@@ -1182,7 +1249,7 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
     calls = []
 
     class FakeDevice:
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active))
 
         def set_hv_module_target(self, address, value, timeout_s):
@@ -1227,7 +1294,7 @@ def test_failed_hv_gate_activation_rolls_target_back_to_zero():
             calls.append(("target", address, value))
             return value
 
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active))
             if active:
                 raise RuntimeError("enable verification failed")
@@ -1263,7 +1330,7 @@ def test_failed_hv_disable_is_reported():
     calls = []
 
     class FakeDevice:
-        def set_output_active(self, address, active, timeout_s):
+        def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active))
             raise RuntimeError("zero failed")
 

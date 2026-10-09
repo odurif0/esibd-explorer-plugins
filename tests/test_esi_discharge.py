@@ -200,6 +200,39 @@ def test_adc_command_error_retains_port(rig):
     assert rig.driver.connected
 
 
+@pytest.mark.parametrize("status", [-10, -12, -13])
+def test_protocol_error_preserves_first_failure_without_unpurged_adc_cleanup(rig, status):
+    rig.state.voltage_status = status
+    with pytest.raises(RuntimeError) as error:
+        rig.driver.disconnect(timeout_s=.5)
+    assert f"{status}" in str(error.value)
+    assert "module 1" in str(error.value)
+    assert "restore ADC selection" not in str(error.value)
+    assert [call for call in rig.calls if call[0] == "select"] == [("select", 1, False, True)]
+    assert ("close",) not in rig.calls
+    assert rig.driver._communication_error is not None
+    assert rig.driver.connected
+
+
+def test_failed_adc_cleanup_cannot_hide_original_invalid_discharge(rig, monkeypatch):
+    rig.state.invalid = "voltage"
+    original = rig.base.set_hv_supply_meas_ranges
+    count = 0
+
+    def select(self, *args):
+        nonlocal count
+        count += 1
+        return -13 if count == 3 else original(self, *args)
+
+    monkeypatch.setattr(rig.base, "set_hv_supply_meas_ranges", select)
+    with pytest.raises(RuntimeError) as error:
+        rig.driver.disconnect(timeout_s=.5)
+    assert "invalid ADC voltage/current" in str(error.value)
+    assert "ADC restoration also failed" in str(error.value)
+    assert "restore ADC selection(1) failed: -13" in str(error.value)
+    assert count == 3 and ("close",) not in rig.calls
+
+
 def test_current_has_no_arbitrary_threshold(rig, monkeypatch):
     # Use the real fake's flag reset, only replace its measured value.
     old = rig.base.get_hv_supply_output_current
@@ -276,8 +309,9 @@ def test_timeout_while_restoring_mux_stops_remaining_cleanup(rig, monkeypatch):
     rig.driver.DISCHARGE_TIMEOUT_S = .03
     monkeypatch.setattr(rig.base, "set_hv_supply_meas_ranges", blocked_restore)
     try:
-        with pytest.raises(RuntimeError, match="timed out"):
+        with pytest.raises(RuntimeError, match="timed out") as error:
             rig.driver.disconnect(timeout_s=.03)
+        assert "last discharge operation: restore ADC selection(1)" in str(error.value)
         assert entered.is_set()
         assert rig.driver._transport_poisoned
         assert ("close",) not in rig.calls

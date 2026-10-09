@@ -8,7 +8,6 @@ import importlib.util
 import os
 import pickle
 import queue
-import shutil
 import struct
 import subprocess
 import sys
@@ -42,27 +41,34 @@ def _receive(stream):
     return pickle.loads(read_exact(size))
 
 
+def _console_python(executable):
+    path = Path(executable)
+    if path.name.lower() == "pythonw.exe":
+        console = path.with_name("python.exe")
+        if not console.is_file():
+            raise RuntimeError(
+                "ESI requires python.exe, not pythonw.exe (the worker needs standard I/O). "
+                "Set ESIBD_ESI_WORKER_PYTHON to a 64-bit Python 3.10+ python.exe."
+            )
+        return str(console)
+    return executable
+
+
 def _worker_python():
+    if getattr(sys, "frozen", False):
+        directory = Path(__file__).resolve().parents[2] / "python"
+        for name in ("python.exe", "python314.dll", "python314.zip", "python314._pth"):
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError(
+                    f"Bundled ESI Python is incomplete: {path}. "
+                    "Restore the complete esi/ plugin folder; external Python is not required."
+                )
+        return [str(directory / "python.exe")]
     override = os.environ.get("ESIBD_ESI_WORKER_PYTHON")
     if override:
-        return [override]
-    if not getattr(sys, "frozen", False):
-        return [sys.executable]
-    # A frozen Explorer executable is not a Python command-line interpreter.
-    for directory in (Path(sys.executable).parent, Path(sys.base_prefix)):
-        candidate = directory / "python.exe"
-        if candidate.is_file():
-            return [str(candidate)]
-    launcher = shutil.which("py")
-    if launcher:
-        return [launcher, "-3"]
-    python = shutil.which("python")
-    if python:
-        return [python]
-    raise RuntimeError(
-        "ESI DLL isolation requires a 64-bit Python interpreter. Set "
-        "ESIBD_ESI_WORKER_PYTHON to python.exe (no extra Python packages required)."
-    )
+        return [_console_python(override)]
+    return [_console_python(sys.executable)]
 
 
 class ESIProcessProxy:
@@ -76,24 +82,36 @@ class ESIProcessProxy:
         self._closed = False
         self._closed_reason = "ESI worker is closed"
         self._sequence = 0
+        self._stderr_lock = threading.Lock()
+        self._stderr_tail = bytearray()
         environment = os.environ.copy()
         if getattr(sys, "frozen", False):
             environment.pop("PYTHONHOME", None)
             environment.pop("PYTHONPATH", None)
+        self._command = [*_worker_python(), "-u", str(Path(__file__).resolve())]
         self._process = subprocess.Popen(
-            [*_worker_python(), "-u", str(Path(__file__).resolve())],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            self._command,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_reader.start()
         self._reader = threading.Thread(target=self._read_replies, daemon=True)
         self._reader.start()
         try:
             self._send({"kwargs": controller_kwargs, "controller_file": controller_file})
             response = self._next_reply(time.monotonic() + startup_timeout_s)
             if response.get("kind") != "ready":
-                raise RuntimeError(response.get("message", "ESI worker startup failed"))
-        except BaseException:
+                message = response.get("message", "ESI worker startup failed")
+                if response.get("traceback"):
+                    message += "\n" + response["traceback"]
+                raise RuntimeError(message)
+        except BaseException as exc:
+            returncode = self._exit_code()
             self.close()
+            if isinstance(exc, Exception):
+                raise RuntimeError(self._failure_message(
+                    f"ESI worker startup failed: {exc}", returncode)) from exc
             raise
 
     @property
@@ -106,6 +124,28 @@ class ESIProcessProxy:
                 self._replies.put(_receive(self._process.stdout))
         except Exception as exc:
             self._replies.put({"kind": "exited", "message": str(exc)})
+
+    def _read_stderr(self):
+        # Drain continuously: native debug output must not fill a pipe and block I/O.
+        while chunk := self._process.stderr.read1(4096):
+            with self._stderr_lock:
+                self._stderr_tail.extend(chunk)
+                del self._stderr_tail[:-8192]
+
+    def _failure_message(self, message, returncode):
+        status = "still running before termination" if returncode is None else (
+            f"{returncode} (0x{returncode & 0xFFFFFFFF:08X})")
+        with self._stderr_lock:
+            stderr = bytes(self._stderr_tail).decode("utf-8", errors="replace").strip()
+        return (f"{message}; interpreter={self._command[:-2]!r}; exit code={status}; "
+                f"worker stderr: {stderr or '(empty)'}")
+
+    def _exit_code(self):
+        # Pipe EOF can arrive just before the OS publishes the child's exit status.
+        try:
+            return self._process.wait(timeout=.1)
+        except subprocess.TimeoutExpired:
+            return None
 
     def _send(self, request):
         _send(self._process.stdin, request, self._send_lock)
@@ -153,6 +193,11 @@ class ESIProcessProxy:
             cancellation_sent = False
             while True:
                 if self.closed:
+                    if not self._closed:
+                        returncode = self._exit_code()
+                        self.close()
+                        raise RuntimeError(self._failure_message(
+                            "ESI DLL worker exited unexpectedly", returncode))
                     raise RuntimeError(self._closed_reason)
                 if cancel is not None and cancel.is_set() and not cancellation_sent:
                     self._send({"op": "cancel", "id": request["id"]})
@@ -165,8 +210,9 @@ class ESIProcessProxy:
                     continue
                 if response.get("kind") == "exited":
                     self._closed_reason = "ESI DLL worker exited unexpectedly"
+                    returncode = self._exit_code()
                     self.close()
-                    raise RuntimeError("ESI DLL worker exited unexpectedly")
+                    raise RuntimeError(self._failure_message(self._closed_reason, returncode))
                 if response.get("id") != request["id"]:
                     self._closed_reason = "ESI worker response does not match its request"
                     self.close()
@@ -196,8 +242,9 @@ class ESIProcessProxy:
                 return response["value"]
         except (TimeoutError, EOFError, BrokenPipeError, OSError) as exc:
             self._closed_reason = f"ESI worker failed during {request['name']}: {exc}"
+            returncode = self._exit_code()
             self.close()
-            raise RuntimeError(self._closed_reason) from exc
+            raise RuntimeError(self._failure_message(self._closed_reason, returncode)) from exc
         except RuntimeError:
             if self._process.poll() is not None:
                 self.close()
@@ -217,9 +264,12 @@ class ESIProcessProxy:
                     self._process.kill()
                     self._process.wait(timeout=1.)
             self._reader.join(timeout=1.)
+            self._stderr_reader.join(timeout=1.)
             self._process.stdin.close()
             if not self._reader.is_alive():
                 self._process.stdout.close()
+            if not self._stderr_reader.is_alive():
+                self._process.stderr.close()
             return self._process.poll() is not None
 
 
@@ -255,7 +305,8 @@ def _worker_main():
         controller = controller_type(**setup["kwargs"])
         _send(output, {"kind": "ready"}, output_lock)
     except Exception as exc:
-        _send(output, {"kind": "startup_error", "message": str(exc)}, output_lock)
+        _send(output, {"kind": "startup_error", "message": str(exc),
+                       "traceback": traceback.format_exc()}, output_lock)
         return
 
     requests = queue.Queue()

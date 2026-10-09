@@ -51,6 +51,7 @@ def probe(path):
         "_invoke_gui_callback", "_sync_status_to_gui", "_sync_status",
         "_restore_off_ui_state", "_restore_on_ui_state", "_set_on_ui_state",
         "_handle_transport_loss", "_stop_refresh_timer",
+        "_stop_local_acquisition",
     }
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     lock = next(
@@ -168,6 +169,18 @@ def probe(path):
     assert parent.onAction.state is False
 
     if path.parent.name == "esi":
+        controller._invalidate_heat_confirmation = lambda: None
+        controller._connection_generation = 0
+        parent.recording = True
+        in_worker(lambda: ns["_stop_local_acquisition"](controller))
+        assert parent.recording is True, "recording was written outside the GUI thread"
+        drain_until(lambda: parent.recording is False)
+        parent.recording = True
+        in_worker(lambda: ns["_stop_local_acquisition"](controller))
+        controller._connection_generation += 1
+        in_worker(lambda: invoke(lambda: calls.append("old-stop-drained")))
+        drain_until(lambda: calls[-1] == "old-stop-drained")
+        assert parent.recording is True, "old stop disabled recording after reconnect"
         assert parent.shutdown_unconfirmed is False
         in_worker(lambda: ns["_restore_on_ui_state"](controller))
         controller.device = object()
@@ -179,6 +192,17 @@ def probe(path):
         in_worker(lambda: invoke(lambda: calls.append("disconnected-on-drained")))
         drain_until(lambda: calls[-1] == "disconnected-on-drained")
         assert parent.onAction.state is False, "disconnected ESI restored ON"
+        parent.onAction.state = True
+        in_worker(lambda: ns["_restore_off_ui_state"](controller))
+        controller._connection_generation += 1
+        in_worker(lambda: invoke(lambda: calls.append("retired-off-drained")))
+        drain_until(lambda: calls[-1] == "retired-off-drained")
+        assert parent.onAction.state is True, "old OFF changed a new pending connection"
+        in_worker(lambda: ns["_restore_off_ui_state"](controller))
+        controller.device = object()
+        in_worker(lambda: invoke(lambda: calls.append("replacement-off-drained")))
+        drain_until(lambda: calls[-1] == "replacement-off-drained")
+        assert parent.onAction.state is True, "old OFF changed a replacement connection"
         controller.shutdown_unconfirmed = True
         in_worker(lambda: sync(controller))
         drain_until(lambda: parent.shutdown_unconfirmed is True)

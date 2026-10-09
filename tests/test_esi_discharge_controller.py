@@ -79,13 +79,14 @@ def test_on_cannot_bypass_pending_shutdown(control, rig, state):
     assert c.main_state != "Disconnected"
 
 
-def test_initialization_failure_releases_backend_if_discharge_cannot_be_verified(control, rig, monkeypatch):
+def test_initialization_failure_releases_backend_if_discharge_cannot_be_verified(control, rig, monkeypatch, tmp_path):
     c = control.controller
     c.device = None
     c.main_state = "Disconnected"
     monkeypatch.setattr(control.module, "_get_esi_driver_class", lambda: lambda **kw: rig.driver)
     rig.driver.connect = lambda **kw: (_ for _ in ()).throw(RuntimeError("startup error"))
     control.parent.baudrate = 230400
+    control.parent.pluginManager = SimpleNamespace(Settings=SimpleNamespace(dataPath=tmp_path))
     rig.values[1, False] = [100.]
     c.runInitialization()
     assert c.device is None and not c.initialized

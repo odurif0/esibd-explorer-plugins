@@ -98,7 +98,7 @@ For the other device plugins:
   standby configuration `-1` keeps the outputs disabled).
 - **OFF** requests and verifies shutdown, then closes communication. Success is
   shown as **Disconnected**; the next ON reconnects.
-- For the other DLL-backed plugins, **Shutdown unconfirmed** means shutdown or
+- Without process isolation, **Shutdown unconfirmed** means shutdown or
   port closure failed. The button
   remains ON so the next click retries OFF, and Explorer's closing warning stays
   active. This button state is not confirmation that outputs are enabled. If a
@@ -111,6 +111,14 @@ not be verified, the plugin shows **Disconnected: shutdown unconfirmed** with a
 persistent warning: disconnection does not prove the HV or heater is OFF. Make
 the instrument safe locally before touching it; see [ESI](esi/README.md).
 
+**Standalone Explorer needs no external Python for ESI.** Its worker uses a private
+64-bit interpreter inside `esi/vendor/python/`, without searching PATH or using a
+Microsoft Store alias. The complete plugin folder must be kept together.
+The current `STATE_ON` badge is green; a previous unconfirmed shutdown remains
+separately visible as a warning icon and red summary until discharge is verified.
+ESI driver logs are stored in `<Explorer data path>/logs/esi/`, with bounded
+rotation, rather than in the installed plugin folder. Existing logs are retained.
+
 A failed initial port opening uses **Connection pending** instead, with the
 DMMR button OFF rather than falsely indicating initialized operation. OFF or
 closing communication cleans up that opening without output commands. The
@@ -118,7 +126,7 @@ driver instance and port reservation remain until the native call has ended
 and closure is confirmed. This confirms port closure, not the hardware output
 state. If opening succeeds after a close request, the plugin runs its normal
 verified shutdown instead of completing initialization.
-A new ON explicitly reconnects after cleanup; outside the isolated ESI plugin,
+A new ON explicitly reconnects after cleanup; without process isolation,
 a native call that never returns or an unconfirmed closure can still require a
 restart.
 
@@ -144,7 +152,7 @@ only). A device that was OFF is not contacted. A normal start keeps every device
 OFF; ESI outputs and PSU panels start as described in their READMEs.
 
 If the instrument was powered off meanwhile, the resume ends like a failed ON
-(outside ESI, a timed-out opening can lock the port until Explorer restarts).
+(without process isolation, a timed-out opening can lock the port until Explorer restarts).
 
 For HV devices, a verified disable is **not proof of complete electrical
 discharge**. ESI additionally checks both HV polarities on each module against
@@ -155,10 +163,9 @@ safety procedure before touching hardware.
 ## Requirements
 
 - ESIBD Explorer `1.0.2` on Windows
-- For ESI with a frozen Explorer executable: Python 3.10 or newer, **64-bit**.
-  Set `ESIBD_ESI_WORKER_PYTHON` to its `python.exe` path if it is not detected.
-  An installed Python-based Explorer uses its own interpreter; the ESI worker
-  requires only the standard library.
+- ESI includes a private 64-bit Python for its isolated worker in standalone
+  Explorer; no external Python installation is needed. A Python-based Explorer
+  uses its own interpreter.
 
 
 ## Notebooks

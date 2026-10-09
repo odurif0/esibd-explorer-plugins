@@ -7,12 +7,21 @@ header, and 64-bit Windows DLL.
 ## Requirements
 
 - ESIBD Explorer `1.0.2` on Windows for hardware communication.
-- The Explorer plugin runs its DLL in a separate, terminable ESI process. An
-  installed Python-based Explorer uses its own interpreter. A frozen Explorer
-  needs Python 3.10 or newer (64-bit), found beside Explorer or through `py` /
-  `python` on PATH; `ESIBD_ESI_WORKER_PYTHON` can specify its `python.exe` path.
-  The worker needs only Python's standard library. Isolation startup failures
-  refuse connection instead of silently loading the DLL in Explorer.
+- A standalone (frozen) Explorer needs **no external Python installation**. The
+  DLL runs in a separate ESI worker using the private 64-bit Python `3.14.8` in
+  `vendor/python/`. This interpreter is launched by its exact plugin-local path;
+  PATH, Microsoft Store aliases and `ESIBD_ESI_WORKER_PYTHON` are not consulted.
+  Keep the complete `esi/` folder: a missing private interpreter refuses connection
+  rather than loading the DLL in Explorer. The official distribution's license and
+  SHA-256 manifest are included. Maintainers can reproduce it with
+  `python3 tools/vendor_esi_python.py /path/to/python-3.14.8-embed-amd64.zip`.
+- A Python-based Explorer runs the DLL in a separate, terminable ESI process using
+  its own interpreter. The worker needs only Python's standard library. Isolation
+  startup failures refuse connection instead of silently loading the DLL inline.
+  A `pythonw.exe` selection is replaced by its sibling `python.exe` (the worker
+  requires standard I/O, but its console window stays hidden). Startup and process
+  failures include the interpreter command, exit status and bounded stderr tail
+  in Explorer's log; handled startup exceptions also retain their traceback.
 - CGC ESI controller with HEAT-CTRL-2410 at address 0 and HVPS-3kB modules at
   addresses 1 and 2.
 - Controller firmware `0x0100` dated July 13, 2026, with the matching July 14
@@ -27,6 +36,11 @@ header, and 64-bit Windows DLL.
 4. Set the controller's Windows COM port and baud rate (default: `230400`).
 
 No notebook or JSON report is required to enable or use the plugin.
+
+Driver logs are written to `<Explorer data path>/logs/esi/`, not the plugin
+folder. The selected directory is reported in Explorer's log at connection.
+The per-device log rotates at 1 MB with three backups. Existing logs are not
+moved or deleted. Notebook experiment reports keep their explicit output paths.
 
 Initialization checks the controller type (`0x8ED6`) and module inventory:
 `ESI_HEAT` at address 0 (`0xDB1C`), and `ESI_HV1` / `ESI_HV2` at addresses 1 / 2
@@ -47,6 +61,9 @@ was ON when Explorer stopped, the next Explorer reconnects without the startup
 commands (no global enable, heater limits, forced OFF or step settings), reads the
 identity and diagnostics, and shows the outputs, targets and temperature as they
 run. Nothing is switched, so an experiment in progress continues.
+Configuration names are also read in the initialization worker, never on the GUI
+thread. A cancelled connection cannot publish a late configuration list or change
+the ON/OFF button of its replacement. Crash-resume logs do not claim a forced OFF.
 
 ## Operation and safety
 
@@ -101,6 +118,9 @@ an active target use the software ramp: `Ramp rate (V/s)` in the ESI settings
 (steps every 0.1 s, 0 = immediate). Its default is 100 V/s for new settings; a
 saved value is kept. Disabling an HV output requests zero immediately, then
 verifies deactivation. A failed target change attempts the same rollback.
+An OFF request cancels pending HV activation before the module or shared gate is
+enabled, including commands waiting for the native I/O lock. A native write already
+in progress cannot be undone by cancellation; OFF remains allowed to deactivate it.
 
 HV generation requires both the controller-wide `SetEnable` state and the
 module's `SetModuleActivationState` state. The driver checks the target and
@@ -172,9 +192,11 @@ experimental temperature criteria, not proof of pressure equilibrium or safety.
 Local OFF disables and verifies module 0, then zeros and reads back its target,
 without stopping the HV modules. Zero temperature alone is not proof of OFF.
 Global OFF and configuration loading also require confirmed heater deactivation;
-a failure leaves output shutdown unconfirmed. The Explorer plugin still releases
-communication so ESI can be reconnected independently; notebook drivers retain
-their inline owner's reservation when shutdown cannot be verified.
+a failure leaves output shutdown unconfirmed. The Explorer plugin attempts to
+release communication so ESI can be reconnected independently. A poisoned inline
+transport retains its owner: closing beside an outstanding native call is unsafe.
+Notebook drivers retain their inline owner's reservation when shutdown cannot be
+verified.
 
 Advanced voltage/current settings and the existing power setting use `0` to
 retain the device limit (shown as `Keep device limit` for power), not to request
@@ -190,11 +212,13 @@ The target cannot exceed the temperature maximum reported by the device.
 ON connects with all output selections OFF. Review targets before explicitly
 enabling an HV output or the heater.
 
-If port opening or a later DLL call blocks or crashes, the ESI worker is terminated
-and its COM handle is released. This affects ESI only. OFF and the communication
-close action can also terminate an in-flight command: queued commands are cancelled,
-and a late result cannot reactivate the UI or the replacement connection. A new ON
-explicitly creates a fresh worker; it never replays a failed activation.
+If port opening or a later DLL call blocks or crashes,
+the ESI worker is terminated and its COM handle is released. This affects ESI only.
+OFF and the communication close action can also terminate an in-flight command.
+A new ON explicitly creates a fresh worker.
+
+Queued commands are cancelled, and a late result cannot reactivate
+the UI or a replacement connection. Failed activations are never replayed.
 
 After a CGC receive/protocol error (`-7` through `-14`, or `-100`), the next serialized
 I/O operation first uses the manufacturer's `Purge` recovery routine. The failed
@@ -208,16 +232,23 @@ The port stays open while the driver checks both ADC polarities on both HV
 modules. All four absolute voltages must be **at most 1 V for three consecutive
 fresh measurement rounds** before the port closes. The check has a 60-second
 deadline; a blocked DLL is handled by the transport watchdog.
+Repeated communication-release requests cannot close the same owner twice.
+The log records the start of shutdown, and errors identify the failed ADC operation
+and module. A cleanup failure cannot hide the original discharge error. ADC
+restoration is skipped on a desynchronized or poisoned transport; shutdown remains
+unconfirmed, rather than sending further commands on a broken stream.
 
 The ADC selection is switched and checked for each polarity, old samples are
 discarded, and the data-ready flags must clear then signal a new conversion.
 The initial selections are restored unless the transport is unusable. Invalid
 readings, unproven ADC freshness, a timeout, or a failed port closure leave output
-shutdown unconfirmed. Explorer releases the communication owner anyway and displays
+shutdown unconfirmed. If communication can be released, Explorer displays
 `Disconnected: shutdown unconfirmed`, with recording stopped and the connection
-button OFF. ON can reconnect ESI without restarting Explorer or other devices.
+button OFF. ON can then reconnect ESI without restarting Explorer or other devices.
 The red shutdown warning remains visible after reconnecting until a subsequent
-shutdown actually verifies discharge. Closing a COM handle or killing the worker
+shutdown actually verifies discharge. It has its own warning icon and red summary;
+the current `STATE_ON` badge stays green and does not certify the previous shutdown.
+Closing a COM handle or killing the worker
 does not disable physical outputs or certify discharge.
 
 The cards show both voltage readings and the current while checking. Current
@@ -229,8 +260,9 @@ next ON reconnects. Saved output selections are not changed.
 **This 1 V software check does not certify safe access or complete discharge.**
 It cannot verify disconnected loads or replace an independent voltage check.
 If shutdown is unconfirmed, use the physical interlock/front panel and the
-instrument's safety procedure. A DLL blocked during operation requires an
-ESI worker termination, which the plugin performs without restarting Explorer.
+instrument's safety procedure. A blocked DLL is isolated by terminating the ESI
+worker, including in standalone Explorer. Notebook drivers still use inline calls
+by default and cannot terminate a blocked DLL owner without restarting their kernel.
 
 The cards wrap in narrow panels, with scrollbars when needed. The mouse wheel
 does not edit setpoints.
