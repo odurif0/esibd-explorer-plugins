@@ -1,4 +1,4 @@
-"""AMX HD (High-Definition power switch) low-level CGC driver (HV-AMX-CTRL-4EDH)."""
+"""AMX HD low-level CGC driver (HV-AMX-CTRL-4EDH: options E + D + H, High Frequency Resolution)."""
 
 from __future__ import annotations
 
