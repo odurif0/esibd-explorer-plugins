@@ -31,6 +31,7 @@ def test_dmmr_axis_reads_pa_and_a_colour_change_keeps_stopped_curves(tmp_path):
                HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "home" / ".config"))
     result = subprocess.run([python, str(Path(__file__)), str(tmp_path)], env=env, text=True,
                             capture_output=True, timeout=240)
+    assert (tmp_path / "report.json").is_file(), (result.returncode, result.stdout[-3000:], result.stderr[-3000:])
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert report.get("code") == 0, (report, result.stdout[-3000:], result.stderr[-3000:])
     assert report["before"] == report["after"] == {"DMMR_M01": True, "DMMR_M02": True}
@@ -44,6 +45,12 @@ def test_dmmr_axis_reads_pa_and_a_colour_change_keeps_stopped_curves(tmp_path):
     # Only the display changes: data, Explorer's display conversion and scans stay in amperes.
     assert 8e-12 < report["data"] < 1.2e-11 and report["converted"] == 1e-11
     assert report["recording_window"] is None  # While recording, Explorer's own window applies.
+    assert report["label_legend"] == ["Collecteur (pA)", "DMMR_M02 (pA)"]
+    assert report["label_legend_text"] == report["label_legend"]
+    assert report["failed_label_legend"] == report["label_legend"]
+    assert report["recording_label_legend"] == ["Entr\u00e9e \u00b5A 50% (pA)", "DMMR_M02 (pA)"]
+    assert report["empty_label_legend"] == ["DMMR_M01 (pA)", "DMMR_M02 (pA)"]
+    assert report["label_channel_names"] == ["DMMR_M01", "DMMR_M02"]
 
 
 def main(work: Path) -> int:
@@ -105,7 +112,12 @@ def main(work: Path) -> int:
                 if time.monotonic() - state["t"] < 1:
                     return
                 device, display = state["device"], state["device"].liveDisplay
-                display.raiseDock(True)
+                if not state.get("raised"):
+                    display.raiseDock(True)
+                    state.update(raised=True, t=time.monotonic())
+                    return
+                if manager.resizing:
+                    return  # Explorer suspends drawing during dock layout changes.
                 display_time = display.getDisplayTime
                 display.getDisplayTime = lambda: -1  # Drawn while acquiring, when the data were recent.
                 display.plot(apply=True)
@@ -138,6 +150,38 @@ def main(work: Path) -> int:
                 device._recording = True  # Explorer's Device.recording state, without starting anything.
                 report["recording_window"] = display._frozen_end()
                 device._recording = False
+                channels = device.getChannels()
+                times = device.time.get().copy()
+                samples = [ch.values.get().copy() for ch in channels]
+                editor = device.channelPanelCards[1]["label_edit"]
+                editor.setText("Collecteur")
+                editor.editingFinished.emit()
+                report["label_legend"] = [ch.plotCurve.name() for ch in channels]
+                report["label_legend_text"] = [label.text for _, label in widget.legend.items]
+                assert window.grab().save(str(work / "dmmr-plot-labels.png"))
+                export = device.exportConfiguration
+                def denied(**kwargs):
+                    raise PermissionError("read-only configuration")
+                device.exportConfiguration = denied
+                editor.setText("Unsaved label")
+                editor.editingFinished.emit()
+                report["failed_label_legend"] = [ch.plotCurve.name() for ch in channels]
+                assert channels[0].label == "Collecteur" and editor.isModified()
+                device.exportConfiguration = export
+                device._recording = True
+                display.getDisplayTime = lambda: -1
+                editor.setText("Entr\u00e9e \u00b5A 50%")
+                editor.editingFinished.emit()
+                display.plot(apply=True)  # The next recording frame, without hardware I/O.
+                report["recording_label_legend"] = [ch.plotCurve.name() for ch in channels]
+                device._recording = False
+                editor.setText("")
+                editor.editingFinished.emit()
+                report["empty_label_legend"] = [ch.plotCurve.name() for ch in channels]
+                report["label_channel_names"] = [ch.name for ch in channels]
+                np.testing.assert_array_equal(device.time.get(), times)
+                for ch, values in zip(channels, samples, strict=True):
+                    np.testing.assert_array_equal(ch.values.get(), values)
                 finish(0)
         except Exception:  # noqa: BLE001
             report["exception"] = traceback.format_exc()

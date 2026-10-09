@@ -62,6 +62,8 @@ Compact module cards use as many columns as the panel can fit, with
 scrollbars when space is limited. Edit the label below the module number;
 Enter or leaving the field saves it, Escape cancels the edit. Labels are
 stored by module address without renaming recorded channels.
+The plot legend uses this label, or the channel name when the label is empty.
+Editing it updates the legend without resetting the recorded history.
 
 `Used` shows the range returned with the current, not the requested range.
 No full-scale values are inferred from these indices. Currents stay uncorrected:
