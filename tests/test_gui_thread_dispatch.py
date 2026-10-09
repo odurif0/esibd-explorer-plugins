@@ -129,6 +129,7 @@ def probe(path):
     parent = Parent()
     controller = types.SimpleNamespace(
         controllerParent=parent, main_state="ST_ON", hardware_main_state="ST_ON",
+        device=object(), shutdown_unconfirmed=False,
         output_state_summary="ON", available_configs=[], available_configs_text="configs",
         loaded_state_text="Manual", loaded_config_text="Config 1", device_enabled_state="ON",
         detected_modules_text="modules", detected_modules="modules", device_state_summary="OK",
@@ -165,6 +166,23 @@ def probe(path):
     in_worker(lambda: ns["_set_on_ui_state"](parent, False))
     drain_until(lambda: parent.deviceOnAction.state is False)
     assert parent.onAction.state is False
+
+    if path.parent.name == "esi":
+        assert parent.shutdown_unconfirmed is False
+        in_worker(lambda: ns["_restore_on_ui_state"](controller))
+        controller.device = object()
+        in_worker(lambda: invoke(lambda: calls.append("retired-on-drained")))
+        drain_until(lambda: calls[-1] == "retired-on-drained")
+        assert parent.onAction.state is False, "retired ESI connection restored ON"
+        controller.device = None
+        in_worker(lambda: ns["_restore_on_ui_state"](controller))
+        in_worker(lambda: invoke(lambda: calls.append("disconnected-on-drained")))
+        drain_until(lambda: calls[-1] == "disconnected-on-drained")
+        assert parent.onAction.state is False, "disconnected ESI restored ON"
+        controller.shutdown_unconfirmed = True
+        in_worker(lambda: sync(controller))
+        drain_until(lambda: parent.shutdown_unconfirmed is True)
+        assert parent.labels["shutdown_unconfirmed"].text() == "True"
 
     if "_stop_refresh_timer" in ns:
         class Timer(QTimer):
