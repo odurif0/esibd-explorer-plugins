@@ -1,0 +1,34 @@
+{
+  "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+  "family": "amx_hd",
+  "protocol": 1,
+  "source": {
+    "file": "source.zip",
+    "sha256": "cd41393dd3baab0c45d78f19c9644ace69131c55a7a9ba652a770f955ed0ba5d",
+    "size_bytes": 330091,
+    "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+    "vendored": false
+  },
+  "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+  "targets": {
+    "windows-x86_64": {
+      "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "features": [
+        "amx_hd"
+      ],
+      "file": "esibd-amx_hd-worker.exe",
+      "sha256": "baad7656ab73f18ef7499e98a9d263725da65d1d07d6e1db6e7e681750781528",
+      "size_bytes": 880128,
+      "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+      "target": "x86_64-pc-windows-gnu"
+    }
+  },
+  "third_party_notices": {
+    "file": "THIRD_PARTY_NOTICES.txt",
+    "sha256": "7270db18708f7c470ef333139bc2c6cbc63084b8dc3aaed6fa8fb9fc5dd9b39c",
+    "size_bytes": 279627
+  },
+  "validation": "hardware-not-validated",
+  "worker_version": "0.1.0"
+}

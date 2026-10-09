@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Any, cast
 
 import numpy as np
@@ -3417,11 +3417,15 @@ class AMXDevice(Device):
         connection_pending = bool(
             controller and getattr(controller, "_initial_open_incomplete", lambda: False)()
         )
+        native_lost = bool(controller and getattr(controller, "_native_transport_lost", False))
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = not shutdown_confirmed and not connection_pending
+            self.onAction.state = not shutdown_confirmed and not connection_pending and not native_lost
             self._sync_local_on_action()
         if not shutdown_confirmed and not connection_pending:
             self.print(
+                "AMX native communication was lost; the OFF button is not hardware "
+                "OFF confirmation. Make the hardware safe before reconnecting."
+                if native_lost else
                 "AMX shutdown could not be confirmed; UI remains ON until "
                 "the hardware state is verified.",
                 flag=PRINT.WARNING,
@@ -3467,6 +3471,14 @@ class AMXDevice(Device):
         current_state = self.isOn() if hasattr(self, "onAction") else False
         transition_target = getattr(controller, "transition_target_on", None)
         requested_on = current_state if on is None else bool(on)
+        if (controller and not requested_on
+                and getattr(controller, "_native_backend", lambda _: None)(getattr(controller, "device", None)) is not None
+                and (getattr(controller, "initializing", False)
+                     or getattr(controller, "transitioning", False))):
+            controller._initial_open_close_requested = True
+            controller._cancel_native_operation()
+            self._set_on_ui_state(False)
+            return
         if controller and getattr(controller, "initializing", False) and not requested_on:
             # The initialization worker owns Open and will perform verified
             # shutdown if it succeeds. Never start a competing output worker.
@@ -3973,6 +3985,8 @@ class AMXController(DeviceController):
         self._channel_apply_pending: dict[int, AMXChannel] = {}
         self._channel_apply_worker_running = False
         self._consecutive_poll_errors = 0
+        self._native_cancel_event = Event()
+        self._native_transport_lost = False
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
         # earlier in this session and is therefore still locked in-process.
         self._poisoned_com: int | None = None
@@ -4013,6 +4027,7 @@ class AMXController(DeviceController):
     def initializeCommunication(self) -> None:
         if getattr(self, "initializing", False):
             return
+        self._retire_failed_native_worker()
         acquisition_thread = getattr(self, "acquisitionThread", None)
         if acquisition_thread is not None and acquisition_thread.is_alive():
             self.closeCommunication()
@@ -4035,9 +4050,15 @@ class AMXController(DeviceController):
             self._initialize_transport_session()
             if self._initial_open_close_requested:
                 self.shutdownCommunication()
+            elif self._native_backend(self.device) is not None:
+                device, token = self.device, self._native_cancel_event
+                _invoke_gui_callback(
+                    lambda: self.initComplete(native_device=device, native_token=token)
+                )
             else:
                 self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
+            self._retire_failed_native_worker()
             self._restore_off_ui_state()
             guidance = self._init_failure_guidance(exc)
             message = (
@@ -4047,9 +4068,16 @@ class AMXController(DeviceController):
             if guidance:
                 message = f"{message}\n{guidance}"
             self.print(message, flag=PRINT.ERROR)
-            self._dispose_device()
+            if (self._initial_open_close_requested
+                    and self._native_backend(self.device) is not None
+                    and not self._initial_open_incomplete()):
+                self.shutdownCommunication()
+            else:
+                self._dispose_device()
         finally:
             self.initializing = False
+            if self._native_transport_lost or self._native_backend(self.device) is not None:
+                self._sync_status_to_gui()
 
     def _init_failure_guidance(self, exc: Exception) -> str:
         """Operator guidance appended to an init-failure message, or "" if none.
@@ -4059,6 +4087,12 @@ class AMXController(DeviceController):
         COM port is locked in-process) instead of looping on a bare
         'Error opening port' (-2) while the hardware is actually responsive.
         """
+        if self._native_transport_lost:
+            return (
+                "The native worker was retired; output safety is not confirmed. "
+                "Make the hardware safe, then retry ON explicitly to start a fresh worker. "
+                "No outputs are automatically re-enabled."
+            )
         if self._initial_open_incomplete():
             return (
                 "The failed initial connection is retained until its native call finishes "
@@ -4076,8 +4110,19 @@ class AMXController(DeviceController):
             self._poisoned_com = current_com
         return guidance
 
-    def initComplete(self) -> None:
-        if self._initial_open_close_requested:
+    def initComplete(self, *, native_device=None, native_token=None) -> None:
+        if native_device is not None:
+            if (native_device is not self.device
+                    or native_token is not self._native_cancel_event
+                    or native_token.is_set()
+                    or getattr(self, "_native_ready_device", None) is not native_device):
+                return
+        elif self._native_backend(self.device) is not None:
+            self._retire_failed_native_worker()
+            return  # A parameterless signal cannot identify its native session.
+        if self._retire_failed_native_worker():
+            return
+        if self.device is None or self._initial_open_close_requested:
             return  # A queued success must not undo an explicit OFF/close.
         self._finalize_transport_initialization()
         self._resume_pending_on_request_after_transport_ready()
@@ -4089,7 +4134,15 @@ class AMXController(DeviceController):
             device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
             com=int(self.controllerParent.com),
             baudrate=int(self.controllerParent.baudrate),
+            native_backend=True,
+            log_dir=Path(self.controllerParent.pluginManager.Settings.dataPath) / "logs" / self.controllerParent.name.lower(),
         )
+        if self._native_backend(self.device) is not None:
+            self._native_ready_device = None
+            self._native_cancel_event = Event()
+            self.main_state = "Connecting"
+            self.device_enabled_state = "Unknown"
+            self._native_transport_lost = False
         backend_reason = str(
             getattr(self.device, "_process_backend_disabled_reason", "")
         ).strip()
@@ -4098,12 +4151,14 @@ class AMXController(DeviceController):
         if self._initial_open_close_requested:
             self._dispose_device()  # Construction finished, but Open was never sent.
             return
-        self.device.connect(timeout_s=float(self.controllerParent.connect_timeout_s))
+        self._device_call(self.device, "connect", timeout_s=float(self.controllerParent.connect_timeout_s))
         if self._initial_open_close_requested:
             return  # The worker must verify shutdown, not continue initialization.
         self._refresh_available_configs()
         self._refresh_loaded_config_status()
         self._update_state()
+        if self._native_backend(self.device) is not None:
+            self._native_ready_device = self.device
 
     def _finalize_transport_initialization(self) -> None:
         """Sync transport state to the GUI after communication becomes ready."""
@@ -4181,9 +4236,12 @@ class AMXController(DeviceController):
             self.print("Resumed after an Explorer crash: AMX adopted as it runs "
                        f"({self._startup_snapshot_summary(snapshot)}); no config was loaded, nothing was enabled.")
         except Exception as exc:  # noqa: BLE001 - reported; the connection stays open, nothing commanded
+            retired = self._retire_failed_native_worker()
             self.errorCount += 1
+            outcome = ("Native communication was lost; output safety is not confirmed."
+                       if retired else "Communication stays open; nothing was commanded.")
             self.print(f"Resume after an Explorer crash: could not read the AMX state: "
-                       f"{self._format_exception(exc)}. Communication stays open; nothing was commanded.",
+                       f"{self._format_exception(exc)}. {outcome}",
                        flag=PRINT.ERROR)
         finally:
             self.resume_session = False
@@ -4225,10 +4283,13 @@ class AMXController(DeviceController):
             return
 
         try:
-            configs = list_configs(
+            configs = self._device_call(device, "list_configs",
                 timeout_s=float(getattr(self.controllerParent, "connect_timeout_s", 5.0))
             )
         except Exception as exc:  # noqa: BLE001
+            if (self._retire_failed_native_worker()
+                    or (self._native_backend(device) is not None and self._native_cancel_event.is_set())):
+                raise
             self.available_configs = []
             self.available_configs_text = "Unavailable"
             self.print(
@@ -4253,8 +4314,11 @@ class AMXController(DeviceController):
             return
 
         try:
-            status = get_status()
+            status = self._device_call(device, "get_status")
         except Exception as exc:  # noqa: BLE001
+            if (self._retire_failed_native_worker()
+                    or (self._native_backend(device) is not None and self._native_cancel_event.is_set())):
+                raise
             self.loaded_config_text = "Unavailable"
             self.print(
                 f"Could not read loaded AMX config: {self._format_exception(exc)}",
@@ -4387,7 +4451,7 @@ class AMXController(DeviceController):
         device = self.device
         if device is None:
             raise RuntimeError("AMX device disconnected.")
-        return device.collect_housekeeping(timeout_s=self._startup_snapshot_timeout_s())
+        return self._device_call(device, "collect_housekeeping", timeout_s=self._startup_snapshot_timeout_s())
 
     def _startup_snapshot_ready(self, snapshot: dict[str, Any]) -> bool:
         state = str(snapshot.get("main_state", {}).get("name", "") or "")
@@ -4493,12 +4557,12 @@ class AMXController(DeviceController):
 
         # DeviceEnable only allows a subsequent config load to restore Enb.
         started_s = time.monotonic()
-        device.set_device_enabled(True, timeout_s=timeout_s)
+        self._device_call(device, "set_device_enabled", True, timeout_s=timeout_s)
         self._print_if_slow("AMX set_device_enabled(ON)", started_s)
         try:
             if load_config_first:
                 started_s = time.monotonic()
-                device.load_config(config_index, timeout_s=timeout_s)
+                self._device_call(device, "load_config", config_index, timeout_s=timeout_s)
                 self._print_if_slow(f"AMX load_config({config_index})", started_s)
                 self._loaded_config_index = config_index
                 started_s = time.monotonic()
@@ -4512,7 +4576,7 @@ class AMXController(DeviceController):
             return snapshot
         except Exception:
             with contextlib.suppress(Exception):
-                device.set_device_enabled(False, timeout_s=timeout_s)
+                self._device_call(device, "set_device_enabled", False, timeout_s=timeout_s, cancellable=False)
             raise
 
     def _ensure_transport_connected(self, timeout_s: float) -> Any:
@@ -4530,7 +4594,7 @@ class AMXController(DeviceController):
                 "connect()."
             )
         started_s = time.monotonic()
-        connect(timeout_s=timeout_s)
+        self._device_call(device, "connect", timeout_s=timeout_s)
         self._print_if_slow("AMX transport reconnect", started_s)
         self._refresh_available_configs()
         self._refresh_loaded_config_status()
@@ -4624,14 +4688,18 @@ class AMXController(DeviceController):
                 restart_acquisition=True,
             )
         except TimeoutError:
-            pass
+            self._retire_failed_native_worker()
         except Exception as exc:  # noqa: BLE001
+            self._retire_failed_native_worker()
             self.errorCount += 1
             self.print(
                 f"Failed to load AMX config {config_index}: {self._format_exception(exc)}",
                 flag=PRINT.ERROR,
             )
         finally:
+            if (self._initial_open_close_requested
+                    and self._native_backend(self.device) is not None):
+                self.shutdownCommunication()
             self._end_transition()
             self._sync_status_to_gui()
 
@@ -4656,9 +4724,9 @@ class AMXController(DeviceController):
                     flag=PRINT.WARNING,
                 )
                 width_ticks = 1
-            device.set_pulser_width_ticks(pulser, width_ticks, timeout_s=timeout_s)
+            self._device_call(device, "set_pulser_width_ticks", pulser, width_ticks, timeout_s=timeout_s)
         else:
-            device.set_pulser_width_ticks(pulser, 0, timeout_s=timeout_s)
+            self._device_call(device, "set_pulser_width_ticks", pulser, 0, timeout_s=timeout_s)
 
     def applyGlobalSettings(self) -> None:
         device = self.device
@@ -4682,15 +4750,17 @@ class AMXController(DeviceController):
                     return
                 self.output_rows = None
                 self._sync_status_to_gui()
-                device.set_frequency_khz(
+                self._device_call(device, "set_frequency_khz",
                     float(getattr(self.controllerParent, "frequency_khz", 2.0)),
                     timeout_s=timeout_s,
                 )
                 for channel in self.controllerParent.getChannels():
                     self._apply_channel_timing(channel, timeout_s)
         except TimeoutError:
+            self._retire_failed_native_worker()
             return
         except Exception as exc:  # noqa: BLE001
+            self._retire_failed_native_worker()
             self.errorCount += 1
             self.print(
                 f"Failed to apply AMX global settings: {self._format_exception(exc)}",
@@ -4855,7 +4925,7 @@ class AMXController(DeviceController):
                 device = self.device
                 if device is None:
                     return
-                snapshot = device.collect_housekeeping(timeout_s=timeout_s)
+                snapshot = self._device_call(device, "collect_housekeeping", timeout_s=timeout_s)
                 if (
                     self.device is not device
                     or not getattr(self, "initialized", False)
@@ -4866,7 +4936,7 @@ class AMXController(DeviceController):
         except TimeoutError as exc:
             if str(exc) == lock_timeout_message:
                 return
-            self._poll_error("Timed out while polling AMX housekeeping.", exc=None)
+            self._poll_error("Timed out while polling AMX housekeeping.", exc=exc)
             return
         except Exception as exc:  # noqa: BLE001
             self._poll_error(
@@ -4880,6 +4950,8 @@ class AMXController(DeviceController):
         self._consecutive_poll_errors += 1
         self.print(message, flag=PRINT.ERROR)
         self.initializeValues(reset=True)
+        if self._retire_failed_native_worker():
+            return
         if self._consecutive_poll_errors >= _AMX_MAX_CONSECUTIVE_POLL_ERRORS:
             self.print(
                 f"Too many consecutive AMX polling errors ({self._consecutive_poll_errors}). "
@@ -4987,8 +5059,10 @@ class AMXController(DeviceController):
                     return
                 self._apply_channel_timing(channel, timeout_s)
         except TimeoutError:
+            self._retire_failed_native_worker()
             return
         except Exception as exc:  # noqa: BLE001
+            self._retire_failed_native_worker()
             self.errorCount += 1
             self.print(
                 f"Failed to apply AMX P{channel.pulser_number()}: {self._format_exception(exc)}",
@@ -5070,19 +5144,27 @@ class AMXController(DeviceController):
                     self._restore_on_ui_state()
                 return
         except Exception as exc:  # noqa: BLE001
+            self._retire_failed_native_worker()
             self.errorCount += 1
-            if target_on:
+            if (target_on and not (self._initial_open_close_requested
+                                  and self._native_backend(self.device) is not None)):
                 self._restore_ui_state_for_device()
             self.print(
                 f"Failed to toggle AMX: {self._format_exception(exc)}",
                 flag=PRINT.ERROR,
             )
         finally:
+            if (target_on and self._initial_open_close_requested
+                    and self._native_backend(self.device) is not None):
+                self.shutdownCommunication()
             self._end_transition()
             self._sync_status_to_gui()
 
     def shutdownCommunication(self) -> bool:
         self._initial_open_close_requested = True
+        self._cancel_native_operation()
+        if self._retire_failed_native_worker():
+            return False
         device = self.device
         if device is None:
             self.closeCommunication()
@@ -5115,7 +5197,7 @@ class AMXController(DeviceController):
                     shutdown_confirmed = self.main_state == "Disconnected"
                 else:
                     started_s = time.monotonic()
-                    shutdown_result = device.shutdown(
+                    shutdown_result = self._device_call(device, "shutdown", cancellable=False,
                         timeout_s=float(getattr(self.controllerParent, "startup_timeout_s", 10.0)),
                         **shutdown_kwargs,
                     )
@@ -5149,6 +5231,9 @@ class AMXController(DeviceController):
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
         self._initial_open_close_requested = True
+        self._cancel_native_operation()
+        if self._retire_failed_native_worker(force=final_state is None):
+            return
         if self._initial_open_incomplete():
             # Release only the failed opening, never claim a hardware shutdown.
             if self._dispose_device(initial_open_only=True) is False:
@@ -5205,11 +5290,15 @@ class AMXController(DeviceController):
                 device = self.device
                 if device is None:
                     return
-                snapshot = device.collect_housekeeping(
+                snapshot = self._device_call(device, "collect_housekeeping",
                     timeout_s=float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
                 )
                 self._apply_snapshot(snapshot)
         except Exception as exc:
+            if self._retire_failed_native_worker():
+                raise
+            if self._native_backend(device) is not None:
+                raise
             if _amx_transport_failure_is_fatal(exc):
                 # Poisoned/unusable transport: stop acquisition and route the
                 # close through the GUI-thread signal (mirrors _poll_error).
@@ -5268,11 +5357,95 @@ class AMXController(DeviceController):
             "_open_failed", "_opening_in_progress", "_failed_open_released",
         ))
 
+    @staticmethod
+    def _native_backend(device):
+        """Inspect local fields without queuing a lifecycle RPC."""
+        try:
+            backend = object.__getattribute__(device, "_backend")
+            mode = object.__getattribute__(device, "_backend_mode")
+        except (AttributeError, TypeError):
+            return None
+        if mode == "process" and isinstance(getattr(backend, "session", None), str):
+            return backend
+        return None
+
+    def _device_call(self, device, method: str, *args, cancellable: bool = True, **kwargs):
+        backend = self._native_backend(device)
+        if backend is not None and backend.closed:
+            raise RuntimeError("AMX native transport is unusable; output safety is not confirmed.")
+        token = self._native_cancel_event if backend is not None and cancellable else None
+        if token is not None:
+            if token.is_set():
+                raise RuntimeError("AMX native operation cancelled before dispatch.")
+        if backend is None:
+            result = getattr(device, method)(*args, **kwargs)
+        else:
+            # The Event belongs to the supervisor, not the serialized facade.
+            result = backend.call_method(
+                method, *args,
+                rpc_timeout_s=type(device)._native_rpc_timeout_for(method, kwargs),
+                _io_timeout_s=kwargs.get("timeout_s"), _cancel_event=token, **kwargs,
+            )
+        if token is not None and token.is_set():
+            raise RuntimeError("AMX native operation cancelled; shutdown must be verified.")
+        return result
+
+    def _cancel_native_operation(self) -> None:
+        if self._native_backend(self.device) is not None:
+            self._native_cancel_event.set()
+
+    def _retire_failed_native_worker(self, *, force: bool = False) -> bool:
+        device = self.device
+        backend = self._native_backend(device)
+        if backend is None or (not backend.closed and not force):
+            return False
+        first_loss = not self._native_transport_lost
+        self._native_transport_lost = True
+        self._initial_open_close_requested = True
+        self._native_cancel_event.set()
+        self.acquiring = self.initialized = False
+        self.main_state = _AMX_SHUTDOWN_UNCONFIRMED_STATE
+        self.device_enabled_state = "Unknown"
+        self.device_state_summary = self.controller_state_summary = "Unknown"
+        self.available_configs = []
+        self.available_configs_text = self.loaded_config_text = "n/a"
+        self._loaded_config_index = -1
+        self._discard_pending_runtime_applies()
+        self.initializeValues(reset=True)
+        try:
+            reaped = backend.close(grace_s=0) if force else backend.close()
+            if reaped is True and self.device is device:
+                self.device = None
+        except Exception as exc:
+            self.print(f"AMX native worker retirement failed: {exc}", flag=PRINT.ERROR)
+        self._restore_off_ui_state()
+        token = self._native_cancel_event
+
+        def invalidate_readbacks() -> None:
+            if token is self._native_cancel_event and self._native_transport_lost:
+                self.controllerParent.recording = False
+                self.updateValues()
+
+        _invoke_gui_callback(invalidate_readbacks)
+        self._sync_status_to_gui()
+        if first_loss:
+            self.print("AMX native communication lost. Output safety is not confirmed; "
+                       "make the hardware safe before an explicit reconnect.", flag=PRINT.ERROR)
+        return True
+
     def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         self.output_rows = None
         device = self.device
         if device is None:
-            return self.main_state != _AMX_SHUTDOWN_UNCONFIRMED_STATE
+            return self._native_transport_lost or self.main_state != _AMX_SHUTDOWN_UNCONFIRMED_STATE
+        if self._retire_failed_native_worker():
+            return self.device is None
+        if (self._native_backend(device) is not None
+                and self.main_state == _AMX_SHUTDOWN_UNCONFIRMED_STATE
+                and not self._initial_open_incomplete()):
+            self._restore_on_ui_state()
+            self._sync_status_to_gui()
+            return False  # A live worker still needs verified OFF, not bare Close.
         # A connect that just succeeded needs verified shutdown, not bare Close.
         # Its initializer retains the pending stop request and owns that path.
         initial_cleanup = (getattr(device, "_open_failed", False)
@@ -5286,6 +5459,8 @@ class AMXController(DeviceController):
                 released = device.disconnect() is True
         except Exception as exc:
             self.print(f"AMX connection cleanup remains unconfirmed: {exc}", flag=PRINT.ERROR)
+            if self._retire_failed_native_worker():
+                return self.device is None
         if not released:
             initial_open = self._initial_open_incomplete()
             self.initialized = not initial_open
@@ -5307,7 +5482,10 @@ class AMXController(DeviceController):
 
     def _restore_off_ui_state(self) -> None:
         self.resume_session = False
+        token = self._native_cancel_event
         def _update_gui() -> None:
+            if token is not self._native_cancel_event:
+                return
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):
                 sync_on_state(False)
@@ -5318,13 +5496,17 @@ class AMXController(DeviceController):
         _invoke_gui_callback(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
+        token = self._native_cancel_event
         def _update_gui() -> None:
+            if token is not self._native_cancel_event:
+                return
+            state = not self._native_transport_lost
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):
-                sync_on_state(True)
+                sync_on_state(state)
                 return
             if hasattr(self.controllerParent, "onAction"):
-                self.controllerParent.onAction.state = True
+                self.controllerParent.onAction.state = state
 
         _invoke_gui_callback(_update_gui)
 
@@ -5340,6 +5522,8 @@ class AMXController(DeviceController):
         transport-init ``_update_state``; it never crosses the controller/device
         boundary, and defaults to a non-ON string (no None risk).
         """
+        if self._retire_failed_native_worker():
+            return
         if _state_is_on(getattr(self, "main_state", "")):
             self._restore_on_ui_state()
         else:

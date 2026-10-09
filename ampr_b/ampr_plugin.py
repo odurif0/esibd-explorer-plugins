@@ -1494,14 +1494,18 @@ class AMPRDevice(Device):
         if controller:
             shutdown_confirmed = bool(controller.shutdownCommunication())
         connection_pending = getattr(controller, "main_state", None) == "Connection pending"
+        retired = bool(getattr(controller, "_native_worker_retired_unconfirmed", False)
+                       and controller.device is None)
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = not shutdown_confirmed and not connection_pending
+            self.onAction.state = not shutdown_confirmed and not connection_pending and not retired
             self._sync_local_on_action()
             self._sync_toolbar_communication_controls()
         if not shutdown_confirmed:
             self.print(
                 "AMPR connection cleanup is pending; no output startup was performed."
                 if connection_pending else
+                "AMPR disconnected; hardware OFF remains unconfirmed. Reconnect explicitly."
+                if retired else
                 "AMPR shutdown could not be confirmed; UI remains ON until "
                 "the hardware state is verified.",
                 flag=PRINT.WARNING,
@@ -1527,7 +1531,9 @@ class AMPRDevice(Device):
             self._sync_toolbar_communication_controls()
             self._update_status_widgets()
 
-        _invoke_gui_callback(_update_gui)
+        controller = getattr(self, "controller", None)
+        dispatch = getattr(controller, "_queue_native_gui", _invoke_gui_callback)
+        dispatch(_update_gui)
 
     def setOn(self, on: "bool | None" = None) -> None:
         """Toggle the AMPR without the generic immediate apply=True jump."""
@@ -2119,6 +2125,10 @@ class AMPRController(DeviceController):
         self._setpoint_cancel = Event()
         self._setpoint_thread: Thread | None = None
         self._forced_close_state: str | None = None
+        self._native_session_token = object()
+        self._native_initialization_ready = None
+        self._native_initialization_required = False
+        self._native_shutdown_unconfirmed = False
         self._consecutive_transport_failures = 0
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
         # earlier in this session and is therefore still locked in-process.
@@ -2152,9 +2162,14 @@ class AMPRController(DeviceController):
         # Arm the request before scheduling its worker so an intervening close
         # cannot be forgotten when that worker eventually starts.
         self._initial_open_close_requested = False
+        self._native_session_token = object()
+        self._native_initialization_ready = None
+        self._native_initialization_required = True
         super().initializeCommunication()
 
     def runInitialization(self) -> None:
+        token = self._native_session_token
+        self._native_initialization_required = True
         if getattr(self, '_initial_open_close_requested', False):
             if not self.initialized:
                 self._restore_off_ui_state()
@@ -2171,6 +2186,8 @@ class AMPRController(DeviceController):
                 device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
+                native_backend=True,
+                log_dir=Path(self.controllerParent.pluginManager.Settings.dataPath) / "logs" / self.controllerParent.name.lower(),
             )
             if getattr(self, '_initial_open_close_requested', False):
                 # No native Open was issued by this freshly created backend.
@@ -2193,8 +2210,13 @@ class AMPRController(DeviceController):
                 return
             self._refresh_module_scan()
             self._update_state()
+            if token is not self._native_session_token:
+                return
+            self._native_initialization_ready = (token, self.device)
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
+            if token is not self._native_session_token:
+                return
             self._restore_off_ui_state()
             guidance = self._init_failure_guidance(exc)
             message = (
@@ -2206,7 +2228,8 @@ class AMPRController(DeviceController):
             self.print(message, flag=PRINT.ERROR)
             self._dispose_device()
         finally:
-            self.initializing = False
+            if token is self._native_session_token:
+                self.initializing = False
 
     def _init_failure_guidance(self, exc: Exception) -> str:
         """Operator guidance appended to an init-failure message, or "" if none.
@@ -2236,6 +2259,10 @@ class AMPRController(DeviceController):
     def initComplete(self) -> None:
         if getattr(self, '_initial_open_close_requested', False):
             return  # A queued success must not undo an explicit close.
+        if self._native_initialization_required:
+            if self._native_initialization_ready != (self._native_session_token, self.device):
+                return
+            self._native_initialization_ready = None
         if self.device is not None and self.detected_module_ids:
             self.controllerParent._sync_channels_from_detected_modules(
                 self.detected_module_ids
@@ -2249,6 +2276,8 @@ class AMPRController(DeviceController):
         # A fresh transport reached this far, so any earlier in-process port
         # poisoning is no longer relevant for this COM port.
         self._poisoned_com = None
+        self._forced_close_state = None
+        self._native_worker_retired_unconfirmed = False
         self.super_init_complete_called = True
         self._sync_status_to_gui()
         if self.device is None:
@@ -2288,7 +2317,8 @@ class AMPRController(DeviceController):
 
     def runAcquisition(self) -> None:
         """Poll AMPR readbacks while reusing the acquisition-loop lock."""
-        while self.acquiring:
+        token = self._native_session_token
+        while self.acquiring and token is self._native_session_token:
             started = time.monotonic()
             try:
                 with self._controller_lock_section(
@@ -2296,7 +2326,7 @@ class AMPRController(DeviceController):
                     timeout_s=1.0,
                     log_timeout=False,
                 ):
-                    if not self.acquiring:
+                    if not self.acquiring or token is not self._native_session_token:
                         break  # A ramp/OFF may have taken over while this thread waited.
                     self.readNumbers(already_acquired=True)
                     self.signalComm.updateValuesSignal.emit()
@@ -2339,9 +2369,11 @@ class AMPRController(DeviceController):
                     already_acquired=already_acquired,
                 ):
                     device = self.device
-                    if device is None:
+                    if device is None or device is not poll_device:
                         return
                     voltages = device.get_module_voltages(module)
+                    if self.device is not device:
+                        return
                     # Polling already reads both requested and measured voltage.
                     # Check the request while holding the same hardware lock so
                     # an old frame can never confirm a newer write.
@@ -2358,6 +2390,8 @@ class AMPRController(DeviceController):
                 # raised by the device and handled by except-Exception below.
                 continue
             except Exception as exc:  # noqa: BLE001
+                if self.device is not poll_device:
+                    return
                 self.errorCount += 1
                 self.print(f"Failed to read module {module}: {exc}", flag=PRINT.ERROR)
                 if _transport_failure_is_fatal(exc):
@@ -2376,7 +2410,7 @@ class AMPRController(DeviceController):
         if (self.resume_session and getattr(self, "_last_output_targets", None)
                 and not getattr(self, "_resume_adoption_queued", False)):
             self._resume_adoption_queued = True
-            _invoke_gui_callback(self._adopt_hardware_setpoints)
+            self._queue_native_gui(self._adopt_hardware_setpoints)
 
     def _adopt_hardware_setpoints(self) -> None:
         """Crash resume: show the setpoints the AMPR holds as the applied values; nothing is sent."""
@@ -2414,7 +2448,7 @@ class AMPRController(DeviceController):
 
     def applyValueFromThread(self, channel: AMPRChannel, *, force: bool = False) -> None:
         """Snapshot on the GUI thread; one worker serializes all pending writes."""
-        _invoke_gui_callback(lambda: self._queue_setpoint(channel, force=force))
+        self._queue_native_gui(lambda: self._queue_setpoint(channel, force=force))
 
     def _queue_setpoint(self, channel: AMPRChannel, *, force: bool = False) -> None:
         if self.device is None or not self.initialized or not self.controllerParent.isOn():
@@ -2547,7 +2581,7 @@ class AMPRController(DeviceController):
             if callable(feedback):
                 feedback(state, request.target, detail)
 
-        _invoke_gui_callback(update_gui)
+        self._queue_native_gui(update_gui)
 
     def _confirm_setpoints(self, module: int, voltages: dict, device: Any) -> None:
         if not hasattr(self, "_setpoint_lock"):
@@ -2716,8 +2750,11 @@ class AMPRController(DeviceController):
             self.print("AMPR PSU turned ON. State: ST_ON.")
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        self._native_initialization_ready = None
         self._initial_open_close_requested = True
         self._cancel_setpoints()
+        if self._retire_native_worker(force=final_state is None):
+            return
         if self._initial_open_incomplete():
             if not self._dispose_device(initial_open_only=True):
                 return
@@ -2761,11 +2798,15 @@ class AMPRController(DeviceController):
         self.initialized = False
         self._clear_transport_failures()
         self._forced_close_state = None
+        self._sync_status_to_gui()
 
     def shutdownCommunication(self) -> bool:
         """Run the AMPR shutdown sequence before releasing communication resources."""
         self._initial_open_close_requested = True
+        self._native_initialization_ready = None
         self._cancel_setpoints()
+        if self._retire_native_worker():
+            return False  # A reaped worker is not a verified hardware shutdown.
         device = self.device
         if device is None:
             self.closeCommunication()
@@ -2820,6 +2861,8 @@ class AMPRController(DeviceController):
                     else _AMPR_SHUTDOWN_UNCONFIRMED_STATE
                 )
             )
+        if shutdown_confirmed:
+            self._native_shutdown_unconfirmed = False
         return shutdown_confirmed
 
     def _refresh_module_scan(self) -> None:
@@ -2946,6 +2989,7 @@ class AMPRController(DeviceController):
         if self.device is None:
             return  # Preserve the last shutdown/transport-loss diagnosis.
 
+        device = self.device
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to refresh the AMPR state.",
@@ -2959,8 +3003,12 @@ class AMPRController(DeviceController):
             # Transient controller-lock contention (e.g. a voltage ramp holding
             # the lock); skip this refresh and keep the last state. Not counted
             # as an error: a real device fault is handled by except-Exception.
+            if self.device is device:
+                self._retire_native_worker()
             return
         except Exception as exc:  # noqa: BLE001
+            if self.device is not device:
+                return
             self.errorCount += 1
             failure_count = self._note_transport_failure()
             transport_unusable = _transport_failure_is_fatal(exc)
@@ -3005,6 +3053,8 @@ class AMPRController(DeviceController):
 
     def _handle_transport_loss(self) -> None:
         """Force immediate AMPR teardown after repeated transport failures."""
+        if self._retire_native_worker():
+            return
         if (
             getattr(self, "_forced_close_state", None) == _AMPR_COMMUNICATION_LOST_STATE
             and self.device is None
@@ -3065,7 +3115,15 @@ class AMPRController(DeviceController):
             if callable(update_status_widgets):
                 update_status_widgets()
 
-        _invoke_gui_callback(_refresh_gui)
+        self._queue_native_gui(_refresh_gui)
+
+    def _queue_native_gui(self, callback) -> None:
+        token, device = self._native_session_token, self.device
+        def guarded() -> None:
+            if (token is self._native_session_token and device is self.device
+                    and getattr(self.controllerParent, "controller", self) in (None, self)):
+                callback()
+        _invoke_gui_callback(guarded)
 
     def _transition_guard(self) -> Lock:
         lock = getattr(self, "_transition_lock", None)
@@ -3088,9 +3146,51 @@ class AMPRController(DeviceController):
             "_open_failed", "_opening_in_progress", "_failed_open_released",
         ))
 
+    def _retire_native_worker(self, *, force: bool = False) -> bool:
+        device = self.device
+        try:
+            backend = object.__getattribute__(device, "_backend")
+        except (AttributeError, TypeError):
+            return False
+        if not isinstance(getattr(backend, "session", None), str):
+            return False
+        if not force and not getattr(backend, "closed", False):
+            return False
+        try:
+            if not backend.close(grace_s=0):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            self.initialized = self.acquiring = self.ramping = False
+            self._native_shutdown_unconfirmed = True
+            self.main_state = _AMPR_SHUTDOWN_UNCONFIRMED_STATE
+            self.initializeValues(reset=True)
+            self._sync_status_to_gui()
+            self.print(f"AMPR native worker release failed: {exc}; hardware OFF is unconfirmed.", flag=PRINT.ERROR)
+            return False
+        if self.device is not device:
+            return True
+        self._cancel_setpoints()
+        self._cancel_ramp = True
+        self._initial_open_close_requested = True
+        self._native_worker_retired_unconfirmed = True
+        self._native_shutdown_unconfirmed = True
+        self._native_initialization_ready = None
+        self.device, self.initialized, self.acquiring, self.ramping = None, False, False, False
+        self.main_state = self._forced_close_state = "Disconnected: shutdown unconfirmed"
+        self._last_output_targets = {}
+        self.device_state_summary = self.interlock_state_summary = self.voltage_state_summary = "Unknown"
+        self.initializeValues(reset=True)
+        self._restore_off_ui_state()
+        self._sync_status_to_gui()
+        self.print("AMPR native worker released. Hardware OFF was not confirmed; outputs may still be live. "
+                   "Verify the hardware state before reconnecting or approaching the device.", flag=PRINT.ERROR)
+        return True
+
     def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         self._cancel_setpoints()
         self._last_output_targets = {}
+        if self._retire_native_worker(force=initial_open_only):
+            return True
         device = self.device
         if device is None:
             return self.main_state not in (_AMPR_SHUTDOWN_UNCONFIRMED_STATE, _AMPR_COMMUNICATION_LOST_STATE)
@@ -3186,10 +3286,13 @@ class AMPRController(DeviceController):
             if callable(sync_local):
                 sync_local()
 
-        _invoke_gui_callback(_update_gui)
+        self._queue_native_gui(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
         """Restore toolbar ON/OFF widgets back to ON after a failed shutdown."""
+        if self._retire_native_worker() or (self.device is None and getattr(self, "_native_worker_retired_unconfirmed", False)):
+            self._restore_off_ui_state()
+            return
         def _update_gui() -> None:
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):
@@ -3201,7 +3304,7 @@ class AMPRController(DeviceController):
             if callable(sync_local):
                 sync_local()
 
-        _invoke_gui_callback(_update_gui)
+        self._queue_native_gui(_update_gui)
 
     @contextlib.contextmanager
     def _controller_lock_section(

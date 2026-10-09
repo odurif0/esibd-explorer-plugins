@@ -56,6 +56,7 @@ def main(work):
     home.mkdir(parents=True, exist_ok=True)
     sys.modules.setdefault("pyautogui", types.ModuleType("pyautogui"))
     from esibd import const
+    const.qSet.setValue(f"{const.GENERAL}/{const.TESTMODE}", True)
     assert Path(const.defaultPluginPath).is_relative_to(home), const.defaultPluginPath
     shutil.copytree(ROOT / "transmission", Path(const.defaultPluginPath) / "transmission",
                     ignore=shutil.ignore_patterns("__pycache__"))
@@ -91,7 +92,8 @@ def main(work):
                 return finish(2)
             manager = getattr(window, "pluginManager", None)
             if state["phase"] == "load":
-                if manager is None or manager.loading or getattr(manager, "finalizing", True):
+                if (manager is None or manager.loading or getattr(manager, "finalizing", True)
+                        or not getattr(manager, "pluginNames", ())):
                     return
                 report["plugins"] = [p.name for p in manager.plugins]
                 plugin = getattr(manager, "Transmission", None)

@@ -2,13 +2,13 @@
 
 Runs the PSU from ESIBD Explorer and monitors live voltage/current readbacks.
 
-The plugin is self-contained: it embeds the minimal private runtime it needs,
-including the PSU driver files and vendor DLL.
+The plugin is self-contained: it bundles its native Rust worker, Python GUI
+adapters and reference driver files, and the PSU vendor DLL.
 
 ## Requirements
 
 - ESIBD Explorer `1.0.2`
-- Windows for real hardware communication
+- Windows x86-64 for real vendor-DLL hardware communication
 - No separate `ESIBD_core` installation is required for the plugin itself
 
 ## Activation
@@ -19,6 +19,26 @@ including the PSU driver files and vendor DLL.
 3. Set the Explorer `plugin path` to that `plugins` folder.
 4. Restart ESIBD Explorer.
 5. Enable the `PSU_C` plugin in the Plugin Manager.
+
+## Native Worker
+
+Production communication runs in this plugin's separate native Rust process,
+`native/esibd-psu-worker.exe` (Windows x86-64). The supervisor selects
+that exact plugin-local file from `native/manifest.json` and verifies its
+SHA-256, family and protocol before use. Missing or mismatched files fail
+startup; workers are not searched on PATH.
+
+The Explorer GUI and thin facade adapters remain Python. The older Python
+device implementation is retained as a reference for tests and notebooks,
+not as a production fallback. No external or bundled private Python worker
+interpreter, Explorer fork or separate `ESIBD_core` installation is required.
+Each plugin instance owns its worker; no running worker is shared with siblings.
+
+Worker logs are written under
+`<Explorer data path>/logs/psu_c/native/psu/`, never inside the plugin.
+The v0.5 native port has local mock-DLL, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
 
 ## Device Configuration
 
@@ -161,17 +181,23 @@ points at or above Ilim. It does not change ranges, Ilim or output enables.
 
 ## Connection Failures
 
-A timed-out connection is never reused. For a failed initial Open only, a later
-OFF/close or ON request can release it after the native call returns and port
-closure is confirmed. Otherwise it stays `Connection pending`, without output
-commands. `Disconnected` confirms port closure, not HV discharge. Other DLL
-timeouts still require hardware OFF and an Explorer restart.
+A failed or timed-out connection is never reused. A returned failed initial
+Open is cleaned up without output commands; `Connection pending` remains until
+port cleanup or worker retirement is confirmed. `Disconnected` confirms
+communication closure, not hardware OFF or HV discharge.
 
-OFF/close during initialization cancels startup. If the connection completes
-without a timeout, a normal verified shutdown follows. Starting again requires
-an explicit ON; the cancelled startup is never resumed automatically.
+OFF/close cancels startup. If Open succeeds after a close request, a normal
+verified shutdown follows. Only an explicit ON rearms startup; cancelled
+requests and old writes are never replayed automatically.
+
+Crashes and hung DLL calls are isolated to this plugin's worker. OFF/close can
+cancel, terminate and reap an unresponsive child without stopping other workers.
+After retirement, a fresh explicit ON starts a new worker without requiring an
+Explorer restart. Process termination does not prove outputs are OFF or
+discharged: use the hardware interlock/front panel when shutdown cannot be
+verified, and treat the displayed uncertainty separately from port ownership.
 
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `psu_c/` directory
-together, including the embedded `vendor/` subtree.
+together, including the bundled `vendor/` and `native/` subtrees.

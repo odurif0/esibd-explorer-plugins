@@ -11,7 +11,8 @@ def control():
     module = _load_plugin()
     calls = []
     heat = SimpleNamespace(is_heat_channel=lambda: True, is_current_channel=lambda: False,
-                           module_address=lambda: 0, name='HEAT', enabled=True)
+                           module_address=lambda: 0, name='HEAT', enabled=True, real=True,
+                           useMonitors=True, value=25., monitor=float('nan'))
     parent = SimpleNamespace(poll_timeout_s=.1, interval=1000., isOn=lambda: True,
                              getChannels=lambda: [heat], heat_power_limit_w=50.)
     controller = module.ESIController(parent)

@@ -1,6 +1,7 @@
-"""Extract the pinned official Windows Python used only by the ESI worker.
+"""Legacy Python-reference tooling; production plugins use native Rust workers.
 
-Download ARCHIVE_URL, then run: python3 tools/vendor_esi_python.py /path/to/archive.zip
+Use --retire to remove an unchanged obsolete private interpreter bundle.
+Explicit --vendor is only for reproducing historical reference-worker tests.
 """
 
 from __future__ import annotations
@@ -56,10 +57,42 @@ def vendor(archive_path: Path, destination: Path = DESTINATION) -> dict:
     return manifest
 
 
+def retire(destination: Path = DESTINATION) -> dict:
+    for path in (destination, *destination.parents):
+        if path.is_symlink():
+            raise ValueError(f"Refusing to retire a symlinked Python bundle: {path}")
+    manifest_path = destination / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("Private Python manifest is missing")
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    if (manifest.get("version") != VERSION or manifest.get("archive_sha256") != ARCHIVE_SHA256
+            or manifest.get("source_url") != ARCHIVE_URL or not isinstance(manifest.get("files"), dict)):
+        raise ValueError("Refusing to remove a different private Python bundle")
+    expected = {*manifest["files"], "manifest.json"}
+    if {path.name for path in destination.iterdir()} != expected:
+        raise ValueError("Refusing to remove unexpected files from the private Python folder")
+    for name, metadata in manifest["files"].items():
+        if not name or Path(name).name != name or "\\" in name:
+            raise ValueError("Invalid private Python manifest filename")
+        path = destination / name
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"Refusing to remove a non-regular file: {path}")
+        data = path.read_bytes()
+        if len(data) != metadata["bytes"] or hashlib.sha256(data).hexdigest() != metadata["sha256"]:
+            raise ValueError(f"Refusing to remove a changed Python bundle file: {path}")
+    for name in sorted(manifest["files"]):
+        (destination / name).unlink()
+    manifest_path.unlink()
+    destination.rmdir()
+    return manifest
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("archive", type=Path)
+    operation = parser.add_mutually_exclusive_group(required=True)
+    operation.add_argument("--vendor", type=Path, metavar="ARCHIVE", help="reproduce a historical Python reference bundle")
+    operation.add_argument("--retire", action="store_true", help="remove the unchanged obsolete private Python bundle")
     args = parser.parse_args()
-    metadata = vendor(args.archive)
-    print(f"ESI private Python {VERSION}: {len(metadata['files'])} files, "
-          f"{metadata['uncompressed_bytes']} bytes extracted")
+    metadata = retire() if args.retire else vendor(args.vendor)
+    print(f"ESI legacy private Python {VERSION}: {len(metadata['files'])} files, "
+          f"{metadata['uncompressed_bytes']} bytes {'retired' if args.retire else 'extracted'}")

@@ -3,6 +3,34 @@
 The software was exercised with simulated instruments. This is not physical
 qualification of a controller, load, sensor, calibration or protection limit.
 
+## Native worker qualification
+
+The Rust migration requires a new qualification on the Windows standalone
+Explorer 1.0.2 executable. Wine DLL loading, mock SDK tests and Linux PTY tests
+do not qualify Windows serial communication or physical output state.
+
+- Install complete folders, including `native/manifest.json`, the worker,
+  corresponding sources and notices. No private or system Python is required
+  by a worker. Record the binary/DLL hashes, Explorer version and COM mappings.
+- First test one device at zero with output gates disabled and independently
+  verified safe. Check startup, cancellation while connecting, readbacks, OFF,
+  discharge where applicable, and a fresh ON without restarting Explorer.
+- With two devices safely connected, terminate only one worker in Task Manager.
+  Its plugin must stop recording, invalidate readings and become reconnectable;
+  the other plugin must keep communicating. A forced disconnection must finish
+  without waiting for the failed device's SDK lock. Reconnecting must create a
+  new worker; an old completion must not change the new session's controls.
+- Worker termination is not hardware OFF. Check the physical outputs separately
+  before reconnecting. A failed shutdown with healthy communication must remain
+  available for an explicit OFF retry, not falsely become a successful shutdown.
+- Check `<Data path>/logs/<device>/native/<family>/` and that no new log is written
+  to the installed plugin folder. Keep all failure traces and physical readings.
+- Repeat for AMPR A/B, AMX A/B, AMX HD, DMMR, ESI, PSU A/B/C/D/E and TPG366.
+  Then qualify MScan and Transmission on simulated channels before approved,
+  bounded hardware runs. Transmission's Rust optimizer is not numerically
+  identical to the former SciPy implementation; compare measured outcomes,
+  bounds, Stop/recovery and saved files rather than identical search paths.
+
 ## Install once
 
 Close Explorer, CGC utilities and instrument-owning notebook kernels. Keep all
@@ -21,13 +49,17 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
 - **All device plugins:** verify COM assignments and channel/module mappings.
   Select zero targets and disabled output gates before connection; do not load
   an unreviewed startup profile. Check ON, OFF, reconnect and window closing.
-  A shutdown/closure failure must remain unconfirmed, not become Disconnected.
+  A shutdown failure with usable communication must remain unconfirmed and
+  retryable. A reaped worker must show `Disconnected: shutdown unconfirmed`,
+  never a claim that hardware shutdown succeeded.
   Software OFF is not a substitute for an independent physical safety check.
 - **Sleep prevention (all device plugins):** with a device ON, run
-  `powercfg /requests` in an administrator prompt: SYSTEM must list
-  "ESIBD Explorer: <device> on COM<n> is connected" for each connected device,
-  and the entry must disappear after a confirmed OFF. Leave the PC idle beyond
-  its sleep delay with a device ON: it must stay awake.
+  `powercfg /requests` in an administrator prompt: SYSTEM must list Explorer's
+  native-worker sleep request. Test each device in isolation; its request must
+  disappear after OFF or confirmed process reaping. With two connected devices,
+  closing one must leave the other's request active. Leave the PC idle beyond
+  its sleep delay with a device ON: it must stay awake. Reaping releases the
+  sleep request but never confirms physical output shutdown.
 - **TPG366:** match its real USB baud setting; compare all six statuses and units
   with the controller display. Test OFF/ON and reconnection after a controller
   power cycle. Inspect missing/off gauges without unplugging a powered gauge.

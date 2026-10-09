@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Event, Lock, RLock
 from typing import Any, cast
 
 import numpy as np
@@ -2488,9 +2488,11 @@ class DMMRDevice(Device):
         if self.controller:
             shutdown_confirmed = bool(self.controller.shutdownCommunication())
         pending = _initial_open_incomplete(getattr(self.controller, 'device', None))
+        retired = bool(getattr(self.controller, "_native_worker_retired_unconfirmed", False)
+                       and self.controller.device is None)
         if self.useOnOffLogic and hasattr(self, "onAction"):
             # Initial connection ownership is not a confirmed acquisition ON.
-            self.onAction.state = not shutdown_confirmed and not pending
+            self.onAction.state = not shutdown_confirmed and not pending and not retired
             self._sync_local_on_action()
             self._sync_toolbar_communication_controls()
             self._update_status_widgets()
@@ -2499,6 +2501,8 @@ class DMMRDevice(Device):
                 "DMMR connection cleanup is pending; use Disconnect to retry closure "
                 "or ON to clean up before reconnecting after the DLL call returns."
                 if pending else
+                "DMMR disconnected; hardware stop remains unconfirmed. Reconnect explicitly."
+                if retired else
                 "DMMR shutdown could not be confirmed; UI remains ON until the hardware state is verified.",
                 flag=PRINT.WARNING,
             )
@@ -2523,7 +2527,9 @@ class DMMRDevice(Device):
             self._sync_toolbar_communication_controls()
             self._update_status_widgets()
 
-        _invoke_gui_callback(_update_gui)
+        controller = getattr(self, "controller", None)
+        dispatch = getattr(controller, "_queue_native_gui", _invoke_gui_callback)
+        dispatch(_update_gui)
 
     def setOn(self, on: "bool | None" = None) -> None:
         """Toggle the DMMR without relying on a channel apply path."""
@@ -2941,6 +2947,55 @@ class DMMRChannel(Channel):
             line_edit.setToolTip(tooltip)
 
 
+def _native_dmmr_backend(device):
+    """Inspect local facade fields without turning detection into an RPC."""
+    try:
+        backend = object.__getattribute__(device, "_backend")
+    except (AttributeError, TypeError):
+        return None
+    if (getattr(backend, "family", None) == "dmmr"
+            and isinstance(getattr(backend, "session", None), str)
+            and callable(getattr(backend, "call_method", None))):
+        return backend
+    return None
+
+
+class _NativeDMMRCommandRecovery:
+    """Local cancellation checks; all verification/recovery runs in Rust."""
+
+    def __init__(self, controller, device, timeout_s, phase):
+        self.controller, self.device = controller, device
+        self.timeout_s, self.phase = timeout_s, phase
+
+    def _active(self):
+        backend = _native_dmmr_backend(self.device)
+        if (self.controller.device is not self.device or backend is None
+                or getattr(backend, "closed", False)):
+            raise RuntimeError("Native DMMR connection retired; recovery stopped.")
+        if self.phase == "startup" and (
+                not self.controller.controllerParent.isOn()
+                or self.controller._native_cancel_event.is_set()):
+            raise RuntimeError("Operation cancelled; recovery stopped.")
+
+    def verify_running(self):
+        self._active()
+        return self.controller._native_call(
+            self.device, "verify_running", timeout_s=self.timeout_s,
+            cancellable=self.phase == "startup",
+        )
+
+    def recover(self, status, action, expected):
+        self._active()
+        incident = self.controller._native_call(
+            self.device, "recover_command", status, action, expected,
+            timeout_s=self.timeout_s, cancellable=self.phase == "startup",
+        )
+        if not isinstance(incident, dict) or incident.get("verified") is not True:
+            raise RuntimeError("Native DMMR recovery was not verified.")
+        self._active()
+        return incident.get("result", incident)
+
+
 class DMMRController(DeviceController):
     """DMMR hardware controller used by the ESIBD Explorer plugin."""
 
@@ -2964,6 +3019,10 @@ class DMMRController(DeviceController):
         self._transition_lock = Lock()
         self._close_lock = Lock()
         self._forced_close_state: str | None = None
+        self._native_session_token = object()
+        self._native_initialization_ready = None
+        self._native_initialization_required = False
+        self._native_shutdown_unconfirmed = False
         self._consecutive_transport_failures = 0
         # Last timed-out COM port, until its closure is positively confirmed.
         # This cache alone cannot establish whether a native worker is still alive.
@@ -2998,6 +3057,12 @@ class DMMRController(DeviceController):
         ranges[module] = int(meas_range)
 
     def _new_command_recovery(self, device, timeout_s: float, phase: str):
+        if _native_dmmr_backend(device) is not None:
+            if phase == "startup":
+                self._native_cancel_event = Event()
+            self._native_call(device, "begin_command_recovery", phase,
+                              timeout_s=timeout_s, cancellable=phase == "startup")
+            return _NativeDMMRCommandRecovery(self, device, timeout_s, phase)
         factory = getattr(device, 'new_command_recovery', None)
         if not callable(factory):
             return None  # An old/incomplete backend fails closed on a receive error.
@@ -3007,7 +3072,40 @@ class DMMRController(DeviceController):
                 phase != 'startup' or self.controllerParent.isOn()),
         )
 
+    def _native_call(self, device, name, *args, timeout_s: float, cancellable=False):
+        backend = _native_dmmr_backend(device)
+        if backend is None or self.device is not device:
+            raise RuntimeError("Native DMMR connection retired.")
+        if getattr(backend, "closed", False):
+            raise RuntimeError("Native DMMR transport is unusable; hardware stop is unconfirmed.")
+        event = getattr(self, "_native_cancel_event", None) if cancellable else None
+        budget = getattr(type(device), '_native_rpc_timeout_for', None)
+        rpc_timeout_s = (budget(name, {'timeout_s': timeout_s}) if callable(budget)
+                         else max(5.0, 8.0 * float(timeout_s) + 5.0))
+        return backend.call_method(
+            name, *args, timeout_s=timeout_s,
+            rpc_timeout_s=rpc_timeout_s,
+            _cancel_event=event,
+        )
+
+    def _cancel_native_operation(self):
+        event = getattr(self, "_native_cancel_event", None)
+        if event is not None:
+            event.set()
+        backend = _native_dmmr_backend(self.device)
+        if backend is not None:
+            with contextlib.suppress(Exception):
+                backend.cancel()
+
     def _startup_call(self, device, name, *args, timeout_s: float, recovery=None):
+        if _native_dmmr_backend(device) is not None:
+            if recovery is not None:
+                recovery._active()
+            result = self._native_call(device, name, *args, timeout_s=timeout_s,
+                                       cancellable=True)
+            if recovery is not None:
+                recovery._active()
+            return result
         if recovery is not None:
             recovery._active()
         elif getattr(device, '_transport_poisoned', False):
@@ -3019,11 +3117,13 @@ class DMMRController(DeviceController):
             raise RuntimeError('DLL blocked; startup cancelled.')
         return result
 
-    def _recover_startup_command(self, device, recovery, status, action, verify):
+    def _recover_startup_command(self, device, recovery, status, action, verify, *, expected=None):
         if recovery is None or status not in (-10, -11, -12, -13):
             raise RuntimeError(f'{action} failed: {self._format_status(status, device=device)}')
         self.print(f'DMMR startup receive error in {action}: {status}; checking hardware readbacks.', flag=PRINT.WARNING)
-        result = recovery.recover(status, action, verify)
+        result = (recovery.recover(status, action, {"running": True} if expected is None else expected)
+                  if isinstance(recovery, _NativeDMMRCommandRecovery)
+                  else recovery.recover(status, action, verify))
         self.print(f'Recovered DMMR startup after {action}: {status}; hardware readbacks verified.', flag=PRINT.WARNING)
         return result
 
@@ -3047,6 +3147,33 @@ class DMMRController(DeviceController):
         return state_reply
 
     def _configure_module_ranges(self, device, modules, timeout_s: float, *, recovery=None) -> None:
+        if _native_dmmr_backend(device) is not None:
+            self._read_recovery = None
+            self._verified_read_ranges = {}
+            requested = {
+                channel.module_address(): getattr(channel, '_requested_range_mode', 'Auto')
+                for channel in self.controllerParent.getChannels() if channel.real
+            }
+            modes = {module: requested.get(module, 'Auto') for module in modules}
+            if any(mode not in _DMMR_RANGE_MODES for mode in modes.values()):
+                raise ValueError(f"Invalid range mode: {modes!r}")
+            if recovery is not None:
+                recovery._active()
+            verified = self._native_call(device, "configure_module_ranges", modes,
+                                         timeout_s=timeout_s, cancellable=True)
+            if not isinstance(verified, dict) or set(verified) != set(modes):
+                raise RuntimeError("Native DMMR did not verify every requested module range.")
+            for address, values in verified.items():
+                if not isinstance(values, (tuple, list)) or len(values) != 2:
+                    raise RuntimeError("Malformed native DMMR range readback.")
+                mode = modes[address]
+                result = self._validate_startup_range(
+                    device, address, mode == 'Auto', None if mode == 'Auto' else int(mode),
+                    (device.NO_ERR, *values),
+                )
+                self._verified_read_ranges[address] = result[1:]
+            self._native_read_recovery_device = device
+            return
         self._read_recovery = None
         self._verified_read_ranges = {}
         requested = {
@@ -3159,9 +3286,14 @@ class DMMRController(DeviceController):
             return  # A duplicate ON must not erase an earlier close request.
         # Arm on the caller thread, before the host queues the worker.
         self._initial_open_close_requested = False
+        self._native_session_token = object()
+        self._native_initialization_ready = None
+        self._native_initialization_required = True
         super().initializeCommunication()
 
     def runInitialization(self) -> None:
+        token = self._native_session_token
+        self._native_initialization_required = True
         self._end_transition()
         started_new_connection = False
         try:
@@ -3179,6 +3311,8 @@ class DMMRController(DeviceController):
                 device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
+                native_backend=True,
+                log_dir=Path(self.controllerParent.pluginManager.Settings.dataPath) / "logs" / self.controllerParent.name.lower(),
             )
             started_new_connection = True
             backend_reason = str(
@@ -3205,8 +3339,13 @@ class DMMRController(DeviceController):
             )
             if not self._update_state() or self.device is None:
                 raise RuntimeError('DMMR state could not be confirmed after initialization.')
+            if token is not self._native_session_token:
+                return
+            self._native_initialization_ready = (token, self.device)
             self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
+            if token is not self._native_session_token:
+                return
             if started_new_connection and not self.initialized:
                 self._dispose_device()
             if self.initialized or (self.device is not None
@@ -3223,7 +3362,8 @@ class DMMRController(DeviceController):
                 message = f"{message}\n{guidance}"
             self.print(message, flag=PRINT.ERROR)
         finally:
-            self.initializing = False
+            if token is self._native_session_token:
+                self.initializing = False
 
     def _init_failure_guidance(self, exc: Exception) -> str:
         """Operator guidance appended to an init-failure message, or "" if none.
@@ -3256,6 +3396,10 @@ class DMMRController(DeviceController):
         return guidance
 
     def initComplete(self) -> None:
+        if self._native_initialization_required:
+            if self._native_initialization_ready != (self._native_session_token, self.device):
+                return
+            self._native_initialization_ready = None
         if getattr(self, '_initial_open_close_requested', False):
             self.shutdownCommunication()
             return
@@ -3270,6 +3414,8 @@ class DMMRController(DeviceController):
         # A fresh transport reached this far, so any earlier in-process port
         # poisoning is no longer relevant for this COM port.
         self._poisoned_com = None
+        self._forced_close_state = None
+        self._native_worker_retired_unconfirmed = False
         self.super_init_complete_called = True
         self._sync_status_to_gui()
         if self.device is None:
@@ -3293,14 +3439,15 @@ class DMMRController(DeviceController):
 
     def runAcquisition(self) -> None:
         """Own the polling lock once, as in the AMPR/AMX acquisition loops."""
-        while self.acquiring:
+        token = self._native_session_token
+        while self.acquiring and token is self._native_session_token:
             started = time.monotonic()
             try:
                 with self._controller_lock_section(
                     "Could not acquire lock to acquire DMMR data.",
                     log_timeout=False,
                 ):
-                    if not self.acquiring:
+                    if not self.acquiring or token is not self._native_session_token:
                         break
                     if getTestMode():
                         self.fakeNumbers()
@@ -3328,6 +3475,10 @@ class DMMRController(DeviceController):
             return
 
         if not getattr(self.controllerParent, "isOn", lambda: False)():
+            return
+
+        if _native_dmmr_backend(self.device) is not None:
+            self._read_native_numbers(already_acquired=already_acquired)
             return
 
         new_values = dict(self.values)
@@ -3399,12 +3550,80 @@ class DMMRController(DeviceController):
             self.meas_ranges = new_ranges
             self._sample_token = object()
 
+    def _read_native_numbers(self, *, already_acquired=False):
+        device = self.device
+        backend = _native_dmmr_backend(device)
+        if backend is None:
+            return
+        try:
+            with self._controller_lock_section('Could not acquire lock to read DMMR modules.',
+                                               already_acquired=already_acquired):
+                result = self._native_call(
+                    device, "poll_currents", self._measurement_modules(),
+                    timeout_s=float(self.controllerParent.poll_timeout_s), cancellable=True,
+                )
+            if not self.acquiring or self.device is not device or not self.controllerParent.isOn():
+                return
+            if (not isinstance(result, dict) or type(result.get('token')) is not int
+                    or result['token'] <= 0
+                    or not all(isinstance(result.get(key), dict) for key in ('values', 'ranges', 'valid'))):
+                raise RuntimeError('Malformed native DMMR measurement snapshot.')
+            token = (backend.session, result['token'])
+            previous = getattr(self, '_native_sample_token', None)
+            if previous is not None and token[0] == previous[0] and token[1] <= previous[1]:
+                raise RuntimeError('Repeated/retired native DMMR sample token.')
+            new_values = dict.fromkeys(self.values, np.nan)
+            new_ranges = dict.fromkeys(self.values, np.nan)
+            if not result.get('recovery'):
+                for address in new_values:
+                    if result['valid'].get(address) is True:
+                        self._store_current(new_values, new_ranges, address,
+                                            result['values'].get(address, np.nan),
+                                            result['ranges'].get(address, np.nan))
+            else:
+                self.print('DMMR receive recovery verified; the failed polling cycle is missing.',
+                           flag=PRINT.WARNING)
+            with self._sample_lock:
+                self.values, self.meas_ranges = new_values, new_ranges
+                self._sample_token = object()
+                self._native_sample_token = token
+        except TimeoutError:
+            if self.device is not device:
+                return
+            self.initializeValues(reset=True)
+            if getattr(backend, 'closed', False):
+                self._handle_transport_loss()
+        except Exception as exc:
+            if self.device is not device:
+                return
+            self.errorCount += 1
+            self.initializeValues(reset=True)
+            if getattr(backend, 'closed', False) or _transport_failure_is_fatal(exc):
+                self._handle_transport_loss()
+            else:
+                self._stop_after_read_failure(str(exc), already_acquired=already_acquired)
+
     def _recover_read(self, status, action, *, already_acquired=False):
         self.print(f'DMMR receive error {status} during {action}; checking communication. '
                    'This measurement is missing.', flag=PRINT.WARNING)
         try:
             with self._controller_lock_section('Could not acquire DMMR recovery lock.',
                                                already_acquired=already_acquired):
+                if _native_dmmr_backend(self.device) is not None:
+                    device = self.device
+                    timeout_s = float(self.controllerParent.poll_timeout_s)
+                    if getattr(self, '_native_read_recovery_device', None) is not device:
+                        self._native_call(device, 'configure_read_recovery',
+                                          getattr(self, '_verified_read_ranges', {}),
+                                          timeout_s=timeout_s, cancellable=True)
+                        self._native_read_recovery_device = device
+                    incident = self._native_call(device, 'recover_read', status, action,
+                                                 timeout_s=timeout_s, cancellable=True)
+                    if not isinstance(incident, dict) or incident.get('verified') is not True:
+                        raise RuntimeError('Native DMMR read recovery was not verified.')
+                    self.print('DMMR communication verified; waiting for new module readings.',
+                               flag=PRINT.WARNING)
+                    return incident
                 if getattr(self, '_read_recovery', None) is None:
                     self._read_recovery = _get_dmmr_driver_class().ReadRecovery(
                         self.device, getattr(self, '_verified_read_ranges', {}), automatic=False,
@@ -3476,7 +3695,7 @@ class DMMRController(DeviceController):
                     sync_monitor()
             self._sync_status_to_gui()
 
-        _invoke_gui_callback(update_gui)
+        self._queue_native_gui(update_gui)
 
     def _report_startup_diagnostics(self, device: Any, *, start: bool) -> None:
         method = getattr(device, "begin_startup_diagnostics" if start else "end_startup_diagnostics", None)
@@ -3529,9 +3748,14 @@ class DMMRController(DeviceController):
                         device, 'set_enable', True, timeout_s=timeout_s, recovery=recovery,
                     )
                     if enable_status != device.NO_ERR:
-                        raise RuntimeError(
-                            f"set_enable(True) failed: {self._format_status(enable_status, device=device)}"
-                        )
+                        if isinstance(recovery, _NativeDMMRCommandRecovery):
+                            self._recover_startup_command(device, recovery, enable_status,
+                                                          'set_enable(True)', None,
+                                                          expected={'enabled': True})
+                        else:
+                            raise RuntimeError(
+                                f"set_enable(True) failed: {self._format_status(enable_status, device=device)}"
+                            )
                     # Stop unsolicited current frames before configuring module
                     # ranges, not only after all those command/reply exchanges.
                     self._disable_automatic_current_for_module_polling(
@@ -3601,7 +3825,11 @@ class DMMRController(DeviceController):
             self._sync_status_to_gui()
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        self._native_initialization_ready = None
+        self._cancel_native_operation()
         self._initial_open_close_requested = True
+        if self._retire_native_worker(force=final_state is None):
+            return
         initial_open = _initial_open_incomplete(self.device)
         if not initial_open:
             if final_state is None and self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
@@ -3676,6 +3904,10 @@ class DMMRController(DeviceController):
 
     def shutdownCommunication(self) -> bool:
         """Run the DMMR shutdown sequence before releasing communication resources."""
+        self._cancel_native_operation()
+        self._native_initialization_ready = None
+        if self._retire_native_worker():
+            return False
         if _initial_open_incomplete(self.device):
             self.closeCommunication()
             return self.device is None and self.main_state == 'Disconnected'
@@ -3697,8 +3929,11 @@ class DMMRController(DeviceController):
                 if device is None:
                     shutdown_confirmed = self.main_state == "Disconnected"
                 else:
-                    shutdown_result = device.shutdown(
-                        timeout_s=float(self.controllerParent.connect_timeout_s)
+                    shutdown_result = (
+                        self._native_call(device, 'shutdown',
+                                          timeout_s=float(self.controllerParent.connect_timeout_s))
+                        if _native_dmmr_backend(device) is not None
+                        else device.shutdown(timeout_s=float(self.controllerParent.connect_timeout_s))
                     )
                     shutdown_confirmed = shutdown_result is True
         except Exception as exc:  # noqa: BLE001
@@ -3725,13 +3960,17 @@ class DMMRController(DeviceController):
                     else _DMMR_SHUTDOWN_UNCONFIRMED_STATE
                 )
             )
-        return shutdown_confirmed and self.device is None and self.main_state == 'Disconnected'
+        confirmed = shutdown_confirmed and self.device is None and self.main_state == 'Disconnected'
+        if confirmed:
+            self._native_shutdown_unconfirmed = False
+        return confirmed
 
     def _update_state(self, *, already_acquired: bool = False, startup_recovery=None) -> bool:
         if self.device is None:
             return False  # Preserve the last shutdown/transport-loss diagnosis.
 
         timeout_s = float(self.controllerParent.poll_timeout_s)
+        device = self.device
         try:
             with self._controller_lock_section(
                 "Could not acquire lock to refresh the DMMR state.",
@@ -3748,12 +3987,17 @@ class DMMRController(DeviceController):
                     if status != device.NO_ERR:
                         status, _state_hex, state_name = self._recover_startup_command(
                             device, startup_recovery, status, 'get_state()',
-                            lambda: self._verify_startup_ranges(device, startup_recovery))
+                            lambda: self._verify_startup_ranges(device, startup_recovery),
+                            expected={'running': True, 'ranges': getattr(self, '_verified_read_ranges', {})})
         except TimeoutError:
             # Transient controller-lock contention; skip this refresh and keep
             # the last state. A real device fault is handled by except-Exception.
+            if self.device is device:
+                self._retire_native_worker()
             return False
         except Exception as exc:  # noqa: BLE001
+            if self.device is not device:
+                return False
             self.errorCount += 1
             failure_count = self._note_transport_failure()
             transport_unusable = _transport_failure_is_fatal(exc)
@@ -3773,6 +4017,8 @@ class DMMRController(DeviceController):
             self.temperature_state_summary = self._safe_query_state("get_temperature_state") or "Unknown"
             return False
 
+        if self.device is not device:
+            return False
         self._clear_transport_failures()
         if status == device.NO_ERR:
             if self.main_state != _DMMR_SHUTDOWN_UNCONFIRMED_STATE:
@@ -3798,6 +4044,8 @@ class DMMRController(DeviceController):
 
     def _handle_transport_loss(self) -> None:
         """Stop publishing readings; retain the backend until shutdown is verified."""
+        if self._retire_native_worker():
+            return
         if self.device is None:
             return
 
@@ -3840,7 +4088,15 @@ class DMMRController(DeviceController):
             if callable(update_status_widgets):
                 update_status_widgets()
 
-        _invoke_gui_callback(_refresh_gui)
+        self._queue_native_gui(_refresh_gui)
+
+    def _queue_native_gui(self, callback) -> None:
+        token, device = self._native_session_token, self.device
+        def guarded() -> None:
+            if (token is self._native_session_token and device is self.device
+                    and getattr(self.controllerParent, "controller", self) in (None, self)):
+                callback()
+        _invoke_gui_callback(guarded)
 
     def _transition_guard(self) -> Lock:
         lock = getattr(self, "_transition_lock", None)
@@ -3865,6 +4121,8 @@ class DMMRController(DeviceController):
         self._consecutive_transport_failures = 0
 
     def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
+        if self._retire_native_worker(force=initial_open_only):
+            return True
         device = self.device
         if device is None:
             return True
@@ -3903,6 +4161,41 @@ class DMMRController(DeviceController):
             self._sync_status_to_gui()
         with contextlib.suppress(Exception):
             device.close()
+        return True
+
+    def _retire_native_worker(self, *, force: bool = False) -> bool:
+        device = self.device
+        backend = _native_dmmr_backend(device)
+        if backend is None or (not force and not getattr(backend, "closed", False)):
+            return False
+        try:
+            if not backend.close(grace_s=0):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            self.initialized = self.acquiring = False
+            self._native_shutdown_unconfirmed = True
+            self.main_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
+            self.initializeValues(reset=True)
+            self._sync_status_to_gui()
+            self.print(f"DMMR native worker release failed: {exc}; hardware stop is unconfirmed.", flag=PRINT.ERROR)
+            return False
+        if self.device is not device:
+            return True
+        self._cancel_native_operation()
+        self._initial_open_close_requested = True
+        self._native_worker_retired_unconfirmed = True
+        self._native_shutdown_unconfirmed = True
+        self._native_initialization_ready = None
+        self.device, self.initialized, self.acquiring = None, False, False
+        self.main_state = self._forced_close_state = "Disconnected: shutdown unconfirmed"
+        self._poisoned_com = None
+        self._read_recovery = None
+        self.device_state_summary = self.voltage_state_summary = self.temperature_state_summary = "Unknown"
+        self.initializeValues(reset=True)
+        self._restore_off_ui_state()
+        self._sync_status_to_gui()
+        self.print("DMMR native worker released. Hardware stop was not confirmed; readings are invalid. "
+                   "Verify the controlling HV devices before approaching the setup.", flag=PRINT.ERROR)
         return True
 
     def _attempt_device_disable(self) -> None:
@@ -3979,9 +4272,12 @@ class DMMRController(DeviceController):
             if callable(sync_local):
                 sync_local()
 
-        _invoke_gui_callback(_update_gui)
+        self._queue_native_gui(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
+        if self._retire_native_worker() or (self.device is None and getattr(self, "_native_worker_retired_unconfirmed", False)):
+            self._restore_off_ui_state()
+            return
         """Restore toolbar ON/OFF widgets back to ON after a failed shutdown."""
         def _update_gui() -> None:
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
@@ -3994,7 +4290,7 @@ class DMMRController(DeviceController):
             if callable(sync_local):
                 sync_local()
 
-        _invoke_gui_callback(_update_gui)
+        self._queue_native_gui(_update_gui)
 
     def _disable_acquisition(self, *, already_acquired=False) -> bool:
         """Confirm both OFF gates; one resynchronization for returned receive faults.
@@ -4012,6 +4308,11 @@ class DMMRController(DeviceController):
                 if device is None:
                     raise RuntimeError('device unavailable')
                 timeout_s = float(self.controllerParent.connect_timeout_s)
+                if _native_dmmr_backend(device) is not None:
+                    result = self._native_call(device, 'disable_acquisition', timeout_s=timeout_s)
+                    if result is not True:
+                        raise RuntimeError('Native DMMR did not confirm both OFF gates.')
+                    return True
 
                 def stop_once():
                     failures, receive_status, fatal = [], None, False

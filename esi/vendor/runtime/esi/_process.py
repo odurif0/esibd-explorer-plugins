@@ -74,7 +74,7 @@ def _worker_python():
 class ESIProcessProxy:
     """Serialize calls and terminate only ESI when a native call stalls or crashes."""
 
-    def __init__(self, controller_kwargs, *, startup_timeout_s=30., controller_file=None):
+    def __init__(self, controller_kwargs, *, startup_timeout_s=30., controller_file=None, worker_launcher=None):
         self._request_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._close_lock = threading.Lock()
@@ -84,16 +84,21 @@ class ESIProcessProxy:
         self._sequence = 0
         self._stderr_lock = threading.Lock()
         self._stderr_tail = bytearray()
-        environment = os.environ.copy()
-        if getattr(sys, "frozen", False):
-            environment.pop("PYTHONHOME", None)
-            environment.pop("PYTHONPATH", None)
-        self._command = [*_worker_python(), "-u", str(Path(__file__).resolve())]
-        self._process = subprocess.Popen(
-            self._command,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        if worker_launcher is not None:
+            # The host supplies Python, not device logic or the RPC protocol.
+            self._process = worker_launcher(Path(__file__).resolve())
+            self._command = list(self._process.args)
+        else:
+            environment = os.environ.copy()
+            if getattr(sys, "frozen", False):
+                environment.pop("PYTHONHOME", None)
+                environment.pop("PYTHONPATH", None)
+            self._command = [*_worker_python(), "-u", str(Path(__file__).resolve())]
+            self._process = subprocess.Popen(
+                self._command,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self._stderr_reader.start()
         self._reader = threading.Thread(target=self._read_replies, daemon=True)

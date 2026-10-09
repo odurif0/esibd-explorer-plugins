@@ -55,12 +55,17 @@ def test_sync_propagates_canonical_edits_and_keeps_device_names(tmp_path: Path) 
     canonical_entry.write_text(canonical_entry.read_text(encoding="utf-8") + "\n# sync probe\n", encoding="utf-8")
     canonical_runtime = runtime_root(tmp_path, psu[0])
     (canonical_runtime / "sync_probe.txt").write_text("probe", encoding="utf-8")
+    canonical_readme = tmp_path / psu[0].folder / "README.md"
+    canonical_readme.write_text(canonical_readme.read_text(encoding="utf-8") + "\nREADME sync probe\n", encoding="utf-8")
+    original_sibling_readme = (tmp_path / psu[1].folder / "README.md").read_bytes()
     extra = runtime_root(tmp_path, psu[1]) / "stale.txt"
     extra.write_text("stale", encoding="utf-8")
 
     drift = tool.sync(tmp_path, check=True)
     assert any(path.endswith("psu_e/psu_plugin.py") for path in drift)
+    assert any(path.endswith("psu_e/README.md") for path in drift)
     assert extra.exists(), "--check must not change files"
+    assert (tmp_path / psu[1].folder / "README.md").read_bytes() == original_sibling_readme
 
     tool.sync(tmp_path)
     assert tool.sync(tmp_path, check=True) == []
@@ -71,3 +76,9 @@ def test_sync_propagates_canonical_edits_and_keeps_device_names(tmp_path: Path) 
         source = plugin_source(tmp_path, spec).read_text(encoding="utf-8")
         assert f'name = "{spec.manager_name}"' in source
         assert source.endswith("# sync probe\n")
+        readme = (tmp_path / spec.folder / "README.md").read_text(encoding="utf-8")
+        assert readme.startswith(f"# {spec.manager_name} Plugin\n")
+        assert f"logs/{spec.folder}/native/psu/" in readme
+        assert f"{spec.manager_name}_last_setpoints.json" in readme
+        assert f"`{spec.folder}/`" in readme
+        assert readme.endswith("README sync probe\n")

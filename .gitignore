@@ -6,8 +6,7 @@ __pycache__/
 *.egg-info/
 .claude/
 *.zip
-!esi/vendor/python/*.pyd
-!esi/vendor/python/python314.zip
+!*/native/source.zip
 
 # runtime device logs (created at runtime, never shipped)
 logs/
@@ -15,3 +14,6 @@ logs/
 # local agent tooling artifacts
 .omo/
 .venv*/
+
+# local Rust build output
+native/target/

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
+import math
 import os
 import queue
 import sys
@@ -629,6 +631,36 @@ class ProcessIsolatedClientMixin:
     ) -> None:
         object.__setattr__(self, "_process_backend_disabled_reason", "")
 
+        native_backend = backend_kwargs.pop("native_backend", False)
+        if not isinstance(native_backend, bool):
+            raise TypeError("native_backend must be a boolean")
+        if native_backend:
+            from ._native_worker import NativeWorkerProxy
+
+            if any(value is not None for value in incompatible_objects.values()):
+                raise ValueError("A native worker cannot share Python loggers, locks or threads")
+
+            family = self._INSTRUMENT_NAME.lower().replace(" ", "_")
+            dll_names = {"esi": "COM-ESI-CTRL.dll", "psu": "COM-HVPSU2D.dll",
+                         "amx": "COM-HVAMX4ED.dll", "amx_hd": "COM-HVAMX4EDH.dll",
+                         "ampr": "COM-AMPR-12.dll", "dmmr": "COM-DMMR-8.dll"}
+            root = Path(__file__).resolve().parents[2]
+            config = {key: value for key, value in backend_kwargs.items()
+                      if key not in {"logger", "thread_lock", "hk_thread"}}
+            if not config.get("dll_path"):
+                config["dll_path"] = str(root / "vendor" / "runtime" / family / "vendor" / "x64" / dll_names[family])
+            else:
+                config["dll_path"] = str(Path(config["dll_path"]).resolve())
+            # An isolation failure is fatal: never load the DLL into Explorer.
+            backend = NativeWorkerProxy(root, family, config,
+                                        startup_timeout_s=self._PROCESS_STARTUP_TIMEOUT_S,
+                                        log_dir=config.get("log_dir"),
+                                        stop_grace_s=5. if family == "psu" else 1.,
+                                        awake_request=SystemAwakeRequest(f"ESIBD Explorer: {self._INSTRUMENT_NAME} native worker"))
+            object.__setattr__(self, "_backend_mode", "process")
+            object.__setattr__(self, "_backend", backend)
+            return
+
         if allow_process_backend and supports_process_backend(*incompatible_objects.values()):
             process_kwargs = dict(backend_kwargs)
             if "logger" in process_kwargs:
@@ -676,6 +708,18 @@ class ProcessIsolatedClientMixin:
         if backend_mode == "inline":
             return getattr(backend, name)
 
+        if hasattr(backend, "session"):
+            if name in {"connected", "_dll_port_claimed", "_open_failed", "_opening_in_progress",
+                        "_failed_open_released", "_failed_open_cleanup_outcome",
+                        "_transport_poisoned", "_transport_error"} and hasattr(backend, "lifecycle_attribute"):
+                return backend.lifecycle_attribute(name)
+            if name == "_transport_poisoned":
+                return backend.closed
+            if name in {"_open_failed", "_opening_in_progress", "_failed_open_released"}:
+                return False
+            if name == "connected" and backend.closed:
+                return False
+
         controller_attr = getattr(self._PROCESS_CONTROLLER_CLASS, name, None)
         if callable(controller_attr) and not name.startswith("_"):
             return functools.partial(self._call_process_method, name)
@@ -698,12 +742,47 @@ class ProcessIsolatedClientMixin:
 
     def _call_process_method(self, method_name, *args, **kwargs):
         backend = object.__getattribute__(self, "_backend")
+        if hasattr(backend, "session"):
+            parameters = dict(kwargs)
+            method = getattr(self._PROCESS_CONTROLLER_CLASS, method_name, None)
+            if method is not None:
+                parameters = inspect.signature(method).bind(None, *args, **kwargs).arguments
+            return backend.call_method(
+                method_name, *args, rpc_timeout_s=self._native_rpc_timeout_for(method_name, parameters),
+                _io_timeout_s=parameters.get("timeout_s"), **kwargs)
         return backend.call_method(
             method_name,
             *args,
             rpc_timeout_s=self._rpc_timeout_for(method_name, kwargs),
             **kwargs,
         )
+
+    @classmethod
+    def _native_rpc_timeout_for(cls, method_name: str, kwargs) -> float:
+        """Total operation budget, separate from the per-export native watchdog."""
+        timeout = kwargs.get("timeout_s")
+        timeout = 5. if timeout is None else float(timeout)
+        if not math.isfinite(timeout) or not .001 <= timeout <= 3600.:
+            raise ValueError("Native I/O timeout must be between 1ms and 1h")
+        family = cls._INSTRUMENT_NAME.lower().replace(" ", "_")
+        # Preserve the reference compound-read limits; five seconds cover IPC
+        # scheduling, not an extra hardware retry. Cancellation bypasses this.
+        if family != "esi":
+            batches = {"get_product_info": (2., 5., 10., 20.),
+                       "collect_housekeeping": (3., 10., 20., 60.),
+                       "list_configs": (3. if family == "dmmr" else 2., 5., 15. if family == "dmmr" else 10., 45. if family == "dmmr" else 30.),
+                       "get_config_list": (3., 5., 15., 45.)}
+            if method_name in batches:
+                multiplier, additive, minimum, maximum = batches[method_name]
+                return min(3600., min(maximum, max(minimum, multiplier * timeout + additive)) + 5.)
+        if family == "dmmr" and method_name in {"configure_module_ranges", "poll_currents", "recover_read",
+                                                  "recover_command", "disable_acquisition", "shutdown"}:
+            # Long FIFO drains and startup recovery have a separate overall cap.
+            return min(65., max(30., 8. * timeout + 5.))
+        budget = cls._rpc_timeout_for(method_name, {"timeout_s": timeout})
+        if budget > 3600.:
+            raise ValueError("Native operation exceeds the supported one-hour deadline")
+        return budget
 
     @classmethod
     def _rpc_timeout_for(cls, method_name: str, kwargs) -> float:
@@ -723,6 +802,18 @@ class ProcessIsolatedClientMixin:
             return
         if object.__getattribute__(self, "_backend_mode") == "process":
             object.__getattribute__(self, "_backend").close()
+
+    def force_close_transport(self, timeout_s: Optional[float] = None) -> bool:
+        backend = object.__getattribute__(self, "_backend")
+        if object.__getattribute__(self, "_backend_mode") == "process" and hasattr(backend, "session"):
+            return backend.close()
+        return getattr(backend, "force_close_transport")(timeout_s=timeout_s)
+
+    def wait_for_idle(self, timeout_s: float = 1.) -> bool:
+        backend = object.__getattribute__(self, "_backend")
+        if object.__getattribute__(self, "_backend_mode") == "process":
+            return backend.wait_for_idle(timeout_s)
+        return True
 
     def __del__(self):  # pragma: no cover - best effort cleanup
         try:

@@ -7,7 +7,35 @@ Enable the `MScan` plugin in Explorer's Plugin Manager. Its panel is titled
 
 Requires Explorer 1.0.2 and the PSU A–E, AMX A–B, DMMR and (for the quadrupole
 offset) AMPR A–B plugins from the same bundle. The plugin uses Explorer's plotting, channel services and HDF5 format,
-but has its own interface and scan protocol. No DLL or bundled runtime.
+but has its own interface and scan protocol, bundled Python adapter and native
+Rust scan worker. MScan has no vendor DLL of its own.
+
+## Native Worker
+
+Production planning and the scan state machine run in an isolated native Rust
+worker: `native/esibd-mscan-worker.exe` on Windows x86-64 or
+`native/esibd-mscan-worker` on Linux x86-64. The supervisor selects that exact
+plugin-local binary from `native/manifest.json` and verifies its SHA-256, family
+and protocol. Missing or mismatched files fail startup; workers are not searched
+on PATH. The DLL-backed device plugins still require Windows x86-64 for real
+hardware communication.
+
+The Python GUI and `_runtime/_native_scan.py` adapter execute acknowledged
+actions and collect observations only through Explorer channels. The worker
+does not import device plugins or call their DLLs. The original Python scan
+implementation is retained as an explicit reference for tests, never a
+production fallback. No external or private Python worker interpreter or
+Explorer fork is required.
+
+Stop/Explorer close cancels pending actions and can terminate and reap an
+unresponsive scan worker; a crash or hang does not stop other workers. A later
+explicit Start creates a fresh worker without restarting Explorer or replaying
+old commands. Worker exit proves neither restored voltages nor hardware OFF;
+Stop/error retains the voltage behavior described below. Worker logs are under
+`<Explorer data path>/logs/mscan/native/mscan/`, never inside the plugin.
+The v0.5 native port has local mock-channel, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
 
 ## Use
 
@@ -207,7 +235,8 @@ file does not rewrite it. Notes are metadata, not a scan control.
 INI settings are read and written as UTF-8, including files with a Windows BOM;
 module names and saved selections do not depend on the Windows locale.
 
-To copy this plugin to another machine, keep the whole `mscan/` directory together.
+To copy this plugin to another machine, keep the whole `mscan/` directory together,
+including `_runtime/` and `native/`.
 
 ## Origin and license
 

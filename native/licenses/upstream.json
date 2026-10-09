@@ -1,0 +1,34 @@
+{
+  "argmin 0.11.0": {
+    "repository": "https://github.com/argmin-rs/argmin",
+    "revision": "c94c32adefd6c2525ce05806092ca868ec85fba4",
+    "files": [
+      {
+        "file": "upstream/argmin-0.11.0/LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "source_url": "https://raw.githubusercontent.com/argmin-rs/argmin/c94c32adefd6c2525ce05806092ca868ec85fba4/LICENSE-MIT"
+      },
+      {
+        "file": "upstream/argmin-0.11.0/LICENSE-APACHE",
+        "sha256": "11f10b8009ae95f6213f13bf12cfb048e002abf4e05af77320dc248fb3efa404",
+        "source_url": "https://raw.githubusercontent.com/argmin-rs/argmin/c94c32adefd6c2525ce05806092ca868ec85fba4/LICENSE-APACHE"
+      }
+    ]
+  },
+  "argmin-math 0.5.1": {
+    "repository": "https://github.com/argmin-rs/argmin",
+    "revision": "48dbd837faa4643c936564f34d3480a6639f2673",
+    "files": [
+      {
+        "file": "upstream/argmin-math-0.5.1/LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "source_url": "https://raw.githubusercontent.com/argmin-rs/argmin/48dbd837faa4643c936564f34d3480a6639f2673/LICENSE-MIT"
+      },
+      {
+        "file": "upstream/argmin-math-0.5.1/LICENSE-APACHE",
+        "sha256": "11f10b8009ae95f6213f13bf12cfb048e002abf4e05af77320dc248fb3efa404",
+        "source_url": "https://raw.githubusercontent.com/argmin-rs/argmin/48dbd837faa4643c936564f34d3480a6639f2673/LICENSE-APACHE"
+      }
+    ]
+  }
+}

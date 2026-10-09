@@ -145,6 +145,8 @@ def run(scenario, target, app_holder):
                                "_esibd_bundled_transmission_transmission._beamline",
                                "_esibd_bundled_transmission_transmission._engine",
                                "_esibd_bundled_transmission_transmission._log",
+                               "_esibd_bundled_transmission_transmission._native_engine",
+                               "_esibd_bundled_transmission_transmission._native_worker",
                                "_esibd_bundled_transmission_transmission._simulator"], runtime
 
     window = QWidget()
@@ -266,7 +268,7 @@ def scenario_body(env):
         start = session_events()[0]
         assert start["event"] == "plugin_start" and start["log_directory"] == str(logs)
         assert set(start["environment"]["code"]) == {"transmission_plugin.py", "__init__.py", "_engine.py", "_simulator.py",
-                                                     "_beamline.py", "_log.py"}
+                                                     "_beamline.py", "_log.py", "_native_engine.py", "_native_worker.py"}
         opened = []
         module.QDesktopServices.openUrl = lambda url: opened.append(url.toLocalFile())
         panel.logs.click()

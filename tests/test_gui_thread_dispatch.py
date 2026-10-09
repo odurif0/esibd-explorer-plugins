@@ -51,7 +51,7 @@ def probe(path):
         "_invoke_gui_callback", "_sync_status_to_gui", "_sync_status",
         "_restore_off_ui_state", "_restore_on_ui_state", "_set_on_ui_state",
         "_handle_transport_loss", "_stop_refresh_timer",
-        "_stop_local_acquisition",
+        "_stop_local_acquisition", "_queue_native_gui", "_retire_native_worker", "_native_dmmr_backend",
     }
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     lock = next(
@@ -137,7 +137,14 @@ def probe(path):
         interlock_state_summary="OK", voltage_state_summary="OK", temperature_state_summary="OK",
         interlock_state="OK", heat_status="OK",
         _update_channel_values=lambda **kw: on_gui(),
+        _native_session_token=object(), _native_cancel_event=threading.Event(),
+        _native_transport_lost=False, _connection_generation=0,
+        initializeValues=lambda **kwargs: None,
     )
+    for name in ("_queue_native_gui", "_retire_native_worker"):
+        if name in ns:
+            setattr(controller, name, types.MethodType(ns[name], controller))
+    object.__setattr__(parent, "controller", controller)
     sync = ns.get("_sync_status_to_gui", ns.get("_sync_status"))
     in_worker(lambda: sync(controller))
     assert parent.writes == [], "setting was written before dispatch"

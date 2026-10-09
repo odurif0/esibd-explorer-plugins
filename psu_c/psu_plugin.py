@@ -3728,7 +3728,9 @@ class PSUDevice(Device):
             self._sync_toolbar_communication_controls()
             self._update_status_widgets()
 
-        _invoke_gui_callback(_update_gui)
+        controller = getattr(self, "controller", None)
+        dispatch = getattr(controller, "_queue_native_gui", _invoke_gui_callback)
+        dispatch(_update_gui)
 
     def _acquisition_readiness(self) -> tuple[bool, str]:
         """Return whether manual recording can start and, if not, why."""
@@ -3932,12 +3934,15 @@ class PSUDevice(Device):
         connection_pending = bool(
             controller and getattr(controller, "_initial_open_incomplete", lambda: False)()
         )
+        retired = bool(getattr(controller, "_native_worker_retired_unconfirmed", False)
+                       and controller.device is None)
         if self.useOnOffLogic and hasattr(self, "onAction"):
-            self.onAction.state = not shutdown_confirmed and not connection_pending
+            self.onAction.state = not shutdown_confirmed and not connection_pending and not retired
             self._sync_local_on_action()
         if not shutdown_confirmed and not connection_pending:
             self.print(
-                "PSU shutdown could not be confirmed; UI remains ON until "
+                "PSU disconnected; hardware OFF remains unconfirmed. Reconnect explicitly."
+                if retired else "PSU shutdown could not be confirmed; UI remains ON until "
                 "the hardware state is verified.",
                 flag=PRINT.WARNING,
             )
@@ -4419,6 +4424,10 @@ class PSUController(DeviceController):
         self._transition_lock = Lock()
         self._manual_apply_state_lock = Lock()
         self._output_cancel = Event()
+        self._native_session_token = object()
+        self._native_initialization_ready = None
+        self._native_initialization_required = False
+        self._native_shutdown_unconfirmed = False
         self._manual_apply_pending_state: tuple[dict[str, Any], Event] | None = None
         self._manual_apply_worker_running = False
         self._manual_apply_active = False
@@ -4705,11 +4714,16 @@ class PSUController(DeviceController):
         parent = self.controllerParent
         parent._pending_setpoints = {}
         parent._setpoint_prefill_decided = bool(self.resume_session)  # A resume adopts the PSU as it runs.
+        self._native_session_token = object()
+        self._native_initialization_ready = None
+        self._native_initialization_required = True
         # Create the token before the host starts the worker, never inside it:
         # an OFF arriving before the worker is scheduled must not be forgotten.
         super().initializeCommunication()
 
     def runInitialization(self) -> None:
+        token = self._native_session_token
+        self._native_initialization_required = True
         cancel = self._output_cancel
         self.initialized = False
         if cancel.is_set():
@@ -4726,8 +4740,8 @@ class PSUController(DeviceController):
                 device_id=f"{self.controllerParent.name.lower()}_com{int(self.controllerParent.com)}",
                 com=int(self.controllerParent.com),
                 baudrate=int(self.controllerParent.baudrate),
-                logger=logging.getLogger(f"esibd.plugins.{self.controllerParent.name.lower()}"),
-                allow_process_backend=False,
+                native_backend=True,
+                log_dir=Path(self.controllerParent.pluginManager.Settings.dataPath) / "logs" / self.controllerParent.name.lower(),
             )
             backend_reason = str(
                 getattr(self.device, "_process_backend_disabled_reason", "")
@@ -4749,8 +4763,13 @@ class PSUController(DeviceController):
             if cancel.is_set():
                 self.shutdownCommunication()
             else:
+                if token is not self._native_session_token:
+                    return
+                self._native_initialization_ready = (token, self.device)
                 self.signalComm.initCompleteSignal.emit()
         except Exception as exc:  # noqa: BLE001
+            if token is not self._native_session_token:
+                return
             if self._initial_open_incomplete():
                 guidance = self._init_failure_guidance(exc)
                 self._dispose_device()
@@ -4779,7 +4798,8 @@ class PSUController(DeviceController):
                 "Disconnected" if recovered else _PSU_SHUTDOWN_UNCONFIRMED_STATE
             ))
         finally:
-            self.initializing = False
+            if token is self._native_session_token:
+                self.initializing = False
 
     def _init_failure_guidance(self, exc: Exception) -> str:
         """Operator guidance appended to an init-failure message, or "" if none.
@@ -4809,6 +4829,10 @@ class PSUController(DeviceController):
     def initComplete(self) -> None:
         if self._output_cancel.is_set():
             return
+        if self._native_initialization_required:
+            if self._native_initialization_ready != (self._native_session_token, self.device):
+                return
+            self._native_initialization_ready = None
         if self.device is not None:
             self.controllerParent._sync_channels()
         self.initializeValues(reset=True)
@@ -4817,6 +4841,7 @@ class PSUController(DeviceController):
         # poisoning is no longer relevant for this COM port.
         self._poisoned_com = None
         self._forced_close_state = None
+        self._native_worker_retired_unconfirmed = False
         self.super_init_complete_called = True
         self._set_loaded_config_text("Connected")
         self._sync_status_to_gui()
@@ -5224,7 +5249,7 @@ class PSUController(DeviceController):
             if callable(update_status):
                 update_status()
 
-        _invoke_gui_callback(update)
+        self._queue_native_gui(update)
 
     def _update_channel_values(self, *, sync_setpoints: bool = False) -> None:
         """Publish on the GUI thread, including Parameter.extraEvents (UCM)."""
@@ -5578,7 +5603,7 @@ class PSUController(DeviceController):
                 "setpoints_only": True, "voltage_values": {ch: target},
             })
 
-        _invoke_gui_callback(request)
+        self._queue_native_gui(request)
 
     def applyValue(self, channel: PSUChannel) -> None:
         self.applyValueFromThread(channel)
@@ -5695,6 +5720,25 @@ class PSUController(DeviceController):
         setpoint, never an assumed zero or the potentially stale GUI value.
         Step size/cadence bound commanded increments, not measured output slew.
         """
+        backend = getattr(device, "_backend", None)
+        if getattr(device, "_backend_mode", "") == "process" and getattr(backend, "session", None) is not None:
+            rpc_timeout_s = self._native_ramp_rpc_timeout(
+                backend, {channel: target_v}, timeout_s, cancel,
+                cold_start_possible=False, fixed_calls=32,
+            )
+            if rpc_timeout_s is None:
+                return False
+            step_v, step_s = self._ramp_profile()
+            result = backend.call_method(
+                "ramp_channel_voltage", channel, target_v,
+                timeout_s=timeout_s,
+                interlock_monitoring=bool(getattr(self.controllerParent, "interlock_monitoring", True)),
+                ramp_step_v=step_v, ramp_step_interval_s=step_s,
+                rpc_timeout_s=rpc_timeout_s, _cancel_event=cancel,
+            )
+            if result is not None:
+                raise RuntimeError("Unexpected result from native PSU ramp.")
+            return not cancel.is_set()
         step_v, step_s = self._ramp_profile()
         delta_v = target_v - start_v
         steps = max(1, int(np.ceil(abs(delta_v) / step_v)))
@@ -5720,6 +5764,50 @@ class PSUController(DeviceController):
         if not np.isfinite(step_s) or step_s <= 0:
             step_s = _PSU_VOLTAGE_RAMP_STEP_S
         return step_v, step_s
+
+    def _native_ramp_rpc_timeout(
+        self, backend, voltage_targets: dict[int, Any], timeout_s: float, cancel: Event,
+        *, cold_start_possible: bool, fixed_calls: int,
+    ) -> float | None:
+        """Budget native writes and cadence from fresh hardware, before any write."""
+        if cancel.is_set():
+            return None
+        if not np.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("PSU timeout_s must be finite and positive.")
+        targets = {ch: float(value) for ch, value in voltage_targets.items()}
+        if any(ch not in _PSU_CHANNEL_IDS or not np.isfinite(value) or value < 0 for ch, value in targets.items()):
+            raise ValueError("PSU channel setpoints must be finite and non-negative.")
+        step_v, step_s = self._ramp_profile()
+        base_s = fixed_calls * timeout_s + _PSU_RANGE_SWITCH_SETTLE_S + 5.0
+        if base_s > 3600.0:
+            raise ValueError("PSU native operation exceeds the supported one-hour deadline.")
+        steps = 0
+        for ch, target in targets.items():
+            if cancel.is_set():
+                return None
+            actual, limit = backend.call_method(
+                "get_channel_voltage_limits", ch, timeout_s=timeout_s,
+                rpc_timeout_s=timeout_s + 5.0, _cancel_event=cancel,
+            )
+            if cancel.is_set():
+                return None
+            start = _coerce_float(actual, np.nan)
+            # Invalid starts are adjudicated by Rust. A cold start can reset a
+            # corrupt setpoint to zero; a live edit will refuse its readback.
+            start = start if np.isfinite(start) and start >= 0 else 0.0
+            delta = max(abs(target - start), target if cold_start_possible else 0.0)
+            # The front panel can change a setpoint between this budgeting
+            # read and the atomic native operation. Include its valid range.
+            limit = _coerce_float(limit, np.nan)
+            if np.isfinite(limit) and limit >= 0:
+                delta = max(delta, target, abs(target - limit))
+            estimate = delta / step_v
+            if not np.isfinite(estimate):
+                raise ValueError("PSU native ramp exceeds the supported one-hour deadline.")
+            steps += max(1, math.ceil(estimate))
+            if base_s + steps * (step_s + timeout_s) > 3600.0:
+                raise ValueError("PSU native ramp exceeds the supported one-hour deadline.")
+        return max(30.0, base_s + steps * (step_s + timeout_s))
 
     def applyManualState(
         self, manual_state: dict[str, Any], *, cancel: Event | None = None
@@ -5771,6 +5859,28 @@ class PSUController(DeviceController):
     def _apply_manual_state_unlocked(
         self, device, manual_state: dict[str, Any], timeout_s: float, cancel: Event
     ) -> bool:
+        backend = getattr(device, "_backend", None)
+        if getattr(device, "_backend_mode", "") == "process" and getattr(backend, "session", None) is not None:
+            targets = dict(manual_state.get("voltage_values") or {})
+            if not manual_state.get("setpoints_only"):
+                outputs = manual_state.get("output_enabled") or {}
+                targets = {ch: targets.get(ch, 0.0) for ch in _PSU_CHANNEL_IDS if outputs.get(ch, False)}
+            rpc_timeout_s = self._native_ramp_rpc_timeout(
+                backend, targets, timeout_s, cancel,
+                cold_start_possible=not bool(manual_state.get("setpoints_only")), fixed_calls=48,
+            )
+            if rpc_timeout_s is None:
+                return False
+            step_v, step_s = self._ramp_profile()
+            result = backend.call_method(
+                "apply_manual_state", manual_state, timeout_s=timeout_s,
+                interlock_monitoring=bool(getattr(self.controllerParent, "interlock_monitoring", True)),
+                ramp_step_v=step_v, ramp_step_interval_s=step_s,
+                rpc_timeout_s=rpc_timeout_s, _cancel_event=cancel,
+            )
+            if result is not None:
+                raise RuntimeError("Unexpected result from native PSU manual operation.")
+            return not cancel.is_set()
         if manual_state.get("setpoints_only"):
             targets = dict(manual_state.get("voltage_values") or {})
             currents = dict(manual_state.get("current_limit_values") or {})
@@ -6169,7 +6279,10 @@ class PSUController(DeviceController):
             self._sync_status_to_gui()
 
     def shutdownCommunication(self) -> bool:
+        self._native_initialization_ready = None
         self._cancel_output_commands()
+        if self._retire_native_worker():
+            return False
         device = self.device
         if device is None:
             self.closeCommunication()
@@ -6235,10 +6348,15 @@ class PSUController(DeviceController):
                 else _PSU_SHUTDOWN_UNCONFIRMED_STATE
             )
         )
+        if shutdown_confirmed:
+            self._native_shutdown_unconfirmed = False
         return shutdown_confirmed
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
+        self._native_initialization_ready = None
         self._cancel_output_commands()
+        if self._retire_native_worker(force=final_state is None):
+            return
         if self._initial_open_incomplete():
             # Release only the failed opening, never claim a hardware shutdown.
             if self._dispose_device(initial_open_only=True) is False:
@@ -6284,6 +6402,7 @@ class PSUController(DeviceController):
         if self._dispose_device() is False:
             return
         self.initialized = False
+        self._sync_status_to_gui()
 
     def _update_state(self) -> None:
         if self.main_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE:
@@ -6299,7 +6418,11 @@ class PSUController(DeviceController):
                 timeout_s=timeout_s
             )
         except Exception:
+            if self.device is not device:
+                return
             self._invalidate_hv_readback()
+            if self._retire_native_worker():
+                return
             try:
                 self.hardware_main_state = str(
                     device.get_status().get("connected", False)
@@ -6314,6 +6437,8 @@ class PSUController(DeviceController):
             self.output_state_summary = "Unknown"
             return
 
+        if self.device is not device:
+            return
         self._apply_snapshot(snapshot, refreshed_at=read_started)
         live_started = time.monotonic()
         try:
@@ -6366,7 +6491,15 @@ class PSUController(DeviceController):
                 if callable(sync_manual):
                     sync_manual()
 
-        _invoke_gui_callback(_refresh_gui)
+        self._queue_native_gui(_refresh_gui)
+
+    def _queue_native_gui(self, callback) -> None:
+        token, device = self._native_session_token, self.device
+        def guarded() -> None:
+            if (token is self._native_session_token and device is self.device
+                    and getattr(self.controllerParent, "controller", self) in (None, self)):
+                callback()
+        _invoke_gui_callback(guarded)
 
     def _transition_guard(self) -> Lock:
         lock = getattr(self, "_transition_lock", None)
@@ -6390,6 +6523,8 @@ class PSUController(DeviceController):
         is torn down so the GUI shows Communication lost and frees the COM port,
         instead of staying "initialized" against a dead device.
         """
+        if self._retire_native_worker():
+            return
         if (
             getattr(self, "_forced_close_state", None) == _PSU_COMMUNICATION_LOST_STATE
             and self.device is None
@@ -6410,7 +6545,7 @@ class PSUController(DeviceController):
         self._clear_transport_failures()
         stop = getattr(self.controllerParent, "_stop_refresh_timer", None)
         if callable(stop):
-            _invoke_gui_callback(stop)
+            self._queue_native_gui(stop)
         self._dispose_device()
         self._sync_status_to_gui()
         close_signal = getattr(
@@ -6425,8 +6560,50 @@ class PSUController(DeviceController):
             "_open_failed", "_opening_in_progress", "_failed_open_released",
         ))
 
+    def _retire_native_worker(self, *, force: bool = False) -> bool:
+        device = self.device
+        try:
+            backend = object.__getattribute__(device, "_backend")
+        except (AttributeError, TypeError):
+            return False
+        if not isinstance(getattr(backend, "session", None), str):
+            return False
+        if not force and not getattr(backend, "closed", False):
+            return False
+        try:
+            if not backend.close(grace_s=0):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            self.initialized = self.acquiring = False
+            self._native_shutdown_unconfirmed = True
+            self.main_state = _PSU_SHUTDOWN_UNCONFIRMED_STATE
+            self._invalidate_hv_readback()
+            self.initializeValues(reset=True)
+            self._sync_status_to_gui()
+            self.print(f"PSU native worker release failed: {exc}; hardware OFF is unconfirmed.", flag=PRINT.ERROR)
+            return False
+        if self.device is not device:
+            return True
+        self._cancel_output_commands()
+        self._initial_open_close_requested = True
+        self._native_worker_retired_unconfirmed = True
+        self._native_shutdown_unconfirmed = True
+        self._native_initialization_ready = None
+        self.device, self.initialized, self.acquiring = None, False, False
+        self.main_state = self._forced_close_state = "Disconnected: shutdown unconfirmed"
+        self.hardware_main_state = self.output_state_summary = self.device_state_summary = "Unknown"
+        self._invalidate_hv_readback()
+        self.initializeValues(reset=True)
+        self._restore_off_ui_state()
+        self._sync_status_to_gui()
+        self.print("PSU native worker released. Hardware OFF was not confirmed; outputs may still be live. "
+                   "Verify the hardware state before reconnecting or approaching the device.", flag=PRINT.ERROR)
+        return True
+
     def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         self._invalidate_hv_readback()
+        if self._retire_native_worker(force=initial_open_only):
+            return True
         device = self.device
         self.interlock_active = None
         self.psu_enabled_actual = None
@@ -6479,10 +6656,13 @@ class PSUController(DeviceController):
             if hasattr(self.controllerParent, "onAction"):
                 self.controllerParent.onAction.state = False
 
-        _invoke_gui_callback(_update_gui)
+        self._queue_native_gui(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
         """Restore toolbar ON/OFF widgets back to ON after a failed shutdown."""
+        if self._retire_native_worker() or (self.device is None and getattr(self, "_native_worker_retired_unconfirmed", False)):
+            self._restore_off_ui_state()
+            return
         def _update_gui() -> None:
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):
@@ -6491,7 +6671,7 @@ class PSUController(DeviceController):
             if hasattr(self.controllerParent, "onAction"):
                 self.controllerParent.onAction.state = True
 
-        _invoke_gui_callback(_update_gui)
+        self._queue_native_gui(_update_gui)
 
     @contextlib.contextmanager
     def _controller_lock_section(

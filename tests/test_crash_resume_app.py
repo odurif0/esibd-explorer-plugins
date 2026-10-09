@@ -53,6 +53,7 @@ def main(work: Path, phase: str) -> int:
     home.mkdir(parents=True, exist_ok=True)
     sys.modules.setdefault("pyautogui", types.ModuleType("pyautogui"))
     from esibd import const
+    const.qSet.setValue(f"{const.GENERAL}/{const.TESTMODE}", True)
     plugins = Path(const.defaultPluginPath)
     if not (plugins / "psu_a").exists():
         shutil.copytree(ROOT / "psu_a", plugins / "psu_a", ignore=shutil.ignore_patterns("__pycache__", "logs"))
@@ -101,7 +102,8 @@ def main(work: Path, phase: str) -> int:
                 report["timeout"] = state["phase"]
                 return finish(2)
             if state["phase"] == "load":
-                if manager is None or manager.loading or getattr(manager, "finalizing", True):
+                if (manager is None or manager.loading or getattr(manager, "finalizing", True)
+                        or not getattr(manager, "pluginNames", ())):
                     return
                 device = getattr(manager, "PSU_A", None)
                 if device is None:

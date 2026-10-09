@@ -400,13 +400,12 @@ def test_initialization_selects_backend_and_reports_com_on_failure(monkeypatch, 
     controller.runInitialization()
 
     assert constructor_kwargs[0]["com"] == 16
-    assert constructor_kwargs[0]["process_backend"] is True
+    assert constructor_kwargs[0]["native_backend"] is True
     assert constructor_kwargs[0]["log_dir"] == tmp_path / "logs" / "esi"
     assert "allow_negative" not in constructor_kwargs[0]
     private_python_messages = [message for message in messages if "plugin's private Python" in message]
-    assert len(private_python_messages) == int(frozen)
-    if frozen:
-        assert "no external Python installation required" in private_python_messages[0]
+    assert not private_python_messages
+    assert any("plugin-local native Rust worker" in message for message in messages)
     assert not any("isolation is disabled" in message.lower() for message in messages)
     assert any("initialization failed on COM16" in message for message in messages)
     assert controller.device is None
@@ -474,7 +473,7 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
 
     controller.runInitialization()
 
-    assert constructor_kwargs[0]["process_backend"] is True
+    assert constructor_kwargs[0]["native_backend"] is True
     assert calls == [
         ("connect", 5.0),
         ("global", True, 5.0),
@@ -627,15 +626,19 @@ def test_on_sequence_forces_every_output_off_and_energizes_nothing():
     class FakeDevice:
         def set_hv_module_target(self, address, value, timeout_s):
             calls.append(("target", address, value))
+            return value
 
         def set_heater_temperature(self, value, timeout_s, *, cancel_event=None):
             calls.append(("heat_target", value))
+            return value
 
         def set_global_active(self, active, timeout_s, *, cancel_event=None):
             calls.append(("global", active))
+            return active
 
         def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("module", address, active))
+            return active
 
     channels = [
         types.SimpleNamespace(module_address=lambda: 1, is_heat_channel=lambda: False, enabled=True, value=1000.0),
@@ -653,6 +656,7 @@ def test_on_sequence_forces_every_output_off_and_energizes_nothing():
     controller.device = FakeDevice()
     controller.initialized = True
     controller.heat_readback_valid = True
+    controller.errorCount = 0
     controller.applyValue = lambda channel: calls.append(("apply", channel.module_address()))
 
     controller.toggleOn()
@@ -931,10 +935,12 @@ def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
         def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             assert cancel_event is controller._output_cancel
             calls.append(("active", address, active, timeout_s))
+            return active
 
         def set_heater_temperature(self, target, timeout_s, *, cancel_event=None):
             assert cancel_event is controller._output_cancel
             calls.append(("temperature", target, timeout_s))
+            return target
 
         def set_hv_module_target(self, *args, **kwargs):
             raise AssertionError("Heat channel must not use the HV voltage setter")
@@ -953,6 +959,7 @@ def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
     controller.device = FakeDevice()
     controller.initialized = True
     controller.heat_readback_valid = True
+    controller.errorCount = 0
 
     controller.applyValue(channel)
 
@@ -1114,6 +1121,7 @@ def test_disabling_hv_uses_module_output_gate():
     class FakeDevice:
         def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("active", address, active, timeout_s))
+            return active
 
     parent = types.SimpleNamespace(
         poll_timeout_s=2.0,
@@ -1129,6 +1137,7 @@ def test_disabling_hv_uses_module_output_gate():
     controller = module.ESIController(parent)
     controller.device = FakeDevice()
     controller.initialized = True
+    controller.errorCount = 0
 
     controller.applyValue(channel)
 
@@ -1181,6 +1190,7 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
     class FakeDevice:
         def set_output_active(self, address, active, timeout_s, *, cancel_event=None):
             calls.append(("module", address, active))
+            return active
 
         def set_global_active(self, active, timeout_s, *, cancel_event=None):
             calls.append(("global", active))

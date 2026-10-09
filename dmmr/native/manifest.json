@@ -1,0 +1,34 @@
+{
+  "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+  "family": "dmmr",
+  "protocol": 1,
+  "source": {
+    "file": "source.zip",
+    "sha256": "62f795746b4b9da436a1eb3260693aebafa07b4f3bdddf2b6203927c0483f5a6",
+    "size_bytes": 330082,
+    "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+    "vendored": false
+  },
+  "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+  "targets": {
+    "windows-x86_64": {
+      "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "features": [
+        "dmmr"
+      ],
+      "file": "esibd-dmmr-worker.exe",
+      "sha256": "4203007ae001f16d35cbd95d37d1c9151ac3ea6996e28aa917db310094e0be07",
+      "size_bytes": 963072,
+      "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+      "target": "x86_64-pc-windows-gnu"
+    }
+  },
+  "third_party_notices": {
+    "file": "THIRD_PARTY_NOTICES.txt",
+    "sha256": "bac097ff9670a9167af532a68e97d72f7811d3d228eaf41ef366e56ee6e71eed",
+    "size_bytes": 279625
+  },
+  "validation": "hardware-not-validated",
+  "worker_version": "0.1.0"
+}

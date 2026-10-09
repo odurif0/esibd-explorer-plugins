@@ -77,6 +77,7 @@ def connection(monkeypatch, tmp_path):
     parent = types.SimpleNamespace(
         name='DMMR', com=15, baudrate=230400, connect_timeout_s=0.03,
         poll_timeout_s=0.03, getChannels=lambda: [], isOn=lambda: False,
+        pluginManager=types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path)),
     )
     controller = plugin.DMMRController(parent)
     messages, successes = [], []

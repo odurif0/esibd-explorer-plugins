@@ -6,13 +6,44 @@ noise-tolerant surrogate model and verified A/B decisions. It optimizes either t
 total ion current or one mass selected by a quadrupole.
 
 Enable the `Transmission` plugin in Explorer's Plugin Manager. When installing or
-updating, keep the whole `transmission/` directory: the entrypoint loads its private
-runtime from `_runtime/` (`_engine.py`, the optimizer; `_beamline.py`, which turns
-the simple settings into a configuration; `_simulator.py`, a simulated beamline;
-`_log.py`, the logs). The
+updating, keep the whole `transmission/` directory, including `_runtime/` and
+`native/`: the entrypoint loads the private Python GUI adapters from `_runtime/`
+(`_native_engine.py`, the native action adapter; `_native_worker.py`, its
+supervisor; `_engine.py`, configuration/types and the Python optimizer reference;
+`_beamline.py`, which turns the simple settings into a configuration;
+`_simulator.py`, a simulated beamline; `_log.py`, the logs). The
 plugin imports no other plugin: it drives the channels of the device plugins only
 through Explorer, like a user edit, so each device keeps its own ramps, limits and
 OFF logic. MIT license (see `LICENSE`).
+
+## Native Worker
+
+Both production optimization strategies run in an isolated native Rust worker:
+`native/esibd-transmission-worker.exe` on Windows x86-64 or
+`native/esibd-transmission-worker` on Linux x86-64. The supervisor selects that
+exact plugin-local binary from `native/manifest.json` and verifies its SHA-256,
+family and protocol. Missing or mismatched files fail startup; workers are not
+searched on PATH. DLL-backed device plugins still require Windows x86-64 for
+real hardware communication.
+
+The GUI, configuration builders and Explorer channel-action adapters stay
+Python. The existing `_simulator.py` also stays Python behind the same adapter:
+simulation uses the native optimizer without opening hardware. The older Python
+optimizer is retained as a reference, never a production fallback. No external
+or private Python worker interpreter or Explorer fork is required.
+
+Stop requests cancellation and the checked return described below while the
+worker and devices remain responsive. A crash or hang is isolated to this scan
+worker; Stop/Explorer close can terminate and reap it without stopping other
+workers. A later explicit run creates a fresh worker, without restarting
+Explorer or replaying old commands. Forced termination proves neither restored
+setpoints nor hardware OFF: unavailable recovery is reported as unconfirmed,
+not replaced by a blind restore or a Python optimizer fallback.
+Native worker logs stay under
+`<Explorer data path>/logs/transmission/native/transmission/`.
+The v0.5 native port has local mock-channel, Wine and Explorer 1.0.2 software
+validation. Real-hardware qualification remains pending; complete it before
+routine experimental use. These checks do not certify physical shutdown.
 
 ## Use
 
@@ -51,7 +82,8 @@ further command.
 
 During the run the panel shows the stage, the
 measurement count, the best gain so far and an upper bound of the time left; **■ Stop**
-returns to the start of the stage in progress. At the end, one line sums it up (for
+requests a return to the start of the stage in progress while the worker and
+devices remain responsive. At the end, one line sums it up (for
 example `Collector: 210 pA → 820 pA (×3.9). 5/6 stage(s) improved`): **Keep** the
 new settings or **Revert** to the settings before the run, step by step.
 
@@ -157,6 +189,12 @@ about 15 min for a selected mass.
 - `coordinate`: the classic manual method, automated: one setting at a time, a
   five-point line and a quadratic fit, with a shrinking step. Robust and easy to read.
 
+Both strategies, stage scoring, peak sweeps and A/B verification execute in Rust.
+The numerical engine uses `nalgebra` and bounded `argmin` Nelder-Mead fits instead
+of the reference SciPy L-BFGS-B routines; seeded PCG box/local candidates replace
+scrambled Sobol points. Fits, candidate sequences and optimization results are
+not promised to be bitwise identical to SciPy, even for the same seed.
+
 ## Safety
 
 - The **soft interlocks** only stop the optimization: a watched pressure outside its
@@ -176,11 +214,13 @@ about 15 min for a selected mass.
 - **ESI channels are never driven**: their HV discharge is not confirmed and a
   temperature setpoint starts the heater. They are not offered in Configure… and the
   advanced configuration refuses them; they can still be measured.
-- **Stop** returns step by step to the start of the stage in progress; completed stages
-  keep their verdict. **Revert** returns every channel driven by the last run, the
-  filter included, to its value before that run.
+- **Stop** requests a checked step-by-step return to the start of the stage in progress;
+  completed stages keep their verdict. A worker/device fault can prevent the return
+  and leaves restoration unconfirmed. **Revert** returns every channel driven by
+  the last run, the filter included, to its value before that run.
 - A quick sweep moves only the filter amplitude, in steps of the sweep spacing, then
-  returns it to its previous value; Stop returns it at once.
+  returns it to its previous value; Stop requests its return while the worker and
+  devices remain available.
 
 ## Advanced configuration
 
@@ -261,9 +301,12 @@ copy it together with the session data.
   beamline saved, MScan file opened, peak selected, advanced configuration, devices not
   ready / turned ON / declined / ready / timed out, start refused, run start and end,
   Stop, Keep, Revert), rotated at 1 MB with 5 backups.
+- `native/transmission/<date-time>-<session>.jsonl`: native worker startup,
+  requests, replies, errors, timeouts and termination/reaping diagnostics.
 
-Each line has `t` (Unix time), `seq` and `event`; non-finite numbers are `null`. A run log
-contains:
+Native transport lines use `time`, `session` and `kind`; they are separate from
+the adapter run/session logs. Each adapter line has `t` (Unix time), `seq` and
+`event`; non-finite numbers are `null`. A run log contains:
 
 | Event | Content |
 | --- | --- |

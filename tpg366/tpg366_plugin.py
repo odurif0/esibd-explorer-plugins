@@ -23,13 +23,13 @@ from esibd.core import Channel, DeviceController, PARAMETERTYPE, Parameter, PLUG
 from esibd.plugins import Device
 
 
-def _load_protocol():
+def _load_protocol(part="_tpg366"):
     # Explorer imports every root *.py file without sys.modules registration.
     # Keep the protocol below that discovery level and load it privately here.
-    path = Path(__file__).parent / "_runtime" / "_tpg366.py"
+    path = Path(__file__).parent / "_runtime" / f"{part}.py"
     if not path.is_file():
         raise ModuleNotFoundError(f"Missing bundled TPG366 protocol: {path}")
-    name = "_esibd_bundled_tpg366"
+    name = "_esibd_bundled_tpg366" + ("" if part == "_tpg366" else part)
     module = sys.modules.get(name)
     if module is None:
         spec = importlib.util.spec_from_file_location(name, path)
@@ -530,6 +530,7 @@ class PressureController(DeviceController):
         self._generation = 0
         self._worker = None
         self._retained_port = None
+        self._native_link = None
         self._awake = None
         self.gauges = ()
         self.interval_s = 1.0
@@ -586,10 +587,14 @@ class PressureController(DeviceController):
                     self.update.emit((generation, "sample", reading))
                     stop.wait(self.interval_s)
                 return
-            port = serial.Serial(port=port_name, baudrate=baudrate, bytesize=serial.EIGHTBITS,
-                                 parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
-                                 timeout=.05, write_timeout=1.0, xonxoff=False, rtscts=False, dsrdtr=False)
-            link = _protocol.TPG366Link(port, stop)
+            data_path = getattr(self.controllerParent.pluginManager.Settings, 'dataPath', None)
+            if not data_path or not str(data_path).strip():
+                raise RuntimeError('Native TPG366 logging requires Explorer Settings.dataPath.')
+            link = _load_protocol("_native_link").NativeLink(
+                _load_protocol("_native_worker").NativeWorkerProxy, _protocol,
+                Path(__file__).resolve().parent, port_name, baudrate, stop,
+                log_dir=Path(data_path) / "logs" / "tpg366")
+            port = self._native_link = link
             reported_naks = 0
 
             def report_naks():
@@ -655,6 +660,8 @@ class PressureController(DeviceController):
                 else:
                     port = None
             self.update.emit((generation, "finished", (port, error, close_error)))
+            if generation == self._generation:
+                self._native_link = None
 
     def startAcquisition(self):
         if not self.initialized and not self.initializing:
@@ -667,6 +674,9 @@ class PressureController(DeviceController):
     def closeCommunication(self):
         requested = not self._stop.is_set()
         self._stop.set()  # Cancel before waiting for any I/O. Only the worker closes.
+        link = getattr(self, "_native_link", None)
+        if link is not None:
+            link.cancel()
         if requested:
             self.print("OFF requested: stop acquisition and close USB; gauges unchanged.")
         self.acquiring = False

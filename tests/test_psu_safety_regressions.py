@@ -14,12 +14,13 @@ from psu_fakes import StatefulPSU
 
 
 @pytest.fixture
-def setup():
+def setup(tmp_path):
     module = _load_module()
     parent = types.SimpleNamespace(
         name="PSU_A", isOn=lambda: True, getChannels=lambda: [],
         startup_timeout_s=1.0, poll_timeout_s=0.1, connect_timeout_s=0.1,
         interlock_monitoring=True, com=1, baudrate=230400,
+        pluginManager=types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path)),
     )
     controller = module.PSUController(parent)
     controller.device = StatefulPSU()

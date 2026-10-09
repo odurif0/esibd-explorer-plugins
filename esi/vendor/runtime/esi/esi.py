@@ -1639,6 +1639,8 @@ class ESI(ProcessIsolatedClientMixin):
         dll_path: Optional[str] = None,
         log_dir: Optional[Path] = None,
         process_backend: bool = False,
+        worker_launcher=None,
+        native_backend: bool = False,
     ):
         backend_kwargs = {
             "device_id": device_id,
@@ -1649,6 +1651,10 @@ class ESI(ProcessIsolatedClientMixin):
             "dll_path": dll_path,
             "log_dir": log_dir,
         }
+        if native_backend:
+            backend_kwargs["native_backend"] = True
+            self._initialize_process_backend(backend_kwargs=backend_kwargs, incompatible_objects={})
+            return
         if process_backend:
             from ._process import ESIProcessProxy
 
@@ -1657,7 +1663,8 @@ class ESI(ProcessIsolatedClientMixin):
             backend_kwargs.pop("logger")
             backend_kwargs.pop("thread_lock")
             # Failure to start isolation must not silently load the DLL in Explorer.
-            object.__setattr__(self, "_backend", ESIProcessProxy(backend_kwargs))
+            proxy_options = {"worker_launcher": worker_launcher} if worker_launcher is not None else {}
+            object.__setattr__(self, "_backend", ESIProcessProxy(backend_kwargs, **proxy_options))
             object.__setattr__(self, "_backend_mode", "process")
             object.__setattr__(self, "_process_backend_disabled_reason", "")
             return
@@ -1674,6 +1681,8 @@ class ESI(ProcessIsolatedClientMixin):
     def __getattr__(self, name):
         if object.__getattribute__(self, "_backend_mode") == "process":
             backend = object.__getattribute__(self, "_backend")
+            if hasattr(backend, "session"):
+                return super().__getattr__(name)
             if name in {"_open_failed", "_opening_in_progress", "_failed_open_released"}:
                 return False  # Terminating the worker retires even a failed/blocked Open.
             if name == "_transport_poisoned":

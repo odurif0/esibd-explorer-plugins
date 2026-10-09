@@ -1,0 +1,46 @@
+{
+  "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+  "family": "tpg366",
+  "protocol": 1,
+  "source": {
+    "file": "source.zip",
+    "sha256": "ed0fbc7eadcb7a1478486781c90b88c9f408ea390d245ff69623241022552a07",
+    "size_bytes": 12332833,
+    "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+    "vendored": true
+  },
+  "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+  "targets": {
+    "linux-x86_64": {
+      "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "features": [
+        "tpg366"
+      ],
+      "file": "esibd-tpg366-worker",
+      "sha256": "58066b7dec6030c57836f51e5875a6435ed2e52415aba636a42075c0c105ffcc",
+      "size_bytes": 642192,
+      "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "windows-x86_64": {
+      "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "features": [
+        "tpg366"
+      ],
+      "file": "esibd-tpg366-worker.exe",
+      "sha256": "6bc4aad5efe0c7eb07650cdf1b2bb6c17d2c4ffae91a28c0c738e29559c2e1c4",
+      "size_bytes": 619520,
+      "source_data_sha256": "39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922",
+      "target": "x86_64-pc-windows-gnu"
+    }
+  },
+  "third_party_notices": {
+    "file": "THIRD_PARTY_NOTICES.txt",
+    "sha256": "a8f8c94b46aec96b52dfec17feaa469c7dc95e529ddd8b1458edbccec1c7a0d3",
+    "size_bytes": 521835
+  },
+  "validation": "hardware-not-validated",
+  "worker_version": "0.1.0"
+}

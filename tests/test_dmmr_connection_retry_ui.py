@@ -27,7 +27,7 @@ def probe(late_status, output, shutdown_action=None):
     from importlib.metadata import PackageNotFoundError
     import threading
     import time
-    from types import MethodType
+    from types import MethodType, SimpleNamespace
 
     try:
         from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
@@ -49,6 +49,7 @@ def probe(late_status, output, shutdown_action=None):
     module, controller = hw.plugin, hw.controller
     parent = QWidget()
     parent.name, parent.com, parent.baudrate = 'DMMR', 15, 230400
+    parent.pluginManager = SimpleNamespace(Settings=SimpleNamespace(dataPath=output))
     parent.useOnOffLogic, parent.loading = True, False
     parent.connect_timeout_s = parent.poll_timeout_s = 0.03
     parent.main_state = 'Disconnected'
@@ -102,6 +103,9 @@ def probe(late_status, output, shutdown_action=None):
     # gate/range answers are simulated here, as in test_dmmr_toggle_ui.
     factory = hw.factory
     def native_driver(**kwargs):
+        assert kwargs['native_backend'] is True
+        assert Path(kwargs['log_dir']) == output / 'logs' / 'dmmr'
+        # Inject the Python reference explicitly; this probe does not load the Rust DLL worker.
         driver = factory(**kwargs)
         gates = FaultingDMMR()
         gates.fail_start = None

@@ -58,6 +58,7 @@ def main(work: Path) -> int:
     home.mkdir(parents=True, exist_ok=True)
     sys.modules.setdefault("pyautogui", types.ModuleType("pyautogui"))
     from esibd import const
+    const.qSet.setValue(f"{const.GENERAL}/{const.TESTMODE}", True)
     plugins = Path(const.defaultPluginPath)
     shutil.copytree(ROOT / "dmmr", plugins / "dmmr", ignore=shutil.ignore_patterns("__pycache__", "logs"))
     Path(const.defaultConfigPath).mkdir(parents=True, exist_ok=True)
@@ -95,7 +96,8 @@ def main(work: Path) -> int:
                 return finish(2)
             manager = getattr(window, "pluginManager", None)
             if state["phase"] == "load":
-                if manager is None or manager.loading or getattr(manager, "finalizing", True):
+                if (manager is None or manager.loading or getattr(manager, "finalizing", True)
+                        or not getattr(manager, "pluginNames", ())):
                     return
                 device = state["device"] = manager.DMMR
                 device._sync_channels_from_detected_modules([1, 2])
