@@ -101,6 +101,9 @@ def _install_esibd_stubs():
         def toggleOn(self):
             self.super_toggle_called = True
 
+        def print(self, message, **kwargs):
+            pass
+
         def startAcquisition(self):
             self.acquiring = True
 
@@ -362,7 +365,7 @@ def test_panel_controls_one_target_and_one_output_state_per_module():
     ]
 
 
-def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypatch):
+def test_initialization_uses_isolated_backend_and_reports_com_on_failure(monkeypatch):
     module = _load_plugin()
     constructor_kwargs = []
     messages = []
@@ -370,7 +373,7 @@ def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypat
     class FakeDriver:
         def __init__(self, **kwargs):
             constructor_kwargs.append(kwargs)
-            self._process_backend_disabled_reason = "inline backend selected"
+            self._process_backend_disabled_reason = ""
 
         def connect(self, timeout_s):
             raise RuntimeError("open failed")
@@ -394,7 +397,7 @@ def test_initialization_uses_inline_backend_and_reports_com_on_failure(monkeypat
     controller.runInitialization()
 
     assert constructor_kwargs[0]["com"] == 16
-    assert constructor_kwargs[0]["process_backend"] is False
+    assert constructor_kwargs[0]["process_backend"] is True
     assert "allow_negative" not in constructor_kwargs[0]
     assert any("initialization failed on COM16" in message for message in messages)
     assert controller.device is None

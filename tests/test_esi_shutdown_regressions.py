@@ -195,6 +195,10 @@ def test_command_queued_before_off_cannot_revive_after_new_on():
     main_thread = threading.current_thread()
 
     class ObservedLock:
+        def acquire(self, **kwargs):
+            return original_lock.acquire(**kwargs)
+        def release(self):
+            original_lock.release()
         def __enter__(self):
             if threading.current_thread() is not main_thread:
                 waiting.set()

@@ -159,7 +159,8 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
         def __getattr__(self, name):  # Any command not listed below would be recorded and fail the test.
             return lambda *args, **kwargs: calls.append((name, args))
 
-        def connect(self, timeout_s):
+        def connect(self, timeout_s, *, preserve_outputs=False):
+            assert preserve_outputs is True
             calls.append(("connect",))
 
         def collect_identity(self, timeout_s):

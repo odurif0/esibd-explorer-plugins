@@ -26,7 +26,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.4.0.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.4.1.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -98,10 +98,18 @@ For the other device plugins:
   standby configuration `-1` keeps the outputs disabled).
 - **OFF** requests and verifies shutdown, then closes communication. Success is
   shown as **Disconnected**; the next ON reconnects.
-- **Shutdown unconfirmed** means shutdown or port closure failed. The button
+- For the other DLL-backed plugins, **Shutdown unconfirmed** means shutdown or
+  port closure failed. The button
   remains ON so the next click retries OFF, and Explorer's closing warning stays
   active. This button state is not confirmation that outputs are enabled. If a
   DLL call is blocked, make the instrument safe locally and restart Explorer.
+
+**ESI is isolated in its own process.** If its DLL blocks or crashes, OFF or
+closing communication releases that worker and stops ESI acquisition without
+stopping other devices. A new ON creates a fresh connection. If shutdown could
+not be verified, the plugin shows **Disconnected: shutdown unconfirmed** with a
+persistent warning: disconnection does not prove the HV or heater is OFF. Make
+the instrument safe locally before touching it; see [ESI](esi/README.md).
 
 A failed initial port opening uses **Connection pending** instead, with the
 DMMR button OFF rather than falsely indicating initialized operation. OFF or
@@ -110,8 +118,9 @@ driver instance and port reservation remain until the native call has ended
 and closure is confirmed. This confirms port closure, not the hardware output
 state. If opening succeeds after a close request, the plugin runs its normal
 verified shutdown instead of completing initialization.
-A new ON explicitly reconnects after cleanup; a native call that never returns
-or an unconfirmed closure can still require a restart.
+A new ON explicitly reconnects after cleanup; outside the isolated ESI plugin,
+a native call that never returns or an unconfirmed closure can still require a
+restart.
 
 While a device's port is open (from ON until its closure is confirmed,
 including an unconfirmed shutdown), its plugin asks Windows not to sleep on
@@ -135,7 +144,7 @@ only). A device that was OFF is not contacted. A normal start keeps every device
 OFF; ESI outputs and PSU panels start as described in their READMEs.
 
 If the instrument was powered off meanwhile, the resume ends like a failed ON
-(a timed-out opening can lock the port until Explorer restarts).
+(outside ESI, a timed-out opening can lock the port until Explorer restarts).
 
 For HV devices, a verified disable is **not proof of complete electrical
 discharge**. ESI additionally checks both HV polarities on each module against
@@ -146,6 +155,10 @@ safety procedure before touching hardware.
 ## Requirements
 
 - ESIBD Explorer `1.0.2` on Windows
+- For ESI with a frozen Explorer executable: Python 3.10 or newer, **64-bit**.
+  Set `ESIBD_ESI_WORKER_PYTHON` to its `python.exe` path if it is not detected.
+  An installed Python-based Explorer uses its own interpreter; the ESI worker
+  requires only the standard library.
 
 
 ## Notebooks
