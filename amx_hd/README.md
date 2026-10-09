@@ -1,7 +1,10 @@
 # AMX HD Plugin
 
-Drives the **AMX HD** (CGC `HV-AMX-CTRL-4EDH`, High-Definition) oscillator and
-timer timing from ESIBD Explorer and monitors live timer readbacks.
+Drives the **AMX HD** (CGC `HV-AMX-CTRL-4EDH`) oscillator and timer timing from
+ESIBD Explorer and monitors live timer readbacks. "HD" is only this plugin's name:
+CGC's `EDH` means options E + D + **H, "High Frequency Resolution"** (2 digital
+oscillators with 10 Hz resolution, 16 pulse generators, timing resolution < 0.1 ns,
+jitter < 0.5 ns; [CGC 19AMX options](https://www.cgc-instruments.com/en/Products/Switches/19AMX/Preconfigured/Options)).
 
 This is the HD sibling of the `amx_a/` and `amx_b/` plugins. The HD variant is
 a **different controller** than the normal AMX: it ships its own vendor DLL
