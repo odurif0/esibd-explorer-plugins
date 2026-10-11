@@ -568,18 +568,43 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
             )
         timeout = self._resolve_timeout(timeout_s)
         self.force_safe_off(timeout_s=timeout)
-        status = self._call_locked_with_timeout(
-            ESIBase.load_current_config,
-            timeout,
-            "load_current_config",
-            self,
-            config_number,
-        )
-        self._raise_on_status(status, f"load_current_config({config_number})")
-        self.configure_hv_max_voltage_steps(
-            self.DEFAULT_HV_MAX_VOLTAGE_STEP_V, timeout_s=timeout_s
-        )
-        self.force_safe_off(timeout_s=timeout)
+        errors: list[Exception] = []
+        try:
+            status = self._call_locked_with_timeout(
+                ESIBase.load_current_config,
+                timeout,
+                "load_current_config",
+                self,
+                config_number,
+            )
+            self._raise_on_status(status, f"load_current_config({config_number})")
+        except Exception as exc:
+            errors.append(exc)
+        # A saved slot may itself enable HV, and a failed load may still have
+        # been applied. Force OFF before anything else; the ramp-step patch
+        # requires (and checks) that state.
+        try:
+            self.force_safe_off(timeout_s=timeout)
+        except Exception as exc:
+            errors.append(exc)
+        else:
+            if not errors:
+                try:
+                    self.configure_hv_max_voltage_steps(
+                        self.DEFAULT_HV_MAX_VOLTAGE_STEP_V, timeout_s=timeout_s
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                try:
+                    self.force_safe_off(timeout_s=timeout)
+                except Exception as exc:
+                    errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise RuntimeError(
+                "ESI load_config failed: " + "; ".join(str(error) for error in errors)
+            ) from errors[0]
 
     def save_config(
         self,

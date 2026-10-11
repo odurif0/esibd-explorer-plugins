@@ -16,6 +16,9 @@ use crate::error::{Error, Result};
 use crate::ffi::Dll;
 use serde_json::{Value, json};
 
+// The 4EDH signal bus exposes Mapping0-Out0 .. Mapping3-Out3: four engines.
+const MAPPING_ENGINE_MAX: u32 = 3;
+
 pub struct Controller {
     inner: amx::Controller,
 }
@@ -288,6 +291,10 @@ impl Controller {
                     {
                         return Err(Error::argument("Invalid switch source bits"));
                     }
+                    // DIO_SRC_NUM: 64 bus signals plus 16 clock outputs; 80..127 select nothing.
+                    if method == "set_digital_io_signal_source" && value & 0x7f >= 80 {
+                        return Err(Error::argument("Invalid digital I/O signal source"));
+                    }
                     json!(value)
                 };
                 self.raw_status(suffix, &[json!(index), value], 0, ctx)
@@ -357,7 +364,7 @@ impl Controller {
             }
             "get_mapping_engine_input_source" | "get_mapping_engine_output_value" => {
                 let p = Params::new(args, kwargs, &["mapping_engine"], 1, 1)?;
-                let number = uint(&p[0], "mapping_engine", u32::MAX)?;
+                let number = uint(&p[0], "mapping_engine", MAPPING_ENGINE_MAX)?;
                 let (suffix, tail, count) = if method == "get_mapping_engine_input_source" {
                     (
                         "GetMappingEngineInputSource",
@@ -390,7 +397,7 @@ impl Controller {
                     &["mapping_engine", "input_sources"]
                 };
                 let p = Params::new(args, kwargs, names, names.len(), names.len())?;
-                let number = uint(&p[0], "mapping_engine", u32::MAX)?;
+                let number = uint(&p[0], "mapping_engine", MAPPING_ENGINE_MAX)?;
                 let values = byte_buffer(
                     &p[if output { 2 } else { 1 }],
                     if output { 7 } else { 4 },

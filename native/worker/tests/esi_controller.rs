@@ -54,6 +54,10 @@ struct Instrument {
     fresh_counts: [[usize; 2]; 3],
     config: Vec<u8>,
     config_corrupt: bool,
+    // The volatile config mirrors the live gate/target/activation state, and a
+    // loaded NVM slot may itself enable HV, as on the controller.
+    config_tracks_outputs: bool,
+    load_live: bool,
     slots: BTreeMap<usize, (String, bool, bool)>,
 }
 
@@ -94,6 +98,8 @@ impl Default for Instrument {
             fresh_counts: [[0; 2]; 3],
             config: vec![0; 53],
             config_corrupt: false,
+            config_tracks_outputs: false,
+            load_live: false,
             slots: BTreeMap::from([
                 (10, ("Spray-2kV".to_owned(), true, true)),
                 (12, ("Test-100V".to_owned(), true, false)),
@@ -287,6 +293,15 @@ impl Dll for MockDll {
             "COM_ESI_CTRL_GetCurrentConfig" => {
                 assert_eq!(args[0].as_array().unwrap().len(), 53);
                 let mut config = state.config.clone();
+                if state.config_tracks_outputs {
+                    config[0] = u8::from(state.enabled);
+                    for address in [1, 2] {
+                        let offset = 17 + (address - 1) * 12;
+                        let millivolts = (state.target[address] * 1000.0).round() as i32;
+                        config[offset..offset + 4].copy_from_slice(&millivolts.to_le_bytes());
+                        config[offset + 10] = u8::from(state.active[address]);
+                    }
+                }
                 if state.config_corrupt {
                     config[50] ^= 1;
                 }
@@ -334,6 +349,11 @@ impl Dll for MockDll {
                 state.target = [0.0; 3];
                 state.active = [false; 3];
                 state.enabled = false;
+                if state.load_live {
+                    state.enabled = true;
+                    state.target[1] = 1000.0;
+                    state.active[1] = true;
+                }
                 vec![]
             }
             "COM_ESI_CTRL_SaveCurrentConfig" | "COM_ESI_CTRL_SetConfigFlags" => vec![],
@@ -1515,7 +1535,8 @@ fn load_slot_forces_off_before_and_after_load_and_reapplies_volatile_steps() {
     );
     assert_eq!(rig.count("COM_ESI_CTRL_LoadCurrentConfig"), 1);
     assert_eq!(rig.count("COM_ESI_CTRL_SetCurrentConfig"), 1);
-    assert_eq!(rig.count("COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage"), 4);
+    // Safe OFF before the load, right after it, and after the ramp-step patch.
+    assert_eq!(rig.count("COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage"), 6);
     let calls = rig.calls();
     let load = calls
         .iter()
@@ -1538,6 +1559,82 @@ fn load_slot_forces_off_before_and_after_load_and_reapplies_volatile_steps() {
         i32::from_le_bytes(state.config[21..25].try_into().unwrap()),
         10008
     );
+}
+
+#[test]
+fn load_slot_that_enables_hv_is_forced_off_before_the_ramp_patch() {
+    let mut rig = Rig::connected(true);
+    {
+        let mut state = rig.state.lock().unwrap();
+        state.config_tracks_outputs = true;
+        state.load_live = true;
+    }
+    assert_eq!(
+        rig.call("load_config", &[json!(10)], json!({})).unwrap(),
+        Value::Null
+    );
+    let calls = rig.calls();
+    let load = calls
+        .iter()
+        .position(|(name, _)| name == "COM_ESI_CTRL_LoadCurrentConfig")
+        .unwrap();
+    let patch = calls
+        .iter()
+        .position(|(name, _)| name == "COM_ESI_CTRL_SetCurrentConfig")
+        .unwrap();
+    assert!(load < patch);
+    assert!(
+        calls[load + 1..patch]
+            .iter()
+            .any(|(name, args)| name == "COM_ESI_CTRL_SetEnable" && args[0] == false)
+    );
+    assert!(calls[load + 1..patch].iter().any(|(name, args)| name
+        == "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage"
+        && args[0] == 1
+        && args[1] == 0.0));
+    let state = rig.state.lock().unwrap();
+    assert!(!state.enabled);
+    assert_eq!(state.active, [false; 3]);
+    assert_eq!(state.target, [0.0; 3]);
+    assert_eq!(
+        i32::from_le_bytes(state.config[21..25].try_into().unwrap()),
+        10008
+    );
+}
+
+#[test]
+fn failed_load_or_ramp_patch_still_ends_safe_off() {
+    for failing in [
+        "COM_ESI_CTRL_LoadCurrentConfig",
+        "COM_ESI_CTRL_SetCurrentConfig",
+    ] {
+        let mut rig = Rig::connected(true);
+        {
+            let mut state = rig.state.lock().unwrap();
+            state.config_tracks_outputs = true;
+            state.load_live = failing != "COM_ESI_CTRL_LoadCurrentConfig";
+        }
+        if failing == "COM_ESI_CTRL_LoadCurrentConfig" {
+            // The command may have been applied before its acknowledgement failed.
+            rig.state.lock().unwrap().enabled = true;
+        }
+        rig.inject(failing, 1, -15, vec![]);
+        let error = rig
+            .call("load_config", &[json!(10)], json!({}))
+            .unwrap_err();
+        assert!(error.message.contains("failed"), "{failing}: {error}");
+        let calls = rig.calls();
+        let failed = calls.iter().position(|(name, _)| name == failing).unwrap();
+        assert!(
+            calls[failed + 1..]
+                .iter()
+                .any(|(name, args)| name == "COM_ESI_CTRL_SetEnable" && args[0] == false),
+            "{failing}: no OFF after the failure"
+        );
+        let state = rig.state.lock().unwrap();
+        assert!(!state.enabled, "{failing}");
+        assert_eq!(state.active, [false; 3], "{failing}");
+    }
 }
 
 #[test]

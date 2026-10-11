@@ -1283,7 +1283,41 @@ def test_load_config_reapplies_hv_max_voltage_step_patch(driver_modules, monkeyp
     controller.load_config(10, timeout_s=0.5)
     assert loaded == [10]
     assert patched == [driver_module._ESIController.DEFAULT_HV_MAX_VOLTAGE_STEP_V]
-    assert len(safe_off_calls) == 2
+    # Safe OFF before the load, right after it, and after the ramp-step patch.
+    assert len(safe_off_calls) == 3
+
+
+@pytest.mark.parametrize("failing", ("load", "patch"))
+def test_load_config_that_enables_hv_still_ends_safe_off(driver_modules, monkeypatch, failing):
+    """A slot saved with HV on must not stay live when the ramp patch refuses it."""
+    _runtime, driver_module, base_module = driver_modules
+    controller = _controller(driver_module)
+    controller.connected = True
+    events = []
+    monkeypatch.setattr(
+        driver_module._ESIController,
+        "force_safe_off",
+        lambda self, timeout_s=None: events.append("off") or True,
+    )
+    monkeypatch.setattr(
+        base_module.ESIBase,
+        "load_current_config",
+        lambda self, num: events.append("load") or (-7 if failing == "load" else 0),
+    )
+
+    def patch(self, step, timeout_s=None):
+        events.append("patch")
+        if events[-2] != "off":
+            raise RuntimeError("Refusing volatile HV configuration while outputs are not safely OFF")
+        if failing == "patch":
+            raise RuntimeError("ESI volatile HV configuration verification failed")
+
+    monkeypatch.setattr(driver_module._ESIController, "configure_hv_max_voltage_steps", patch)
+    with pytest.raises(RuntimeError, match="load_current_config" if failing == "load" else "verification failed"):
+        controller.load_config(10, timeout_s=0.5)
+    assert events[:3] == ["off", "load", "off"]
+    assert events[-1] == "off"
+    assert ("patch" in events) is (failing == "patch")
 
 
 def test_load_config_rejects_out_of_range_slot(driver_modules):

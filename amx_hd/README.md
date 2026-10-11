@@ -1,7 +1,8 @@
 # AMX HD Plugin
 
 Drives the **AMX HD** (CGC `HV-AMX-CTRL-4EDH`) oscillator and timer timing from
-ESIBD Explorer and monitors live timer readbacks. "HD" is only this plugin's name:
+ESIBD Explorer, monitors live timer readbacks and shows the expected signal on
+each output CH0–CH3, with the voltages of the PSUs wired to them. "HD" is only this plugin's name:
 CGC's `EDH` means options E + D + **H, "High Frequency Resolution"** (2 digital
 oscillators with 10 Hz resolution, 16 pulse generators, timing resolution < 0.1 ns,
 jitter < 0.5 ns; [CGC 19AMX options](https://www.cgc-instruments.com/en/Products/Switches/19AMX/Preconfigured/Options)).
@@ -64,6 +65,9 @@ routine experimental use. These checks do not certify physical shutdown.
 - `Available configs`: live list of config slots reported by the connected HD.
 - `Frequency (kHz)`: oscillator-0 frequency. The same value is exposed directly
   in the plugin toolbar for routine operation.
+- `PSU for CH0-CH1`, `PSU for CH2-CH3`: PSU plugin physically feeding each output
+  pair (PSU CH0 (+) = Vpos, CH1 (−) = Vneg). Read-only association used for the
+  displayed rail voltages and by MScan; it never connects or controls the PSU.
 
 Toolbar notes:
 
@@ -83,9 +87,48 @@ Runtime timing notes:
 
 - HD timer delay/width share the same register offsets as the normal AMX
   pulsers (delay `+3`, width `+2` ticks, 100 MHz / 10 ns tick on oscillator-0).
-- HD per-switch **fine delays** (~11 ps) and switch source selection exist in
-  the driver but are **not exposed in this v1 plugin** (parity with the normal
-  AMX plugin). They can be added in a follow-up.
+- The `Freq` setting writes oscillator 0 only, and the µs/duty conversions assume
+  a 100 MHz clock. When Clock 0 is not `CLK100M` (for example a PLL-tuned config),
+  the panel says so; read the CH0–CH3 table for the decoded timing.
+- Per-switch coarse (5 ns) and **fine delays** (~11 ps) and the switch sources are
+  read and displayed, never written by this plugin.
+
+## Operator Panel
+
+The default view shows the four outputs CH0–CH3, decoded from the live
+controller registers, never from a config name or slot number:
+
+| Column | Meaning |
+| --- | --- |
+| Signal | `Periodic`, `Static`, `Hi-Z`, `Burst`, `External`, `Software`, `Gated`, `Unknown` or `Not enabled` |
+| Frequency | Output frequency computed from the oscillator period and its clock |
+| Levels | `Vneg ↔ Vpos`, `Vpos`, `Vneg` or `Hi-Z`; measured PSU voltages replace the rail names when a PSU is associated |
+| Time (µs) Vpos / Vneg | Exact dwell, only when all switch edge delays are zero |
+| Relative timing | Same / opposite / delay in µs relative to the first decoded output |
+| PSU | Associated PSU plugin |
+
+Decoding uses CGC's 4EDH signal table (64 sources: logic 0, two software
+triggers, `Enb`, the 16 timer outputs, the 16 timer running states, four
+oscillators, the 16 mapping-engine outputs and eight digital inputs), as listed by
+CGC's `COM-HVAMX4EDH-Control` 1-20 software and used in its configuration files
+(`SwitchTrigger0=TimerOut00,Pos`). Enable low gives Hi-Z, enable high with the
+trigger low/high gives Vneg/Vpos. Oscillator *k* runs on Clock *k* and timer *t*
+on Clock ((*t* mod 8) div 2); periods are register + 2 ticks, widths + 2 and
+delays + 3. Mapping engines, bursts, running-state signals, chained, software or
+external triggers, a stop source and PLL/counter/divider clocks are never
+flattened into a frequency: those outputs are reported as such, with the reason
+in the tooltip. Hi-Z never implies 0 V.
+
+The routing registers are read only while the controller is ON (`STATE_ON`),
+right after each ON/config load and then every 5 s; timing edits invalidate the
+table until the next readback. **Advanced** shows the timer cards (requested
+enable and width, register readbacks, trigger and clock, `REGISTERS APPLIED`
+when the width and oscillator-0 registers match the request) and the channel
+table. Viewing the panel never writes to the controller.
+
+The table states the expected signal from registers; it is not a waveform
+measurement. Check it once with an oscilloscope on each output before relying on
+it (see `SOFTWARE_TEST_PLAN.md`).
 
 ## AMX HD Configurations
 
@@ -109,8 +152,9 @@ Important points:
 - Before choosing a config index, query the controller with the
   [AMX HD hardware probe](../notebooks/amx_hd_hardware_probe.ipynb) or `list_configs()`.
 
-The plugin queries the timer count at runtime (`get_timer_count()`); it does
-not hard-code a channel count. Each timer channel exposes:
+The channels cover timers 0–3; the housekeeping snapshot reads every timer the
+controller reports (`get_timer_count()`), and the CH0–CH3 table decodes whichever
+timers the outputs actually use. Each timer channel exposes:
 
 - duty-cycle setpoint in percent
 - timer delay in ticks

@@ -21,6 +21,16 @@ TRANSPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TRANSPORT)
 
 
+def test_numpy_scalars_encode_as_their_python_values():
+    np = pytest.importorskip("numpy")
+    assert TRANSPORT.encode(np.bool_(True)) is True
+    assert TRANSPORT.encode([np.bool_(False), np.int16(-3), np.float32(0.5)]) == [False, -3, 0.5]
+    assert TRANSPORT.encode(np.float64("nan")) == {"$float": "nan"}
+    assert TRANSPORT.encode(np.array(7)) == 7
+    with pytest.raises(TypeError):
+        TRANSPORT.encode(np.array([1, 2]))
+
+
 @pytest.fixture(scope="module")
 def binary():
     if shutil.which("cargo") is None:

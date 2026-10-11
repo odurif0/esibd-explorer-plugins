@@ -164,7 +164,7 @@ def rust_source(functions):
         lines += [f'            let function = unsafe {{ lib.get::<unsafe extern "system" fn({", ".join(c_types)}) -> {result}>(b"{symbol}\\0") }}.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {{symbol}}: {{e}}")))?;',
                   f'            let status = unsafe {{ function({", ".join(expressions)}) }};']
         if spec["result"] == "constchar*":
-            lines += ["            let text = if status.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(status) }.to_string_lossy().into_owned() };",
+            lines += ["            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };",
                       "            Ok(NativeReply { status: 0, values: vec![Value::String(text)] })"]
         else:
             lines.append(f"            Ok(NativeReply {{ status: i64::from(status), values: vec![{', '.join(outputs)}] }})")

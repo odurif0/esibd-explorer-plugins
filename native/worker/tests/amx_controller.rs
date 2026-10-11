@@ -1305,11 +1305,35 @@ fn hd_switch_timing_sources_pll_and_interlock_operations_are_real_validated_call
         ("set_timer_burst", vec![json!(0), json!(1 << 24)]),
         ("set_pll_ref_div", vec![json!(0), json!(0)]),
         ("set_pll_fdbk_div", vec![json!(0), json!(6)]),
+        // DIO sources are the 64 bus signals and 16 clock outputs (0x50).
+        ("set_digital_io_signal_source", vec![json!(0), json!(80)]),
+        ("set_digital_io_signal_source", vec![json!(0), json!(0xff)]),
+        // Mapping0..Mapping3 only.
+        ("get_mapping_engine_input_source", vec![json!(4)]),
+        (
+            "set_mapping_engine_output_value",
+            vec![json!(4), json!(true), json!(vec![0; 7])],
+        ),
     ] {
+        let calls = state.lock().unwrap().names().len();
         assert!(
             rpc(device.as_mut(), method, &args, json!({})).is_err(),
             "{method}"
         );
+        assert_eq!(
+            state.lock().unwrap().names().len(),
+            calls,
+            "{method} reached the DLL"
+        );
+    }
+    for source in [79, 0x80 | 79] {
+        rpc(
+            device.as_mut(),
+            "set_digital_io_signal_source",
+            &[json!(7), json!(source)],
+            json!({}),
+        )
+        .unwrap();
     }
 }
 
@@ -1838,7 +1862,7 @@ fn hd_indexed_facade_matches_the_sdk_for_every_clock_pll_io_timer_and_switch_ope
         ("set_counter_period", json!(20)),
         ("set_oscillator_period", json!(u32::MAX)),
         ("set_digital_io_config", json!(2)),
-        ("set_digital_io_signal_source", json!(255)),
+        ("set_digital_io_signal_source", json!(0x80 | 79)), // Inverted Div3.
         ("set_switch_trigger_source", json!(191)),
         ("set_switch_enable_source", json!(191)),
         ("set_switch_rise_delay_fine", json!(511)),

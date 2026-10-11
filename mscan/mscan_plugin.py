@@ -245,7 +245,7 @@ class _Settings(SettingsManager):
                 elif key == scan.OFFSET:
                     choices = [scan.NO_OFFSET, *[scan._offset_label(c) for c in scan.pluginManager.DeviceManager.channels() if scan._is_ampr(c)]]
                 else:
-                    choices = ['None', *[p.name for p in scan.pluginManager.plugins if p.name in ('AMX_A', 'AMX_B')]]
+                    choices = ['None', *[p.name for p in scan.pluginManager.plugins if p.name in scan.AMX_PLUGINS]]
                 choices.append(str(item[Parameter.VALUE]))
                 item[Parameter.ITEMS] = ','.join(dict.fromkeys(choices))
         scan.notes = str(old_value('Notes', Parameter.VALUE) or '')
@@ -289,6 +289,7 @@ class MScan(Scan):
     iconFile = 'mscan.png'
     useInvalidWhileWaiting = False
     AMX = 'AMX'
+    AMX_PLUGINS = ('AMX_A', 'AMX_B', 'AMX_HD')  # Each publishes decoded CH0–CH3 output_rows.
     OUTPUTS = 'AMX connectors'
     START = 'Amplitude from (V)'
     STOP = 'Amplitude to (V)'
@@ -372,7 +373,7 @@ class MScan(Scan):
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='detector_module', event=self._signal_changed,
             toolTip='Physical DMMR module wired to the ion collector after the quadrupole. '
                     'Only this current channel is acquired. DMMR acquisition and recording must already be active.')
-        settings[self.AMX] = parameterDict(value='None', items='None, AMX_A, AMX_B',
+        settings[self.AMX] = parameterDict(value='None', items=', '.join(['None', *self.AMX_PLUGINS]),
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_name', event=self._setup_changed,
             toolTip='AMX with PSU associations already configured in its Settings. No automatic ON or config load.')
         settings[self.OUTPUTS] = parameterDict(value='CH0-CH1', items=', '.join([self.NO_PAIR, *self.PAIRS]),
@@ -1087,7 +1088,7 @@ class MScan(Scan):
             combo.blockSignals(previous)
         amx_setting = self.settingsMgr.settings[self.AMX]
         if not amx_setting.combo.view().isVisible():
-            choices = ['None', *sorted({p.name for p in self.pluginManager.plugins if p.name in ('AMX_A', 'AMX_B')})]
+            choices = ['None', *sorted({p.name for p in self.pluginManager.plugins if p.name in self.AMX_PLUGINS})]
             selected_amx = str(amx_setting.value)
             if selected_amx not in choices:
                 choices.append(selected_amx)
@@ -1131,7 +1132,7 @@ class MScan(Scan):
                     lines.append(f'{name}: unavailable')
                 shared = []
                 for other in self.pluginManager.plugins:
-                    if other.name not in ('AMX_A', 'AMX_B'):
+                    if other.name not in self.AMX_PLUGINS:
                         continue
                     for i, attr in ((0, 'psu_ch01'), (2, 'psu_ch23')):
                         if str(getattr(other, attr, 'None')) == name and (other is not amx or i not in selected_outputs):

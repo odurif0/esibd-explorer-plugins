@@ -1584,10 +1584,32 @@ impl Backend for Controller {
             "load_config" => {
                 let slot = arguments.slot()?;
                 self.safe_off(ctx)?;
-                self.write("COM_ESI_CTRL_LoadCurrentConfig", &[json!(slot)], ctx, true)?;
-                self.configure_steps(DEFAULT_STEP, ctx)?;
-                self.safe_off(ctx)?;
-                Ok(Value::Null)
+                // A saved slot may itself enable HV, and a failed or cancelled
+                // load may still have been applied. Force OFF before anything
+                // else; the ramp-step patch requires (and checks) that state.
+                let loaded =
+                    self.write("COM_ESI_CTRL_LoadCurrentConfig", &[json!(slot)], ctx, true);
+                let mut errors = Vec::new();
+                if let Err(error) = loaded {
+                    errors.push(error);
+                }
+                match self.safe_off(ctx) {
+                    Err(error) => errors.push(error),
+                    Ok(()) if errors.is_empty() => {
+                        if let Err(error) = self.configure_steps(DEFAULT_STEP, ctx) {
+                            errors.push(error);
+                        }
+                        if let Err(error) = self.safe_off(ctx) {
+                            errors.push(error);
+                        }
+                    }
+                    Ok(()) => {}
+                }
+                if errors.is_empty() {
+                    Ok(Value::Null)
+                } else {
+                    Err(combined_error("ESI load_config", errors))
+                }
             }
             "save_config" => {
                 let slot = arguments.slot()?;
@@ -2187,6 +2209,18 @@ fn validate_pwm(values: &[Value]) -> Result<()> {
     boolean(&values[6])?;
     unsigned(&values[7])?;
     Ok(())
+}
+
+/// Keep every failure of a multi-step operation; a transport timeout stays a
+/// TimeoutError so the supervisor still retires the worker.
+fn combined_error(operation: &str, errors: Vec<Error>) -> Error {
+    let kind = errors
+        .iter()
+        .find(|error| error.kind == "TimeoutError")
+        .or(errors.first())
+        .map_or("RuntimeError".to_owned(), |error| error.kind.clone());
+    let messages: Vec<String> = errors.iter().map(|error| error.message.clone()).collect();
+    Error::new(kind, format!("{operation} failed: {}", messages.join("; ")))
 }
 
 fn integer_map(values: &BTreeMap<u64, Value>) -> Value {

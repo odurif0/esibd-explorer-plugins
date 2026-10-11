@@ -140,7 +140,7 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let a0 = scalar::<u32>(&args[0], false)?;
             let function = unsafe { lib.get::<unsafe extern "system" fn(u32) -> *const std::ffi::c_char>(b"COM_DMMR_8_GetCommErrorMessage\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function(a0) };
-            let text = if status.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(status) }.to_string_lossy().into_owned() };
+            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };
             Ok(NativeReply { status: 0, values: vec![Value::String(text)] })
         }
         "COM_DMMR_8_GetConfigData" => {
@@ -218,7 +218,7 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             arity(args, 0, symbol)?;
             let function = unsafe { lib.get::<unsafe extern "system" fn() -> *const std::ffi::c_char>(b"COM_DMMR_8_GetErrorMessage\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function() };
-            let text = if status.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(status) }.to_string_lossy().into_owned() };
+            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };
             Ok(NativeReply { status: 0, values: vec![Value::String(text)] })
         }
         "COM_DMMR_8_GetFwDate" => {
@@ -263,7 +263,7 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             arity(args, 0, symbol)?;
             let function = unsafe { lib.get::<unsafe extern "system" fn() -> *const std::ffi::c_char>(b"COM_DMMR_8_GetIOErrorMessage\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function() };
-            let text = if status.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(status) }.to_string_lossy().into_owned() };
+            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };
             Ok(NativeReply { status: 0, values: vec![Value::String(text)] })
         }
         "COM_DMMR_8_GetIOState" => {
@@ -278,7 +278,7 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let a0 = scalar::<i32>(&args[0], false)?;
             let function = unsafe { lib.get::<unsafe extern "system" fn(i32) -> *const std::ffi::c_char>(b"COM_DMMR_8_GetIOStateMessage\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function(a0) };
-            let text = if status.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(status) }.to_string_lossy().into_owned() };
+            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };
             Ok(NativeReply { status: 0, values: vec![Value::String(text)] })
         }
         "COM_DMMR_8_GetInterfaceState" => {
