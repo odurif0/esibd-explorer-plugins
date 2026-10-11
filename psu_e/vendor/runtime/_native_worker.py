@@ -29,6 +29,9 @@ LIFECYCLE_ATTRIBUTES = frozenset({"connected", "_dll_port_claimed", "_open_faile
 def encode(value):
     if value is None or isinstance(value, (str, bool)):
         return value
+    if type(value).__module__ == "numpy" and getattr(value, "shape", None) == ():
+        # NumPy scalars, including numpy.bool_ (neither bool nor a numbers ABC).
+        return encode(value.item())
     if isinstance(value, numbers.Integral):
         return int(value)
     if isinstance(value, numbers.Real):

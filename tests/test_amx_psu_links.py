@@ -21,15 +21,35 @@ class Item:
         self.tooltip = value
 
 
-@pytest.fixture(params=("amx_a", "amx_b"))
+@pytest.fixture(params=("amx_a", "amx_b", "amx_hd"))
 def rig(request):
     module, parent, controller = make_case(request.param)
     items = [[Item() for _ in range(7)] for _ in range(4)]
     parent.amxOutputTable = SimpleNamespace(item=lambda row, col: items[row][col])
-    controller._apply_snapshot(config79_snapshot())
+    apply_reference_routing(request.param, controller)
     parent.psu_ch01, parent.psu_ch23 = "PSU_A", "None"
     register_sources(parent)
     return module, parent, controller, items
+
+
+def apply_reference_routing(folder, controller, *, static=False):
+    """Four periodic outputs; optionally CH0 Vpos, CH1 Vneg, CH2 Hi-Z, CH3 external."""
+    if folder == "amx_hd":
+        from test_amx_hd_outputs import config273
+        state, routing = config273()
+        if static:
+            for switch, (field, value) in zip(routing["switches"], (
+                    ("trigger_source", 0x80), ("trigger_source", 0), ("enable_source", 0), ("trigger_source", 56))):
+                switch[field] = value
+        controller.hd_routing = routing
+    else:
+        state = config79_snapshot()
+        if static:
+            state["switches"][0]["trigger_config"] = 32  # constant 1 -> Vpos
+            state["switches"][1]["trigger_config"] = 0   # constant 0 -> Vneg
+            state["switches"][2]["enable_config"] = 0    # Hi-Z
+            state["switches"][3]["trigger_config"] = 3   # external
+    controller._apply_snapshot(state)
 
 
 def register_sources(parent, *plugins):
@@ -100,15 +120,10 @@ def test_each_real_psu_publishes_channels_for_either_pair(rig, psu_folder):
 
 
 def test_static_hiz_and_unknown_routing_are_not_replaced_by_both_rails(rig):
-    _, parent, controller, items = rig
+    module, parent, controller, items = rig
     parent.pluginManager.plugins = [provider()]
     parent.psu_ch23 = "PSU_A"
-    state = config79_snapshot()
-    state["switches"][0]["trigger_config"] = 32  # constant 1 -> Vpos
-    state["switches"][1]["trigger_config"] = 0   # constant 0 -> Vneg
-    state["switches"][2]["enable_config"] = 0    # Hi-Z
-    state["switches"][3]["trigger_config"] = 3   # external
-    controller._apply_snapshot(state)
+    apply_reference_routing("amx_hd" if hasattr(module, "AMXHDDevice") else "amx_a", controller, static=True)
     parent._update_output_table()
     assert [row[3].text for row in items] == ["+101 V", "-102 V", "Hi-Z", "Unknown"]
     parent.main_state = "Shutdown unconfirmed"

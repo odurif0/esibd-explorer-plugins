@@ -121,7 +121,7 @@ def probe(folder, output):
                 title = device.channelPanelCards[i]["title"]
                 assert title.text() == f"CH{i} ({sign})"
                 assert "magnitudes, not signed voltages to earth" in title.toolTip()
-    elif family == "amx":
+    elif family in ("amx", "amx_hd"):
         # Output rows are the default view; exercise the existing pulser controls
         # in Advanced as well (default/narrow output view has dedicated Qt tests).
         device.advancedAction = SimpleNamespace(state=True)

@@ -179,7 +179,27 @@ pub fn text_buffer(value: &Value, length: usize) -> Result<Vec<u8>> {
 
 pub fn text_output(buffer: &[u8]) -> Value {
     let end = buffer.iter().position(|v| *v == 0).unwrap_or(buffer.len());
-    Value::String(String::from_utf8_lossy(&buffer[..end]).into_owned())
+    Value::String(decode_text(&buffer[..end]))
+}
+
+/// CGC DLLs return ANSI text (Windows-1252); valid UTF-8 is kept as is.
+pub fn decode_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => bytes.iter().map(|byte| windows_1252(*byte)).collect(),
+    }
+}
+
+fn windows_1252(byte: u8) -> char {
+    const HIGH: [u32; 32] = [
+        0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD, 0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178,
+    ];
+    match byte {
+        0x80..=0x9F => char::from_u32(HIGH[usize::from(byte - 0x80)]).unwrap_or('\u{FFFD}'),
+        _ => char::from(byte),
+    }
 }
 
 pub fn text_input(value: &Value, max_length: usize) -> Result<Vec<u8>> {
@@ -221,5 +241,13 @@ mod tests {
             b"foo\0"
         );
         assert_eq!(text_output(b"foo\0junk"), json!("foo"));
+    }
+
+    #[test]
+    fn ansi_text_is_decoded_as_windows_1252() {
+        assert_eq!(text_output(b"10 \xb5s \xb0C\0"), json!("10 µs °C"));
+        assert_eq!(text_output(b"\x80 \x96 \x81\0"), json!("€ – \u{FFFD}"));
+        assert_eq!(text_output("10 µs".as_bytes()), json!("10 µs"));
+        assert_eq!(decode_text(b"plain"), "plain");
     }
 }

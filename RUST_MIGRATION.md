@@ -32,9 +32,34 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`39875286a292d0d70d8620352a2193dff2a9c8413ece80d05f0d4b4bc5314922`.
+`6542d60defbe441b95e131481ac01640de6676c018c56516d9c59058a3e24dd6`
+(v0.5.1 update below).
 
-The final all-feature Rust suite passes 302 tests, formatting/generated ABI checks
+## v0.5.1 Update (2026-10-11)
+
+A line-by-line review of the worker sources and Python adapters found one
+defect, present in both the Rust worker and the Python reference: ESI
+`load_config` patched the volatile ramp step before forcing the outputs OFF.
+A saved slot that enables HV made that patch refuse, and the error skipped the
+final safe OFF, leaving the loaded HV live. OFF is now forced immediately after
+the load, even when the load fails, before the patch and again after it. A
+mock-DLL test reproduced the defect before the fix.
+
+Minor fixes from the same review: DLL text is decoded as UTF-8 when valid and
+otherwise as Windows-1252 (CGC strings are ANSI; `µ`/`°` were lost), AMX HD
+rejects digital-I/O sources 80–127 and mapping engines above 3 before any DLL
+call, and the supervisor encodes NumPy scalars (`numpy.bool_` was refused).
+
+All Windows workers were rebuilt from scratch with Rust 1.98.1 and Zig 0.14.1;
+the three Linux workers are bit-identical to v0.5. A rebuild in a clean
+directory differs only in the 4-byte PE link timestamp. The v0.5 Windows
+binaries were linked with a different Zig/runtime state (same application
+strings, about 50 KB larger, different CRT/unwind imports) and cannot be
+reproduced with this toolchain; they are superseded. Deployed workers pass the
+constructor-only Wine/Linux smoke checks again. Hardware validation is still
+pending.
+
+The final all-feature Rust suite passes 305 tests, formatting/generated ABI checks
 pass, and all-feature/all-target Clippy passes with `-D warnings`. Family-only
 cross builds can report unused DLL helpers for non-DLL features and benign Zig
 linker-option warnings; these are not hidden as a clean cross-build lint claim.
@@ -179,8 +204,8 @@ TPG366 preserve GPL-2.0-or-later; Transmission preserves MIT; third-party Rust
 dependencies retain their own licenses. GPL source archives are built and checked
 offline with vendored dependencies. There is no private Python payload.
 
-The Windows executables occupy 12,452,864 bytes across the 15 standalone folders
-(roughly 0.62 to 1.16 MB per worker); the three Linux executables add 2,552,032
+The Windows executables occupy 11,701,248 bytes across the 15 standalone folders
+(roughly 0.57 to 1.11 MB per worker); the three Linux executables add 2,552,032
 bytes. Source/license archives are separate from runtime cost, and GPL vendored
 source archives account for most of the distribution's additional size. Runtime
 size is not the ZIP size or process memory usage.

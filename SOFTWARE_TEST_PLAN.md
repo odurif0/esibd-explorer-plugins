@@ -96,6 +96,14 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   finite replies; a window without a new valid reply must not advance the scan.
   First check mappings at zero. Nonzero PSU/HV trials require their own approved
   envelope; stopping MScan does not turn off HV outputs.
+- **AMX HD outputs (2026-10-11):** with the PSUs at zero (or disconnected) and an
+  oscilloscope on the logic/trigger monitor of each output, load a known config
+  (for example CGC's `10kHz->SwitchSym`, Configuration273). CH0–CH3 must show
+  10 kHz, `50 / 50` µs, CH1/CH3 opposite to CH0; compare frequency, dwell and
+  relative timing with the scope. Load a static config (`Out0=Vpos`) and a Hi-Z
+  config; then a PLL-tuned config, which must show Unknown and the Clock 0 notice.
+  Associate PSU_x in Settings and check the displayed rail voltages against the
+  PSU panel. Only afterwards select `AMX_HD` in MScan, at zero amplitude first.
 - **MScan quadrupole offset (2026-10-08):** select the AMPR offset channel and a
   small coefficient; in a short stepped scan, check on an independent meter that
   the offset follows U = U/V × A at each point and returns to its initial value.
@@ -137,6 +145,12 @@ Explorer, restart it and press ON: the panel must show every output OFF with the
 target kept, and an independent meter must read no HV until HV1 is selected. Type a
 new target and click an output selector before pressing Enter: the target must be
 taken, without any error in the Explorer log.
+
+**ESI Load config (fixed 2026-10-11):** before routine use, list the controller's
+slots and check that none is saved with the global enable, a module gate or a
+nonzero HV target. If such a slot exists, load it only with the HV outputs
+disconnected and an independent meter on them: the outputs must end OFF (gates off,
+targets zero) even when the log reports that the ramp-step patch was refused.
 
 **ESI electrospray readback (2026-10-08):** set each card's `ADC connector` to the
 electrospray's connector. With an independent HV probe on that connector, compare

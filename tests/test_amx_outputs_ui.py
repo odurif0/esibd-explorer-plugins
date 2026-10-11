@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.parametrize("folder", ("amx_a", "amx_b"))
+@pytest.mark.parametrize("folder", ("amx_a", "amx_b", "amx_hd"))
 @pytest.mark.parametrize("scale", ("1", "1.5"))
 def test_output_view_in_real_qt(folder, scale, tmp_path):
     result = subprocess.run(
@@ -34,6 +34,23 @@ def probe(folder, output):
         return 77
     from test_amx_config_load import make_case
     from test_amx_outputs import config79_snapshot
+    from test_amx_hd_outputs import config273
+    hd = folder == "amx_hd"
+    # Both references drive all four outputs from one timer: 500 kHz (AMX 4ED
+    # Config 80) or 10 kHz (CGC 4EDH Configuration273 "10kHz->SwitchSym").
+    frequency, dwell, oscillator_khz = ("10 kHz", "50 / 50", 10.) if hd else ("500 kHz", "1 / 1", 500.)
+
+    def reference(external=False):
+        if hd:
+            state, routing = config273()
+            if external:
+                routing["timer_triggers"][0] = 56  # Din0
+            controller.hd_routing = routing
+            return state
+        state = config79_snapshot()
+        if external:
+            state["pulsers"][0]["trigger_config"] = 3
+        return state
     app = QApplication([])
     app.setStyle("Fusion")
     palette = QPalette()
@@ -56,14 +73,14 @@ def probe(folder, output):
     parent._update_channel_column_visibility = lambda: None
     for channel in parent.channels:
         channel.setHidden = lambda _: None
-    controller._apply_snapshot(config79_snapshot())
+    controller._apply_snapshot(reference())
     parent.loaded_config_text = "79:500kHz->SwitchSym+DIO0,Osc->DIO1 [memory]"
-    parent.frequency_khz = 500.
+    parent.frequency_khz = oscillator_khz
     toolbar = QHBoxLayout()
     toolbar.addWidget(QLabel(parent.name))
     toolbar.addWidget(QLabel("Oscillator"))
     parent.frequencyWidget = parent._create_frequency_widget()
-    parent.frequencyWidget.setValue(500.)
+    parent.frequencyWidget.setValue(oscillator_khz)
     toolbar.addWidget(parent.frequencyWidget)
     toolbar.addStretch()
     advanced = QPushButton("Advanced")
@@ -91,11 +108,20 @@ def probe(folder, output):
     assert not parent.amxPulserControls.isVisible()
     assert not parent.tree.isVisible()
     assert table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
-    assert all(text(i, 2) == "500 kHz" and text(i, 4) == "1 / 1" for i in range(4))
+    assert all(text(i, 2) == frequency and text(i, 4) == dwell for i in range(4))
     assert [text(i, 5) for i in range(4)] == ["Reference", "Opposite to CH0", "Same as CH0", "Opposite to CH0"]
     assert "Voltages from linked PSUs" in " ".join(label.text() for label in host.findChildren(QLabel) if label.isVisible())
     assert all(text(i, 6) == "—" and text(i, 3) == "Vneg ↔ Vpos" for i in range(4))
-    assert "trilevel" in table.toolTip()
+    assert "Hi-Z never implies a discharged output" in table.toolTip()
+    if hd:
+        notice = parent.amxPanelClockNotice
+        assert not notice.isVisible()
+        controller.hd_routing["clock_sources"][0] = 4  # PLL0
+        parent._update_operator_panel()
+        assert notice.isVisible() and "PLL0" in notice.text()
+        controller.hd_routing["clock_sources"][0] = 3
+        parent._update_operator_panel()
+        assert not notice.isVisible()
     assert table.verticalScrollBar().maximum() == 0
     assert table.horizontalScrollBar().maximum() == 0
     window.grab().save(str(output / f"{folder}-outputs.png"))
@@ -155,8 +181,7 @@ def probe(folder, output):
     parent._update_output_table()
 
     # Unknown custom routing arrives from the real worker-to-Qt callback.
-    external = config79_snapshot()
-    external["pulsers"][0]["trigger_config"] = 3
+    external = reference(external=True)
     thread = Thread(target=controller._apply_snapshot, args=(external,))
     thread.start(); thread.join()
     QTest.qWait(50)
@@ -164,7 +189,7 @@ def probe(folder, output):
     parent.frequency_khz = 123.
     parent._update_operator_panel()
     assert text(0, 2) == "Unknown", "GUI oscillator setpoint was substituted for output frequency"
-    controller._apply_snapshot(config79_snapshot())
+    controller._apply_snapshot(reference())
 
     # Merely viewing outputs / Advanced must never cause hardware writes.
     controller.device.calls.clear()

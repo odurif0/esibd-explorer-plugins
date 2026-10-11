@@ -5,7 +5,7 @@ Enable the `MScan` plugin in Explorer's Plugin Manager. Its panel is titled
 **msScan — AMX/PSU**, distinct from the built-in **msScan** that expects
 `AMP_Q1`/`AMP_Q2`. Those historical channels are not used here.
 
-Requires Explorer 1.0.2 and the PSU A–E, AMX A–B, DMMR and (for the quadrupole
+Requires Explorer 1.0.2 and the PSU A–E, AMX A–B or AMX HD, DMMR and (for the quadrupole
 offset) AMPR A–B plugins from the same bundle. The plugin uses Explorer's plotting, channel services and HDF5 format,
 but has its own interface and scan protocol, bundled Python adapter and native
 Rust scan worker. MScan has no vendor DLL of its own.
@@ -41,7 +41,8 @@ routine experimental use. These checks do not certify physical shutdown.
 
 1. Configure the PSU associations in AMX Settings and establish the waveform.
    Turn ON the required PSU rails and AMX. Start DMMR acquisition and recording.
-2. Choose **AMX** and one pair of **AMX connectors**: **CH0-CH1** or **CH2-CH3**.
+2. Choose **AMX** (`AMX_A`, `AMX_B` or `AMX_HD`) and one pair of **AMX connectors**:
+   **CH0-CH1** or **CH2-CH3**.
    **Driven PSU** lists the supply channels swept together; shared outputs are
    identified too. **Fixed frequency** comes from the AMX output readback, not
    an assumed oscillator frequency. Per-edge compensation delays are allowed
