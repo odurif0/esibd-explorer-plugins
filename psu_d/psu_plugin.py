@@ -2248,7 +2248,7 @@ class PSUDevice(Device):
             with contextlib.suppress(Exception):
                 setting.value = False
         self.interlock_monitoring = False
-        self.print("Interlock monitoring disabled; ST_ERR_ILOCK cleared.", flag=PRINT.INFO)
+        self.print("Interlock monitoring disabled; ST_ERR_ILOCK cleared.")
         with contextlib.suppress(Exception):
             controller._update_state()
 
