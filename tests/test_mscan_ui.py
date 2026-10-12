@@ -7,7 +7,7 @@ import sys
 from types import ModuleType, SimpleNamespace as NS
 
 import pytest
-from support.qt import run_probe
+from support.qt import dispose_windows, run_probe
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -600,7 +600,7 @@ def test_native_command_dispatch_still_expires_without_late_write(mscan_module, 
 
 def test_mscan_in_real_explorer_and_qt(tmp_path, scenario, scale):
     run_probe(__file__, scenario, tmp_path, timeout=45, scale=scale,
-              env={'PYTHONUNBUFFERED': '1', 'PYTHONFAULTHANDLER': '1'})
+              env={'PYTHONUNBUFFERED': '1'})
 
 
 def run(scenario, target, app_holder=None):
@@ -2118,10 +2118,5 @@ if __name__ == '__main__':
         print('QT_SCENARIO_COMPLETE', result)
     finally:
         if applications:
-            from PyQt6.QtCore import QCoreApplication, QEvent
-            for widget in applications[0].topLevelWidgets():
-                widget.hide()
-                widget.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            applications[0].processEvents()
+            dispose_windows(applications[0])
     raise SystemExit(result)

@@ -2101,41 +2101,42 @@ def test_interlock_button_visibility_follows_main_state():
     assert button.visible is False
 
 
-def test_clear_interlock_disables_monitoring_and_persists_setting():
+def _interlock_ui(module, controller, monitoring=True):
+    """A PSU device whose setting runs its event on change, as Explorer's wrapper does."""
+    events = []
+
+    class UI(module.PSUDevice):
+        @property
+        def interlock_monitoring(self):
+            return self._monitoring
+
+        @interlock_monitoring.setter
+        def interlock_monitoring(self, value):
+            self._monitoring = value
+            events.append(value)
+            self._interlock_monitoring_changed()
+
+    device = _new_psu_device(module, controller=controller, print=lambda *a, **k: None)
+    device.__class__ = UI
+    device._monitoring = monitoring
+    return device, events
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_clear_interlock_switches_outputs_off_then_persists_setting(confirmed):
     module = load_plugin(module_name="psu_plugin_behavior_test")
-    calls = []
-
-    class FakeDevice:
-        def set_interlock_enabled(self, connector_output, connector_bnc, timeout_s=None):
-            calls.append((connector_output, connector_bnc, timeout_s))
-
-    setting_key = f"PSU_A/{module.PSUDevice.INTERLOCK_MONITORING}"
-    settings = {setting_key: types.SimpleNamespace(value=True)}
-    plugin_manager = types.SimpleNamespace(
-        Settings=types.SimpleNamespace(settings=settings)
-    )
-    state_updates = []
+    applied = []
     controller = types.SimpleNamespace(
-        device=FakeDevice(),
-        initialized=True,
-        _update_state=lambda: state_updates.append(True),
+        device=object(), initialized=True,
+        _interlock_monitoring_changed=lambda **kw: applied.append(kw) or confirmed,
     )
-    messages = []
-    device = _new_psu_device(
-        module,
-        name="PSU_A",
-        controller=controller,
-        pluginManager=plugin_manager,
-        connect_timeout_s=5.0,
-        interlock_monitoring=True,
-        print=lambda *args, **kwargs: messages.append(args),
-    )
+    device, events = _interlock_ui(module, controller)
     device._clear_interlock()
 
-    assert calls == [(False, False, 5.0)]
-    assert settings[setting_key].value is False
-    assert device.interlock_monitoring is False
-    assert state_updates == [True]
+    # Applied once, outputs OFF first; the setting's own event does not re-apply it.
+    assert applied == [{"enabled": False, "outputs_off": True}]
+    assert device.interlock_monitoring is (not confirmed)
+    assert events == ([False] if confirmed else [])
 
 
 def test_clear_interlock_requires_initialized_communication():

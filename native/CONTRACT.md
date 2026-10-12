@@ -78,7 +78,10 @@ Length-prefixed UTF-8 JSON, four-byte big-endian length, maximum 16 MiB. The fir
 parent request is `{version:1, id:0, op:"init", family:"esi", config:{...}}`.
 Replies identify version, request id, kind, success/value or typed error. Supported
 ops are call/getattr/setattr/close/cancel; only one hardware call runs at a time.
-Cancellation can be received while hardware runs. A lost parent pipe terminates
+Cancellation can be received while hardware runs. A call cancelled before it
+starts is refused unless its backend's `runs_when_cancelled(method)` says it turns
+the cancellation into its own outcome (Transmission: `observe`, `cancel`,
+`shutdown`, `state`, `summary`). A lost parent pipe terminates
 the worker, even when the hardware thread is blocked. Native DLL stdout must not
 corrupt the protocol channel. Logs go to stderr, drained by the parent.
 

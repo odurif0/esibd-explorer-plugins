@@ -127,7 +127,10 @@ fn execute(
     let controller = backend
         .as_mut()
         .ok_or_else(|| Error::runtime("Worker is not initialized"))?;
-    ctx.check_cancelled()?;
+    let method = request.get("method").and_then(Value::as_str);
+    if !(op == "call" && method.is_some_and(|m| controller.runs_when_cancelled(m))) {
+        ctx.check_cancelled()?;
+    }
     match op {
         "call" => {
             let method = request
@@ -290,5 +293,39 @@ fn main() {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Recorder(Arc<Mutex<Vec<String>>>);
+    impl Backend for Recorder {
+        fn call(&mut self, method: &str, _: &[Value], _: &Value, _: &Context) -> Result<Value> {
+            self.0.lock().unwrap().push(method.to_owned());
+            Ok(Value::Null)
+        }
+        fn runs_when_cancelled(&self, method: &str) -> bool {
+            method == "observe"
+        }
+    }
+
+    #[test]
+    fn a_request_cancelled_before_it_starts_runs_only_if_its_backend_handles_it() {
+        let ctx = Context::test(5.0);
+        ctx.cancel();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut backend: Option<Box<dyn Backend>> = Some(Box::new(Recorder(calls.clone())));
+        let call = |method: &str| json!({"id":1,"op":"call","method":method,"args":[],"kwargs":{}});
+        for request in [
+            call("set_voltage"),
+            json!({"id":2,"op":"getattr","name":"observe"}),
+        ] {
+            let refused = execute(&mut backend, &request, "test", &ctx).unwrap_err();
+            assert_eq!(refused.message, "Operation cancelled");
+        }
+        assert!(execute(&mut backend, &call("observe"), "test", &ctx).is_ok());
+        assert_eq!(*calls.lock().unwrap(), ["observe"]);
     }
 }

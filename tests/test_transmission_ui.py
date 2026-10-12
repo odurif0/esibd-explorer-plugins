@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 from operator import itemgetter
-from support.qt import run_probe
+from support.qt import dispose_windows, run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = ("simulation-total", "simulation-mass", "stop", "not-ready", "advanced", "spectrum",
@@ -75,7 +75,7 @@ max_step = 1.0
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_transmission_in_real_explorer_and_qt(tmp_path, scenario):
-    run_probe(__file__, scenario, tmp_path, timeout=240, env={"PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"})
+    run_probe(__file__, scenario, tmp_path, timeout=240, env={"PYTHONUNBUFFERED": "1"})
 
 
 def run(scenario, target, app_holder):
@@ -927,10 +927,5 @@ if __name__ == "__main__":
         print("QT_SCENARIO_COMPLETE", code)
     finally:
         if applications:
-            from PyQt6.QtCore import QCoreApplication, QEvent
-            for widget in applications[0].topLevelWidgets():
-                widget.hide()
-                widget.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            applications[0].processEvents()
+            dispose_windows(applications[0])
     raise SystemExit(code)

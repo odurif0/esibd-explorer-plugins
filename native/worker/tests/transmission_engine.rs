@@ -722,6 +722,40 @@ fn pending_executed_command_is_acknowledged_before_cancellation_recovery() {
 }
 
 #[test]
+fn an_observation_cancelled_before_it_runs_still_restores_the_stage_start() {
+    // A Stop can cancel the queued observation of a command Explorer already
+    // applied; the worker must run it so the stop restores the stage start.
+    let mut c = Controller::new(&configuration("coordinate")).unwrap();
+    assert!(c.runs_when_cancelled("observe") && !c.runs_when_cancelled("run"));
+    let mut i = Instrument::new();
+    let start = i.values.clone();
+    let ctx = Context::test(30.0);
+    let mut response = c.call("run", &[], &json!({}), &ctx).unwrap();
+    let mut cancelled = false;
+    for _ in 0..10_000 {
+        if response["complete"] == true {
+            break;
+        }
+        let observation = i.observe(&response["action"]);
+        let moved = response["action"]["op"] == "command" && i.values["X"] != 0.0;
+        response = if !cancelled && moved {
+            let stopped = Context::test(30.0);
+            stopped.cancel();
+            cancelled = true;
+            i.stop = true;
+            c.call("observe", &[observation], &json!({}), &stopped)
+                .unwrap()
+        } else {
+            c.call("observe", &[observation], &json!({}), &ctx).unwrap()
+        };
+    }
+    assert!(cancelled);
+    assert_eq!(response["result"]["status"], "stopped");
+    assert_eq!(i.values["X"], 0.0);
+    assert_steps(&i, &start, &BTreeMap::from([("X".into(), 1.0)]));
+}
+
+#[test]
 fn relative_grouped_knob_preserves_gain_and_limits() {
     let mut config = configuration("coordinate");
     config["stages"][0]["knobs"][0] = json!({"name":"RF","channels":{"X":1.0,"Y":-0.5},"scale_channel":"X","relative":true,"floor":10.0,"window":[-0.15,0.15],"max_step":0.02});

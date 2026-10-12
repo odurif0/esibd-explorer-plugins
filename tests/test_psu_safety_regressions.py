@@ -191,6 +191,45 @@ def test_config_load_reapplies_interlock_setting(setup):
     assert device.interlocks == (True, True)
 
 
+def _tripped_interlock(controller, device, outputs=(True, True)):
+    device.enabled, device.outputs, device.interlocks = True, outputs, (True, True)
+    controller.main_state, controller.interlock_active = "ST_ERR_ILOCK", False
+
+
+def test_disabling_a_tripped_interlock_switches_outputs_off_first(setup):
+    # The interlock only gates the outputs: lifting it with an output still
+    # enabled would bring the HV back at the old setpoints.
+    _module, controller, device, messages = setup
+    _tripped_interlock(controller, device)
+    controller.controllerParent.interlock_monitoring = False
+    assert controller._interlock_monitoring_changed()
+    assert device.outputs == (False, False) and device.interlocks == (False, False)
+    calls = device.calls
+    assert calls.index(("outputs", False, False)) < calls.index(("interlocks", False, False))
+    assert controller.output_enabled_by_channel == {0: False, 1: False}
+    assert any("switched OFF first" in msg for msg in messages)
+
+
+def test_disabling_interlock_on_a_closed_loop_leaves_outputs_alone(setup):
+    _module, controller, device, _messages = setup
+    device.enabled, device.outputs, device.interlocks = True, (True, False), (True, True)
+    controller.main_state, controller.interlock_active = "ST_ON", True
+    controller.controllerParent.interlock_monitoring = False
+    assert controller._interlock_monitoring_changed()
+    assert device.outputs == (True, False) and device.interlocks == (False, False)
+    assert not any(call[0] == "outputs" for call in device.calls)
+
+
+def test_interlock_stays_enabled_when_outputs_are_not_confirmed_off(setup):
+    _module, controller, device, messages = setup
+    _tripped_interlock(controller, device, outputs=(True, False))
+    device.set_output_enabled = lambda *a, **kw: None  # ACK, but command ignored.
+    assert not controller._interlock_monitoring_changed(enabled=False, outputs_off=True)
+    assert device.interlocks == (True, True)
+    assert ("interlocks", False, False) not in device.calls
+    assert any("not confirmed OFF" in msg for msg in messages)
+
+
 def test_manual_apply_requires_disable_before_reconfiguring_range(setup):
     _module, controller, device, messages = setup
     device.enabled = True

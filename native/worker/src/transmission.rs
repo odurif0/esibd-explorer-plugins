@@ -2939,6 +2939,13 @@ fn no_arguments(args: &[Value], kwargs: &Value) -> Result<()> {
     Ok(())
 }
 impl Backend for Controller {
+    fn runs_when_cancelled(&self, method: &str) -> bool {
+        // A Stop that reaches a queued request still restores the stage start.
+        matches!(
+            method,
+            "observe" | "cancel" | "shutdown" | "state" | "summary"
+        )
+    }
     fn call(
         &mut self,
         method: &str,

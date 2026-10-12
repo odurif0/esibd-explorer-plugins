@@ -23,7 +23,7 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | DMMR | Implemented | Implemented | 38 controller tests; isolated recovery checks | Not tested |
 | TPG366 | Implemented | Implemented | 17 Rust + 36 adapter/PTY tests; 30 Explorer 1.0.2 Qt cases | Not tested |
 | MScan | Implemented | Implemented | 39 native tests; 36 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
-| Transmission | Implemented | Implemented | 24 engine tests; 19 packaged lifecycle tests; 15 Explorer 1.0.2 Qt cases | Not tested |
+| Transmission | Implemented | Implemented | 25 engine tests; 19 packaged lifecycle tests; 15 Explorer 1.0.2 Qt cases | Not tested |
 
 The local target-host environment is isolated from the owner's installed Explorer.
 Passing Python-reference tests do not validate native hardware communication.
@@ -32,8 +32,21 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`af00819f46b2420cd8f226ea66a25ac9775645b6dd44391108da3a651604ccac`
-(PSU fan-data fix below).
+`ae13fc269125a38b790e5843aceb087a9382890e8359604a5850023482dc902c`
+(Transmission stop fix below).
+
+## Transmission Stop Fix (2026-10-12)
+
+Under load, a Stop could reach the queued `observe` request that reports an
+Explorer action already performed. The worker refused every call cancelled
+before it started, so the observation was lost: the run ended as `error`
+(`RuntimeError: Operation cancelled`) without restoring the stage start. A
+backend can now declare the calls it runs when cancelled; the Transmission
+engine turns that cancellation into `stopped` and restores the stage start, as
+for a Stop during the call. Device calls cancelled before they start are still
+refused. Because `main.rs` is shared, all 15 deployed workers were rebuilt; the
+Rust suite passes 307 tests and the Linux and Wine constructor-only smoke checks
+pass again.
 
 ## PSU Fan-Data Fix (2026-10-12)
 
