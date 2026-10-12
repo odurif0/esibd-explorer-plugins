@@ -7,7 +7,7 @@ import pytest
 def control():
     from types import SimpleNamespace
     from copy import deepcopy
-    from test_esi_plugin_behavior import _load_plugin
+    from support.esi import load_plugin as _load_plugin
     module = _load_plugin()
     calls = []
     heat = SimpleNamespace(is_heat_channel=lambda: True, is_current_channel=lambda: False,
@@ -246,7 +246,7 @@ def test_superseded_completion_does_not_clear_newer_error(control, monkeypatch, 
 @pytest.mark.parametrize('capture', ['before', 'during'])
 def test_old_snapshot_cannot_replace_verified_power_or_refresh_its_age(control, monkeypatch, capture):
     import math
-    from test_esi_heater_stability import snapshot
+    from support.esi_heater import snapshot
     c = control.controller
     data = snapshot()
     data['heat']['hardware_limits']['max_power_w'] = 180.
@@ -275,7 +275,7 @@ def test_old_snapshot_cannot_replace_verified_power_or_refresh_its_age(control, 
 @pytest.mark.parametrize('kind', ['power', 'temperature'])
 @pytest.mark.parametrize('fallback_fails', [False, True])
 def test_failed_edit_invalidates_on_and_reports_fallback(control, monkeypatch, kind, fallback_fails):
-    from test_esi_heater_stability import snapshot
+    from support.esi_heater import snapshot
     c = control.controller
     c._apply_snapshot(snapshot(), observed_at=5.)
     generation = c._heat_stability_generation

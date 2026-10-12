@@ -5,10 +5,8 @@ are touched. The host algorithms are extracted rather than reimplemented.
 """
 from __future__ import annotations
 
-import ast
 import importlib.util
 import sys
-from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +14,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_shutdown_confirmation_regressions import FAMILIES
+from support.shutdown import FAMILIES
+from explorer_host import compile_definition
 
 
 HISTORY_PLUGINS = [
@@ -26,20 +25,6 @@ HISTORY_PLUGINS = [
     ("amx_hd", "amx_hd", "AMXHDDevice"),
     *((f"psu_{letter}", "psu", "PSUDevice") for letter in "abcde"),
 ]
-
-
-@lru_cache
-def _host_tree(path):
-    return ast.parse(path.read_text())
-
-
-@lru_cache
-def _host_code(path, name, parent):
-    tree = _host_tree(path)
-    nodes = tree.body if parent is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == parent).body
-    node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
-    unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
-    return compile(ast.fix_missing_locations(unit), str(path), "exec")
 
 
 @pytest.fixture(params=HISTORY_PLUGINS, ids=lambda spec: spec[0])
@@ -53,7 +38,7 @@ def rig(monkeypatch, request):
 
     def extract(filename, name, parent=None):
         path = host / filename
-        exec(_host_code(path, name, parent), ns)
+        exec(compile_definition(path, name, parent), ns)
         return ns[name]
 
     buffer = extract("core.py", "DynamicNp")

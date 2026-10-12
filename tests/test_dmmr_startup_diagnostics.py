@@ -3,15 +3,13 @@ from __future__ import annotations
 
 import builtins
 import ctypes
-import logging
 from pathlib import Path
 import threading
-from types import SimpleNamespace
 
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
-from test_dmmr_toggle_failures import rig as toggle_rig, start
+from support.dmmr import dmmr_toggle_rig as toggle_rig, start
+from support.dmmr import DLL_PATH
 
 
 @pytest.fixture(name="rig")
@@ -19,100 +17,47 @@ def diagnostics_rig():
     return toggle_rig.__wrapped__()
 
 
-DLL_PATH = Path(__file__).resolve().parents[1] / "dmmr/vendor/runtime/dmmr/vendor/x64/COM-DMMR-8.dll"
-
-
-class NativeFunction:
-    def __init__(self, implementation):
-        self.implementation = implementation
-        self.argtypes = self.restype = None
-
-    def __call__(self, *args):
-        for kind, value in zip(self.argtypes, args):
-            kind.from_param(value)
-        return self.implementation(*args)
-
-
-@pytest.fixture
-def native(tmp_path):
-    cls = _load_module()._get_dmmr_driver_class()._PROCESS_CONTROLLER_CLASS
-    driver = cls.__new__(cls)
-    driver.com, driver.baudrate = 13, 230400
-    driver.connected = driver._dll_port_claimed = True
-    driver._transport_poisoned = False
-    driver._transport_error = None
-    driver.thread_lock = threading.Lock()
-    driver.logger = logging.getLogger("dmmr-startup-test")
-    driver._set_port_claimed = lambda value: setattr(driver, '_dll_port_claimed', value)
-    driver.dmmr_dll_path = DLL_PATH
-    driver._startup_log_dir = tmp_path
-    driver._startup_log_path = None
-    calls = []
-    state = SimpleNamespace(open_status=0, close_status=0, path=None)
-
-    def open_log(filename):
-        assert driver.thread_lock.locked()
-        calls.append(("open", threading.get_ident()))
-        state.path = Path(filename.decode("utf-8"))
-        if state.open_status == 0:
-            state.path.write_bytes(b"Opening debug file\r\n")
-        return state.open_status
-
-    def close_log():
-        assert driver.thread_lock.locked()
-        calls.append(("close", threading.get_ident()))
-        # The actual DLL clears its FILE pointer even if fclose returns -401.
-        return state.close_status
-
-    driver.dll = SimpleNamespace(
-        COM_DMMR_8_OpenDebugFile=NativeFunction(open_log),
-        COM_DMMR_8_CloseDebugFile=NativeFunction(close_log),
-    )
-    driver._configure_dll_signatures()
-    return SimpleNamespace(driver=driver, calls=calls, state=state, directory=tmp_path)
-
-
-def test_optional_native_signatures_are_explicit(native):
-    dll = native.driver.dll
+def test_optional_native_signatures_are_explicit(dmmr_native):
+    dll = dmmr_native.driver.dll
     assert dll.COM_DMMR_8_OpenDebugFile.argtypes == [ctypes.c_char_p]
     assert dll.COM_DMMR_8_OpenDebugFile.restype is ctypes.c_int
     assert dll.COM_DMMR_8_CloseDebugFile.argtypes == []
     assert dll.COM_DMMR_8_CloseDebugFile.restype is ctypes.c_int
 
 
-def test_native_trace_contains_identity_and_data_read(native):
-    driver = native.driver
+def test_native_trace_contains_identity_and_data_read(dmmr_native):
+    driver = dmmr_native.driver
     header = driver.begin_startup_diagnostics(timeout_s=0.5)
     assert "COM13" in header and "230400" in header
     assert DLL_PATH.name in header and "e3bb4674" in header
-    native.state.path.write_bytes(b"WriteCommand: 'g5Y'\r\nData read: '5Yx'\r\n")
+    dmmr_native.state.path.write_bytes(b"WriteCommand: 'g5Y'\r\nData read: '5Yx'\r\n")
     report = driver.end_startup_diagnostics(timeout_s=0.5)
     assert "Data read: '5Yx'" in report
-    assert [call[0] for call in native.calls] == ["open", "close"]
-    assert all(tid != threading.get_ident() for _, tid in native.calls)
+    assert [call[0] for call in dmmr_native.calls] == ["open", "close"]
+    assert all(tid != threading.get_ident() for _, tid in dmmr_native.calls)
     assert not driver.thread_lock.locked()
     assert driver.end_startup_diagnostics(timeout_s=0.5) == ""
 
 
-def test_repeated_starts_reuse_one_bounded_file(native):
-    driver = native.driver
+def test_repeated_starts_reuse_one_bounded_file(dmmr_native):
+    driver = dmmr_native.driver
     paths = set()
     for _ in range(4):
         driver.begin_startup_diagnostics(timeout_s=0.5)
-        paths.add(native.state.path)
-        native.state.path.write_bytes(b"x" * (driver._STARTUP_LOG_MAX_BYTES + 4000))
+        paths.add(dmmr_native.state.path)
+        dmmr_native.state.path.write_bytes(b"x" * (driver._STARTUP_LOG_MAX_BYTES + 4000))
         report = driver.end_startup_diagnostics(timeout_s=0.5)
         assert "truncated" in report.lower()
-        assert native.state.path.stat().st_size <= driver._STARTUP_LOG_MAX_BYTES
+        assert dmmr_native.state.path.stat().st_size <= driver._STARTUP_LOG_MAX_BYTES
         assert len(report) < 5 * driver._STARTUP_LOG_MAX_BYTES
     assert len(paths) == 1
-    assert list(native.directory.iterdir()) == list(paths)
+    assert list(dmmr_native.directory.iterdir()) == list(paths)
 
 
-def test_control_bytes_remain_visible_and_cannot_spoof_log_lines(native):
-    driver = native.driver
+def test_control_bytes_remain_visible_and_cannot_spoof_log_lines(dmmr_native):
+    driver = dmmr_native.driver
     driver.begin_startup_diagnostics(timeout_s=0.5)
-    native.state.path.write_bytes(b"Data read: '5Y\x00\xff\rZ'\r\n\x1b[31merror\n")
+    dmmr_native.state.path.write_bytes(b"Data read: '5Y\x00\xff\rZ'\r\n\x1b[31merror\n")
     report = driver.end_startup_diagnostics(timeout_s=0.5)
     assert r"5Y\x00\xff\x0dZ" in report
     assert r"\x1b[31merror" in report
@@ -121,24 +66,24 @@ def test_control_bytes_remain_visible_and_cannot_spoof_log_lines(native):
 
 
 @pytest.mark.parametrize("export", ["COM_DMMR_8_OpenDebugFile", "COM_DMMR_8_CloseDebugFile"])
-def test_both_optional_exports_are_required(native, export):
-    delattr(native.driver.dll, export)
-    report = native.driver.begin_startup_diagnostics(timeout_s=0.5)
+def test_both_optional_exports_are_required(dmmr_native, export):
+    delattr(dmmr_native.driver.dll, export)
+    report = dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5)
     assert "unavailable" in report.lower()
-    assert native.calls == []
-    assert native.driver.end_startup_diagnostics(timeout_s=0.5) == ""
+    assert dmmr_native.calls == []
+    assert dmmr_native.driver.end_startup_diagnostics(timeout_s=0.5) == ""
 
 
-def test_unverified_dll_does_not_use_undocumented_debug_api(native, tmp_path):
+def test_unverified_dll_does_not_use_undocumented_debug_api(dmmr_native, tmp_path):
     other = tmp_path / "other.dll"
     other.write_bytes(b"a different DLL")
-    native.driver.dmmr_dll_path = other
-    report = native.driver.begin_startup_diagnostics(timeout_s=0.5)
+    dmmr_native.driver.dmmr_dll_path = other
+    report = dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5)
     assert "unverified DLL" in report
-    assert native.calls == []
+    assert dmmr_native.calls == []
 
 
-def test_missing_optional_stdlib_module_does_not_break_device_control(native, monkeypatch):
+def test_missing_optional_stdlib_module_does_not_break_device_control(dmmr_native, monkeypatch):
     original_import = builtins.__import__
 
     def import_without_hashlib(name, *args, **kwargs):
@@ -147,41 +92,41 @@ def test_missing_optional_stdlib_module_does_not_break_device_control(native, mo
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", import_without_hashlib)
-    report = native.driver.begin_startup_diagnostics(timeout_s=0.5)
+    report = dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5)
     assert "unavailable" in report.lower() and "hashlib" in report
-    assert native.driver._transport_poisoned is False
-    assert native.calls == []
+    assert dmmr_native.driver._transport_poisoned is False
+    assert dmmr_native.calls == []
 
 
-def test_unwritable_log_directory_is_not_a_hardware_error(native, tmp_path):
+def test_unwritable_log_directory_is_not_a_hardware_error(dmmr_native, tmp_path):
     blocked = tmp_path / "not-a-directory"
     blocked.write_text("not a directory")
-    native.driver._startup_log_dir = blocked
-    assert "unavailable" in native.driver.begin_startup_diagnostics(timeout_s=0.5).lower()
-    assert native.calls == []
-    assert native.driver._transport_poisoned is False
+    dmmr_native.driver._startup_log_dir = blocked
+    assert "unavailable" in dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5).lower()
+    assert dmmr_native.calls == []
+    assert dmmr_native.driver._transport_poisoned is False
 
 
-def test_native_open_failure_is_reported_without_poisoning(native):
-    native.state.open_status = -400
-    report = native.driver.begin_startup_diagnostics(timeout_s=0.5)
+def test_native_open_failure_is_reported_without_poisoning(dmmr_native):
+    dmmr_native.state.open_status = -400
+    report = dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5)
     assert "-400" in report and "unavailable" in report.lower()
-    assert native.driver.end_startup_diagnostics(timeout_s=0.5) == ""
-    assert native.driver._transport_poisoned is False
-    assert [name for name, _ in native.calls] == ["open"]
+    assert dmmr_native.driver.end_startup_diagnostics(timeout_s=0.5) == ""
+    assert dmmr_native.driver._transport_poisoned is False
+    assert [name for name, _ in dmmr_native.calls] == ["open"]
 
 
-def test_native_close_failure_still_reports_captured_data(native):
-    native.driver.begin_startup_diagnostics(timeout_s=0.5)
-    native.state.close_status = -401
-    report = native.driver.end_startup_diagnostics(timeout_s=0.5)
+def test_native_close_failure_still_reports_captured_data(dmmr_native):
+    dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5)
+    dmmr_native.state.close_status = -401
+    report = dmmr_native.driver.end_startup_diagnostics(timeout_s=0.5)
     assert "-401" in report and "Opening debug file" in report
-    assert native.driver._transport_poisoned is False
-    assert native.driver._startup_log_path is None
+    assert dmmr_native.driver._transport_poisoned is False
+    assert dmmr_native.driver._startup_log_path is None
 
 
-def test_poisoned_call_never_triggers_parallel_native_close(native):
-    driver = native.driver
+def test_poisoned_call_never_triggers_parallel_native_close(dmmr_native):
+    driver = dmmr_native.driver
     driver.begin_startup_diagnostics(timeout_s=0.5)
     release, finished = threading.Event(), threading.Event()
 
@@ -197,21 +142,21 @@ def test_poisoned_call_never_triggers_parallel_native_close(native):
         assert not finished.is_set()
         report = driver.end_startup_diagnostics(timeout_s=0.5)
         assert "not closed" in report.lower() and "restart Explorer" in report
-        assert [name for name, _ in native.calls] == ["open"]
+        assert [name for name, _ in dmmr_native.calls] == ["open"]
         assert driver.thread_lock.locked()
         # A second ON cannot truncate the active file or open another native log.
         assert "unavailable" in driver.begin_startup_diagnostics(timeout_s=0.1).lower()
-        assert [name for name, _ in native.calls] == ["open"]
+        assert [name for name, _ in dmmr_native.calls] == ["open"]
     finally:
         release.set()
         assert finished.wait(1)
 
 
-def test_native_close_timeout_does_not_retry_or_trim_an_active_file(native):
-    driver = native.driver
+def test_native_close_timeout_does_not_retry_or_trim_an_active_file(dmmr_native):
+    driver = dmmr_native.driver
     driver.begin_startup_diagnostics(timeout_s=0.5)
     size = driver._STARTUP_LOG_MAX_BYTES + 20
-    native.state.path.write_bytes(b"x" * size)
+    dmmr_native.state.path.write_bytes(b"x" * size)
     release, finished = threading.Event(), threading.Event()
     calls = []
 
@@ -229,7 +174,7 @@ def test_native_close_timeout_does_not_retry_or_trim_an_active_file(native):
         assert "not closed" in report.lower()
         assert not finished.is_set()
         assert driver._transport_poisoned is True
-        assert native.state.path.stat().st_size == size
+        assert dmmr_native.state.path.stat().st_size == size
         assert driver._startup_log_path is not None
         driver.end_startup_diagnostics(timeout_s=0.02)
         assert len(calls) == 1
@@ -238,8 +183,8 @@ def test_native_close_timeout_does_not_retry_or_trim_an_active_file(native):
         assert finished.wait(1)
 
 
-def test_close_worker_failure_keeps_capture_active_and_reports_the_trace(native, monkeypatch):
-    driver = native.driver
+def test_close_worker_failure_keeps_capture_active_and_reports_the_trace(dmmr_native, monkeypatch):
+    driver = dmmr_native.driver
     driver.begin_startup_diagnostics(timeout_s=0.5)
 
     def no_worker(*args, **kwargs):
@@ -253,10 +198,10 @@ def test_close_worker_failure_keeps_capture_active_and_reports_the_trace(native,
     assert driver._transport_poisoned is False
 
 
-def test_trimming_failure_does_not_hide_captured_bytes(native, monkeypatch):
-    driver = native.driver
+def test_trimming_failure_does_not_hide_captured_bytes(dmmr_native, monkeypatch):
+    driver = dmmr_native.driver
     driver.begin_startup_diagnostics(timeout_s=0.5)
-    native.state.path.write_bytes(b"Data read: '5Yx'\n" + b"x" * driver._STARTUP_LOG_MAX_BYTES)
+    dmmr_native.state.path.write_bytes(b"Data read: '5Yx'\n" + b"x" * driver._STARTUP_LOG_MAX_BYTES)
     real_open = Path.open
 
     def read_only(path, mode="r", *args, **kwargs):
@@ -269,21 +214,21 @@ def test_trimming_failure_does_not_hide_captured_bytes(native, monkeypatch):
     assert "cannot trim" in report and "Data read: '5Yx'" in report
 
 
-def test_nested_begin_does_not_overwrite_active_evidence(native):
-    driver = native.driver
+def test_nested_begin_does_not_overwrite_active_evidence(dmmr_native):
+    driver = dmmr_native.driver
     driver.begin_startup_diagnostics(timeout_s=0.5)
-    native.state.path.write_bytes(b"Data read: '5Yx'\n")
+    dmmr_native.state.path.write_bytes(b"Data read: '5Yx'\n")
     assert "already active" in driver.begin_startup_diagnostics(timeout_s=0.5)
-    assert [name for name, _ in native.calls] == ["open"]
+    assert [name for name, _ in dmmr_native.calls] == ["open"]
     assert "Data read: '5Yx'" in driver.end_startup_diagnostics(timeout_s=0.5)
 
 
-def test_missing_native_file_is_a_diagnostic_warning(native):
-    native.driver.begin_startup_diagnostics(timeout_s=0.5)
-    native.state.path.unlink()
-    report = native.driver.end_startup_diagnostics(timeout_s=0.5)
+def test_missing_native_file_is_a_diagnostic_warning(dmmr_native):
+    dmmr_native.driver.begin_startup_diagnostics(timeout_s=0.5)
+    dmmr_native.state.path.unlink()
+    report = dmmr_native.driver.end_startup_diagnostics(timeout_s=0.5)
     assert "unavailable" in report.lower()
-    assert [name for name, _ in native.calls] == ["open", "close"]
+    assert [name for name, _ in dmmr_native.calls] == ["open", "close"]
 
 
 def attach_capture(rig):

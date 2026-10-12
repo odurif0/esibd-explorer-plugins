@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 SLUGS = ("ampr_a", "amx_a", "amx_hd", "psu_a", "esi")
 
@@ -15,15 +15,7 @@ SLUGS = ("ampr_a", "amx_a", "amx_hd", "psu_a", "esi")
 @pytest.mark.parametrize("scale", ["1", "1.5"])
 @pytest.mark.parametrize("finish", ["retry", "close", "shutdown", "cancel", "queued"])
 def test_explicit_qt_connection_actions_keep_failed_open_cleanup_separate(slug, scale, finish, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), slug, str(tmp_path), finish],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt/Explorer sources unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, slug, tmp_path, finish, timeout=30, scale=scale)
 
 
 def probe(slug, output, finish="retry"):
@@ -37,13 +29,13 @@ def probe(slug, output, finish="retry"):
         from PyQt6.QtGui import QAction, QIcon
         from PyQt6.QtTest import QTest
         from PyQt6.QtWidgets import QApplication, QLabel, QToolBar, QVBoxLayout, QWidget
-        from test_on_off_action_ui import explorer_state_action
+        from support.ui import explorer_state_action
         StateAction = explorer_state_action()
     except (ImportError, PackageNotFoundError):
         return 77
 
-    from test_cgc_initial_connection_recovery import SPECS, rig as rig_fixture
-    from test_cgc_plugin_connection_recovery import build_plugin
+    from support.cgc import SPECS, cgc_rig as rig_fixture
+    from support.cgc import build_plugin
 
     app = QApplication([])
     with pytest.MonkeyPatch.context() as mp:

@@ -1,26 +1,18 @@
 """Independent real-Qt probes for readout, focused edits and card layout."""
 from pathlib import Path
-import os
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize("case", ["values", "editing", "layout"])
 def test_pressure_panel(case, tmp_path):
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), case, str(tmp_path)],
-                            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-                            capture_output=True, text=True, timeout=15)
-    if result.returncode == 77:
-        pytest.skip(result.stdout.strip())
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr
+    run_probe(__file__, case, tmp_path, timeout=15)
 
 
 def probe(case, output):
     import importlib.util
-    import math
     from types import SimpleNamespace as NS
     try:
         from PyQt6.QtWidgets import QApplication, QScrollArea

@@ -2,9 +2,6 @@
 import numpy as np
 import pytest
 
-from test_mscan import module, rig  # noqa: F401
-from test_mscan_continuous import continuous  # noqa: F401
-
 
 def confirm(rig, value):
     psu = rig.psus[0]
@@ -14,58 +11,58 @@ def confirm(rig, value):
         c._value = c.voltage_setpoint_readback = c.monitor = value
 
 
-def test_quantized_confirmation_does_not_change_the_requested_amplitude(rig):
-    s = rig.scan
+def test_quantized_confirmation_does_not_change_the_requested_amplitude(mscan_rig):
+    s = mscan_rig.scan
     s._command([10., 10.])
-    revisions = [c.voltage_request_revision for c in rig.psus[0].channels]
-    confirm(rig, 9.999)
+    revisions = [c.voltage_request_revision for c in mscan_rig.psus[0].channels]
+    confirm(mscan_rig, 9.999)
     assert s._observation()[0]
     assert s._observation()[0]  # repeated housekeeping is still only an observation
-    assert [c.voltage_request_revision for c in rig.psus[0].channels] == revisions
+    assert [c.voltage_request_revision for c in mscan_rig.psus[0].channels] == revisions
     assert s._plan['expected'] == [10., 10.]
     assert [r['confirmed_vset'] for r in s._plan['rails']] == [9.999, 9.999]
-    assert rig.psus[0].writes == [(0, 10.), (1, 10.)]
+    assert mscan_rig.psus[0].writes == [(0, 10.), (1, 10.)]
 
 
-def test_later_hardware_setpoint_change_is_not_hidden_by_voltage_tolerance(rig):
-    s = rig.scan
+def test_later_hardware_setpoint_change_is_not_hidden_by_voltage_tolerance(mscan_rig):
+    s = mscan_rig.scan
     s._command([10., 10.])
-    confirm(rig, 9.999)
+    confirm(mscan_rig, 9.999)
     assert s._observation()[0]
-    confirm(rig, 9.998)  # far inside the 1 V regulation tolerance
-    with pytest.raises(rig.module.ScanError, match='PSU setpoint changed outside the scan'):
+    confirm(mscan_rig, 9.998)  # far inside the 1 V regulation tolerance
+    with pytest.raises(mscan_rig.module.ScanError, match='PSU setpoint changed outside the scan'):
         s._command([20., 20.])
-    assert rig.psus[0].writes == [(0, 10.), (1, 10.)]
+    assert mscan_rig.psus[0].writes == [(0, 10.), (1, 10.)]
 
 
-def test_noop_return_keeps_the_last_confirmed_setpoint(rig, monkeypatch):
-    channel_type = type(rig.psus[0].channels[0])
+def test_noop_return_keeps_the_last_confirmed_setpoint(mscan_rig, monkeypatch):
+    channel_type = type(mscan_rig.psus[0].channels[0])
     value = channel_type.value
     def only_changes(c, target):
         if value.fget(c) != target:  # real Qt does not emit valueChanged on a no-op
             value.fset(c, target)
     monkeypatch.setattr(channel_type, 'value', property(value.fget, only_changes))
-    rig.scan._command([40., 50.])
-    assert rig.psus[0].writes == []
-    assert [r['confirmed_vset'] for r in rig.scan._plan['rails']] == [40., 50.]
-    rig.psus[0].channels[0].voltage_setpoint_readback = 40.001
-    with pytest.raises(rig.module.ScanError, match='PSU setpoint changed outside the scan'):
-        rig.scan._observation()
+    mscan_rig.scan._command([40., 50.])
+    assert mscan_rig.psus[0].writes == []
+    assert [r['confirmed_vset'] for r in mscan_rig.scan._plan['rails']] == [40., 50.]
+    mscan_rig.psus[0].channels[0].voltage_setpoint_readback = 40.001
+    with pytest.raises(mscan_rig.module.ScanError, match='PSU setpoint changed outside the scan'):
+        mscan_rig.scan._observation()
 
 
-def test_missing_setpoint_readback_is_not_a_valid_confirmation(rig):
-    s = rig.scan
+def test_missing_setpoint_readback_is_not_a_valid_confirmation(mscan_rig):
+    s = mscan_rig.scan
     s._command([10., 10.])
-    confirm(rig, 10.)
-    rig.psus[0].channels[0].voltage_setpoint_readback = np.nan
+    confirm(mscan_rig, 10.)
+    mscan_rig.psus[0].channels[0].voltage_setpoint_readback = np.nan
     assert not s._observation()[0]
     assert s._plan['rails'][0]['confirmed_vset'] is None
 
 
 @pytest.mark.parametrize('mode', ['stepped', 'continuous'])
 @pytest.mark.parametrize('kind', ['request', 'roundtrip', 'hardware'])
-def test_external_changes_abort_in_either_mode(rig, continuous, mode, kind):
-    s, c = rig.scan, rig.psus[0].channels[0]
+def test_external_changes_abort_in_either_mode(mscan_rig, mscan_continuous, mode, kind):
+    s, c = mscan_rig.scan, mscan_rig.psus[0].channels[0]
     if mode == 'stepped':
         s.scan_mode = s.STEPPED
         s._plan = s._preflight()
@@ -86,5 +83,5 @@ def test_external_changes_abort_in_either_mode(rig, continuous, mode, kind):
     if mode == 'stepped':
         assert np.isfinite(s.outputChannels[0].recordingData[0])
     assert np.isnan(s.outputChannels[0].recordingData[1:]).all()
-    assert rig.psus[0].writes == [(0, 10.), (1, 10.)]
-    assert rig.psus[0].isOn()  # no later point, restoration or automatic OFF
+    assert mscan_rig.psus[0].writes == [(0, 10.), (1, 10.)]
+    assert mscan_rig.psus[0].isOn()  # no later point, restoration or automatic OFF

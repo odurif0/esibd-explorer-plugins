@@ -3,46 +3,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
-from test_dmmr_zero_notebook import ns, rig  # noqa: F401
-from test_dmmr_acquisition_regressions import rig as plugin_rig  # noqa: F401
-
-
-def inject_stream_fault(device, *, status=-13, persistent=False, sticky=False, malformed=False, after_s=None):
-    original = device.get_current
-    original_state, original_purge = device.get_state, device.purge
-    faulted = False
-    desynchronized = False
-
-    def frame(**kw):
-        nonlocal faulted, desynchronized
-        due = device.clock() >= after_s if after_s is not None else device.frames >= 32
-        if device.automatic and due and (not faulted or persistent):
-            faulted = True
-            desynchronized = sticky
-            device.clock.sleep(.01)
-            return status, 0, 666., 0, 1e6
-        return original(**kw)
-
-    def state(**kw):
-        if desynchronized:
-            return -13, '0x0000', 'ST_ON'
-        if malformed and faulted and device.automatic:
-            return 0, '0x0001', 'ST_ERR'
-        return original_state(**kw)
-
-    def purge():
-        nonlocal desynchronized
-        desynchronized = False
-        device.clock.sleep(.15)
-        return original_purge()
-
-    device.get_current, device.get_state, device.purge = frame, state, purge
+from support.dmmr import inject_stream_fault
 
 
 @pytest.mark.parametrize('status', [-10, -11, -12, -13])
-def test_notebook_transient_receive_error_keeps_original_error_and_continues(rig, status):
-    device, cfg, output, run = rig
+def test_notebook_transient_receive_error_keeps_original_error_and_continues(dmmr_notebook_rig, status):
+    device, cfg, output, run = dmmr_notebook_rig
     inject_stream_fault(device, status=status)
     report, raw, summary, saved = run()
     assert report['status'] == 'complete', report['error']
@@ -62,8 +28,8 @@ def test_notebook_transient_receive_error_keeps_original_error_and_continues(rig
     assert len([c for c in device.calls if c == ('automatic', True)]) == 1
 
 
-def test_notebook_parser_error_can_recover_without_accepting_a_fake_frame(rig):
-    device, _, _, run = rig
+def test_notebook_parser_error_can_recover_without_accepting_a_fake_frame(dmmr_notebook_rig):
+    device, _, _, run = dmmr_notebook_rig
     parse = device.check_auto_input
     failed = False
     def one_bad_parser_reply():
@@ -79,8 +45,8 @@ def test_notebook_parser_error_can_recover_without_accepting_a_fake_frame(rig):
     assert report['acquisition']['read_recoveries'][0]['resumed']
 
 
-def test_notebook_sticky_error_records_purge_and_omits_fit_across_restart(rig):
-    device, cfg, _, run = rig
+def test_notebook_sticky_error_records_purge_and_omits_fit_across_restart(dmmr_notebook_rig):
+    device, cfg, _, run = dmmr_notebook_rig
     cfg['baseline_window_s'] = .5
     inject_stream_fault(device, sticky=True)
     report, raw, _, saved = run()
@@ -98,8 +64,8 @@ def test_notebook_sticky_error_records_purge_and_omits_fit_across_restart(rig):
     assert raw.loc[raw.status.ne(0), 'current_A'].isna().all()
 
 
-def test_notebook_persistent_error_stops_without_a_retry_loop(rig):
-    device, _, _, run = rig
+def test_notebook_persistent_error_stops_without_a_retry_loop(dmmr_notebook_rig):
+    device, _, _, run = dmmr_notebook_rig
     inject_stream_fault(device, persistent=True)
     report, raw, *_ = run()
     assert report['status'] == 'failed'
@@ -110,8 +76,8 @@ def test_notebook_persistent_error_stops_without_a_retry_loop(rig):
     assert not device.connected
 
 
-def test_notebook_changed_controller_state_is_not_repaired_blindly(rig):
-    device, _, _, run = rig
+def test_notebook_changed_controller_state_is_not_repaired_blindly(dmmr_notebook_rig):
+    device, _, _, run = dmmr_notebook_rig
     inject_stream_fault(device, malformed=True)
     report, raw, *_ = run()
     assert report['status'] == 'failed'
@@ -120,8 +86,8 @@ def test_notebook_changed_controller_state_is_not_repaired_blindly(rig):
     assert raw.status.eq(-13).sum() == 1
 
 
-def test_notebook_no_new_frame_after_verified_recovery_still_triggers_watchdog(rig):
-    device, _, _, run = rig
+def test_notebook_no_new_frame_after_verified_recovery_still_triggers_watchdog(dmmr_notebook_rig):
+    device, _, _, run = dmmr_notebook_rig
     inject_stream_fault(device)
     old = device.record_protocol_event
     def stop_producing_frames(event):
@@ -136,18 +102,18 @@ def test_notebook_no_new_frame_after_verified_recovery_still_triggers_watchdog(r
     assert report['cleanup']['shutdown_confirmed']
 
 
-def test_campaign_keeps_recovery_metadata_and_shades_actual_gap(ns, rig):
+def test_campaign_keeps_recovery_metadata_and_shades_actual_gap(dmmr_notebook_ns, dmmr_notebook_rig):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    device, cfg, output, _ = rig
+    device, cfg, output, _ = dmmr_notebook_rig
     inject_stream_fault(device, sticky=True)
     cfg.update(series_count=1)
-    ns['run_campaign'](device, output, cfg, clock=device.clock, sleep=device.clock.sleep)
-    _, telemetry, report = ns['analyse_campaign'](output)
+    dmmr_notebook_ns['run_campaign'](device, output, cfg, clock=device.clock, sleep=device.clock.sleep)
+    _, telemetry, report = dmmr_notebook_ns['analyse_campaign'](output)
     assert report['status'] == 'complete'
     assert len(report['series'][0]['read_recoveries']) == 1
-    figures = ns['plot_campaign'](report, telemetry)
+    figures = dmmr_notebook_ns['plot_campaign'](report, telemetry)
     assert len(figures['current_vs_time'].axes[0].patches) == 1
     for figure in figures.values():
         figure.canvas.draw()
@@ -168,8 +134,8 @@ def start_plugin(rig):
 
 
 @pytest.mark.parametrize('status', [-10, -11, -12, -13])
-def test_plugin_transient_read_is_nan_then_a_new_verified_cycle(plugin_rig, status):
-    rig = plugin_rig
+def test_plugin_transient_read_is_nan_then_a_new_verified_cycle(dmmr_acquisition_rig, status):
+    rig = dmmr_acquisition_rig
     start_plugin(rig)
     getter = rig.device.get_module_current
     failed = False
@@ -193,8 +159,8 @@ def test_plugin_transient_read_is_nan_then_a_new_verified_cycle(plugin_rig, stat
 
 
 @pytest.mark.parametrize('stop_confirmed', [True, False])
-def test_plugin_persistent_error_stops_and_retains_uncertainty(plugin_rig, stop_confirmed):
-    rig = plugin_rig
+def test_plugin_persistent_error_stops_and_retains_uncertainty(dmmr_acquisition_rig, stop_confirmed):
+    rig = dmmr_acquisition_rig
     start_plugin(rig)
     rig.device.get_module_current = lambda *a, **kw: (-13, 666., 0)
     rig.controller.readNumbers()
@@ -213,8 +179,8 @@ def test_plugin_persistent_error_stops_and_retains_uncertainty(plugin_rig, stop_
 
 
 @pytest.mark.parametrize('operation', ['state', 'current'])
-def test_plugin_blocked_dll_never_queries_or_closes_the_same_transport(plugin_rig, operation):
-    rig = plugin_rig
+def test_plugin_blocked_dll_never_queries_or_closes_the_same_transport(dmmr_acquisition_rig, operation):
+    rig = dmmr_acquisition_rig
     start_plugin(rig)
     def blocked(*args, **kw):
         rig.device._transport_poisoned = True
@@ -237,8 +203,8 @@ def test_plugin_blocked_dll_never_queries_or_closes_the_same_transport(plugin_ri
 
 
 @pytest.mark.parametrize('status', [-10, -11, -12, -13])
-def test_plugin_range_read_at_on_retries_read_only_not_writes(plugin_rig, status):
-    rig = plugin_rig
+def test_plugin_range_read_at_on_retries_read_only_not_writes(dmmr_acquisition_rig, status):
+    rig = dmmr_acquisition_rig
     recovery_class = rig.module._get_dmmr_driver_class().CommandRecovery
     rig.device.new_command_recovery = lambda **kw: recovery_class(rig.device, **kw)
     getter = rig.device.get_module_meas_range
@@ -256,8 +222,8 @@ def test_plugin_range_read_at_on_retries_read_only_not_writes(plugin_rig, status
     assert rig.controller._verified_read_ranges == {0: (0, True), 3: (0, True)}
 
 
-def test_notebook_preserves_reset_device_time_in_a_new_segment(rig):
-    device, cfg, _, run = rig
+def test_notebook_preserves_reset_device_time_in_a_new_segment(dmmr_notebook_rig):
+    device, cfg, _, run = dmmr_notebook_rig
     cfg['baseline_window_s'] = .5
     inject_stream_fault(device, sticky=True)
     purge, get_frame = device.purge, device.get_current
@@ -286,8 +252,8 @@ def test_notebook_preserves_reset_device_time_in_a_new_segment(rig):
 
 
 @pytest.mark.parametrize('bad', [(0, np.nan, 0), (0, 1e-12, 2)])
-def test_plugin_recovery_requires_valid_values_in_the_verified_range(plugin_rig, bad):
-    rig = plugin_rig
+def test_plugin_recovery_requires_valid_values_in_the_verified_range(dmmr_acquisition_rig, bad):
+    rig = dmmr_acquisition_rig
     start_plugin(rig)
     rig.controller._verified_read_ranges = {0: (0, False), 3: (0, False)}
     rig.device.get_module_meas_range = lambda *a, **kw: (0, 0, False)
@@ -302,9 +268,9 @@ def test_plugin_recovery_requires_valid_values_in_the_verified_range(plugin_rig,
     assert all(np.isnan(v) for v in rig.controller.values.values())
 
 
-def test_explicit_off_finished_during_recovery_is_not_relabelled_unconfirmed(plugin_rig):
+def test_explicit_off_finished_during_recovery_is_not_relabelled_unconfirmed(dmmr_acquisition_rig):
     from contextlib import contextmanager
-    rig = plugin_rig
+    rig = dmmr_acquisition_rig
     start_plugin(rig)
     section = rig.controller._controller_lock_section
     @contextmanager

@@ -5,16 +5,16 @@ import threading
 
 import pytest
 
-from test_dmmr_connection_retry import connection, finish_open  # noqa: F401
-from test_dmmr_failed_open_shutdown import failed_open, request  # noqa: F401
+from support.dmmr import finish_open
+from support.dmmr import request
 
 
 @pytest.mark.parametrize('window', ['before_close_classification', 'after_connect'])
 @pytest.mark.parametrize('verified_stop', [True, False])
 def test_close_keeps_connected_backend_until_initializer_verifies_stop(
-    failed_open, monkeypatch, window, verified_stop,
+    dmmr_failed_open, monkeypatch, window, verified_stop,
 ):
-    hw, c = failed_open, failed_open.controller
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     c.controllerParent.connect_timeout_s = 1.0
     c.initializing = True
     connected, proceed = threading.Event(), threading.Event()
@@ -107,9 +107,9 @@ def test_close_keeps_connected_backend_until_initializer_verifies_stop(
 @pytest.mark.parametrize('state', ['Disconnected', 'Connecting', 'ST_ON', 'OFF'])
 @pytest.mark.parametrize('initialized', [True, False])
 def test_plain_close_cannot_infer_verified_stop_from_display_or_completed_open(
-    failed_open, monkeypatch, state, initialized,
+    dmmr_failed_open, monkeypatch, state, initialized,
 ):
-    hw, c = failed_open, failed_open.controller
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     hw.block, hw.powered = False, True
     old = hw.factory()
     assert old.connect(timeout_s=1.0)
@@ -136,9 +136,9 @@ def test_plain_close_cannot_infer_verified_stop_from_display_or_completed_open(
 
 @pytest.mark.parametrize('initialized', [True, False])
 def test_unconfirmed_stop_takes_priority_over_stale_forced_transport_state(
-    failed_open, monkeypatch, initialized,
+    dmmr_failed_open, monkeypatch, initialized,
 ):
-    failed_open.controller._forced_close_state = 'Communication lost'
+    dmmr_failed_open.controller._forced_close_state = 'Communication lost'
     test_plain_close_cannot_infer_verified_stop_from_display_or_completed_open(
-        failed_open, monkeypatch, 'Shutdown unconfirmed', initialized,
+        dmmr_failed_open, monkeypatch, 'Shutdown unconfirmed', initialized,
     )

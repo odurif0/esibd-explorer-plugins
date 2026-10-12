@@ -5,27 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_amx_config_load import load_module, make_case
+from support.amx import load_module, make_case
+from support.amx import config79_snapshot
 
 FOLDERS = ("amx_a", "amx_b")
-
-
-def config79_snapshot():
-    # CGC Config-4D-All.cfg [Configuration80] (zero-based API slot 79).
-    # Only P0 runs, yet all four switch channels are driven.
-    return {
-        "device_enabled": True, "main_state": {"name": "STATE_ON"},
-        "controller_state": {"flags": ["ENB", "ENB_OSC", "ENB_PULSER", "ENABLE", "CLRN"]},
-        "oscillator": {"period": 198},
-        "pulsers": [dict(pulser=p, width_ticks=98 if p == 0 else 0,
-                         delay_ticks=7 if p == 0 else 0, burst=0 if p < 2 else None,
-                         trigger_config=2 if p == 0 else 0, stop_config=0 if p < 2 else None)
-                    for p in range(4)],
-        "switches": [dict(switch=ch, trigger_config=10 if ch % 2 == 0 else 42,
-                          enable_config=32, trigger_delay={"rise": 0, "fall": 0}, enable_delay=0)
-                     for ch in range(4)],
-        "switch_mapping": {"trigger_enabled": False, "enable_enabled": False},
-    }
 
 
 @pytest.fixture(params=FOLDERS)
@@ -85,6 +68,8 @@ def test_active_or_missing_mapping_is_not_assumed_direct(module, field, value):
     ("missing_burst", "Unknown"), ("invalid_source", "Unknown"),
     ("invalid_period", "Unknown"), ("missing_flags", "Unknown"),
 ])
+
+
 def test_non_simple_signals_never_inherit_oscillator_frequency(module, case, expected):
     snapshot = config79_snapshot()
     p, s = snapshot["pulsers"][0], snapshot["switches"][0]

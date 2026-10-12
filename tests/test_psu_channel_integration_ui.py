@@ -6,90 +6,24 @@ for the Channel setters, callbacks, global update, history or UCM relay logic.
 """
 from __future__ import annotations
 
-import ast
 import configparser
-import __future__
-from enum import Enum, auto
-from importlib.metadata import distribution
 import importlib.util
-import os
 from pathlib import Path
-import re
-import subprocess
 import sys
 from threading import Lock, Thread
 import time
 from types import SimpleNamespace
-from typing import cast
 
 import numpy as np
 import pytest
+from support.qt import run_probe
+from support.ui import real_framework
 
 
 @pytest.mark.parametrize("folder", [f"psu_{s}" for s in "abcde"])
 @pytest.mark.parametrize("configuration", ["bootstrap", "saved_bootstrap", "legacy_dict", "legacy_ini"])
 def test_standard_channel_integration(folder, configuration, tmp_path):
-    result = subprocess.run([sys.executable, __file__, folder, str(tmp_path), configuration],
-                            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-                            text=True, capture_output=True, timeout=45)
-    if result.returncode == 77:
-        pytest.skip("Qt or Explorer unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
-
-
-def real_framework():
-    from PyQt6 import QtCore, QtGui, QtWidgets
-    import pyqtgraph as pg
-    from asteval import Interpreter
-    root = Path(distribution("esibd-explorer").locate_file("esibd"))
-    trees = {name: ast.parse((root / name).read_text()) for name in ("core.py", "const.py", "plugins.py")}
-    ns = dict(np=np, pg=pg, re=re, time=time, Path=Path, cast=cast, Enum=Enum, auto=auto,
-              pyqtSignal=QtCore.pyqtSignal, pyqtSlot=QtCore.pyqtSlot, Qt=QtCore.Qt,
-              Setting=type("Setting", (), {}), getDarkMode=lambda: True,
-              colors=SimpleNamespace(fg="#eeeeee", bg="#20232a", highlight="#308cc6"),
-              aeval=Interpreter(), CompactComboBox=QtWidgets.QComboBox,
-              LedIndicator=QtWidgets.QLabel)
-    for qt in (QtCore, QtGui, QtWidgets):
-        ns.update({name: getattr(qt, name) for name in dir(qt) if name.startswith("Q")})
-
-    def extract(file, name, parent=None):
-        nodes = trees[file].body if parent is None else parent.body
-        node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
-        exec(compile(ast.Module(body=[node], type_ignores=[]), str(root / file), "exec",
-                     flags=__future__.annotations.compiler_flag), ns)
-        return ns[name]
-
-    for name in ("INOUT", "PARAMETERTYPE", "PRINT", "PLUGINTYPE", "makeWrapper"):
-        extract("const.py", name)
-    from explorer_host import add_const_names
-    add_const_names(root, ns)  # e.g. Explorer 1.0.1's valid_chars / validateText
-    for name in ("DynamicNp", "ParameterWidget", "LabviewSpinBox", "LabviewDoubleSpinBox", "LabviewSciSpinBox",
-                 "Label", "ColorButton", "CheckBox", "ToolButton", "LineEdit", "Parameter", "parameterDict", "RelayChannel", "Channel"):
-        extract("core.py", name)
-    ns["ScanChannel"] = type("ScanChannel", (ns["Channel"],), {})
-    from test_psu_plugin_behavior import _install_esibd_stubs
-    _install_esibd_stubs()
-    core = sys.modules["esibd.core"]
-    for name in ("Channel", "Parameter", "PARAMETERTYPE", "PRINT", "PLUGINTYPE", "parameterDict", "ToolButton"):
-        setattr(core, name, ns[name])
-    Device = sys.modules["esibd.plugins"].Device
-    ns["Device"] = ns["ChannelManager"] = Device
-    Device.getChannels = lambda self: self.channels
-    Device.initialized = property(lambda self: bool(self.controller and self.controller.initialized))
-    Device.subtractBackgroundActive = lambda self: False
-    Device.getIcon = lambda self, *args, **kwargs: QtGui.QIcon()  # 1.0.1 passes desaturate=
-    device_node = next(n for n in trees["plugins.py"].body if isinstance(n, ast.ClassDef) and n.name == "Device")
-    for name in ("updateValues", "applyValues"):
-        setattr(Device, name, extract("plugins.py", name, device_node))
-    dm_node = next(n for n in trees["plugins.py"].body if isinstance(n, ast.ClassDef) and n.name == "DeviceManager")
-    manager = type("DeviceManager", (), {})
-    for name in ("channels", "getChannelByName", "getDevices", "getInputDevices", "getOutputDevices", "getRelays", "globalUpdate"):
-        setattr(manager, name, extract("plugins.py", name, dm_node))
-    ucm_node = next(n for n in trees["plugins.py"].body if isinstance(n, ast.ClassDef) and n.name == "UCM")
-    UCMChannel = extract("plugins.py", "UCMChannel", ucm_node)
-    ns["UCMChannel"], ns["DeviceManager"] = UCMChannel, manager
-    return ns
+    run_probe(__file__, folder, tmp_path, configuration, timeout=45)
 
 
 def probe(folder, output, configuration="bootstrap"):
@@ -203,7 +137,7 @@ def probe(folder, output, configuration="bootstrap"):
     controller.lock = Lock()
     controller.initialized = True
     controller.print = parent.print
-    from psu_fakes import StatefulPSU
+    from support.psu_fakes import StatefulPSU
 
     class Hardware(StatefulPSU):
         def collect_housekeeping(self, **kw):
@@ -378,7 +312,7 @@ def probe(folder, output, configuration="bootstrap"):
     amx_module = importlib.util.module_from_spec(amx_spec)
     amx_spec.loader.exec_module(amx_module)
     amx = amx_module.AMXDevice.__new__(amx_module.AMXDevice)
-    from test_amx_outputs import config79_snapshot
+    from support.amx import config79_snapshot
     amx.channels, amx.loading, amx.updating = [], False, False
     amx.pluginManager = plugin_manager
     amx.inout = ns["INOUT"].IN

@@ -1,26 +1,16 @@
 """Actual AMPR name editor updates existing pyqtgraph curves, ON or OFF."""
 from __future__ import annotations
 
-import ast
-import os
 from pathlib import Path
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize("folder", ["ampr_a", "ampr_b"])
 def test_ampr_name_editor_updates_plot_labels(folder, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__)), folder, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt/Explorer sources unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, folder, tmp_path, timeout=30)
 
 
 def exercise(module, device, app, window, output):
@@ -35,15 +25,10 @@ def exercise(module, device, app, window, output):
     host = Path(distribution("esibd-explorer").locate_file("esibd"))
     namespace = module.Channel.updateDisplay.__globals__
     namespace["PlotDataItem"] = pg.PlotDataItem
+    from explorer_host import compile_definition
+
     def extract(filename, name, parent=None):
-        tree = ast.parse((host / filename).read_text())
-        nodes = tree.body if parent is None else next(
-            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == parent
-        ).body
-        node = next(node for node in nodes if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == name)
-        unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node],
-                          type_ignores=[])
-        exec(compile(ast.fix_missing_locations(unit), str(host / filename), "exec"), namespace)
+        exec(compile_definition(host / filename, name, parent), namespace)
         return namespace[name]
 
     for name in ("ViewBox", "LabelItem", "SciAxisItem", "PlotItem", "PlotWidget"):
@@ -96,5 +81,5 @@ def exercise(module, device, app, window, output):
 
 
 if __name__ == "__main__":
-    from test_ampr_startup_ui import probe
+    from support.ampr_ui import probe
     raise SystemExit(probe(sys.argv[1], False, Path(sys.argv[2]), exercise=exercise))

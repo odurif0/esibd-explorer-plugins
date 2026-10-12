@@ -2,174 +2,22 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import types
 import time
-from enum import Enum
 from pathlib import Path
 
 from PIL import Image
 import pytest
+from support.esi import ExplorerLikeChannel, counting_device, load_plugin
 
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "esi" / "esi_plugin.py"
 ICON_PATH = Path(__file__).resolve().parents[1] / "esi" / "esi.png"
 
 
-def _install_esibd_stubs():
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"
-        FLOAT = "FLOAT"
-        EXP = "EXP"
-        BOOL = "BOOL"
-        LABEL = "LABEL"
-        COMBO = "COMBO"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        MIN = "Min"
-        MAX = "Max"
-        ADVANCED = "Advanced"
-
-    class Channel:
-        NAME = "Name"
-        ACTIVE = "Active"
-        DISPLAY = "Display"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-        MONITOR = "Monitor"
-        MIN = "Min"
-        MAX = "Max"
-
-        def __init__(self, channelParent=None, tree=None):
-            self.channelParent = channelParent
-            self.tree = tree
-            self._parameters = {
-                self.VALUE: types.SimpleNamespace(unit=""),
-                self.MONITOR: types.SimpleNamespace(unit=""),
-            }
-
-        def getDefaultChannel(self):
-            return {
-                self.VALUE: {},
-                self.ENABLED: {},
-                self.ACTIVE: {},
-                self.DISPLAY: {},
-                self.REAL: {},
-                self.MIN: {},
-                self.MAX: {},
-            }
-
-        def setDisplayedParameters(self):
-            self.displayedParameters = []
-
-        def initGUI(self, item):
-            self.module = item.get("Module", 2)
-
-        def getParameterByName(self, name):
-            return self._parameters[name]
-
-        def enabledChanged(self):
-            self.base_enabled_changed = True
-
-        def applyValue(self, apply=False):
-            self.applied = apply
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-            self.acquiring = False
-
-        def toggleOn(self):
-            self.super_toggle_called = True
-
-        def print(self, message, **kwargs):
-            pass
-
-        def startAcquisition(self):
-            self.acquiring = True
-
-        def stopAcquisition(self):
-            self.acquiring = False
-
-        def initComplete(self):
-            self.initialized = True
-            self.startAcquisition()
-            if self.controllerParent.isOn():
-                self.toggleOnFromThread(parallel=True)
-
-    class Device:
-        MAXDATAPOINTS = "Max data points"
-
-        def getDefaultSettings(self):
-            return {
-                f"{self.name}/Interval": {Parameter.VALUE: 0},
-                f"{self.name}/{self.MAXDATAPOINTS}": {Parameter.VALUE: 0},
-            }
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        result = dict(kwargs)
-        if "value" in kwargs:
-            result[Parameter.VALUE] = kwargs["value"]
-        if "header" in kwargs:
-            result[Parameter.HEADER] = kwargs["header"]
-        return result
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.parameterDict = parameterDict
-    plugins.Device = Device
-    plugins.LiveDisplay = type("LiveDisplay", (), {})
-    plugins.Plugin = Plugin
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _load_plugin():
-    for name in tuple(sys.modules):
-        if (
-            name == "esi_plugin_test"
-            or name == "esibd"
-            or name.startswith("esibd.")
-            or name.startswith("_esibd_bundled_esi_runtime")
-        ):
-            sys.modules.pop(name, None)
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("esi_plugin_test", PLUGIN_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_esi_plugin_metadata_and_private_runtime():
-    module = _load_plugin()
+    module = load_plugin()
 
     assert module.providePlugins() == [module.ESIDevice]
     assert module.ESIDevice.name == "ESI"
@@ -185,7 +33,7 @@ def test_esi_plugin_metadata_and_private_runtime():
 
 
 def test_fixed_channel_layout_is_safe_and_stable():
-    module = _load_plugin()
+    module = load_plugin()
 
     items = module._fixed_channel_items("ESI")
 
@@ -213,7 +61,7 @@ def test_fixed_channel_layout_is_safe_and_stable():
 
 
 def test_default_com_is_generic_and_operator_configurable():
-    module = _load_plugin()
+    module = load_plugin()
     device = module.ESIDevice()
 
     settings = device.getDefaultSettings()
@@ -222,7 +70,7 @@ def test_default_com_is_generic_and_operator_configurable():
 
 
 def test_missing_config_creates_three_controls_and_two_current_channels(tmp_path):
-    module = _load_plugin()
+    module = load_plugin()
     device = object.__new__(module.ESIDevice)
     config_file = tmp_path / "ESI.ini"
     applied = []
@@ -254,7 +102,7 @@ def test_missing_config_creates_three_controls_and_two_current_channels(tmp_path
 
 
 def test_generic_nine_channel_config_is_migrated_to_fixed_layout(tmp_path):
-    module = _load_plugin()
+    module = load_plugin()
     device = object.__new__(module.ESIDevice)
     config_file = tmp_path / "ESI.ini"
     applied = []
@@ -282,7 +130,7 @@ def test_generic_nine_channel_config_is_migrated_to_fixed_layout(tmp_path):
 
 
 def test_polarity_channel_config_migrates_to_safe_module_pairs(tmp_path):
-    module = _load_plugin()
+    module = load_plugin()
     device = object.__new__(module.ESIDevice)
     config_file = tmp_path / "ESI.ini"
     applied = []
@@ -318,7 +166,7 @@ def test_polarity_channel_config_migrates_to_safe_module_pairs(tmp_path):
 
 
 def test_panel_controls_one_target_and_one_output_state_per_module():
-    module = _load_plugin()
+    module = load_plugin()
     updates = []
 
     class ParameterValue:
@@ -367,7 +215,7 @@ def test_panel_controls_one_target_and_one_output_state_per_module():
 
 @pytest.mark.parametrize("frozen", [False, True])
 def test_initialization_selects_backend_and_reports_com_on_failure(monkeypatch, frozen, tmp_path):
-    module = _load_plugin()
+    module = load_plugin()
     monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     constructor_kwargs = []
     messages = []
@@ -416,7 +264,7 @@ def test_initialization_selects_backend_and_reports_com_on_failure(monkeypatch, 
 def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
     monkeypatch, frozen, tmp_path,
 ):
-    module = _load_plugin()
+    module = load_plugin()
     monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     calls = []
     constructor_kwargs = []
@@ -496,7 +344,7 @@ def test_initialization_configures_verified_hv_steps_while_outputs_are_off(
     ("Disconnected: shutdown unconfirmed", "#c53030"),
 ])
 def test_current_status_color_does_not_conflate_previous_shutdown_warning(state, expected_color):
-    module = _load_plugin()
+    module = load_plugin()
     device = object.__new__(module.ESIDevice)
     device.main_state = state
     device.shutdown_unconfirmed = True
@@ -504,7 +352,7 @@ def test_current_status_color_does_not_conflate_previous_shutdown_warning(state,
 
 
 def test_reconnected_status_is_green_but_shutdown_warning_remains_red():
-    module = _load_plugin()
+    module = load_plugin()
     device = object.__new__(module.ESIDevice)
     device.com = 16
     device.main_state = "STATE_ON"
@@ -544,7 +392,7 @@ def test_reconnected_status_is_green_but_shutdown_warning_remains_red():
 
 
 def test_init_complete_resumes_pending_on_toggle():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
     parent = types.SimpleNamespace(
         ensureFixedChannels=lambda **kwargs: calls.append(("channels", kwargs)),
@@ -567,7 +415,7 @@ def test_init_complete_resumes_pending_on_toggle():
 
 
 def test_channel_defaults_enforce_3kv_positive_range():
-    module = _load_plugin()
+    module = load_plugin()
     parent = types.SimpleNamespace()
     channel = module.ESIChannel(channelParent=parent, tree=None)
 
@@ -590,7 +438,7 @@ def test_channel_defaults_enforce_3kv_positive_range():
 
 
 def test_operator_cards_keep_their_width_and_heat_panel_can_shrink():
-    module = _load_plugin()
+    module = load_plugin()
     source = PLUGIN_PATH.read_text(encoding="utf-8")
 
     assert module._ESI_HV_CARD_WIDTH == 300
@@ -605,7 +453,7 @@ def test_operator_cards_keep_their_width_and_heat_panel_can_shrink():
 
 
 def test_enabled_change_forces_hardware_apply():
-    module = _load_plugin()
+    module = load_plugin()
     channel = module.ESIChannel(
         channelParent=types.SimpleNamespace(loading=False),
         tree=None,
@@ -620,7 +468,7 @@ def test_enabled_change_forces_hardware_apply():
 
 def test_on_sequence_forces_every_output_off_and_energizes_nothing():
     # 2026-10-07: ON restarted a saved HV1 selection at 1000 V. ON now opens the global gate only.
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -673,7 +521,7 @@ def test_on_sequence_forces_every_output_off_and_energizes_nothing():
 
 def test_init_complete_never_reapplies_saved_targets_or_selections():
     # Explorer's DeviceController.initComplete calls updateValues(apply=True) when the device is ON.
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
     parent = types.SimpleNamespace(
         ensureFixedChannels=lambda **kwargs: calls.append("channels"),
@@ -692,73 +540,12 @@ def test_init_complete_never_reapplies_saved_targets_or_selections():
     assert controller.acquiring is True and controller.initialized is True
 
 
-class _ExplorerLikeChannel:
-    """Explorer 1.0.2: Channel.loading is a read-only view of the device's loading counter."""
-
-    def __init__(self, device, module_number, enabled, value, heat=False):
-        self.device, self.module, self.name = device, module_number, f"ESI_HV{module_number}"
-        self._enabled, self._value, self.heat = enabled, value, heat
-        self.events = []
-        self.VALUE, self.ENABLED = "Value", "Enabled"
-
-    @property
-    def loading(self):
-        return self.device.loading
-
-    @property
-    def value(self):
-        return self._value
-
-    @value.setter
-    def value(self, value):
-        self._value = value
-        self.events.append(("value", value, self.device.loading))
-
-    @property
-    def enabled(self):
-        return self._enabled
-
-    @enabled.setter
-    def enabled(self, value):
-        self._enabled = value
-        self.events.append(("enabled", value, self.device.loading))
-
-    def module_address(self):
-        return self.module
-
-    def is_heat_channel(self):
-        return self.heat
-
-    def getParameterByName(self, name):
-        return None  # Explorer returns None for a parameter this stand-in does not model.
-
-
-def _counting_device(module, channels):
-    class CountingESI(module.ESIDevice):
-        _count = 0
-
-        @property
-        def loading(self):
-            return self._count != 0
-
-        @loading.setter
-        def loading(self, value):  # Explorer's Plugin.loading counter
-            self._count += 1 if value else -1
-
-    device = object.__new__(CountingESI)
-    device.getChannels = lambda: channels
-    device.name = "ESI"
-    device.printed = []
-    device.print = lambda text, **kwargs: device.printed.append(text)
-    return device
-
-
 def test_draft_target_commit_works_with_explorer_read_only_channel_loading():
     # 2026-10-07: ten panel actions failed with "property 'loading' of 'ESIChannel' object has no setter".
-    module = _load_plugin()
+    module = load_plugin()
     channels = []
-    device = _counting_device(module, channels)
-    channel = _ExplorerLikeChannel(device, 1, enabled=True, value=1000.0)
+    device = counting_device(module, channels)
+    channel = ExplorerLikeChannel(device, 1, enabled=True, value=1000.0)
     channels.append(channel)
 
     class FocusedSpin:  # The operator typed 0 and clicked elsewhere.
@@ -783,12 +570,12 @@ def test_draft_target_commit_works_with_explorer_read_only_channel_loading():
 
 
 def test_saved_and_on_output_selections_start_off_with_targets_kept(monkeypatch):
-    module = _load_plugin()
+    module = load_plugin()
     channels = []
-    device = _counting_device(module, channels)
-    hv1 = _ExplorerLikeChannel(device, 1, enabled=True, value=1000.0)
-    hv2 = _ExplorerLikeChannel(device, 2, enabled=False, value=500.0)
-    heat = _ExplorerLikeChannel(device, 0, enabled=True, value=90.0, heat=True)
+    device = counting_device(module, channels)
+    hv1 = ExplorerLikeChannel(device, 1, enabled=True, value=1000.0)
+    hv2 = ExplorerLikeChannel(device, 2, enabled=False, value=500.0)
+    heat = ExplorerLikeChannel(device, 0, enabled=True, value=90.0, heat=True)
     channels.extend([hv1, hv2, heat])
     monkeypatch.setattr(module.Device, "loadConfiguration", lambda self, **kwargs: None, raising=False)
 
@@ -814,7 +601,7 @@ def test_saved_and_on_output_selections_start_off_with_targets_kept(monkeypatch)
 
 
 def test_off_sequence_uses_driver_confirmed_disconnect():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -843,7 +630,7 @@ def test_off_sequence_uses_driver_confirmed_disconnect():
 
 
 def test_normal_target_change_is_ramped_in_bounded_steps(monkeypatch):
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -865,7 +652,7 @@ def test_normal_target_change_is_ramped_in_bounded_steps(monkeypatch):
 
 
 def test_ramp_wait_yields_to_off_without_another_step():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
     parent = types.SimpleNamespace(ramp_rate_v_s=10.0, poll_timeout_s=2.0)
     controller = module.ESIController(parent)
@@ -885,7 +672,7 @@ def test_ramp_wait_yields_to_off_without_another_step():
 
 
 def test_active_hv_target_change_uses_configured_ramp(monkeypatch):
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -928,7 +715,7 @@ def test_active_hv_target_change_uses_configured_ramp(monkeypatch):
 
 
 def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -971,7 +758,7 @@ def test_heat_channel_sets_temperature_without_using_hv_voltage_path():
 
 @pytest.mark.parametrize('operation', ['target', 'on'])
 def test_heat_ready_wait_uses_the_existing_output_cancellation_token(operation):
-    module = _load_plugin()
+    module = load_plugin()
     channel = types.SimpleNamespace(module_address=lambda: 0, is_heat_channel=lambda: True,
                                     enabled=True, value=30., name='HEAT')
     parent = types.SimpleNamespace(poll_timeout_s=1., isOn=lambda: True)
@@ -1006,7 +793,7 @@ def test_heat_ready_wait_uses_the_existing_output_cancellation_token(operation):
 
 
 def test_invalid_heat_readback_blocks_nonzero_target_and_forces_off():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1037,7 +824,7 @@ def test_invalid_heat_readback_blocks_nonzero_target_and_forces_off():
 
 
 def test_snapshot_rejects_disconnected_heat_sensor_readback(monkeypatch):
-    module = _load_plugin()
+    module = load_plugin()
     parent = types.SimpleNamespace(
         main_state="",
         interlock_state="",
@@ -1115,7 +902,7 @@ def test_snapshot_rejects_disconnected_heat_sensor_readback(monkeypatch):
 
 
 def test_disabling_hv_uses_module_output_gate():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1145,7 +932,7 @@ def test_disabling_hv_uses_module_output_gate():
 
 
 def test_hv_pair_applies_one_unsigned_module_target_without_adc_selection():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1184,7 +971,7 @@ def test_hv_pair_applies_one_unsigned_module_target_without_adc_selection():
 
 
 def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1227,7 +1014,7 @@ def test_failed_on_transition_forces_global_safe_off_and_restores_ui():
 
 
 def test_failed_global_rollback_keeps_off_action_reachable():
-    module = _load_plugin()
+    module = load_plugin()
 
     class FakeDevice:
         def set_hv_module_target(self, address, value, timeout_s):
@@ -1255,7 +1042,7 @@ def test_failed_global_rollback_keeps_off_action_reachable():
 
 
 def test_failed_hv_apply_zeros_and_deactivates_affected_output():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1296,7 +1083,7 @@ def test_failed_hv_apply_zeros_and_deactivates_affected_output():
 
 
 def test_failed_hv_gate_activation_rolls_target_back_to_zero():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1336,7 +1123,7 @@ def test_failed_hv_gate_activation_rolls_target_back_to_zero():
 
 
 def test_failed_hv_disable_is_reported():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1369,7 +1156,7 @@ def test_failed_hv_disable_is_reported():
 
 
 def test_dispose_disconnects_before_closing_backend():
-    module = _load_plugin()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -1392,7 +1179,7 @@ def test_dispose_disconnects_before_closing_backend():
 
 
 def test_default_settings_include_config_management_keys():
-    module = _load_plugin()
+    module = load_plugin()
     device = module.ESIDevice()
 
     settings = device.getDefaultSettings()
@@ -1406,7 +1193,7 @@ def test_default_settings_include_config_management_keys():
 
 
 def test_controller_has_config_state_attributes():
-    module = _load_plugin()
+    module = load_plugin()
     controller = module.ESIController(
         types.SimpleNamespace(connect_timeout_s=5.0)
     )
@@ -1416,7 +1203,7 @@ def test_controller_has_config_state_attributes():
 
 
 def test_refresh_available_configs_populates_list():
-    module = _load_plugin()
+    module = load_plugin()
 
     class FakeDevice:
         def list_configs(self, timeout_s=5.0):
@@ -1436,7 +1223,7 @@ def test_refresh_available_configs_populates_list():
 
 
 def test_refresh_available_configs_handles_no_configs():
-    module = _load_plugin()
+    module = load_plugin()
 
     class FakeDevice:
         def list_configs(self, timeout_s=5.0):
@@ -1452,7 +1239,7 @@ def test_refresh_available_configs_handles_no_configs():
 
 
 def test_refresh_available_configs_handles_error():
-    module = _load_plugin()
+    module = load_plugin()
 
     class FakeDevice:
         def list_configs(self, timeout_s=5.0):
@@ -1469,7 +1256,7 @@ def test_refresh_available_configs_handles_error():
 
 
 def test_operating_config_ready_rejects_unselected():
-    module = _load_plugin()
+    module = load_plugin()
     controller = module.ESIController(
         types.SimpleNamespace(connect_timeout_s=5.0, operating_config=-1)
     )
@@ -1480,7 +1267,7 @@ def test_operating_config_ready_rejects_unselected():
 
 
 def test_operating_config_ready_rejects_invalid_slot():
-    module = _load_plugin()
+    module = load_plugin()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, operating_config=3)
     controller = module.ESIController(parent)
     controller.available_configs = [
@@ -1493,7 +1280,7 @@ def test_operating_config_ready_rejects_invalid_slot():
 
 
 def test_operating_config_ready_accepts_valid_slot():
-    module = _load_plugin()
+    module = load_plugin()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, operating_config=7)
     controller = module.ESIController(parent)
     controller.available_configs = [
@@ -1505,7 +1292,7 @@ def test_operating_config_ready_accepts_valid_slot():
 
 
 def test_load_config_now_requires_initialized_device():
-    module = _load_plugin()
+    module = load_plugin()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, name="ESI")
     controller = module.ESIController(parent)
     controller.initialized = False
@@ -1515,7 +1302,7 @@ def test_load_config_now_requires_initialized_device():
 
 
 def test_load_config_now_requires_device_on():
-    module = _load_plugin()
+    module = load_plugin()
     parent = types.SimpleNamespace(
         connect_timeout_s=5.0, name="ESI",
         isOn=lambda: False, operating_config=5,
@@ -1534,7 +1321,7 @@ def test_load_config_now_requires_device_on():
 
 def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
     """A failed Qt emit must never run the GUI callback on the worker thread."""
-    module = _load_plugin()
+    module = load_plugin()
 
     pyqt = types.ModuleType("PyQt6")
     pyqt.__path__ = []

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import threading
 import types
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 import pytest
+from support.dmmr import load_plugin
 
 
 PLUGIN_PATH = (
@@ -20,151 +19,8 @@ PLUGIN_PATH = (
 )
 
 
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"
-        FLOAT = "FLOAT"
-        LABEL = "LABEL"
-        TEXT = "TEXT"
-        BOOL = "BOOL"
-        COMBO = "COMBO"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        NAME = "Name"
-        ADVANCED = "Advanced"
-        EVENT = "Event"
-        TOOLTIP = "Tooltip"
-        WIDGET = "Widget"
-
-    class Channel:
-        COLLAPSE = "Collapse"
-        NAME = "Name"
-        ACTIVE = "Active"
-        DISPLAY = "Display"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-        SCALING = "Scaling"
-        MIN = "Min"
-        MAX = "Max"
-        OPTIMIZE = "Optimize"
-
-    class _Signal:
-        def emit(self, *args, **kwargs):
-            self.last_emit = (args, kwargs)
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-            self.lock = threading.Lock()
-            self.signalComm = types.SimpleNamespace(
-                initCompleteSignal=_Signal(),
-                closeCommunicationSignal=_Signal(),
-            )
-            self.errorCount = 0
-            self.initializing = False
-            self.acquiring = False
-            self.values = None
-            self.print = lambda *args, **kwargs: None
-
-        def startAcquisition(self):
-            self.acquiring = True
-
-        def stopAcquisition(self):
-            self.acquiring = False
-
-        def toggleOn(self):
-            return None
-
-        def closeCommunication(self):
-            return None
-
-    class ToolButton:
-        pass
-
-    class LabviewDoubleSpinBox:
-        def __init__(self, indicator=False, displayDecimals=2):
-            self.indicator = indicator
-            self.displayDecimals = displayDecimals
-            self.NAN = "NaN"
-            self._decimals = displayDecimals
-
-        def setDecimals(self, value):
-            self._decimals = value
-
-        def decimals(self):
-            return self._decimals
-
-    class Device:
-        pass
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        return kwargs
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.LabviewDoubleSpinBox = LabviewDoubleSpinBox
-    core.parameterDict = parameterDict
-    core.getTestMode = lambda: False
-    plugins.Device = Device
-    plugins.LiveDisplay = type("LiveDisplay", (), {})
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name.startswith("_esibd_bundled_dmmr_runtime")
-        or name == "dmmr_plugin_behavior_test"
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _load_module():
-    _clear_test_modules()
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("dmmr_plugin_behavior_test", PLUGIN_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_bootstrap_config_is_replaced_from_detected_modules():
-    module = _load_module()
+    module = load_plugin()
     default_item = {
         "Module": "0",
         "Real": True,
@@ -191,7 +47,7 @@ def test_bootstrap_config_is_replaced_from_detected_modules():
 
 
 def test_existing_config_is_merged_and_duplicates_are_neutralized():
-    module = _load_module()
+    module = load_plugin()
 
     current_items = [
         {"Name": "Keep", "Module": 1, "Real": True, "Enabled": True},
@@ -223,7 +79,7 @@ def test_existing_config_is_merged_and_duplicates_are_neutralized():
 
 
 def test_controller_read_numbers_polls_module_currents():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         NO_ERR = 0
@@ -280,7 +136,7 @@ def test_controller_read_numbers_polls_module_currents():
 
 
 def test_controller_read_numbers_does_not_block_on_zero_ready_flags():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         NO_ERR = 0
@@ -344,7 +200,7 @@ def test_controller_read_numbers_does_not_block_on_zero_ready_flags():
 
 
 def test_controller_read_numbers_stops_if_manual_mode_has_changed():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         NO_ERR = 0
@@ -435,7 +291,7 @@ def test_controller_read_numbers_stops_if_manual_mode_has_changed():
 
 
 def test_controller_toggle_on_enables_measurement():
-    module = _load_module()
+    module = load_plugin()
     calls = []
 
     class FakeDevice:
@@ -493,7 +349,7 @@ def test_controller_toggle_on_enables_measurement():
 
 
 def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
-    module = _load_module()
+    module = load_plugin()
     calls, modes = [], {}
 
     class FakeDevice:
@@ -568,7 +424,7 @@ def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
 
 
 def test_controller_toggle_off_syncs_status_back_to_gui():
-    module = _load_module()
+    module = load_plugin()
     calls = []
     sync_calls = []
 
@@ -640,7 +496,7 @@ def test_controller_toggle_off_syncs_status_back_to_gui():
 
 
 def test_controller_toggle_off_failure_restores_on_ui_state():
-    module = _load_module()
+    module = load_plugin()
     ui_states = []
     log_messages = []
 
@@ -692,7 +548,7 @@ def test_controller_toggle_off_failure_restores_on_ui_state():
 
 
 def test_controller_retains_backend_and_unconfirmed_shutdown_when_transport_is_unusable():
-    module = _load_module()
+    module = load_plugin()
     ui_states = []
 
     class FakeDevice:
@@ -743,7 +599,7 @@ def test_controller_retains_backend_and_unconfirmed_shutdown_when_transport_is_u
 
 
 def test_controller_read_numbers_acquires_lock_for_state_and_module_polling():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         NO_ERR = 0
@@ -828,7 +684,7 @@ def test_controller_read_numbers_acquires_lock_for_state_and_module_polling():
 
 
 def test_controller_retains_shutdown_uncertainty_after_repeated_state_failures():
-    module = _load_module()
+    module = load_plugin()
     ui_states = []
 
     class FakeDevice:
@@ -887,7 +743,7 @@ def test_controller_retains_shutdown_uncertainty_after_repeated_state_failures()
 
 
 def test_close_communication_preserves_forced_communication_lost_state():
-    module = _load_module()
+    module = load_plugin()
 
     parent = types.SimpleNamespace(
         isOn=lambda: False,
@@ -911,7 +767,7 @@ def test_close_communication_preserves_forced_communication_lost_state():
 
 
 def test_controller_read_numbers_keeps_partial_results_on_timeout():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         NO_ERR = 0
@@ -982,7 +838,7 @@ def test_controller_read_numbers_keeps_partial_results_on_timeout():
 
 
 def test_controller_lock_section_rejects_unsupported_lock_type():
-    module = _load_module()
+    module = load_plugin()
 
     controller = module.DMMRController(types.SimpleNamespace())
     controller.lock = object()
@@ -993,7 +849,7 @@ def test_controller_lock_section_rejects_unsupported_lock_type():
 
 
 def test_controller_formats_open_port_timeout_with_operator_hint():
-    module = _load_module()
+    module = load_plugin()
 
     parent = types.SimpleNamespace(com=3)
     controller = module.DMMRController(parent)
@@ -1012,7 +868,7 @@ def test_controller_formats_open_port_timeout_with_operator_hint():
 
 
 def test_controller_formats_open_port_error_with_operator_hint():
-    module = _load_module()
+    module = load_plugin()
 
     parent = types.SimpleNamespace(com=3)
     controller = module.DMMRController(parent)
@@ -1027,7 +883,7 @@ def test_controller_formats_open_port_error_with_operator_hint():
 
 
 def test_controller_update_values_clears_monitor_when_channel_is_disabled():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeChannel:
         def __init__(self, module, enabled):
@@ -1062,7 +918,7 @@ def test_controller_update_values_clears_monitor_when_channel_is_disabled():
 
 
 def test_controller_update_values_resyncs_monitor_widgets():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeChannel:
         def __init__(self, module, enabled):
@@ -1103,7 +959,7 @@ def test_controller_update_values_resyncs_monitor_widgets():
 
 
 def test_controller_shutdown_failure_marks_state_unconfirmed():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         def shutdown(self, timeout_s=None):
@@ -1134,7 +990,7 @@ def test_controller_shutdown_failure_marks_state_unconfirmed():
 
 
 def test_controller_shutdown_success_marks_state_disconnected():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeDevice:
         connected = True
@@ -1171,7 +1027,7 @@ def test_controller_shutdown_success_marks_state_disconnected():
 
 
 def test_dmmr_monitor_widget_formats_currents_with_si_prefixes():
-    module = _load_module()
+    module = load_plugin()
 
     widget = module._DMMRCurrentMonitorSpinBox(indicator=True, displayDecimals=3)
 
@@ -1182,7 +1038,7 @@ def test_dmmr_monitor_widget_formats_currents_with_si_prefixes():
 
 
 def test_upgrade_monitor_widget_replaces_default_numeric_widget():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeParameter:
         def __init__(self):
@@ -1215,7 +1071,7 @@ def test_upgrade_monitor_widget_replaces_default_numeric_widget():
 
 
 def test_sync_monitor_widget_does_not_overwrite_numeric_spinbox_text():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeLineEdit:
         def __init__(self):
@@ -1271,7 +1127,7 @@ def test_sync_monitor_widget_does_not_overwrite_numeric_spinbox_text():
 
 
 def test_set_monitor_widget_minimum_width_keeps_fixed_width():
-    module = _load_module()
+    module = load_plugin()
 
     class FakeMetrics:
         def horizontalAdvance(self, text):
@@ -1314,7 +1170,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     process lifetime; the init-failure guidance must tell the operator to
     restart ESIBD Explorer instead of letting retries loop on a confusing
     '-2 (Error opening port)'."""
-    module = _load_module()
+    module = load_plugin()
     controller = module.DMMRController(types.SimpleNamespace(com=10))
 
     fatal_exc = RuntimeError(
@@ -1334,7 +1190,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
 
 
 def test_init_failure_guidance_silent_without_prior_poisoning():
-    module = _load_module()
+    module = load_plugin()
     controller = module.DMMRController(types.SimpleNamespace(com=10))
 
     assert controller._init_failure_guidance(
@@ -1345,7 +1201,7 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
 
 def test_disable_acquisition_confirms_both_off_gates():
     """An OFF command only confirms shutdown when both gates read back OFF."""
-    module = _load_module()
+    module = load_plugin()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
     controller = module.DMMRController(parent)
     controller.lock = threading.Lock()
@@ -1373,7 +1229,7 @@ def test_disable_acquisition_confirms_both_off_gates():
 
 def test_disable_acquisition_reports_failure_without_raising():
     """Startup cleanup reports failure without masking the original error."""
-    module = _load_module()
+    module = load_plugin()
     parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
     controller = module.DMMRController(parent)
     controller.lock = threading.Lock()
@@ -1396,7 +1252,7 @@ def test_disable_acquisition_reports_failure_without_raising():
 
 def test_run_initialization_does_not_emit_success_after_fatal_state_update():
     """A device destroyed by _update_state() must not look like 'Test mode'."""
-    module = _load_module()
+    module = load_plugin()
     emitted = []
 
     class FakeDevice:
@@ -1462,7 +1318,7 @@ def test_run_initialization_does_not_emit_success_after_fatal_state_update():
 
 
 def test_open_port_rejects_out_of_range_com():
-    module = _load_module()
+    module = load_plugin()
     runtime_name = module._bundled_runtime_module_name(
         Path(__file__).resolve().parents[1] / "dmmr"
     )
@@ -1479,7 +1335,7 @@ def test_open_port_rejects_out_of_range_com():
 def test_update_values_marshals_monitor_widget_updates(monkeypatch):
     """updateValues() runs on the acquisition thread; monitor widget syncs
     must go through the GUI dispatcher, never run directly."""
-    module = _load_module()
+    module = load_plugin()
 
     dispatched = []
 

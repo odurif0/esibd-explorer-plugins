@@ -8,120 +8,17 @@ readback, the indexed oscillator (oscillator 0), and the per-timer snapshot.
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import logging
 import sys
 import threading
 import types
-from enum import Enum
 from pathlib import Path
+from support.amx import load_hd_controller_classes, load_plugin
 
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_HD_PATH = ROOT / "amx_hd" / "amx_hd_plugin.py"
-
-
-def _install_esibd_stubs() -> None:
-    # Minimal stubs sufficient for the plugin module to import.
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"; FLOAT = "FLOAT"; LABEL = "LABEL"
-
-    class _V:
-        def __init__(self, v):
-            self.value = v
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _V("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"; ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"; HEADER = "Header"; ADVANCED = "Advanced"
-        EVENT = "Event"; TOOLTIP = "Tooltip"; INDICATOR = "Indicator"
-        PARAMETER_TYPE = "PARAMETER_TYPE"
-
-    class Channel:
-        COLLAPSE = "Collapse"; NAME = "Name"; ACTIVE = "Active"; DISPLAY = "Display"
-        REAL = "Real"; ENABLED = "Enabled"; VALUE = "Value"; SCALING = "Scaling"
-        MIN = "Min"; MAX = "Max"; OPTIMIZE = "Optimize"
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-
-    class ToolButton:
-        def __init__(self):
-            self.maximum_height = None
-            self.minimum_width = None
-            self.text = None
-            self.checkable = None
-            self.auto_raise = None
-
-        def setMaximumHeight(self, h): self.maximum_height = h
-        def setMinimumWidth(self, w): self.minimum_width = w
-        def setText(self, t): self.text = t
-        def setCheckable(self, c): self.checkable = c
-        def setAutoRaise(self, a): self.auto_raise = a
-
-    class Device:
-        MAXDATAPOINTS = "Max data points"
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kw):
-        p = {}
-        if "value" in kw: p[Parameter.VALUE] = kw["value"]
-        if "advanced" in kw: p[Parameter.ADVANCED] = kw["advanced"]
-        if "header" in kw: p[Parameter.HEADER] = kw["header"]
-        if "toolTip" in kw: p[Parameter.TOOLTIP] = kw["toolTip"]
-        if "parameterType" in kw: p[Parameter.PARAMETER_TYPE] = kw["parameterType"]
-        p.update(kw)
-        return p
-
-    core.PARAMETERTYPE = PARAMETERTYPE; core.PLUGINTYPE = PLUGINTYPE; core.PRINT = PRINT
-    core.Channel = Channel; core.DeviceController = DeviceController
-    core.ToolButton = ToolButton
-    core.Parameter = Parameter; core.parameterDict = parameterDict
-    plugins.Device = Device; plugins.Plugin = Plugin
-    sys.modules["esibd"] = esibd; sys.modules["esibd.core"] = core; sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        n for n in list(sys.modules)
-        if n == "esibd" or n.startswith("esibd.")
-        or n.startswith("_esibd_bundled_amx_runtime")
-        or n.startswith("_esibd_bundled_amx_hd_runtime")
-        or n.startswith("amx_hd_plugin_test")
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _load_hd_plugin_module():
-    _clear_test_modules()
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("amx_hd_plugin_test", PLUGIN_HD_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_hd_controller_classes():
-    module = _load_hd_plugin_module()
-
-    runtime_name = module._bundled_runtime_module_name(PLUGIN_HD_PATH.parent)
-    module._get_amx_driver_class()  # ensures the private runtime package is loaded
-    ctrl_mod = importlib.import_module(f"{runtime_name}.amx_hd.amx_hd")
-    base_mod = importlib.import_module(f"{runtime_name}.amx_hd.amx_hd_base")
-    return ctrl_mod._AMXHDController, base_mod.AMXHDBase
 
 
 def _make_controller(controller_cls):
@@ -139,7 +36,7 @@ def _make_controller(controller_cls):
 
 
 def test_collect_housekeeping_maps_hd_state_and_timers(monkeypatch):
-    controller_cls, base_cls = _load_hd_controller_classes()
+    controller_cls, base_cls = load_hd_controller_classes()
     ctrl = _make_controller(controller_cls)
 
     # HD GetDeviceState -> (status, main_hex, main_name, dev_hex, dev_names, temp_hex, temp_names)
@@ -190,7 +87,7 @@ def test_collect_housekeeping_maps_hd_state_and_timers(monkeypatch):
 
 def test_collect_housekeeping_standby_is_not_on(monkeypatch):
     """0x0000 is STATE_STANDBY on HD — the plugin's _state_is_on must not treat it as ON."""
-    controller_cls, base_cls = _load_hd_controller_classes()
+    controller_cls, base_cls = load_hd_controller_classes()
     ctrl = _make_controller(controller_cls)
 
     monkeypatch.setattr(base_cls, "get_device_state", lambda self: (
@@ -212,7 +109,7 @@ def test_hd_controller_exposes_port_num_for_shared_mixin(monkeypatch):
     """Regression: the shared DllPortClaimRegistryMixin reads self.port_num; the
     HD controller must expose it (it slipped through the port->stream rename)."""
     import ctypes as _ctypes
-    controller_cls, _base_cls = _load_hd_controller_classes()
+    controller_cls, _base_cls = load_hd_controller_classes()
 
     class _FakeDll:
         def __init__(self, *args, **kwargs):
@@ -232,7 +129,7 @@ def test_hd_controller_exposes_port_num_for_shared_mixin(monkeypatch):
 def test_err_open_hint_flags_high_com_ports():
     """The -2 (ERR_OPEN) hint must warn about the COM>=10 Windows naming gotcha,
     and always remind about a port held by another process."""
-    controller_cls, _base_cls = _load_hd_controller_classes()
+    controller_cls, _base_cls = load_hd_controller_classes()
     hint_hi = controller_cls._err_open_hint(10)
     assert "COM1-COM9" in hint_hi
     assert "holds the port" in hint_hi
@@ -246,7 +143,7 @@ def test_get_product_info_unpacks_hd_hw_type_and_version(monkeypatch):
     """Regression: HD GetHwType returns 10 values and GetHwVersion returns 3;
     get_product_info must unpack both fully (it previously expected 2, raising
     'too many values to unpack')."""
-    controller_cls, base_cls = _load_hd_controller_classes()
+    controller_cls, base_cls = load_hd_controller_classes()
     ctrl = _make_controller(controller_cls)
 
     monkeypatch.setattr(base_cls, "get_product_no", lambda self: (0, 77057))
@@ -276,7 +173,7 @@ def test_collect_state_snapshot_is_lightweight(monkeypatch):
     """The startup-readiness poll uses a state-only snapshot: it must read the
     state + enable bit and must NOT pull the full housekeeping (which holds the
     transport lock for ~1-2 s and stalled the ON transition)."""
-    controller_cls, base_cls = _load_hd_controller_classes()
+    controller_cls, base_cls = load_hd_controller_classes()
     ctrl = _make_controller(controller_cls)
 
     heavy_calls = {"housekeeping": 0, "oscillator": 0, "timer_count": 0}
@@ -327,7 +224,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     """A timed-out open_port locks the COM port for the process lifetime: the
     init-failure guidance must tell the operator to restart ESIBD Explorer
     instead of letting retries loop on a confusing '-2 (Error opening port)'."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     controller = plugin.AMXHDController(controllerParent=_ComParent(com=10))
 
     # Attempt 1: device OFF, open_port times out and poisons the transport.
@@ -352,7 +249,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
 def test_init_failure_guidance_silent_without_prior_poisoning():
     """A garden-variety init failure with no prior poisoning yields no guidance,
     so unrelated cabling / COM-number problems are not mis-attributed."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     controller = plugin.AMXHDController(controllerParent=_ComParent(com=10))
 
     assert controller._init_failure_guidance(
@@ -364,7 +261,7 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
 def test_init_failure_guidance_forgets_poisoning_on_success():
     """A fresh transport reaching init completion clears any prior poisoning so
     later failures are not mis-attributed (e.g. the operator switched COM port)."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     controller = plugin.AMXHDController(controllerParent=_ComParent(com=10))
 
     controller._init_failure_guidance(
@@ -380,7 +277,7 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
     """A failed ON must not strand the ON/OFF button at OFF when the AMX is
     genuinely ON: the button must reflect the real state so the OFF toggle
     (-> shutdown) stays reachable. This is the core of the deadlock fix."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     restored = []
     parent = _ComParent(com=10)
     parent._set_on_ui_state = lambda on: restored.append(bool(on))
@@ -401,7 +298,7 @@ def test_restore_ui_state_standby_keeps_on_when_standby_is_deliberate():
     STATE_STANDBY hardware state is the expected outcome, not an OFF condition:
     the ON/OFF button must stay ON so the OFF toggle (-> shutdown) is reachable.
     """
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     restored = []
     parent = _ComParent(com=10)
     parent._set_on_ui_state = lambda on: restored.append(bool(on))
@@ -421,7 +318,7 @@ def test_startup_snapshot_ready_accepts_standby_for_standby_config():
     """A standby Operating config legitimately leaves the device in
     STATE_STANDBY (HV not applied). The startup wait must accept that as
     ready, not time out waiting for STATE_ON."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(name="AMX_HD", operating_config=0)
     controller = plugin.AMXHDController(controllerParent=parent)
     controller.available_configs = [
@@ -445,7 +342,7 @@ def test_startup_snapshot_ready_accepts_standby_for_standby_config():
 def test_startup_snapshot_ready_rejects_standby_for_non_standby_config():
     """When the Operating config is NOT standby, STATE_STANDBY is not ready:
     the device must reach STATE_ON."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(name="AMX_HD", operating_config=1)
     controller = plugin.AMXHDController(controllerParent=parent)
     controller.available_configs = [
@@ -461,7 +358,7 @@ def test_startup_snapshot_ready_rejects_standby_for_non_standby_config():
 
 
 def test_hd_controller_startup_wait_logs_progress_when_state_is_slow(monkeypatch):
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     now = {"value": 0.0}
     snapshots = [
         {
@@ -530,7 +427,7 @@ def test_device_active_predicate():
     """_device_active() is the single source of truth for whether the device is
     in its expected operating state. STATE_ON is always active. STATE_STANDBY
     is active only when the Operating config is a standby slot."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     configs = [
         {"index": 0, "name": "Standby", "active": True, "valid": True},
         {"index": 1, "name": "Operate", "active": True, "valid": True},
@@ -589,7 +486,7 @@ def test_config_selector_changed_allows_standby_operating_selection():
     """Selecting a standby slot as Operating config is persisted as-is. The
     operator is trusted to know a standby config does not apply HV; a
     non-blocking warning is emitted at ON time, not at selection time."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     device, written, logs, _state = _make_device_stub(plugin)
     device.operatingConfigCombo = object()  # truthy placeholder
 
@@ -604,7 +501,7 @@ def test_config_selector_changed_allows_standby_operating_selection():
 def test_warn_if_standby_operating_does_not_emit():
     """A standby-named Operating config is a normal operator choice. The plugin
     must NOT emit a warning — the operator knows HV will not be applied."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(name="AMX_HD")
     controller = plugin.AMXHDController(controllerParent=parent)
     controller.available_configs = [
@@ -626,7 +523,7 @@ def test_resume_pending_on_auto_selects_standby_when_device_parked():
     previous shutdown) and no Operating config is selected, the resume path
     auto-selects the standby config so the first ON completes without requiring
     the operator to manually pick a config first."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     configs = [
         {"index": 0, "name": "Standby", "active": True, "valid": True},
         {"index": 1, "name": "Operate", "active": True, "valid": True},
@@ -664,7 +561,7 @@ def test_resume_pending_on_auto_selects_standby_when_device_parked():
 def test_resume_pending_on_does_not_auto_select_when_config_already_chosen():
     """If an Operating config is already selected (>= 0), the resume path must
     not override it — even if the device happens to be in STATE_STANDBY."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     configs = [
         {"index": 0, "name": "Standby", "active": True, "valid": True},
         {"index": 1, "name": "Operate", "active": True, "valid": True},
@@ -702,7 +599,7 @@ def test_stop_acquisition_for_transition_does_not_call_base_stopAcquisition():
     directly, without calling the base stopAcquisition (which uses a 1s lock timeout
     and logs spurious 'Could not acquire lock to stop acquisition' errors when
     runAcquisition holds the lock for collect_housekeeping)."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(name="AMX_HD")
     controller = plugin.AMXHDController(controllerParent=parent)
 
@@ -738,7 +635,7 @@ def test_stop_acquisition_for_transition_does_not_call_base_stopAcquisition():
 def test_stop_acquisition_for_transition_tolerates_missing_getDevice():
     """If getDevice is unavailable or raises, the helper must still set
     acquiring=False without crashing."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(name="AMX_HD")
     controller = plugin.AMXHDController(controllerParent=parent)
     controller.acquiring = True
@@ -752,7 +649,7 @@ def test_stop_acquisition_for_transition_tolerates_missing_getDevice():
 def test_shutdown_kwargs_skips_standby_parking_when_already_in_standby():
     """If the device is already safe, _shutdown_kwargs must not return a
     standby_config -- the config is already loaded, just disconnect."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(name="AMX_HD", standby_config=0)
     controller = plugin.AMXHDController(controllerParent=parent)
     controller.available_configs = [
@@ -779,7 +676,7 @@ def test_read_numbers_ignores_snapshot_after_disconnect():
     device.  In that case readNumbers must ignore the stale snapshot so the
     status badge stays Disconnected.
     """
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(
         name="AMX_HD",
         poll_timeout_s=5.0,
@@ -824,7 +721,7 @@ def test_read_numbers_ignores_snapshot_after_disconnect():
 
 
 def test_hd_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
 
     device = object.__new__(plugin.AMXHDDevice)
     device.useOnOffLogic = True
@@ -852,7 +749,7 @@ def test_hd_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
 
 
 def test_hd_device_close_communication_stops_recording_when_disconnected():
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
 
     close_calls = []
     device = object.__new__(plugin.AMXHDDevice)
@@ -884,7 +781,7 @@ def test_start_operating_mode_uses_extended_lock_timeout():
     """_start_operating_mode must use a lock timeout >= poll_timeout_s +
     startup_timeout_s so that an in-flight collect_housekeeping does not
     cause a spurious 'Could not acquire lock' error."""
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     parent = types.SimpleNamespace(
         name="AMX_HD",
         poll_timeout_s=5.0,
@@ -918,7 +815,7 @@ def test_start_operating_mode_uses_extended_lock_timeout():
 
 
 def test_hd_controller_lock_section_logs_slow_lock_acquisition(monkeypatch):
-    plugin = _load_hd_plugin_module()
+    plugin = load_plugin("amx_hd")
     now = {"value": 0.0}
     printed = []
 

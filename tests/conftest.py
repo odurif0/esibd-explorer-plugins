@@ -12,6 +12,16 @@ import pytest
 
 import explorer_host
 
+# Helpers and fixtures shared by several test modules live in tests/support, never in a
+# test module; test modules do not import one another.
+pytest.register_assert_rewrite("support")
+pytest_plugins = [
+    "support.ampr", "support.cgc", "support.dmmr", "support.dmmr_notebook", "support.esi_discharge",
+    "support.esi_driver", "support.esi_heater", "support.mscan", "support.native", "support.psu",
+]
+
+from support import qt  # noqa: E402  (after register_assert_rewrite)
+
 
 @dataclass(frozen=True, slots=True)
 class PluginSpec:
@@ -268,7 +278,9 @@ def pytest_collection_modifyitems(config, items):
             continue
         if function not in sources:
             try:
-                sources[function] = "subprocess.run(" in inspect.getsource(function)
+                source = inspect.getsource(function)
+                probe = "run_probe(" in source and function.__globals__.get("run_probe") is qt.run_probe
+                sources[function] = "subprocess.run(" in source or probe
             except (OSError, TypeError):
                 sources[function] = False
         if sources[function]:

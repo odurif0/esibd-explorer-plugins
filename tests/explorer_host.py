@@ -8,11 +8,14 @@ ESIBD_REQUIRE_TARGET_HOST=1 turns a mismatch into a session error.
 """
 from __future__ import annotations
 
+import ast
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, distribution
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 TARGET_VERSION = "1.0.2"
 
@@ -33,6 +36,11 @@ def installed_version() -> str | None:
         return distribution("esibd-explorer").version
     except PackageNotFoundError:
         return None
+
+
+def qt_python() -> str:
+    """Interpreter of the real-Explorer subprocesses: ESIBD_QT_PYTHON, else the current one."""
+    return os.environ.get("ESIBD_QT_PYTHON", sys.executable)
 
 
 def interpreter_version(python: str) -> str | None:
@@ -90,3 +98,23 @@ def has_method(esibd_dir: Path, class_name: str, method: str, filename: str = "p
     return any(isinstance(node, ast.ClassDef) and node.name == class_name
                and any(isinstance(item, ast.FunctionDef) and item.name == method for item in node.body)
                for node in tree.body)
+
+
+@lru_cache
+def _source_tree(path: Path) -> ast.Module:
+    return ast.parse(Path(path).read_text(encoding="utf-8"))
+
+
+@lru_cache
+def compile_definition(path: Path, name: str, parent: str | None = None):
+    """Code of one def/class of an Explorer source file (in class `parent` if given), annotations postponed.
+
+    Probes exec it into a namespace to run the host's own implementation against the plugins.
+    """
+    tree = _source_tree(path)
+    nodes = tree.body if parent is None else next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == parent).body
+    node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
+    unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node],
+                      type_ignores=[])
+    return compile(ast.fix_missing_locations(unit), str(path), "exec")

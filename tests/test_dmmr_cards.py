@@ -1,14 +1,13 @@
 """Compact DMMR cards, elastic columns and label editing under real Qt."""
 from __future__ import annotations
 
-import importlib.util
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
+from support.qt import run_probe
+from support.dmmr import use_real_label_parameters
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,58 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("scale", ["1", "1.5"])
 @pytest.mark.parametrize("case", ["grid", "labels", "parameter", "save_failure", "states"])
 def test_dmmr_cards(case, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), case, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real PyQt6 unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
-
-
-def use_real_label_parameters(module, device):
-    """Use Explorer's real Parameter widget/getter/setter, without its app shell."""
-    import ast
-    from enum import Enum
-    from importlib.metadata import distribution
-    import re
-    import numpy as np
-    from PyQt6 import QtCore, QtGui, QtWidgets
-
-    path = Path(distribution("esibd-explorer").locate_file("esibd/core.py"))
-    tree = ast.parse(path.read_text())
-    ns = dict(np=np, re=re, Path=Path, cast=lambda _, value: value, Channel=module.Channel, pyqtSignal=QtCore.pyqtSignal,
-              PARAMETERTYPE=Enum("PARAMETERTYPE", "COMBO INTCOMBO FLOATCOMBO TEXT INT FLOAT EXP BOOL COLOR LABEL PATH"))
-    for qt in (QtCore, QtGui, QtWidgets):
-        ns.update({name: getattr(qt, name) for name in dir(qt) if name.startswith("Q")})
-    ns.update(CheckBox=QtWidgets.QCheckBox, CompactComboBox=QtWidgets.QComboBox,
-              LedIndicator=QtWidgets.QAbstractButton, PRINT=module.PRINT)
-    for name in ("ParameterWidget", "Label", "LabviewSpinBox", "LabviewDoubleSpinBox", "LabviewSciSpinBox", "LineEdit", "Parameter", "parameterDict"):
-        node = next(n for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
-        unit = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
-        exec(compile(ast.fix_missing_locations(unit), str(path), "exec"), ns)
-    module.Parameter = ns["Parameter"]
-    module.PARAMETERTYPE = ns["PARAMETERTYPE"]
-    module.parameterDict = ns["parameterDict"]
-    module.Channel.getDefaultChannel = lambda self: {key: {} for key in ("Value", "Enabled", "Display", "Active")}
-    module.Channel.displayChanged = lambda self: None
-    declaration = module.DMMRChannel.__new__(module.DMMRChannel).getDefaultChannel()["Label"]
-    module.DMMRChannel.label = property(lambda ch: ch.label_parameter.value,
-                                       lambda ch, value: setattr(ch.label_parameter, "value", value))
-    for i, previous in enumerate(device.channels):
-        channel = module.DMMRChannel.__new__(module.DMMRChannel)
-        channel.__dict__.update({k: v for k, v in vars(previous).items() if k != "label"})
-        channel.channelParent = device
-        channel.loading = True
-        channel.print = device.print
-        channel.tree, channel.rowHeight = None, 28
-        parameter = ns["Parameter"]("Label", channel, parameterType=declaration[ns["Parameter"].PARAMETER_TYPE])
-        channel.label_parameter = parameter
-        parameter.value = previous.label
-        channel.loading = False
-        device.channels[i] = channel
+    run_probe(__file__, case, tmp_path, timeout=30, scale=scale)
 
 
 def probe(case, output):
@@ -78,11 +26,8 @@ def probe(case, output):
     except ImportError:
         return 77
     app = QApplication([])
-    from test_dmmr_plugin_behavior import _install_esibd_stubs
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("dmmr_cards_probe", ROOT / "dmmr/dmmr_plugin.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from support.dmmr import load_plugin
+    module = load_plugin(module_name="dmmr_cards_probe")
     device = module.DMMRDevice.__new__(module.DMMRDevice)
     device.loading = False
     device.main_state = "ST_ON"

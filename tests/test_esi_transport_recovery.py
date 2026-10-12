@@ -4,12 +4,12 @@ import threading
 
 import pytest
 
-from test_esi_driver_behavior import _controller, driver_modules
+from support.esi_driver import make_controller
 
 
-def test_receive_error_purges_before_next_read_without_replaying_hv(driver_modules, monkeypatch):
-    _, module, base_module = driver_modules
-    driver = _controller(module)
+def test_receive_error_purges_before_next_read_without_replaying_hv(esi_driver_modules, monkeypatch):
+    _, module, base_module = esi_driver_modules
+    driver = make_controller(module)
     driver.connected = True
     calls = []
     desynchronized = [False]
@@ -39,9 +39,9 @@ def test_receive_error_purges_before_next_read_without_replaying_hv(driver_modul
     assert driver._communication_error is None
 
 
-def test_failed_purge_does_not_send_another_output_command(driver_modules, monkeypatch):
-    _, module, base_module = driver_modules
-    driver = _controller(module)
+def test_failed_purge_does_not_send_another_output_command(esi_driver_modules, monkeypatch):
+    _, module, base_module = esi_driver_modules
+    driver = make_controller(module)
     driver.connected = True
     driver._communication_error = "get_heat_ctrl_power_limit: -10"
     calls = []
@@ -54,9 +54,9 @@ def test_failed_purge_does_not_send_another_output_command(driver_modules, monke
     assert driver._communication_error is not None
 
 
-def test_purge_never_runs_beside_a_blocked_native_call(driver_modules, monkeypatch):
-    _, module, base_module = driver_modules
-    driver = _controller(module)
+def test_purge_never_runs_beside_a_blocked_native_call(esi_driver_modules, monkeypatch):
+    _, module, base_module = esi_driver_modules
+    driver = make_controller(module)
     driver.connected = True
     entered, resume = threading.Event(), threading.Event()
     calls = []
@@ -79,9 +79,9 @@ def test_purge_never_runs_beside_a_blocked_native_call(driver_modules, monkeypat
         driver._pending_dll_call["thread"].join(3.)
 
 
-def test_force_close_does_not_purge_or_command_outputs(driver_modules, monkeypatch):
-    _, module, base_module = driver_modules
-    driver = _controller(module)
+def test_force_close_does_not_purge_or_command_outputs(esi_driver_modules, monkeypatch):
+    _, module, base_module = esi_driver_modules
+    driver = make_controller(module)
     driver.connected = True
     driver._set_port_claimed(True)
     driver._communication_error = "get_enable: -13"
@@ -94,9 +94,9 @@ def test_force_close_does_not_purge_or_command_outputs(driver_modules, monkeypat
     assert not type(driver)._active_connections
 
 
-def test_crash_resume_connect_does_not_run_safe_off_or_enable_outputs(driver_modules, monkeypatch):
-    _, module, base_module = driver_modules
-    driver = _controller(module)
+def test_crash_resume_connect_does_not_run_safe_off_or_enable_outputs(esi_driver_modules, monkeypatch):
+    _, module, base_module = esi_driver_modules
+    driver = make_controller(module)
     calls = []
     base = base_module.ESIBase
     monkeypatch.setattr(base, "open_port", lambda self, com: calls.append("open") or 0)

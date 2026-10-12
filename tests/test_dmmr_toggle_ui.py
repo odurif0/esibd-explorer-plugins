@@ -1,27 +1,20 @@
 """Real Explorer buttons plus the DMMR controller on a Python worker thread."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize('outcome', ['success', 'stopped', 'unconfirmed', 'lost_ack', 'close_failure',
                                    'recovered', 'recovered_off', 'persistent'])
+
+
 @pytest.mark.parametrize('scale', ['1', '1.5'])
 def test_dmmr_failed_start_button_and_next_click(outcome, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), outcome, str(tmp_path)],
-        env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen', 'QT_SCALE_FACTOR': scale},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real PyQt6 or Explorer source unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, outcome, tmp_path, timeout=30, scale=scale)
 
 
 def probe(outcome, output):
@@ -36,15 +29,15 @@ def probe(outcome, output):
         from PyQt6.QtGui import QAction, QIcon
         from PyQt6.QtTest import QTest
         from PyQt6.QtWidgets import QApplication, QLabel, QToolBar, QVBoxLayout, QWidget
-        from test_on_off_action_ui import explorer_state_action
+        from support.ui import explorer_state_action
         StateAction = explorer_state_action()
     except (ImportError, PackageNotFoundError):
         return 77
-    from test_dmmr_plugin_behavior import _load_module
-    from test_dmmr_toggle_failures import FaultingDMMR
+    from support.dmmr import load_plugin
+    from support.dmmr import FaultingDMMR
 
     app = QApplication([])
-    module = _load_module()
+    module = load_plugin()
     parent = QWidget()
     parent.name = "DMMR"
     parent.useOnOffLogic = True
@@ -90,7 +83,7 @@ def probe(outcome, output):
     controller = module.DMMRController(parent)
     parent.controller = controller
     if outcome in ('recovered', 'recovered_off', 'persistent'):
-        from test_dmmr_command_recovery import StartupDevice
+        from support.dmmr import StartupDevice
         hardware = StartupDevice(module._get_dmmr_driver_class().CommandRecovery)
         if outcome != 'recovered_off':
             hardware.faults[('auto_range', 2)] = -12

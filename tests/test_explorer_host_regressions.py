@@ -16,12 +16,12 @@ import importlib.util
 from importlib.metadata import PackageNotFoundError, distribution
 import os
 from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace as NS
 from typing import cast
 
 import pytest
+from support.qt import run_probe
 
 
 def _installer():
@@ -177,18 +177,13 @@ def test_dock_tab_order_is_saved_before_the_geometry_and_restored_after_plugins_
 
 def test_dock_tab_order_survives_a_restart_in_real_qt(host_source, tmp_path):
     """The patched helpers, on real Qt docks: the user's order, new docks last, bad data ignored."""
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(host_source / "core.py")],
-                            env=env, text=True, capture_output=True, timeout=60)
-    if result.returncode == 77:
-        pytest.skip(result.stdout)
-    assert result.returncode == 0, result.stdout + result.stderr
+    run_probe(__file__, host_source / "core.py", timeout=60)
 
 
 def _dock_order_probe(core):
     try:
         from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import QApplication, QDockWidget, QLabel, QMainWindow, QTabBar
+        from PyQt6.QtWidgets import QApplication, QDockWidget, QLabel, QMainWindow
     except ImportError:
         print("PyQt6 unavailable")
         return 77

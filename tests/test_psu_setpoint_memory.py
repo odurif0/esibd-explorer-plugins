@@ -11,7 +11,7 @@ import types
 import numpy as np
 import pytest
 
-from test_psu_channels import make_psu
+from support.psu import make_psu
 
 
 @pytest.fixture(params=[f"psu_{suffix}" for suffix in "abcde"])

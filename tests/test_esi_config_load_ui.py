@@ -3,22 +3,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize('keys', ['ini', 'lower-dict', 'mixed-ini'])
 def test_esi_configuration_roundtrip_in_qt(tmp_path, keys):
-    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONUNBUFFERED='1')
-    result = subprocess.run([env.get('ESIBD_QT_PYTHON', sys.executable), str(Path(__file__)),
-                             str(tmp_path), keys], env=env, text=True, capture_output=True, timeout=40)
-    if result.returncode == 77:
-        pytest.skip(result.stdout + result.stderr)
-    assert result.returncode == 0, result.stdout + result.stderr
+    run_probe(__file__, tmp_path, keys, timeout=40, env={'PYTHONUNBUFFERED': '1'})
 
 
 def run(target, keys):

@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_tpg366_protocol import FakeSerial, frame, protocol
+from support.tpg366 import FakeSerial, frame, protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'tpg366'
@@ -354,6 +354,8 @@ def test_actual_native_pty_nak_failure_and_resync_reuse_port_and_keep_count(nati
 
 @pytest.mark.parametrize('fault,phase', [('partial_ack', 'waiting for ACK'), ('partial_data', 'waiting for data'),
                                        ('late_ack', 'waiting for ACK')])
+
+
 def test_actual_native_pty_timeout_does_not_retransmit_and_explicit_resync_recovers(native_rig, fault, phase):
     rig = native_rig
     link = rig.new_link()
@@ -559,6 +561,8 @@ def test_simulation_does_not_load_native_worker_or_need_data_path():
 
 @pytest.mark.parametrize('settings', [SimpleNamespace(), SimpleNamespace(dataPath=None),
                                      SimpleNamespace(dataPath=''), SimpleNamespace(dataPath=' \t')])
+
+
 def test_missing_explorer_data_path_fails_without_worker_or_plugin_log_fallback(settings):
     opened = []
     rig = SimpleNamespace(data_path=None, serial=SimpleNamespace(name='unused'),

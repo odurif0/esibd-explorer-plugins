@@ -15,12 +15,11 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-import test_ampr_plugin_channel_sync
-import test_amx_hd_plugin_behavior
-import test_amx_plugin_behavior
-import test_dmmr_plugin_behavior
-import test_esi_plugin_behavior
-import test_psu_plugin_behavior
+import support.ampr
+import support.amx
+import support.dmmr
+import support.esi
+import support.psu
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,12 +42,12 @@ def _load_tpg366(monkeypatch):
 
 
 PLUGINS = {
-    "ampr": (lambda mp: test_ampr_plugin_channel_sync._load_module(), "AMPRDevice"),
-    "amx": (lambda mp: test_amx_plugin_behavior._load_module(), "AMXDevice"),
-    "amx_hd": (lambda mp: test_amx_hd_plugin_behavior._load_hd_plugin_module(), "AMXHDDevice"),
-    "dmmr": (lambda mp: test_dmmr_plugin_behavior._load_module(), "DMMRDevice"),
-    "esi": (lambda mp: test_esi_plugin_behavior._load_plugin(), "ESIDevice"),
-    "psu": (lambda mp: test_psu_plugin_behavior._load_module(), "PSUDevice"),
+    "ampr": (lambda mp: support.ampr.load_plugin(), "AMPRDevice"),
+    "amx": (lambda mp: support.amx.load_plugin(), "AMXDevice"),
+    "amx_hd": (lambda mp: support.amx.load_plugin("amx_hd"), "AMXHDDevice"),
+    "dmmr": (lambda mp: support.dmmr.load_plugin(), "DMMRDevice"),
+    "esi": (lambda mp: support.esi.load_plugin(), "ESIDevice"),
+    "psu": (lambda mp: support.psu.load_plugin(), "PSUDevice"),
     "tpg366": (_load_tpg366, "TPG366"),
 }
 
@@ -85,7 +84,7 @@ def test_periodic_configuration_save_runs_on_the_gui_thread(app, plugin, monkeyp
 
 
 def test_hosts_without_periodic_save_are_unaffected(app, monkeypatch):
-    module = test_dmmr_plugin_behavior._load_module()
+    module = support.dmmr.load_plugin()
     monkeypatch.delattr(module.Device, "exportConfigurationIfChanged", raising=False)
     device = module.DMMRDevice.__new__(module.DMMRDevice)
     device.exportConfigurationIfChanged()  # Explorer 1.0.1 has no base method: nothing to do

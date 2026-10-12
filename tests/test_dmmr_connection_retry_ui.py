@@ -1,26 +1,17 @@
 """Real Explorer ON/OFF buttons through a late native open and reconnection."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize('late_status', ['0', '-5'])
 @pytest.mark.parametrize('scale', ['1', '1.5'])
 def test_power_on_retry_with_real_explorer_buttons(late_status, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), late_status, str(tmp_path)],
-        env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen', 'QT_SCALE_FACTOR': scale},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip('Real PyQt6 or Explorer source unavailable')
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert 'Traceback' not in result.stderr, result.stderr
+    run_probe(__file__, late_status, tmp_path, timeout=30, scale=scale)
 
 
 def probe(late_status, output, shutdown_action=None):
@@ -34,12 +25,12 @@ def probe(late_status, output, shutdown_action=None):
         from PyQt6.QtGui import QAction, QIcon
         from PyQt6.QtTest import QTest
         from PyQt6.QtWidgets import QApplication, QLabel, QToolBar, QVBoxLayout, QWidget
-        from test_on_off_action_ui import explorer_state_action
+        from support.ui import explorer_state_action
         StateAction = explorer_state_action()
     except (ImportError, PackageNotFoundError):
         return 77
-    from test_dmmr_connection_retry import connection, finish_open
-    from test_dmmr_toggle_failures import FaultingDMMR
+    from support.dmmr import dmmr_connection as connection, finish_open
+    from support.dmmr import FaultingDMMR
 
     app = QApplication([])
     patch = pytest.MonkeyPatch()
@@ -130,7 +121,7 @@ def probe(late_status, output, shutdown_action=None):
         worker = threading.Thread(target=callback)
         workers.append(worker)
         worker.start()
-    from test_dmmr_initialization_cancel import hold_host_initialization
+    from support.dmmr import hold_host_initialization
     queued = hold_host_initialization(hw, patch)
     queued_mode = bool(shutdown_action and shutdown_action.startswith('queued_'))
     def initialize():
@@ -174,7 +165,7 @@ def probe(late_status, output, shutdown_action=None):
     try:
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         if queued_mode:
-            from test_dmmr_failed_open_shutdown_ui import host_device_close
+            from support.dmmr import host_device_close
             assert controller.initializing and controller.device is None
             assert hw.calls == [] and len(queued) == 1
             if shutdown_action == 'queued_local_off':
@@ -215,7 +206,7 @@ def probe(late_status, output, shutdown_action=None):
         assert hw.calls == ['open'] and hw.successes == []
         parent.grab().save(str(output / 'pending-open.png'))
         if shutdown_action is not None:
-            from test_dmmr_failed_open_shutdown_ui import host_device_close
+            from support.dmmr import host_device_close
             assert parent.closeCommunicationAction.isVisible()
             # First exercise the real Disconnect button while the Open is blocked.
             disconnect_button = parent.titleBar.widgetForAction(parent.closeCommunicationAction)

@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from test_psu_channels import make_psu
+from support.psu import make_psu
 
 FIELDS = ('hardware_voltage_limit', 'hardware_current_limit',
           'voltage_setpoint_readback', 'current_limit_readback')

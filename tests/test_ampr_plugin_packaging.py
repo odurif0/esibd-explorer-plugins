@@ -7,11 +7,11 @@ import importlib.util
 import inspect
 import sys
 import types
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 import pytest
+from support.ampr import load_plugin
 
 
 PLUGIN_PATH = (
@@ -54,221 +54,13 @@ ICON_PATH = (
 )
 
 
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"
-        FLOAT = "FLOAT"
-        LABEL = "LABEL"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        ADVANCED = "Advanced"
-        MAX = "Max"
-        EVENT = "Event"
-        TOOLTIP = "Tooltip"
-        INDICATOR = "Indicator"
-        PARAMETER_TYPE = "PARAMETER_TYPE"
-
-    class Channel:
-        real = True
-        COLLAPSE = "Collapse"
-        NAME = "Name"
-        ACTIVE = "Active"
-        DISPLAY = "Display"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-        MONITOR = "Monitor"
-        SCALING = "Scaling"
-        MIN = "Min"
-        MAX = "Max"
-        OPTIMIZE = "Optimize"
-
-        def __init__(self, channelParent=None, tree=None):
-            self.channelParent = channelParent
-            self.tree = tree
-
-        def setDisplayedParameters(self):
-            self.displayedParameters = [
-                self.NAME,
-                self.VALUE,
-                self.MONITOR,
-                self.MIN,
-                self.MAX,
-                self.ACTIVE,
-                self.REAL,
-                self.OPTIMIZE,
-                self.DISPLAY,
-            ]
-
-        def getDefaultChannel(self):
-            return {
-                self.ACTIVE: {Parameter.HEADER: "A", Parameter.ADVANCED: True},
-                self.DISPLAY: {Parameter.HEADER: "D", Parameter.ADVANCED: False},
-                self.REAL: {Parameter.HEADER: "R", Parameter.ADVANCED: True},
-                self.ENABLED: {Parameter.HEADER: "E", Parameter.ADVANCED: True},
-                self.VALUE: {Parameter.HEADER: "Unit"},
-                self.SCALING: {Parameter.VALUE: "normal"},
-                self.MIN: {},
-                "Max": {},
-            }
-
-        def getSortedDefaultChannel(self):
-            return self.getDefaultChannel()
-
-        def initGUI(self, item):
-            self.super_init_gui_called = item
-
-        def scalingChanged(self):
-            self.rowHeight = 18
-
-        def nameChanged(self):
-            self.super_name_changed_called = True
-
-        def valueChanged(self):
-            self.super_value_changed_called = True
-
-        def equationChanged(self):
-            self.super_equation_changed_called = True
-
-        def activeChanged(self):
-            self.super_active_changed_called = True
-
-        def enabledChanged(self):
-            self.super_enabled_changed_called = True
-
-        def updateDisplay(self):
-            self.super_update_display_called = True
-
-        def updateMin(self):
-            self.super_update_min_called = True
-
-        def updateMax(self):
-            self.super_update_max_called = True
-
-    class DeviceController:
-        pass
-
-    class ToolButton:
-        def __init__(self):
-            self.maximum_height = None
-            self.minimum_width = None
-            self.text = None
-            self.checkable = None
-            self.auto_raise = None
-            self.checked = None
-
-        def setMaximumHeight(self, height):
-            self.maximum_height = height
-
-        def setMinimumWidth(self, width):
-            self.minimum_width = width
-
-        def setText(self, text):
-            self.text = text
-
-        def setCheckable(self, checkable):
-            self.checkable = checkable
-
-        def setAutoRaise(self, auto_raise):
-            self.auto_raise = auto_raise
-
-        def setChecked(self, checked):
-            self.checked = checked
-
-    class Device:
-        def toggleAdvanced(self, advanced=False):
-            self.super_toggle_advanced_called = advanced
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        parameter = {}
-        if "value" in kwargs:
-            parameter[Parameter.VALUE] = kwargs["value"]
-        if "advanced" in kwargs:
-            parameter[Parameter.ADVANCED] = kwargs["advanced"]
-        if "header" in kwargs:
-            parameter[Parameter.HEADER] = kwargs["header"]
-        if "toolTip" in kwargs:
-            parameter[Parameter.TOOLTIP] = kwargs["toolTip"]
-        if "indicator" in kwargs:
-            parameter[Parameter.INDICATOR] = kwargs["indicator"]
-        if "parameterType" in kwargs:
-            parameter[Parameter.PARAMETER_TYPE] = kwargs["parameterType"]
-        parameter.update(kwargs)
-        return parameter
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.parameterDict = parameterDict
-    plugins.Device = Device
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name == "cgc"
-        or name.startswith("cgc.")
-        or name.startswith("esibd_ampr")
-        or name.startswith("_esibd_bundled_ampr_runtime")
-        or name in {"ampr_plugin_test", "ampr_a_plugin_test", "ampr_b_plugin_test"}
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _import_plugin_module_from_path(module_name: str, plugin_path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, plugin_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _import_plugin_module():
-    return _import_plugin_module_from_path("ampr_plugin_test", PLUGIN_PATH)
-
-
 def test_plugin_import_is_lazy_and_does_not_load_runtime(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
     monkeypatch.syspath_prepend("/tmp/nonexistent-sentinel")
 
     runtime_dir_str = str(VENDOR_ROOT)
     assert runtime_dir_str not in sys.path
 
-    module = _import_plugin_module()
+    module = load_plugin()
     runtime_module_name = module._bundled_runtime_module_name()
 
     assert callable(module._get_ampr_driver_class)
@@ -278,10 +70,7 @@ def test_plugin_import_is_lazy_and_does_not_load_runtime(monkeypatch):
 
 
 def test_plugin_prefers_private_bundled_runtime(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
     driver_class = module._get_ampr_driver_class()
     runtime_module_name = module._bundled_runtime_module_name()
 
@@ -294,10 +83,7 @@ def test_plugin_prefers_private_bundled_runtime(monkeypatch):
 
 
 def test_plugin_fails_explicitly_when_bundled_runtime_is_missing(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
     monkeypatch.setattr(module, "_BUNDLED_RUNTIME_DIRNAME", "missing_runtime")
     module._AMPR_DRIVER_CLASS = None
 
@@ -306,10 +92,7 @@ def test_plugin_fails_explicitly_when_bundled_runtime_is_missing(monkeypatch):
 
 
 def test_plugin_runtime_forces_inline_backend():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
     module._get_ampr_driver_class()
     runtime_module_name = module._bundled_runtime_module_name()
 
@@ -319,10 +102,7 @@ def test_plugin_runtime_forces_inline_backend():
 
 
 def test_plugin_runtime_shutdown_attempts_all_outputs_before_raising():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
     driver_class = module._get_ampr_driver_class()
     backend = object.__new__(driver_class._PROCESS_CONTROLLER_CLASS)
     backend.connected = True
@@ -365,13 +145,7 @@ def test_plugin_runtime_shutdown_attempts_all_outputs_before_raising():
 
 @pytest.mark.parametrize("plugin_path", [PLUGIN_A_PATH, PLUGIN_B_PATH])
 def test_plugin_process_backend_calls_methods_with_rpc_timeout(monkeypatch, plugin_path):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path(
-        f"{plugin_path.parent.name}_plugin_test",
-        plugin_path,
-    )
+    module = load_plugin(plugin_path, f"{plugin_path.parent.name}_plugin_test")
     driver_class = module._get_ampr_driver_class()
     runtime_root = driver_class.__module__.rsplit(".", 2)[0]
     driver_common = importlib.import_module(f"{runtime_root}._driver_common")
@@ -418,14 +192,12 @@ def test_plugin_icon_is_a_valid_png_asset():
 
 
 def test_plugin_enables_monitors_and_hides_optimize_column():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     assert module.AMPRDevice.useMonitors is True
 
     channel = object.__new__(module.AMPRChannel)
+    channel.channelParent = types.SimpleNamespace(useMonitors=module.AMPRDevice.useMonitors, ramp_rate_v_s=10.)
     module.AMPRChannel.setDisplayedParameters(channel)
 
     assert "Optimize" not in channel.displayedParameters
@@ -474,10 +246,7 @@ def test_plugin_enables_monitors_and_hides_optimize_column():
 
 
 def test_plugin_hides_framework_collapse_column():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeTree:
         def __init__(self):
@@ -507,10 +276,7 @@ def test_plugin_hides_framework_collapse_column():
 
 
 def test_missing_default_config_keeps_ampr_empty_until_first_initialization(tmp_path):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeAction:
         def __init__(self):
@@ -601,10 +367,7 @@ def test_missing_default_config_keeps_ampr_empty_until_first_initialization(tmp_
 
 
 def test_estimate_storage_handles_empty_pre_initialization_state():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeWidget:
         def __init__(self):
@@ -636,10 +399,7 @@ def test_estimate_storage_handles_empty_pre_initialization_state():
 
 
 def test_toggle_advanced_keeps_ampr_channels_visible():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeChannel:
         def __init__(self):
@@ -678,10 +438,7 @@ def test_toggle_advanced_keeps_ampr_channels_visible():
 
 
 def test_set_on_ui_state_uses_thread_safe_action_signals():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeSignal:
         def __init__(self):
@@ -715,10 +472,7 @@ def test_set_on_ui_state_uses_thread_safe_action_signals():
 
 
 def test_channel_events_are_logged_for_user_changes():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     logs = []
     channel = object.__new__(module.AMPRChannel)
@@ -729,6 +483,7 @@ def test_channel_events_are_logged_for_user_changes():
     channel.name = "AMPR_M02_CH3"
     channel.module = "2"
     channel.id = "3"
+    channel.real = True  # Normally created from the channel parameters.
     channel.value = 123.4
     channel.enabled = True
     channel.active = False
@@ -778,10 +533,7 @@ def test_channel_events_are_logged_for_user_changes():
 
 
 def test_channel_off_immediately_clears_monitor():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     channel = object.__new__(module.AMPRChannel)
     channel.channelParent = types.SimpleNamespace(
@@ -791,6 +543,7 @@ def test_channel_off_immediately_clears_monitor():
     channel.name = "AMPR_M02_CH3"
     channel.module = "2"
     channel.id = "3"
+    channel.real = True  # Normally created from the channel parameters.
     channel.enabled = False
     channel.monitor = 42.0
 
@@ -800,10 +553,7 @@ def test_channel_off_immediately_clears_monitor():
 
 
 def test_channel_enabled_change_forces_apply_even_without_setpoint_change():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     applies = []
     channel = object.__new__(module.AMPRChannel)
@@ -814,6 +564,7 @@ def test_channel_enabled_change_forces_apply_even_without_setpoint_change():
     channel.name = "AMPR_M02_CH3"
     channel.module = "2"
     channel.id = "3"
+    channel.real = True  # Normally created from the channel parameters.
     channel.enabled = True
     channel.monitor = 0.0
     channel.applyValue = lambda apply=False: applies.append(apply)
@@ -824,10 +575,7 @@ def test_channel_enabled_change_forces_apply_even_without_setpoint_change():
 
 
 def test_channel_keeps_display_checkbox_and_explicit_toggle_buttons():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeParameter:
         def __init__(self, value):
@@ -862,7 +610,7 @@ def test_channel_keeps_display_checkbox_and_explicit_toggle_buttons():
     parameters["Display"].check = original_display_widget
     channel.parameters = list(parameters.values())
     channel.rowHeight = 18
-    channel.loading = False
+    channel.channelParent = types.SimpleNamespace(loading=False)  # Channel.loading is read-only.
     channel.tree = FakeTree()
     channel.useDisplays = True
     channel.getParameterByName = parameters.get
@@ -881,10 +629,7 @@ def test_channel_keeps_display_checkbox_and_explicit_toggle_buttons():
 
 
 def test_channel_enabled_toggle_text_becomes_explicitly_off():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeWidget:
         def __init__(self):
@@ -906,6 +651,7 @@ def test_channel_enabled_toggle_text_becomes_explicitly_off():
     channel.name = "AMPR_M02_CH3"
     channel.module = "2"
     channel.id = "3"
+    channel.real = True  # Normally created from the channel parameters.
     channel.enabled = False
     channel.monitor = 42.0
     channel.getParameterByName = lambda name: {"Enabled": FakeParameter(enabled_widget)}.get(name)
@@ -917,10 +663,7 @@ def test_channel_enabled_toggle_text_becomes_explicitly_off():
 
 
 def test_channel_monitor_feedback_uses_relative_color_bands():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeWidget:
         def __init__(self):
@@ -972,10 +715,7 @@ def test_channel_monitor_feedback_uses_relative_color_bands():
 
 
 def test_init_gui_rewires_close_action_to_shutdown():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeSignal:
         def __init__(self):
@@ -1032,10 +772,7 @@ def test_init_gui_rewires_close_action_to_shutdown():
 
 
 def test_finalize_init_adds_local_on_action_and_set_on_keeps_it_synced():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeStateAction:
         def __init__(self):
@@ -1098,10 +835,7 @@ def test_finalize_init_adds_local_on_action_and_set_on_keeps_it_synced():
 
 
 def test_set_on_ignores_reentrant_request_while_transition_is_running():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     device = object.__new__(module.AMPRDevice)
     device.name = "AMPR"
@@ -1128,10 +862,7 @@ def test_set_on_ignores_reentrant_request_while_transition_is_running():
 
 
 def test_close_communication_uses_controller_initialized_for_shutdown():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     shutdown_calls = []
     close_calls = []
@@ -1153,10 +884,7 @@ def test_close_communication_uses_controller_initialized_for_shutdown():
 
 
 def test_shutdown_communication_keeps_ui_on_when_shutdown_is_unconfirmed():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     device = object.__new__(module.AMPRDevice)
     device.useOnOffLogic = True
@@ -1179,10 +907,7 @@ def test_shutdown_communication_keeps_ui_on_when_shutdown_is_unconfirmed():
 
 
 def test_status_widgets_summarize_global_ampr_state():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeLabel:
         def __init__(self, text=""):
@@ -1239,10 +964,7 @@ def test_status_widgets_summarize_global_ampr_state():
 
 
 def test_finalize_init_relabels_advanced_action_for_ampr():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeAdvancedAction:
         def __init__(self):
@@ -1282,12 +1004,10 @@ def test_finalize_init_relabels_advanced_action_for_ampr():
 
 
 def test_ampr_a_and_ampr_b_load_as_distinct_autonomous_plugins(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
     monkeypatch.syspath_prepend("/tmp/nonexistent-sentinel")
 
-    module_a = _import_plugin_module_from_path("ampr_a_plugin_test", PLUGIN_A_PATH)
-    module_b = _import_plugin_module_from_path("ampr_b_plugin_test", PLUGIN_B_PATH)
+    module_a = load_plugin(PLUGIN_A_PATH, "ampr_a_plugin_test")
+    module_b = load_plugin(PLUGIN_B_PATH, "ampr_b_plugin_test")
     runtime_module_name_a = module_a._bundled_runtime_module_name()
     runtime_module_name_b = module_b._bundled_runtime_module_name()
 
@@ -1319,10 +1039,7 @@ def test_ampr_a_and_ampr_b_load_as_distinct_autonomous_plugins(monkeypatch):
 
 
 def test_ampr_recording_action_reflects_device_readiness():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
 
     class FakeAction:
         def __init__(self):
@@ -1392,10 +1109,7 @@ def test_ampr_recording_action_reflects_device_readiness():
     ],
 )
 def test_ampr_partial_startup_exposes_toolbar_disconnect_action(module_name, plugin_path):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path(module_name, plugin_path)
+    module = load_plugin(plugin_path, module_name)
 
     class FakeAction:
         def __init__(self):
@@ -1443,10 +1157,7 @@ def test_ampr_partial_startup_exposes_toolbar_disconnect_action(module_name, plu
 
 
 def test_ampr_toggle_recording_rejects_unready_device():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module()
+    module = load_plugin()
     super_calls = []
 
     def fake_super_toggle(self, on=None, manual=True):

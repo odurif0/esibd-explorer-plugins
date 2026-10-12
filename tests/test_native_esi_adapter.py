@@ -14,8 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_esi_plugin_behavior import _load_plugin
-from test_native_worker import binary  # Local offline executable test-backend fixture.
+from support.esi import load_plugin as _load_plugin
 
 
 def snapshot(*, active=True):
@@ -195,6 +194,8 @@ def test_native_initialization_keeps_verified_safe_sequence(control, monkeypatch
 
 @pytest.mark.parametrize("boundary", ["connect", "global", "heat_limits", "identity", "safe_off",
                                      "steps", "adc1", "adc2", "diagnostics", "configs"])
+
+
 @pytest.mark.parametrize("raises", [False, True])
 def test_retired_initialization_never_commands_or_closes_replacement(control, monkeypatch, boundary, raises):
     driver, _ = prepare_initialization(control, monkeypatch)
@@ -333,6 +334,8 @@ def test_fatal_crash_resume_read_releases_transport_without_output_commands(cont
 
 @pytest.mark.parametrize("kind,boundary", [("temperature", "temperature"), ("power", "heat_config"),
                                           ("power", "heat_limits")])
+
+
 @pytest.mark.parametrize("raises", [False, True])
 def test_retired_heater_edit_never_rolls_back_or_publishes_to_new_connection(control, kind, boundary, raises):
     c, old = control.c, control.c.device
@@ -604,7 +607,7 @@ def test_heat_off_without_readback_stays_red_and_off_reachable(control):
 
 
 @pytest.fixture
-def native_facade(control, binary, monkeypatch, tmp_path):
+def native_facade(control, worker_binary, monkeypatch, tmp_path):
     driver_class = control.module._get_esi_driver_class()
     transport = importlib.import_module(driver_class.__module__.rsplit(".", 2)[0] + "._native_worker")
     proxy_class = transport.NativeWorkerProxy
@@ -614,7 +617,7 @@ def native_facade(control, binary, monkeypatch, tmp_path):
         assert config["device_id"] == "native_esi_gui_test" and config["com"] == 16
         proxy = proxy_class(root, "test", {"connected": True, "_dll_port_claimed": True,
                                           "_transport_poisoned": False, "_transport_error": None},
-                            command=[str(binary), "--family", "test"],
+                            command=[str(worker_binary), "--family", "test"],
                             log_dir=tmp_path, stop_grace_s=.05)
         created.append(proxy)
         return proxy
@@ -631,7 +634,7 @@ def native_facade(control, binary, monkeypatch, tmp_path):
     monkeypatch.setattr(proxy, "call_method", route)
     control.c.device = driver
     yield SimpleNamespace(driver=driver, proxy=proxy, routes=routes, calls=calls,
-                          transport=transport, proxy_class=proxy_class, binary=binary)
+                          transport=transport, proxy_class=proxy_class, binary=worker_binary)
     for proxy in created:
         proxy.close(grace_s=0)
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_esi_current_measurements import rig, snapshot
+from support.esi_current import rig, snapshot
 
 
 class FakeDevice:
@@ -64,6 +64,8 @@ def test_a_value_without_new_conversion_ages_then_is_neither_shown_nor_recorded(
 
 @pytest.mark.parametrize("polarity,valid,state", [
     ("negative", True, "mismatch"), (None, True, "mismatch"), ("positive", False, "invalid")])
+
+
 def test_wrong_connector_or_invalid_reading_is_never_shown_as_the_electrospray_voltage(
         monkeypatch, polarity, valid, state):
     _module, controller, _calls = adc_rig(monkeypatch)
@@ -131,6 +133,8 @@ def test_config_load_points_the_adc_back_at_the_electrospray_connectors(monkeypa
     ({"state": "settling", "requested": "NEG", "value": np.nan}, "NEG settling…"),
     ({"state": "waiting", "requested": "POS", "value": np.nan}, "POS waiting for a reading"),
 ])
+
+
 def test_panel_text_names_the_connector_and_never_hides_a_problem(readback, expected):
     module = rig()[0]
     assert module._adc_readback_text(readback)[0] == expected

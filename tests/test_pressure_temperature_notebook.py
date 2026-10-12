@@ -848,23 +848,22 @@ def test_stop_during_native_heater_readiness_prevents_late_commands(
 
 
 # Real high-level ESI implementation above a stateful fake native DLL.
-from test_esi_heater_activation import rig as _native_esi  # noqa: E402,F401
 
 
 @pytest.fixture
-def native_esi(_native_esi, monkeypatch):
+def native_esi(esi_heater_rig, monkeypatch):
     # Simulate a thermally following load and native limit echoes; never operate an instrument.
     for key in ("voltage", "current", "power"):
         def setter(self, value, key=key):
-            _native_esi.state.limits[key] = value
+            esi_heater_rig.state.limits[key] = value
             return 0, value
-        monkeypatch.setattr(_native_esi.base, f"set_heat_ctrl_{key}_limit", setter)
+        monkeypatch.setattr(esi_heater_rig.base, f"set_heat_ctrl_{key}_limit", setter)
     def monitoring(self):
-        if _native_esi.state.target > 0:
-            _native_esi.state.temperature = _native_esi.state.target - .1
-        return 0, _native_esi.state.sensor_valid, 0., 0., 0., _native_esi.state.temperature
-    monkeypatch.setattr(_native_esi.base, "get_heat_ctrl_monitoring", monitoring)
-    return _native_esi
+        if esi_heater_rig.state.target > 0:
+            esi_heater_rig.state.temperature = esi_heater_rig.state.target - .1
+        return 0, esi_heater_rig.state.sensor_valid, 0., 0., 0., esi_heater_rig.state.temperature
+    monkeypatch.setattr(esi_heater_rig.base, "get_heat_ctrl_monitoring", monitoring)
+    return esi_heater_rig
 
 
 @pytest.mark.parametrize("stop_after", ["voltage", "current", "power"])
@@ -921,26 +920,25 @@ def test_real_esi_runtime_contract_with_simulated_native_calls(ns, native_esi, t
     assert native_esi.state.enabled is False and native_esi.state.active[0] is False
 
 
-from test_esi_discharge import rig as native_discharge  # noqa: E402,F401
-from test_tpg366_protocol import FakeSerial  # noqa: E402
+from support.tpg366 import FakeSerial
 
 
 @pytest.mark.parametrize("fault", [None, "sticky", "high_voltage", "invalid"])
-def test_real_discharge_verifier_requires_fresh_low_values(ns, rig, native_discharge, fault):
+def test_real_discharge_verifier_requires_fresh_low_values(ns, rig, esi_discharge_rig, fault):
     if fault == "sticky":
-        native_discharge.state.sticky = True
+        esi_discharge_rig.state.sticky = True
     elif fault == "high_voltage":
-        native_discharge.values[2, True] = [-100.]
+        esi_discharge_rig.values[2, True] = [-100.]
     elif fault == "invalid":
-        native_discharge.state.invalid = "voltage"
+        esi_discharge_rig.state.invalid = "voltage"
     def disconnect(**kwargs):
         rig.esi.call("disconnect")
-        return native_discharge.driver.disconnect(**kwargs)
+        return esi_discharge_rig.driver.disconnect(**kwargs)
     rig.esi.disconnect = disconnect
     rig.run.run()
     metadata = report(rig.run)
     if fault is None:
-        assert metadata["shutdown_confirmed"] and ("close",) in native_discharge.calls
+        assert metadata["shutdown_confirmed"] and ("close",) in esi_discharge_rig.calls
         assert metadata["last_discharge"]["consecutive"] == 3
         assert metadata["last_discharge"]["limit_v"] == 1
         assert all(abs(values[key]) <= 1 for values in metadata["last_discharge"]["modules"].values()
@@ -953,9 +951,9 @@ def test_real_discharge_verifier_requires_fresh_low_values(ns, rig, native_disch
         elapsed = [observation["elapsed_s"] for observation in observations]
         assert elapsed == sorted(elapsed)
     if fault is not None:
-        assert not metadata["shutdown_confirmed"] and ("close",) not in native_discharge.calls
+        assert not metadata["shutdown_confirmed"] and ("close",) not in esi_discharge_rig.calls
         assert ns["_PT_GUARD"] and rig.run.guard_path.exists()
-    assert not any(call == ("gate", True) for call in native_discharge.calls)
+    assert not any(call == ("gate", True) for call in esi_discharge_rig.calls)
 
 
 @pytest.mark.parametrize("fault", [None, "partial_gauges", "all_invalid", "nak", "unit_change", "initialize", "open", "close"])
@@ -1296,6 +1294,8 @@ def test_unknown_poison_state_never_allows_automatic_cleanup(ns, rig, fault):
 
 @pytest.mark.parametrize("value,expected", [(21, "COM21"), ("com021", "COM21"), (" 021 ", "COM21"),
                                             ("/dev/ttyUSB0", "/dev/ttyUSB0")])
+
+
 def test_tpg_port_normalization(ns, value, expected):
     assert ns["serial_port_name"](value) == expected
 
@@ -1385,8 +1385,8 @@ def _run_signal_probe(tmp_path, mode, notebook=NOTEBOOK):
         from pathlib import Path
         import pytest
         from test_pressure_temperature_notebook import Clock, FakeESI, FakePressure, NoPlots, SimulatedGuard, report, rows
-        from test_esi_heater_activation import rig as native_rig
-        from test_tpg366_protocol import FakeSerial
+        from support.esi_heater import esi_heater_rig as native_rig
+        from support.tpg366 import FakeSerial
         mode, target, notebook = sys.argv[1:]
         target = Path(target)
         tree = ast.parse(''.join(
@@ -2117,6 +2117,8 @@ def test_notebook_run_from_elsewhere_finds_explorers_plugin_folder(ns, tmp_path)
     ("D:/Lab/plugins", "D:/Lab/plugins"),
     ("@Variant(\x00\x00)", None),  # a Qt-serialized object, not a plain path
 ])
+
+
 def test_explorer_plugin_path_is_read_from_its_windows_settings(ns, monkeypatch, stored, expected_first):
     import types
     opened = []

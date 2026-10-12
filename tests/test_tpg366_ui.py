@@ -4,11 +4,10 @@ Optional OS screenshot / Matplotlib widgets are not used by these probes.
 Subprocess isolation avoids the older tests' global ESIBD/Qt module stubs.
 """
 from pathlib import Path
-import os
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "read_failure", "nak_retransmitted", "transient_nak", "resync_unit_change",
@@ -17,14 +16,7 @@ CASES = ("acquire", "stop_during_read", "late_ready", "disconnect_failure", "rea
 
 @pytest.mark.parametrize("case", CASES)
 def test_real_explorer_pressure_plugin(case, tmp_path):
-    result = subprocess.run(
-        [os.environ.get('ESIBD_QT_PYTHON', sys.executable), str(Path(__file__).resolve()), case, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "XDG_CONFIG_HOME": str(tmp_path / "config")},
-        capture_output=True, text=True, timeout=30)
-    if result.returncode == 77:
-        pytest.skip(result.stdout.strip())
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, case, tmp_path, timeout=30, env={'XDG_CONFIG_HOME': str(tmp_path / 'config')})
 
 
 def probe(case, output):
@@ -37,7 +29,7 @@ def probe(case, output):
     import numpy as np
     try:
         from PyQt6 import QtCore, QtGui, QtWidgets
-        import pyqtgraph as pg
+        import pyqtgraph as pg  # noqa: F401  (the plugin's plots need it)
     except ImportError:
         print("Real PyQt6 and pyqtgraph are required")
         return 77
@@ -55,7 +47,7 @@ def probe(case, output):
         sys.modules[canvas.__name__] = canvas
     sys.modules.setdefault("pyautogui", ModuleType("pyautogui"))
     from esibd import core, plugins
-    from test_tpg366_protocol import FakeSerial
+    from support.tpg366 import FakeSerial
 
     app = QtWidgets.QApplication([])
     exceptions = []
@@ -182,7 +174,7 @@ def probe(case, output):
                         port.responses["UNI"] = "1"  # front panel changed during the outage
             port.on_write = nak_prx
         if case == "negative":
-            from test_tpg366_protocol import frame
+            from support.tpg366 import frame
             port.responses["PRX"] = frame(values=["-1.0000E-03"] * 6)
         if case in {"stop_during_read", "late_ready"}:
             target = b"AYT\r" if case == "late_ready" else b"PRX\r"
@@ -524,7 +516,7 @@ def probe(case, output):
             wait(lambda: not device.initialized)
             return 0
         if case == "statuses":
-            from test_tpg366_protocol import frame
+            from support.tpg366 import frame
             ports[0].responses["PRX"] = frame(statuses=(1, 2, 3, 4, 5, 6))
             wait(lambda: device.channels[5].status == "Identification error")
             assert all(math.isnan(ch.value) for ch in device.channels)

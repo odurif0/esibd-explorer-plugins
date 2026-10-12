@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_esi_discharge import rig as native_discharge  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK = ROOT / "notebooks/esi_adc_probe.ipynb"
@@ -66,8 +65,8 @@ class Guard:
 
 
 @pytest.fixture
-def probe(ns, native_discharge, tmp_path):
-    rig = native_discharge
+def probe(ns, esi_discharge_rig, tmp_path):
+    rig = esi_discharge_rig
     diagnostic = {"modules": {address: {"module_active": False, "active": False, "target_v": 0.}
                               for address in (1, 2)},
                   "heat": {"module_active": False}}

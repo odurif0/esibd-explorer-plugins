@@ -5,13 +5,13 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import shutil
-import sys
 import types
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from support import explorer
+from support.amx import load_plugin
 
 
 PLUGIN_PATH = (
@@ -36,178 +36,8 @@ PLUGIN_B_PATH = (
 )
 
 
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        COMBO = "COMBO"
-        INT = "INT"
-        FLOAT = "FLOAT"
-        LABEL = "LABEL"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        ADVANCED = "Advanced"
-        EVENT = "Event"
-        TOOLTIP = "Tooltip"
-        INDICATOR = "Indicator"
-        PARAMETER_TYPE = "PARAMETER_TYPE"
-
-    class Channel:
-        COLLAPSE = "Collapse"
-        NAME = "Name"
-        ACTIVE = "Active"
-        DISPLAY = "Display"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-        SCALING = "Scaling"
-        MIN = "Min"
-        MAX = "Max"
-        OPTIMIZE = "Optimize"
-
-        def __init__(self, channelParent=None, tree=None):
-            self.channelParent = channelParent
-            self.tree = tree
-
-        def setDisplayedParameters(self):
-            self.displayedParameters = [
-                self.NAME,
-                self.VALUE,
-                self.ACTIVE,
-                self.REAL,
-                self.OPTIMIZE,
-                self.DISPLAY,
-            ]
-
-        def getDefaultChannel(self):
-            return {
-                self.ACTIVE: {Parameter.HEADER: "A"},
-                self.DISPLAY: {Parameter.HEADER: "D"},
-                self.REAL: {Parameter.HEADER: "R"},
-                self.ENABLED: {Parameter.HEADER: "E"},
-                self.VALUE: {Parameter.HEADER: "Value"},
-                self.SCALING: {Parameter.VALUE: "normal"},
-                self.MIN: {},
-                self.MAX: {},
-            }
-
-        def getSortedDefaultChannel(self):
-            return self.getDefaultChannel()
-
-        def initGUI(self, item):
-            self.super_init_gui_called = item
-
-        def scalingChanged(self):
-            self.rowHeight = 18
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-
-    class ToolButton:
-        def __init__(self):
-            self.maximum_height = None
-            self.minimum_width = None
-            self.text = None
-            self.checkable = None
-            self.auto_raise = None
-
-        def setMaximumHeight(self, height):
-            self.maximum_height = height
-
-        def setMinimumWidth(self, width):
-            self.minimum_width = width
-
-        def setText(self, text):
-            self.text = text
-
-        def setCheckable(self, checkable):
-            self.checkable = checkable
-
-        def setAutoRaise(self, auto_raise):
-            self.auto_raise = auto_raise
-
-    class Device:
-        MAXDATAPOINTS = "Max data points"
-
-        def toggleAdvanced(self, advanced=False):
-            self.super_toggle_advanced_called = advanced
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        parameter = {}
-        if "value" in kwargs:
-            parameter[Parameter.VALUE] = kwargs["value"]
-        if "advanced" in kwargs:
-            parameter[Parameter.ADVANCED] = kwargs["advanced"]
-        if "header" in kwargs:
-            parameter[Parameter.HEADER] = kwargs["header"]
-        if "toolTip" in kwargs:
-            parameter[Parameter.TOOLTIP] = kwargs["toolTip"]
-        if "parameterType" in kwargs:
-            parameter[Parameter.PARAMETER_TYPE] = kwargs["parameterType"]
-        parameter.update(kwargs)
-        return parameter
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.parameterDict = parameterDict
-    plugins.Device = Device
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name.startswith("_esibd_bundled_amx_runtime")
-        or name in {"amx_plugin_test", "amx_plugin_missing_runtime_test"}
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _import_plugin_module_from_path(module_name: str, plugin_path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, plugin_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_amx_plugin_exposes_expected_metadata():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     assert ICON_PATH.exists()
     assert module.providePlugins() == [module.AMXDevice]
@@ -222,12 +52,10 @@ def test_amx_plugin_exposes_expected_metadata():
 
 
 def test_amx_a_and_amx_b_load_as_distinct_autonomous_plugins(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
     monkeypatch.syspath_prepend("/tmp/nonexistent-sentinel")
 
-    module_a = _import_plugin_module_from_path("amx_a_plugin_test", PLUGIN_A_PATH)
-    module_b = _import_plugin_module_from_path("amx_b_plugin_test", PLUGIN_B_PATH)
+    module_a = load_plugin("amx_a")
+    module_b = load_plugin("amx_b")
 
     assert module_a.AMXDevice.name == "AMX_A"
     assert module_b.AMXDevice.name == "AMX_B"
@@ -242,10 +70,7 @@ def test_amx_a_and_amx_b_load_as_distinct_autonomous_plugins(monkeypatch):
 
 
 def test_amx_plugin_exposes_simple_config_settings():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
     device = object.__new__(module.AMXDevice)
     device.name = "AMX_A"
     device.MAXDATAPOINTS = "Max data points"
@@ -274,10 +99,7 @@ def test_amx_plugin_exposes_simple_config_settings():
 
 
 def test_amx_plugin_loads_driver_from_private_runtime():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
     driver_class = module._get_amx_driver_class()
 
     assert driver_class.__name__ == "AMX"
@@ -285,10 +107,7 @@ def test_amx_plugin_loads_driver_from_private_runtime():
 
 
 def test_amx_plugin_runtime_supports_explicit_process_backend_when_supported(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
     driver_class = module._get_amx_driver_class()
     runtime_root = driver_class.__module__.rsplit(".", 2)[0]
     driver_common = importlib.import_module(f"{runtime_root}._driver_common")
@@ -330,10 +149,7 @@ def test_amx_plugin_runtime_supports_explicit_process_backend_when_supported(mon
 
 
 def test_amx_plugin_runtime_defaults_to_inline_backend(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
     driver_class = module._get_amx_driver_class()
     runtime_root = driver_class.__module__.rsplit(".", 2)[0]
     driver_common = importlib.import_module(f"{runtime_root}._driver_common")
@@ -362,15 +178,9 @@ def test_amx_plugin_runtime_defaults_to_inline_backend(monkeypatch):
 
 
 def test_amx_plugin_fails_cleanly_when_runtime_is_missing(tmp_path):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
     plugin_copy = tmp_path / "amx_plugin.py"
     shutil.copy2(PLUGIN_PATH, plugin_copy)
-    module = _import_plugin_module_from_path(
-        "amx_plugin_missing_runtime_test",
-        plugin_copy,
-    )
+    module = explorer.load_plugin(plugin_copy, "amx_plugin_missing_runtime_test", runtimes=("amx",))
 
     try:
         module._get_amx_driver_class()
@@ -381,10 +191,7 @@ def test_amx_plugin_fails_cleanly_when_runtime_is_missing(tmp_path):
 
 
 def test_plugin_hides_framework_collapse_and_real_columns():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeTree:
         def __init__(self):
@@ -418,10 +225,7 @@ def test_plugin_hides_framework_collapse_and_real_columns():
 
 
 def test_missing_default_config_keeps_amx_empty_until_first_initialization(tmp_path):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeAction:
         def __init__(self):
@@ -495,10 +299,7 @@ def test_missing_default_config_keeps_amx_empty_until_first_initialization(tmp_p
 
 
 def test_amx_channel_monitor_feedback_uses_relative_color_bands():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeWidget:
         def __init__(self):
@@ -544,10 +345,7 @@ def test_amx_channel_monitor_feedback_uses_relative_color_bands():
 
 
 def test_estimate_storage_handles_empty_pre_initialization_state():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeWidget:
         def __init__(self):
@@ -579,10 +377,7 @@ def test_estimate_storage_handles_empty_pre_initialization_state():
 
 
 def test_finalize_init_relabels_advanced_action_for_amx():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeAdvancedAction:
         def __init__(self):
@@ -623,10 +418,7 @@ def test_finalize_init_relabels_advanced_action_for_amx():
 
 
 def test_finalize_init_adds_local_on_action_and_set_on_keeps_it_synced():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeStateAction:
         def __init__(self):
@@ -690,10 +482,7 @@ def test_finalize_init_adds_local_on_action_and_set_on_keeps_it_synced():
 
 
 def test_amx_set_on_ui_state_updates_both_actions_and_status_widgets():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeSignal:
         def __init__(self):
@@ -726,10 +515,7 @@ def test_amx_set_on_ui_state_updates_both_actions_and_status_widgets():
 
 
 def test_amx_set_on_initializes_communication_when_turning_on():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     init_calls = []
     toggle_calls = []
@@ -756,10 +542,7 @@ def test_amx_set_on_initializes_communication_when_turning_on():
 
 
 def test_amx_partial_startup_exposes_toolbar_disconnect_action():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeAction:
         def __init__(self):
@@ -807,10 +590,7 @@ def test_amx_partial_startup_exposes_toolbar_disconnect_action():
 
 
 def test_amx_toggle_recording_rejects_disconnected_device():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
     super_calls = []
 
     def fake_super_toggle(self, on=None, manual=True):
@@ -859,10 +639,7 @@ def test_amx_toggle_recording_rejects_disconnected_device():
 
 
 def test_status_widgets_summarize_global_amx_state():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeLabel:
         def __init__(self, text=""):
@@ -924,10 +701,7 @@ def test_status_widgets_summarize_global_amx_state():
 
 
 def test_status_widgets_relabel_fpga_disabled_off_state_as_standby():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeLabel:
         def __init__(self, text=""):
@@ -987,10 +761,7 @@ def test_status_widgets_relabel_fpga_disabled_off_state_as_standby():
 
 
 def test_status_widgets_keep_native_standby_state_and_badge_color():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeLabel:
         def __init__(self, text=""):
@@ -1039,10 +810,7 @@ def test_status_widgets_keep_native_standby_state_and_badge_color():
 
 
 def test_status_widgets_keep_fpga_disabled_state_when_device_is_on():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     device = object.__new__(module.AMXDevice)
     device.onAction = types.SimpleNamespace(state=True)
@@ -1059,10 +827,7 @@ def test_status_widgets_keep_fpga_disabled_state_when_device_is_on():
 
 
 def test_channel_uses_explicit_toggle_buttons_and_minimum_row_height():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeParameter:
         def __init__(self, value):
@@ -1098,7 +863,7 @@ def test_channel_uses_explicit_toggle_buttons_and_minimum_row_height():
     channel.parameters = list(parameters.values())
     channel.enabled = True
     channel.rowHeight = 18
-    channel.loading = False
+    channel.channelParent = types.SimpleNamespace(loading=False)  # Channel.loading is read-only.
     channel.tree = FakeTree()
     channel.getParameterByName = lambda name: parameters[name]
 
@@ -1117,10 +882,7 @@ def test_channel_uses_explicit_toggle_buttons_and_minimum_row_height():
 
 
 def test_channel_places_display_column_last():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     channel = object.__new__(module.AMXChannel)
     module.AMXChannel.setDisplayedParameters(channel)
@@ -1130,10 +892,7 @@ def test_channel_places_display_column_last():
 
 
 def test_channel_seeds_legacy_value_bounds_before_base_init(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     observed = {}
 
@@ -1148,9 +907,8 @@ def test_channel_seeds_legacy_value_bounds_before_base_init(monkeypatch):
     monkeypatch.setattr(module.Channel, "initGUI", fake_super_init)
 
     channel = object.__new__(module.AMXChannel)
-    channel.channelParent = types.SimpleNamespace(frequency_khz=4.0)
+    channel.channelParent = types.SimpleNamespace(frequency_khz=4.0, loading=False)
     channel.parameters = []
-    channel.loading = False
     channel.tree = None
     channel.getParameterByName = lambda _name: None
 
@@ -1175,10 +933,7 @@ def test_channel_seeds_legacy_value_bounds_before_base_init(monkeypatch):
 
 
 def test_config_controls_show_available_slots_loaded_status_and_load_now_action():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeSignal:
         def __init__(self):
@@ -1345,10 +1100,7 @@ def test_config_controls_show_available_slots_loaded_status_and_load_now_action(
 
 
 def test_config_controls_disable_load_now_until_amx_is_ready():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeSignal:
         def __init__(self):
@@ -1478,10 +1230,7 @@ def test_config_controls_disable_load_now_until_amx_is_ready():
 
 
 def test_config_controls_disable_load_now_when_amx_is_off():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     class FakeSignal:
         def __init__(self):
@@ -1614,10 +1363,7 @@ def test_driver_class_loading_is_thread_safe():
     """Concurrent driver-class loads must serialize, not interleave."""
     import concurrent.futures
 
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("amx_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="amx_plugin_test")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         classes = list(

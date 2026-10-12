@@ -4,7 +4,6 @@ Real Qt/Explorer input-event coverage lives in test_ampr_setpoint_ui.py.
 """
 from __future__ import annotations
 
-import importlib.util
 import threading
 import time
 from pathlib import Path
@@ -13,18 +12,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_ampr_plugin_channel_sync import _clear_test_modules, _install_esibd_stubs
+from support.ampr import load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(params=['ampr_a', 'ampr_b'])
 def rig(request):
-    _clear_test_modules()
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location('ampr_setpoint_test', ROOT / request.param / 'ampr_plugin.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_plugin(f'{request.param}/ampr_plugin.py', 'ampr_setpoint_test')
     # Worker feedback is tested against a real GUI thread in the UI tests.
     module._invoke_gui_callback = lambda fn: fn()
     # The lightweight host stubs otherwise omit the inherited dispatch chain.

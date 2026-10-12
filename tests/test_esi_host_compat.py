@@ -6,8 +6,8 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 
-from test_esi_plugin_behavior import _load_plugin
-from test_plugin_history import _host_code
+from support.esi import load_plugin as _load_plugin
+from explorer_host import compile_definition
 
 HOST = Path(__file__).parent / "fixtures/esibd_1_0_1_export.txt"
 
@@ -39,7 +39,7 @@ def esi(tmp_path, monkeypatch):
 @pytest.mark.parametrize("history", [True, False])
 def test_explorer_1_0_1_export_reaches_the_esi_override(esi, history):
     ns = dict(np=np, Path=Path, h5py=esi.h5py, PRINT=esi.module.PRINT, cast=lambda kind, value: value)
-    exec(_host_code(HOST, "exportOutputData", "Device"), ns)
+    exec(compile_definition(HOST, "exportOutputData", "Device"), ns)
     # Exactly the call Explorer 1.0.1 makes at shutdown and on Ctrl+S.
     ns["exportOutputData"](esi.device, useDefaultFile=True, useAllHistory=history)
     assert esi.received == [history]
@@ -49,6 +49,8 @@ def test_explorer_1_0_1_export_reaches_the_esi_override(esi, history):
     ({}, False), ({"useAllHistory": True}, True), ({"useDefaultFile": True}, True),
     ({"useDefaultFile": True, "useAllHistory": False}, False),
 ])
+
+
 def test_both_host_call_conventions_select_the_same_history(esi, kwargs, expected):
     with esi.h5py.File(esi.tmp / "data.h5", "w") as h5file:
         esi.device.appendOutputData(h5file, **kwargs)

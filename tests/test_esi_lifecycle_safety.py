@@ -6,20 +6,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_esi_driver_behavior import RUNTIME_NAME, _load_runtime
-from test_esi_heater_activation import rig  # noqa: F401
-from test_esi_plugin_behavior import _load_plugin
+from support.esi_driver import RUNTIME_NAME, load_runtime
+from support.esi import load_plugin as _load_plugin
 
 
 @pytest.mark.parametrize("address", [1, 2])
 @pytest.mark.parametrize("phase", [
     "before_dispatch", "module_dispatch", "module_write", "module_readback", "global_dispatch",
 ])
-def test_hv_on_cancellation_never_opens_shared_gate(rig, monkeypatch, address, phase):
+
+
+def test_hv_on_cancellation_never_opens_shared_gate(esi_heater_rig, monkeypatch, address, phase):
     cancel = threading.Event()
-    dispatch = rig.driver._call_locked_with_timeout
-    write = rig.base.set_module_activation_state
-    read = rig.base.get_hv_supply_params_pwm
+    dispatch = esi_heater_rig.driver._call_locked_with_timeout
+    write = esi_heater_rig.base.set_module_activation_state
+    read = esi_heater_rig.base.get_hv_supply_params_pwm
 
     def call(function, timeout, step, *args, **kwargs):
         if ((phase == "module_dispatch" and step.startswith("set_hv_module_active"))
@@ -39,19 +40,19 @@ def test_hv_on_cancellation_never_opens_shared_gate(rig, monkeypatch, address, p
             cancel.set()
         return result
 
-    monkeypatch.setattr(rig.driver, "_call_locked_with_timeout", call)
-    monkeypatch.setattr(rig.base, "set_module_activation_state", set_module)
-    monkeypatch.setattr(rig.base, "get_hv_supply_params_pwm", get_pwm)
+    monkeypatch.setattr(esi_heater_rig.driver, "_call_locked_with_timeout", call)
+    monkeypatch.setattr(esi_heater_rig.base, "set_module_activation_state", set_module)
+    monkeypatch.setattr(esi_heater_rig.base, "get_hv_supply_params_pwm", get_pwm)
     if phase == "before_dispatch":
         cancel.set()
     with pytest.raises(InterruptedError, match="cancel"):
-        rig.driver.set_output_active(address, True, timeout_s=.2, cancel_event=cancel)
-    assert ("enable", True) not in rig.calls
+        esi_heater_rig.driver.set_output_active(address, True, timeout_s=.2, cancel_event=cancel)
+    assert ("enable", True) not in esi_heater_rig.calls
     if phase in ("before_dispatch", "module_dispatch"):
-        assert ("module", address, True) not in rig.calls
+        assert ("module", address, True) not in esi_heater_rig.calls
     # Cancellation must never prevent a following OFF from deactivating HV.
-    assert rig.driver.set_output_active(address, False, timeout_s=.2, cancel_event=cancel) is False
-    assert rig.state.active[address] is False
+    assert esi_heater_rig.driver.set_output_active(address, False, timeout_s=.2, cancel_event=cancel) is False
+    assert esi_heater_rig.state.active[address] is False
 
 
 def test_plugin_forwards_hv_cancellation_to_worker():
@@ -261,7 +262,7 @@ def test_driver_log_is_written_in_explorer_data_directory(monkeypatch, tmp_path)
     c, constructed, _ = initialization_control(monkeypatch, tmp_path, lambda: [])
     c.runInitialization()
     log_dir = constructed[0]["log_dir"]
-    _load_runtime()
+    load_runtime()
     runtime = sys.modules[RUNTIME_NAME + ".esi.esi"]
     base = sys.modules[RUNTIME_NAME + ".esi.esi_base"].ESIBase
     monkeypatch.setattr(base, "__init__", lambda *args, **kwargs: None)

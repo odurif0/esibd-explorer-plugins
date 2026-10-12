@@ -10,51 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_esi_plugin_behavior import _load_plugin
-
-
-WORKER = Path(__file__).resolve().parents[1] / "esi/vendor/runtime/esi/_process.py"
-FAKE_CONTROLLER = '''
-import os
-import time
-
-class Controller:
-    def __init__(self, **kwargs):
-        self.counter = 0
-        self._transport_poisoned = False
-        self.connected = True
-
-    def ping(self):
-        print("vendor output must not corrupt RPC", flush=True)
-        os.write(1, b"native vendor output\\n")
-        return (b"config bytes", {1: (True, 700.)})
-
-    def add(self, amount):
-        value = self.counter
-        time.sleep(.01)
-        self.counter = value + amount
-        return self.counter
-
-    def block(self, *, on_discharge=None, cancel_event=None):
-        if on_discharge:
-            on_discharge({"entered": True})
-        if cancel_event is not None:
-            return cancel_event.wait(5.)
-        time.sleep(60.)
-
-    def disconnect(self, **kwargs):
-        raise RuntimeError("get_enable failed: -13 (Wrong command received)")
-
-    def collect_diagnostics(self, **kwargs):
-        raise RuntimeError("get_enable failed: -13 (Wrong command received)")
-
-    def crash(self):
-        os._exit(7)
-
-    def poison(self):
-        self._transport_poisoned = True
-        raise RuntimeError("ESI DLL call timed out")
-'''
+from support.esi import load_plugin as _load_plugin
+from support.esi_process import FAKE_CONTROLLER, WORKER
 
 
 @pytest.fixture
@@ -281,7 +238,7 @@ def test_error_threshold_close_inside_poll_does_not_unlock_mutex_or_resurrect_fa
 
 
 def test_readback_recovery_resets_consecutive_errors_without_replaying_outputs():
-    from test_esi_current_measurements import rig, snapshot
+    from support.esi_current import rig, snapshot
 
     module, channels, c = rig()
     calls = []
@@ -607,6 +564,8 @@ def test_stderr_is_drained_without_deadlock_or_unbounded_storage(tmp_path):
     fake = tmp_path / "noisy_controller.py"
     fake.write_text('''
 import os
+
+
 class Controller:
     def flood(self):
         os.write(2, b"x" * (1024 * 1024) + b"tail marker")

@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import sys
-import threading
 import types
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from psu_fakes import StatefulPSU
+from support.psu_fakes import StatefulPSU
+from support import explorer
+from support.psu import load_plugin
 
 
 PLUGIN_PATH = (
@@ -23,134 +22,9 @@ PLUGIN_PATH = (
 )
 
 
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"
-        FLOAT = "FLOAT"
-        EXP = "EXP"
-        BOOL = "BOOL"
-        LABEL = "LABEL"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        INFO = "INFO"
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        NAME = "Name"
-        ADVANCED = "Advanced"
-        EVENT = "Event"
-        TOOLTIP = "Tooltip"
-
-    class Channel:
-        NAME = "Name"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-
-    class _Signal:
-        def emit(self, *args, **kwargs):
-            self.last_emit = (args, kwargs)
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-            self.lock = threading.Lock()
-            self.signalComm = types.SimpleNamespace(initCompleteSignal=_Signal())
-            self.errorCount = 0
-            self.initializing = False
-            self.acquiring = False
-            self.print = lambda *args, **kwargs: None
-
-    class ToolButton:
-        pass
-
-    class Device:
-        def getChannels(self):
-            return getattr(self, "channels", [])
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        return kwargs
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.parameterDict = parameterDict
-    plugins.Device = Device
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name.startswith("_esibd_bundled_psu_runtime")
-        or name == "psu_plugin_behavior_test"
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _load_module():
-    _clear_test_modules()
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("psu_plugin_behavior_test", PLUGIN_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _install_fake_qtcore(monkeypatch):
-    pyqt = types.ModuleType("PyQt6")
-    pyqt.__path__ = []
-    qtcore = types.ModuleType("PyQt6.QtCore")
-
-    class FakeQObject:
-        def __init__(self, parent=None):
-            self.parent = parent
-
-    class FakeQEvent:
-        class Type:
-            Wheel = "wheel"
-
-    qtcore.QObject = FakeQObject
-    qtcore.QEvent = FakeQEvent
-    pyqt.QtCore = qtcore
-    monkeypatch.setitem(sys.modules, "PyQt6", pyqt)
-    monkeypatch.setitem(sys.modules, "PyQt6.QtCore", qtcore)
-    return FakeQEvent
-
-
 def test_spinbox_wheel_events_are_blocked(monkeypatch):
-    module = _load_module()
-    fake_event_class = _install_fake_qtcore(monkeypatch)
+    module = load_plugin(module_name="psu_plugin_behavior_test")
+    fake_event_class = explorer.install_fake_qtcore(monkeypatch)
 
     class FakeWidget:
         def __init__(self):
@@ -184,7 +58,7 @@ def test_spinbox_wheel_events_are_blocked(monkeypatch):
 
 
 def test_bootstrap_config_is_replaced_with_fixed_channels():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     default_item = {
         "CH": "0",
         "Real": True,
@@ -223,7 +97,7 @@ def test_bootstrap_config_is_replaced_with_fixed_channels():
 
 
 def test_existing_config_keeps_only_hardware_channels():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     current_items = [
         {"Name": "Keep0", "CH": 0, "Real": True, "Enabled": True},
@@ -257,7 +131,7 @@ def test_existing_config_keeps_only_hardware_channels():
 
 
 def test_missing_hardware_channel_is_recreated_with_fixed_mapping():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     current_items = [
         {"Name": "Keep1", "CH": 1, "Real": True, "Enabled": True},
@@ -284,7 +158,7 @@ def test_missing_hardware_channel_is_recreated_with_fixed_mapping():
 
 
 def test_existing_config_is_merged_and_missing_hardware_channel_is_added():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     current_items = [
         {"Name": "Keep0", "CH": 0, "Real": True, "Enabled": True},
@@ -306,7 +180,7 @@ def test_existing_config_is_merged_and_missing_hardware_channel_is_added():
 
 
 def test_controller_read_numbers_maps_housekeeping_snapshot():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeDevice:
         def collect_housekeeping(self, timeout_s=None):
@@ -390,7 +264,7 @@ def test_controller_read_numbers_maps_housekeeping_snapshot():
 
 
 def test_controller_maps_disabled_psu_state_to_standby():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeDevice:
         def collect_housekeeping(self, timeout_s=None):
@@ -436,7 +310,7 @@ def test_controller_maps_disabled_psu_state_to_standby():
 
 
 def test_controller_read_numbers_reports_snapshot_apply_failures_explicitly():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeDevice:
         def collect_housekeeping(self, timeout_s=None):
@@ -473,7 +347,7 @@ def test_controller_read_numbers_reports_snapshot_apply_failures_explicitly():
 
 
 def test_controller_exposes_available_psu_configs_in_gui_state():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeDevice:
         def list_configs(self, timeout_s=None):
@@ -507,7 +381,7 @@ def test_controller_exposes_available_psu_configs_in_gui_state():
 
 
 def test_psu_config_selector_change_updates_operating_slot():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeCombo:
         def __init__(self):
@@ -535,7 +409,7 @@ def test_psu_config_selector_change_updates_operating_slot():
 
 
 def test_psu_controller_lock_section_uses_raw_lock_and_propagates_errors():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeLock:
         def __init__(self):
@@ -568,7 +442,7 @@ def test_psu_controller_lock_section_uses_raw_lock_and_propagates_errors():
 
 
 def test_psu_controller_read_numbers_acquires_lock_for_housekeeping():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeDevice:
         def collect_housekeeping(self, timeout_s=None):
@@ -610,7 +484,7 @@ def test_read_numbers_lock_timeout_is_not_a_transport_failure(monkeypatch):
     transport-failure threshold (which would, after 3 strikes, falsely declare
     the PSU lost and raise the HV 'outputs may remain energized' alarm) and must
     not wipe the live readbacks."""
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         poll_timeout_s=2.0,
@@ -646,7 +520,7 @@ def test_read_numbers_lock_timeout_is_not_a_transport_failure(monkeypatch):
 
 
 def test_read_numbers_skips_polling_during_manual_apply(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         poll_timeout_s=2.0,
@@ -674,7 +548,7 @@ def test_read_numbers_skips_polling_during_manual_apply(monkeypatch):
 def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_polls(
     monkeypatch,
 ):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     clock = types.SimpleNamespace(now=10.)
     monkeypatch.setattr(module, "time", types.SimpleNamespace(monotonic=lambda: clock.now))
 
@@ -761,7 +635,7 @@ def test_controller_read_numbers_refreshes_live_readbacks_between_housekeeping_p
 
 
 def test_channel_panel_diagnostics_snapshot_formats_compact_summary():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     device = object.__new__(module.PSUDevice)
     device.controller = types.SimpleNamespace(
@@ -783,7 +657,7 @@ def test_channel_panel_diagnostics_snapshot_formats_compact_summary():
 
 
 def test_channel_cards_keep_their_width_and_diagnostics_can_shrink():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     source = PLUGIN_PATH.read_text(encoding="utf-8")
 
     assert module._PSU_PANEL_CARD_WIDTH == 280
@@ -797,21 +671,21 @@ def test_channel_cards_keep_their_width_and_diagnostics_can_shrink():
 
 
 def test_format_current_text_handles_nan():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     assert module._format_current_text(np.nan) == "n/a"
     assert module._format_current_text(0.125) == "125 mA"
 
 
 def test_format_voltage_text_handles_nan():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     assert module._format_voltage_text(np.nan) == "n/a"
     assert module._format_voltage_text(25.0) == "25 V"
 
 
 def test_readback_feedback_keeps_disabled_outputs_visually_checked():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     assert module._psu_feedback_style("default")
     assert (
@@ -861,7 +735,7 @@ def test_readback_feedback_keeps_disabled_outputs_visually_checked():
 
 
 def test_manual_panel_sync_updates_controls_without_live_apply():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     emitted = []
 
     class FakeTimer:
@@ -943,7 +817,7 @@ def test_manual_panel_sync_updates_controls_without_live_apply():
 
 
 def test_manual_panel_change_applies_values_immediately():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
 
     class FakeTimer:
@@ -1013,7 +887,7 @@ def test_manual_panel_change_applies_values_immediately():
 
 
 def test_manual_panel_numeric_change_is_debounced_until_timer_fires():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
 
     class FakeTimer:
@@ -1089,7 +963,7 @@ def test_manual_panel_numeric_change_is_debounced_until_timer_fires():
 
 
 def test_manual_apply_queue_keeps_only_latest_pending_state(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     created_threads = []
     applied = []
 
@@ -1130,7 +1004,7 @@ def test_manual_apply_queue_keeps_only_latest_pending_state(monkeypatch):
 
 
 def test_toggle_on_uses_config_startup_only():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
 
     class FakeDevice(StatefulPSU):
@@ -1191,7 +1065,7 @@ def test_toggle_on_uses_config_startup_only():
 
 
 def test_toggle_on_without_startup_configs_enters_manual_standby():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -1250,7 +1124,7 @@ def test_toggle_on_without_startup_configs_enters_manual_standby():
 
 
 def test_apply_manual_state_updates_outputs_ranges_and_limits():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -1350,7 +1224,7 @@ def test_apply_manual_state_updates_outputs_ranges_and_limits():
 
 
 def test_apply_manual_state_does_not_switch_range_when_range_is_unchanged(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
 
     class FakeDevice(StatefulPSU):
@@ -1405,7 +1279,7 @@ def test_apply_manual_state_does_not_switch_range_when_range_is_unchanged(monkey
 
 
 def test_range_switch_wait_uses_measured_voltage(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     readings = {0: [10.0, 0.0], 1: [0.0, 0.0]}
 
@@ -1436,7 +1310,7 @@ def test_range_switch_wait_uses_measured_voltage(monkeypatch):
 
 
 def test_apply_manual_state_waits_before_switching_changed_range(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
 
     class FakeDevice(StatefulPSU):
@@ -1491,7 +1365,7 @@ def test_apply_manual_state_waits_before_switching_changed_range(monkeypatch):
 
 
 def test_apply_manual_state_does_not_warn_when_current_limit_readback_is_lower():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     printed = []
 
     class FakeDevice(StatefulPSU):
@@ -1545,7 +1419,7 @@ def test_apply_manual_state_does_not_warn_when_current_limit_readback_is_lower()
 
 
 def test_apply_manual_state_refuses_when_current_limit_readback_exceeds_limit():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     printed = []
 
     class FakeDevice(StatefulPSU):
@@ -1601,7 +1475,7 @@ def test_apply_manual_state_refuses_when_current_limit_readback_exceeds_limit():
 
 
 def test_shutdown_with_config_still_forces_safe_disable_before_disconnect():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -1681,7 +1555,7 @@ def test_shutdown_with_config_still_forces_safe_disable_before_disconnect():
 
 
 def test_shutdown_unconfirmed_keeps_backend_without_disconnect():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -1759,7 +1633,7 @@ def test_shutdown_unconfirmed_keeps_backend_without_disconnect():
 
 
 def test_save_current_config_refreshes_available_list_and_loaded_state():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -1828,7 +1702,7 @@ def test_save_current_config_refreshes_available_list_and_loaded_state():
 
 
 def test_save_current_config_refuses_existing_config_slot():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -1886,7 +1760,7 @@ def test_save_current_config_refuses_existing_config_slot():
 
 
 def test_load_operating_config_now_loads_selected_psu_config():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
     sync_calls = []
@@ -1960,7 +1834,7 @@ def test_load_operating_config_now_loads_selected_psu_config():
 
 
 def test_load_operating_config_now_rejects_invalid_config_slot():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     printed = []
 
     parent = types.SimpleNamespace(
@@ -1992,7 +1866,7 @@ def test_load_operating_config_now_rejects_invalid_config_slot():
 
 
 def test_run_initialization_selects_native_backend_for_plugin_runtime(monkeypatch, tmp_path):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     captured_kwargs = {}
 
     class FakeDevice:
@@ -2047,7 +1921,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     """A timed-out open_port locks the COM port for the process lifetime; the
     init-failure guidance must tell the operator to restart ESIBD Explorer
     instead of letting retries loop on a confusing '-2 (Error opening port)'."""
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     controller = module.PSUController(types.SimpleNamespace(com=10))
 
     fatal_exc = RuntimeError(
@@ -2066,7 +1940,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
 
 
 def test_init_failure_guidance_silent_without_prior_poisoning():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     controller = module.PSUController(types.SimpleNamespace(com=10))
 
     assert controller._init_failure_guidance(
@@ -2076,7 +1950,7 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
 
 
 def test_format_current_text_rounds_to_whole_milliamps():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     fmt = module._format_current_text
 
     assert fmt(0.0) == "0 mA"
@@ -2097,7 +1971,7 @@ def _new_psu_device(module, **attrs):
 
 
 def test_interlock_button_is_created_in_title_bar(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeClicked:
         def __init__(self):
@@ -2167,7 +2041,7 @@ def test_interlock_button_is_created_in_title_bar(monkeypatch):
 
 
 def test_interlock_button_visibility_follows_main_state():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class FakeButton:
         def __init__(self):
@@ -2228,7 +2102,7 @@ def test_interlock_button_visibility_follows_main_state():
 
 
 def test_clear_interlock_disables_monitoring_and_persists_setting():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
 
     class FakeDevice:
@@ -2265,7 +2139,7 @@ def test_clear_interlock_disables_monitoring_and_persists_setting():
 
 
 def test_clear_interlock_requires_initialized_communication():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     messages = []
     controller = types.SimpleNamespace(device=object(), initialized=False)
     device = _new_psu_device(
@@ -2319,7 +2193,7 @@ def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
     monkeypatch.setitem(sys.modules, "PyQt6.QtCore", qtcore)
     monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", qtwidgets)
 
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
 
     class _ExplodingDispatcher:
         def emit(self, callback):
@@ -2340,7 +2214,7 @@ def test_invoke_gui_callback_drops_update_when_dispatcher_fails(monkeypatch):
 
 def test_save_current_config_rechecks_slot_under_lock_after_race():
     """A slot filled by a concurrent save must be refused, not overwritten."""
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     calls = []
     printed = []
 
@@ -2400,7 +2274,7 @@ def test_save_current_config_rechecks_slot_under_lock_after_race():
 
 
 def test_config_settings_are_bounded_to_runtime_slot_range():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     device = object.__new__(module.PSUDevice)
     device.name = "PSU_A"
     device.MAXDATAPOINTS = "Max data points"
@@ -2421,7 +2295,7 @@ def test_config_settings_are_bounded_to_runtime_slot_range():
 
 
 def test_dispose_device_reports_failed_disconnect():
-    module = _load_module()
+    module = load_plugin(module_name="psu_plugin_behavior_test")
     printed = []
     parent = types.SimpleNamespace(getChannels=lambda: [])
     controller = module.PSUController(parent)

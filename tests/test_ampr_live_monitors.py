@@ -4,9 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import test_ampr_parallel_ramps as ramps
-
-rig = ramps.rig
+from support.ampr import ramp
 
 
 def monitor_rig(rig, *, down=False, read_time=0.):
@@ -54,96 +52,96 @@ def monitor_rig(rig, *, down=False, read_time=0.):
 
 
 @pytest.mark.parametrize("down", [False, True])
-def test_ramp_reads_and_publishes_each_second_until_every_channel_finishes(rig, down):
-    live = monitor_rig(rig, down=down)
-    ramps.ramp(rig, down=down)
+def test_ramp_reads_and_publishes_each_second_until_every_channel_finishes(ampr_ramp_rig, down):
+    live = monitor_rig(ampr_ramp_rig, down=down)
+    ramp(ampr_ramp_rig, down=down)
     assert live.reads == pytest.approx(list(range(21)))
     assert len(live.snapshots) == 21
     for t, values in live.snapshots:
         expected = []
-        for ch in rig.channels:
+        for ch in ampr_ramp_rig.channels:
             distance = min(abs(ch.value), t * ch.ramp_rate_v_s)
             target = np.sign(ch.value) * (abs(ch.value) - distance if down else distance)
             expected.append(target + .002)
         assert values == pytest.approx(expected), (t, values, expected)
-    assert [ch.value for ch in rig.channels] == [100., -200., 50.]
-    assert rig.clock.now == pytest.approx(20.)
-    assert rig.parent.interval == 5000, "Do not change the user's recording setting"
+    assert [ch.value for ch in ampr_ramp_rig.channels] == [100., -200., 50.]
+    assert ampr_ramp_rig.clock.now == pytest.approx(20.)
+    assert ampr_ramp_rig.parent.interval == 5000, "Do not change the user's recording setting"
 
 
-def test_last_readback_is_not_lost_for_a_ramp_shorter_than_one_second(rig):
-    live = monitor_rig(rig)
-    for ch in rig.channels:
+def test_last_readback_is_not_lost_for_a_ramp_shorter_than_one_second(ampr_ramp_rig):
+    live = monitor_rig(ampr_ramp_rig)
+    for ch in ampr_ramp_rig.channels:
         ch.value = 2.
-    ramps.ramp(rig)
+    ramp(ampr_ramp_rig)
     assert live.reads == pytest.approx([0., .4])
     assert live.snapshots[-1][1] == pytest.approx([2.002] * 3)
 
 
-def test_slow_readbacks_do_not_add_their_duration_to_each_ramp_step(rig):
-    live = monitor_rig(rig, read_time=.15)
-    ramps.ramp(rig)
-    assert 20. <= rig.clock.now < 20.5
+def test_slow_readbacks_do_not_add_their_duration_to_each_ramp_step(ampr_ramp_rig):
+    live = monitor_rig(ampr_ramp_rig, read_time=.15)
+    ramp(ampr_ramp_rig)
+    assert 20. <= ampr_ramp_rig.clock.now < 20.5
     assert len(live.reads) >= 20
     for (start, end) in zip(live.reads[:-2], live.reads[1:-1]):
         assert .999 <= end - start <= 1.101
-    for t, values in rig.writes:
+    for t, values in ampr_ramp_rig.writes:
         for number, value in values.items():
-            assert abs(value) <= rig.channels[number - 1].ramp_rate_v_s * t + 1e-8
+            assert abs(value) <= ampr_ramp_rig.channels[number - 1].ramp_rate_v_s * t + 1e-8
 
 
-def test_failed_read_clears_old_voltages_instead_of_repeating_them(rig):
-    live = monitor_rig(rig)
+def test_failed_read_clears_old_voltages_instead_of_repeating_them(ampr_ramp_rig):
+    live = monitor_rig(ampr_ramp_rig)
     good_read = live.hw.get_module_voltages
 
     def read(address):
-        if .99 <= rig.clock.now <= 1.01:
-            live.reads.append(rig.clock.now)
+        if .99 <= ampr_ramp_rig.clock.now <= 1.01:
+            live.reads.append(ampr_ramp_rig.clock.now)
             raise RuntimeError("Invalid measured voltage reply")
         return good_read(address)
 
     live.hw.get_module_voltages = read
-    ramps.ramp(rig)
+    ramp(ampr_ramp_rig)
     assert len(live.snapshots) > 2
     assert np.isnan(live.snapshots[1][1]).all()
     assert np.isfinite(live.snapshots[2][1]).all()
-    assert rig.controller.errorCount == 1
+    assert ampr_ramp_rig.controller.errorCount == 1
 
 
 @pytest.mark.parametrize("stop_at", [0., 1.])
-def test_off_during_readback_stops_further_ramp_up_commands(rig, stop_at):
-    live = monitor_rig(rig)
+def test_off_during_readback_stops_further_ramp_up_commands(ampr_ramp_rig, stop_at):
+    live = monitor_rig(ampr_ramp_rig)
     good_read = live.hw.get_module_voltages
 
     def read(address):
         result = good_read(address)
-        if rig.clock.now + 1e-9 >= stop_at:
-            rig.module.AMPRDevice.setOn(rig.parent, on=False)
+        if ampr_ramp_rig.clock.now + 1e-9 >= stop_at:
+            ampr_ramp_rig.module.AMPRDevice.setOn(ampr_ramp_rig.parent, on=False)
         return result
 
     live.hw.get_module_voltages = read
-    with pytest.raises(rig.module._AMPRRampCancelled):
-        ramps.ramp(rig)
+    with pytest.raises(ampr_ramp_rig.module._AMPRRampCancelled):
+        ramp(ampr_ramp_rig)
     assert live.reads[-1] == pytest.approx(stop_at)
     if stop_at == 0.:
-        assert not rig.writes
+        assert not ampr_ramp_rig.writes
     else:
-        assert rig.writes
-        for t, values in rig.writes:
+        assert ampr_ramp_rig.writes
+        for t, values in ampr_ramp_rig.writes:
             assert t <= stop_at + 1e-9
             for number, value in values.items():
-                assert abs(value) <= stop_at * rig.channels[number - 1].ramp_rate_v_s + 1e-8
-    assert not rig.on.state
+                assert abs(value) <= stop_at * ampr_ramp_rig.channels[number - 1].ramp_rate_v_s + 1e-8
+    assert not ampr_ramp_rig.on.state
 
 
 @pytest.mark.parametrize("read_time", [.2, 1.4])
-def test_normal_monitoring_uses_one_second_start_to_start_or_actual_io_duration(rig, read_time):
-    live = monitor_rig(rig, read_time=read_time)
-    c = rig.controller
+def test_normal_monitoring_uses_one_second_start_to_start_or_actual_io_duration(ampr_ramp_rig, read_time):
+    live = monitor_rig(ampr_ramp_rig, read_time=read_time)
+    c = ampr_ramp_rig.controller
     c.transitioning = False
     c.acquiring = True
     # Even just after a transition, a settling output remains a valid reading.
-    assert all(ch.waitToStabilize for ch in rig.channels)
+    assert all(ch.waitToStabilize for ch in ampr_ramp_rig.channels)
     publish = c.signalComm.updateValuesSignal.emit
 
     def stop_after_three_samples():
@@ -159,11 +157,11 @@ def test_normal_monitoring_uses_one_second_start_to_start_or_actual_io_duration(
 
 
 @pytest.mark.parametrize("down", [False, True])
-def test_off_and_virtual_channels_remain_neutral_during_other_channels_ramps(rig, down):
-    live = monitor_rig(rig, down=down)
-    rig.channels[0].enabled = False
-    rig.channels[1].real = False
-    ramps.ramp(rig, down=down)
+def test_off_and_virtual_channels_remain_neutral_during_other_channels_ramps(ampr_ramp_rig, down):
+    live = monitor_rig(ampr_ramp_rig, down=down)
+    ampr_ramp_rig.channels[0].enabled = False
+    ampr_ramp_rig.channels[1].real = False
+    ramp(ampr_ramp_rig, down=down)
     assert live.snapshots
     for _, values in live.snapshots:
         assert np.isnan(values[:2]).all()

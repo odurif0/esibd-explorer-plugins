@@ -7,25 +7,24 @@ import io
 import json
 import math
 import threading
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from test_dmmr_zero_notebook import Clock, DMMR, ROOT, assert_restored_ranges, ns  # noqa: F401
+from support.dmmr_notebook import Clock, DMMR, ROOT, assert_restored_ranges
 
 
 @pytest.fixture
-def campaign(ns, tmp_path):
+def campaign(dmmr_notebook_ns, tmp_path):
     clock = Clock()
-    device = DMMR(clock, ns['CERTIFICATE'])
-    cfg = dict(ns['PROTOCOL'], series_count=3, duration_s=5., bin_s=1., tail_s=2.,
+    device = DMMR(clock, dmmr_notebook_ns['CERTIFICATE'])
+    cfg = dict(dmmr_notebook_ns['PROTOCOL'], series_count=3, duration_s=5., bin_s=1., tail_s=2.,
                stall_timeout_s=1., io_timeout_s=.1, pause_s=2., diagnostics_interval_s=2.)
     output = tmp_path / 'campaign'
 
     def run():
-        return ns['run_campaign'](device, output, cfg, clock=clock, sleep=clock.sleep)
+        return dmmr_notebook_ns['run_campaign'](device, output, cfg, clock=clock, sleep=clock.sleep)
 
     return device, cfg, output, run
 
@@ -75,9 +74,11 @@ def inject_reconnect_range_failure(device):
 @pytest.mark.slow
 @pytest.mark.parametrize('scenario', ['overnight', 'overnight_receive_error',
     'overnight_range_setup_error', 'overnight_matching_ranges', 'twelve_short_runs'])
-def test_full_campaign_timing_and_disconnected_pauses(ns, campaign, scenario):
+
+
+def test_full_campaign_timing_and_disconnected_pauses(dmmr_notebook_ns, campaign, scenario):
     device, cfg, output, run = campaign
-    cfg.update(ns['PROTOCOL'])
+    cfg.update(dmmr_notebook_ns['PROTOCOL'])
     if scenario == 'twelve_short_runs':
         cfg.update(series_count=12, duration_s=1200, pause_s=60)
     recovered = scenario == 'overnight_receive_error'
@@ -90,7 +91,7 @@ def test_full_campaign_timing_and_disconnected_pauses(ns, campaign, scenario):
         device.original = dict.fromkeys(range(8), (0, False))
         device.ranges = dict(device.original)
     if recovered:
-        from test_dmmr_transient_reads import inject_stream_fault
+        from support.dmmr import inject_stream_fault
         inject_stream_fault(device, sticky=True, after_s=4 * 3600 + 43 * 60)
     count, duration, pause_s = cfg['series_count'], cfg['duration_s'], cfg['pause_s']
     minutes = int(duration / 60)
@@ -123,7 +124,7 @@ def test_full_campaign_timing_and_disconnected_pauses(ns, campaign, scenario):
         raw = pd.read_csv(directory / 'raw.csv')
         selected = raw.loc[raw.selected == 1]
         assert set(selected.actual_range) == {0}
-        assert set(selected.product_no) == set(ns['CERTIFICATE'])
+        assert set(selected.product_no) == set(dmmr_notebook_ns['CERTIFICATE'])
         assert (selected.groupby('product_no').size() > 1000).all()
         assert 0 < selected.host_elapsed_s.min() < 1
         assert selected.host_elapsed_s.max() < duration
@@ -142,7 +143,7 @@ def test_full_campaign_timing_and_disconnected_pauses(ns, campaign, scenario):
         assert not any(c[0] in ('range', 'autorange', 'purge') for c in device.calls)
     for left, right in zip(report['series'], report['series'][1:]):
         assert right['stream_start_elapsed_s'] - left['stream_end_elapsed_s'] >= pause_s
-    summary, telemetry, analysed = ns['analyse_campaign'](output)
+    summary, telemetry, analysed = dmmr_notebook_ns['analyse_campaign'](output)
     assert len(summary) == 8 * count
     assert len(analysed['time_bins']) == 8 * count * minutes
     assert len(analysed['tail_summary']) == 8 * count
@@ -205,7 +206,7 @@ def test_unconfirmed_shutdown_never_reconnects(campaign):
     assert ('get_enable',) in device.calls
 
 
-def test_interrupt_during_disconnected_pause_preserves_completed_run(ns, campaign):
+def test_interrupt_during_disconnected_pause_preserves_completed_run(dmmr_notebook_ns, campaign):
     device, _, _, run = campaign
     sleep = device.clock.sleep
 
@@ -227,16 +228,18 @@ def test_interrupt_during_disconnected_pause_preserves_completed_run(ns, campaig
 @pytest.mark.parametrize('key,value', [('series_count', 0), ('series_count', True),
     ('series_count', 1.5), ('pause_s', -1), ('pause_s', math.nan),
     ('diagnostics_interval_s', 0), ('diagnostics_interval_s', True)])
-def test_invalid_campaign_cannot_open_the_port(ns, campaign, key, value):
+
+
+def test_invalid_campaign_cannot_open_the_port(dmmr_notebook_ns, campaign, key, value):
     device, cfg, output, _ = campaign
     cfg[key] = value
     with pytest.raises(ValueError):
-        ns['run_campaign'](device, output, cfg)
+        dmmr_notebook_ns['run_campaign'](device, output, cfg)
     assert not device.calls
     assert not output.exists()
 
 
-def test_windows_sleep_guard_restores_previous_thread_state(ns):
+def test_windows_sleep_guard_restores_previous_thread_state(dmmr_notebook_ns):
     calls = []
 
     def set_state(flags):
@@ -244,23 +247,23 @@ def test_windows_sleep_guard_restores_previous_thread_state(ns):
         return 0x80000003  # System AND display had already been requested.
 
     with pytest.raises(KeyboardInterrupt):
-        with ns['prevent_sleep'](set_state) as state:
+        with dmmr_notebook_ns['prevent_sleep'](set_state) as state:
             assert state['active'] and not state['manual_sleep_prevented']
             raise KeyboardInterrupt()
     assert calls == [0x80000001, 0x80000003]
 
 
-def test_refused_sleep_inhibition_stops_before_any_connection(ns, campaign):
+def test_refused_sleep_inhibition_stops_before_any_connection(dmmr_notebook_ns, campaign):
     device, _, output, run = campaign
-    original = ns['prevent_sleep']
-    ns['prevent_sleep'] = lambda: original(lambda _: 0)
+    original = dmmr_notebook_ns['prevent_sleep']
+    dmmr_notebook_ns['prevent_sleep'] = lambda: original(lambda _: 0)
     report = run()
     assert report['status'] == 'failed' and 'sleep' in report['error']
     assert not device.calls and not report['series']
     assert (output / 'report.json').is_file()
 
 
-def test_sleep_guard_is_released_on_acquisition_failure(ns, campaign):
+def test_sleep_guard_is_released_on_acquisition_failure(dmmr_notebook_ns, campaign):
     device, _, _, run = campaign
     active = []
 
@@ -272,14 +275,14 @@ def test_sleep_guard_is_released_on_acquisition_failure(ns, campaign):
         finally:
             active.append('release')
 
-    ns['prevent_sleep'] = guard
+    dmmr_notebook_ns['prevent_sleep'] = guard
     device.fault = 'parser'
     assert run()['status'] == 'failed'
     assert active == ['acquire', 'release']
 
 
 @pytest.mark.parametrize('fault', ['status', 'nan', 'poisoned', 'interrupt'])
-def test_diagnostic_failure_is_not_a_zero_reading(ns, campaign, fault):
+def test_diagnostic_failure_is_not_a_zero_reading(dmmr_notebook_ns, campaign, fault):
     device, _, output, run = campaign
     device.diagnostic_fault = fault
     report = run()
@@ -315,9 +318,9 @@ def test_diagnostic_reply_error_requires_a_healthy_controller(campaign):
     assert not report['pauses']
 
 
-def test_real_base_getters_use_one_transport_lock_and_exact_ctypes_fields(ns):
+def test_real_base_getters_use_one_transport_lock_and_exact_ctypes_fields(dmmr_notebook_ns):
     """Real DMMRBase + runtime timeout guard, only the vendor DLL is simulated."""
-    cls = ns['load_driver'](ROOT / 'dmmr')._PROCESS_CONTROLLER_CLASS
+    cls = dmmr_notebook_ns['load_driver'](ROOT / 'dmmr')._PROCESS_CONTROLLER_CLASS
     backend = cls.__new__(cls)
     backend.thread_lock = threading.Lock()
     backend._transport_poisoned = False
@@ -345,7 +348,7 @@ def test_real_base_getters_use_one_transport_lock_and_exact_ctypes_fields(ns):
     backend.get_temperature_state = nested_lock_forbidden
     clock, stream, report = Clock(), io.StringIO(), {}
     modules = {0: {'product_no': 132310}}
-    recorder = ns['DiagnosticRecorder'](backend, modules, ns['PROTOCOL'], stream, report, 0, clock)
+    recorder = dmmr_notebook_ns['DiagnosticRecorder'](backend, modules, dmmr_notebook_ns['PROTOCOL'], stream, report, 0, clock)
     for _ in recorder.commands:
         recorder.poll_one()
     data = pd.read_csv(io.StringIO(stream.getvalue()))
@@ -353,13 +356,13 @@ def test_real_base_getters_use_one_transport_lock_and_exact_ctypes_fields(ns):
     assert not report['telemetry']['failed_calls']
     assert len(calls) == len(recorder.commands)
     module = data.loc[(data.scope == 'module') & (data.command == 'get_module_housekeeping')]
-    assert list(module.field) == ns['MODULE_HK_FIELDS']
+    assert list(module.field) == dmmr_notebook_ns['MODULE_HK_FIELDS']
     np.testing.assert_allclose(pd.to_numeric(module.value), np.arange(100, 116))
     assert backend.thread_lock.acquire(blocking=False), 'Lock not released'
     backend.thread_lock.release()
 
 
-def test_interleaved_diagnostics_keep_buffered_current_frames(ns, campaign):
+def test_interleaved_diagnostics_keep_buffered_current_frames(dmmr_notebook_ns, campaign):
     device, cfg, output, run = campaign
     cfg.update(series_count=1, duration_s=10, tail_s=2, diagnostics_interval_s=3)
     device.diagnostic_delay = .03
@@ -403,7 +406,9 @@ def test_interleaved_diagnostics_keep_buffered_current_frames(ns, campaign):
     (132307, 132310, 132308, 132306, 132304, 132305, 132303, 132309),
     tuple(range(132303, 132311)),
 ], ids=['recorded_40min_order', 'proposed_reordered_modules'])
-def test_plot_titles_use_recorded_addresses_not_pn_order(ns, campaign, pn_order):
+
+
+def test_plot_titles_use_recorded_addresses_not_pn_order(dmmr_notebook_ns, campaign, pn_order):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -413,12 +418,12 @@ def test_plot_titles_use_recorded_addresses_not_pn_order(ns, campaign, pn_order)
     for address, pn in enumerate(pn_order):
         device.modules[address]['product_no'] = pn
     assert run()['status'] == 'complete'
-    _, data, report = ns['analyse_campaign'](output)
+    _, data, report = dmmr_notebook_ns['analyse_campaign'](output)
     raw = pd.read_csv(output / 'series_01/raw.csv')
     recorded = raw.loc[raw.selected == 1, ['product_no', 'address']].drop_duplicates()
     addresses = dict(recorded.itertuples(index=False, name=None))
     assert addresses == {pn: address for address, pn in enumerate(pn_order)}
-    figures = ns['plot_campaign'](report, data)
+    figures = dmmr_notebook_ns['plot_campaign'](report, data)
     try:
         expected = [f'P/N {pn} · DMMR address {addresses[pn]}' for pn in sorted(addresses)]
         for name in ['current_vs_time', 'module_temperatures']:
@@ -433,18 +438,20 @@ def test_plot_titles_use_recorded_addresses_not_pn_order(ns, campaign, pn_order)
     ([None, None, None], 'address unknown'),
     ([6, 0, 0], 'addresses 0, 6'),
 ])
-def test_plot_titles_do_not_invent_a_unique_address(ns, campaign, addresses, label):
+
+
+def test_plot_titles_do_not_invent_a_unique_address(dmmr_notebook_ns, campaign, addresses, label):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     _, _, output, run = campaign
     assert run()['status'] == 'complete'
-    _, data, report = ns['analyse_campaign'](output)
+    _, data, report = dmmr_notebook_ns['analyse_campaign'](output)
     for row in report['summary']:
         if row['P/N'] == 132303:
             row['address'] = addresses[row['series'] - 1]
-    figures = ns['plot_campaign'](report, data)
+    figures = dmmr_notebook_ns['plot_campaign'](report, data)
     try:
         for name in ['current_vs_time', 'module_temperatures']:
             assert figures[name].axes[0].get_title() == f'P/N 132303 · DMMR {label}'
@@ -453,18 +460,18 @@ def test_plot_titles_do_not_invent_a_unique_address(ns, campaign, addresses, lab
             plt.close(figure)
 
 
-def test_plots_preserve_diagnostic_gaps_and_series_boundaries(ns, campaign):
+def test_plots_preserve_diagnostic_gaps_and_series_boundaries(dmmr_notebook_ns, campaign):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     _, _, output, run = campaign
     assert run()['status'] == 'complete'
-    _, data, report = ns['analyse_campaign'](output)
+    _, data, report = dmmr_notebook_ns['analyse_campaign'](output)
     data['error'] = data['error'].astype(object)
     target = data.index[(data.field == 'temp_cpu_c') & (data.product_no == 132310)]
     data.loc[target[1], ['status', 'value', 'error']] = [-10, np.nan, 'status -10']
-    figures = ns['plot_campaign'](report, data)
+    figures = dmmr_notebook_ns['plot_campaign'](report, data)
     assert len(figures) == 3
     ax = next(ax for ax in figures['module_temperatures'].axes
               if ax.get_title() == 'P/N 132310 · DMMR address 0')
@@ -476,7 +483,7 @@ def test_plots_preserve_diagnostic_gaps_and_series_boundaries(ns, campaign):
         plt.close(figure)
     # All missing readings must not look like zero Celsius.
     data.loc[data.scope == 'module', ['status', 'value', 'error']] = [-10, np.nan, 'status -10']
-    figures = ns['plot_campaign'](report, data)
+    figures = dmmr_notebook_ns['plot_campaign'](report, data)
     assert all(not ax.lines for ax in figures['module_temperatures'].axes)
     assert all('No valid temperature readings' in [t.get_text() for t in ax.texts]
                for ax in figures['module_temperatures'].axes)

@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 STABILITY_CASES = ("heat_stable", "heat_stabilizing", "heat_stale", "heat_expired", "heat_reset")
@@ -23,15 +22,7 @@ CASES = ("widgets", "status_warning", "panel", "groups", "horizontal", "vertical
 
 @pytest.mark.parametrize("case", CASES)
 def test_current_in_explorer(case, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), case, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=35,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt/pyqtgraph or Explorer sources unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, case, tmp_path, timeout=35)
 
 
 def probe(case, output):
@@ -69,17 +60,14 @@ def probe(case, output):
     ns["Qt"] = QtCore.Qt
     trees = {name: ast.parse((host / name).read_text()) for name in ("core.py", "plugins.py", "const.py")}
 
+    from explorer_host import compile_definition
+
     def extract(file, name, parent=None):
-        nodes = trees[file].body
-        if parent:
-            nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == parent).body
-        node = next(n for n in nodes if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name == name)
-        code = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
-        exec(compile(ast.fix_missing_locations(code), str(host / file), "exec"), ns)
+        exec(compile_definition(host / file, name, parent), ns)
         return ns[name]
 
-    from test_esi_plugin_behavior import _install_esibd_stubs
-    _install_esibd_stubs()
+    from support import esi as _esi_support
+    _esi_support.install()
     core, plugins = sys.modules["esibd.core"], sys.modules["esibd.plugins"]
     ns["Channel"], ns["Device"] = core.Channel, plugins.Device
     ns["Setting"] = type("Setting", (), {})
@@ -120,7 +108,7 @@ def probe(case, output):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    from test_esi_current_measurements import channel_for, snapshot
+    from support.esi_current import channel_for, snapshot
     device = module.ESIDevice.__new__(module.ESIDevice)
     device.loading = True
     device.plotting = False
@@ -223,7 +211,6 @@ def probe(case, output):
         module.ESIChannel.min = property(lambda ch: ch.params["Min"].value)
         module.ESIChannel.max = property(lambda ch: ch.params["Max"].value)
         for channel, item in zip(device.channels, module._fixed_channel_items("ESI"), strict=True):
-            channel.loading = True
             channel.rowHeight = 27
             channel.print = device.print
             channel.pluginManager = SimpleNamespace(ChannelManager=plugins.Device, Device=plugins.Device,
@@ -245,7 +232,6 @@ def probe(case, output):
             channel.getSortedDefaultChannel = lambda defaults=defaults: defaults
             channel.tempParameters = lambda: ["Monitor"]
             channel.initGUI(item)
-            channel.loading = False
         data = snapshot()
         currents = (2.345678912e-9, -4.567891234e-9)
         for address, value in enumerate(currents, 1):

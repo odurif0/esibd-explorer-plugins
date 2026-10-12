@@ -1,28 +1,19 @@
 """A failed OFF must stay retryable through Explorer's actual Qt actions."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import MethodType, SimpleNamespace
 
 import pytest
+from support.qt import run_probe
 
 FAMILIES = ("ampr", "amx", "amx_hd", "dmmr", "esi", "psu")
 
 
 @pytest.mark.parametrize("family", FAMILIES)
 def test_failed_off_then_retry_and_reconnect(family, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), family, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=40,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt/Explorer sources unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, family, tmp_path, timeout=40)
 
 
 def probe(family, output):
@@ -35,12 +26,12 @@ def probe(family, output):
         from PyQt6.QtGui import QIcon
         from PyQt6.QtTest import QTest
         from PyQt6.QtWidgets import QApplication, QLabel, QToolBar, QVBoxLayout, QWidget
-        from test_on_off_action_ui import explorer_state_action
+        from support.ui import explorer_state_action
         StateAction = explorer_state_action()
     except (ImportError, PackageNotFoundError):
         return 77
 
-    from test_shutdown_confirmation_regressions import controller_for
+    from support.shutdown import controller_for
     app = QApplication([])
     module, controller, _ = controller_for(family)
     # Explorer's base toggleOn only logs; this loader leaves that hook undefined.
