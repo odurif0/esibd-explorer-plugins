@@ -32,8 +32,23 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`6542d60defbe441b95e131481ac01640de6676c018c56516d9c59058a3e24dd6`
-(v0.5.1 update below).
+`af00819f46b2420cd8f226ea66a25ac9775645b6dd44391108da3a651604ccac`
+(PSU fan-data fix below).
+
+## PSU Fan-Data Fix (2026-10-12)
+
+On the lab PC, every PSU worker of v0.5.1 died with exit `0xC0000374`
+(`STATUS_HEAP_CORRUPTION`) shortly after connecting, at varying DLL calls.
+The CGC header declares `COM_HVPSU2D_GetFanData(..., WORD PWM[3])`, but the
+bundled `COM-HVPSU2D.dll` (SHA-256 `2c951f46...e9bd9e75`) stores `PWM/1000.0`
+into three doubles: 24 bytes into a 6-byte heap buffer. The disassembly of every
+other PSU getter the worker calls matches the header; the AMX, AMX HD, AMPR
+and ESI `GetFanData` exports also match theirs. `tools/generate_native_abi.py`
+now declares `PWM` as `double[3]` only for that DLL hash and refuses to
+generate if the DLL or the declaration changes. The worker reports `pwm` as
+a 0–1 duty fraction. The Python reference passed the same WORD buffer and
+also overflowed, silently, inside Explorer's memory. Only the PSU worker
+binaries changed; the other manifests record the new source hash.
 
 ## v0.5.1 Update (2026-10-11)
 

@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "faaf6401c3db425d663dc621db07d4345d9d1bb37a09a694f0032c2fccdc3dad",
-    "size_bytes": 331065,
-    "source_data_sha256": "6542d60defbe441b95e131481ac01640de6676c018c56516d9c59058a3e24dd6",
+    "sha256": "7ac3c954b57e09791789dfdfbc638aad8290d7dcc4745546457607a06470b9f5",
+    "size_bytes": 331201,
+    "source_data_sha256": "af00819f46b2420cd8f226ea66a25ac9775645b6dd44391108da3a651604ccac",
     "vendored": false
   },
-  "source_data_sha256": "6542d60defbe441b95e131481ac01640de6676c018c56516d9c59058a3e24dd6",
+  "source_data_sha256": "af00819f46b2420cd8f226ea66a25ac9775645b6dd44391108da3a651604ccac",
   "targets": {
     "windows-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -18,9 +18,9 @@
         "psu"
       ],
       "file": "esibd-psu-worker.exe",
-      "sha256": "7131919af6278582233cc23b8aa5cba056f226a2b47a72f235e3786814575747",
-      "size_bytes": 759296,
-      "source_data_sha256": "6542d60defbe441b95e131481ac01640de6676c018c56516d9c59058a3e24dd6",
+      "sha256": "e3db206a38dbaaf3ebb8ee8eb11c3b3d445d98387b828448bf2c1b448bd76f1e",
+      "size_bytes": 758784,
+      "source_data_sha256": "af00819f46b2420cd8f226ea66a25ac9775645b6dd44391108da3a651604ccac",
       "target": "x86_64-pc-windows-gnu"
     }
   },

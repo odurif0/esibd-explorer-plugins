@@ -167,7 +167,7 @@ class PSUBase:
             "COM_HVPSU2D_GetDeviceState": ([word, ptr(dword)], ctypes.c_int),
             "COM_HVPSU2D_GetHousekeeping": ([word] + [ptr(ctypes.c_double)] * 4, ctypes.c_int),
             "COM_HVPSU2D_GetSensorData": ([word, ptr(ctypes.c_double)], ctypes.c_int),
-            "COM_HVPSU2D_GetFanData": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)] + [ptr(word)] * 3, ctypes.c_int),
+            "COM_HVPSU2D_GetFanData": ([word, ptr(self.WIN_BOOL), ptr(self.WIN_BOOL)] + [ptr(word)] * 2 + [ptr(ctypes.c_double)], ctypes.c_int),
             "COM_HVPSU2D_GetLEDData": ([word] + [ptr(self.WIN_BOOL)] * 3, ctypes.c_int),
             "COM_HVPSU2D_GetADCHousekeeping": ([word, ctypes.c_uint] + [ptr(ctypes.c_double)] * 6, ctypes.c_int),
             "COM_HVPSU2D_GetPSUHousekeeping": ([word, ctypes.c_uint] + [ptr(ctypes.c_double)] * 4, ctypes.c_int),
@@ -330,7 +330,8 @@ class PSUBase:
         failed = (self.WIN_BOOL * self.FAN_NUM)()
         set_rpm = (ctypes.c_uint16 * self.FAN_NUM)()
         measured_rpm = (ctypes.c_uint16 * self.FAN_NUM)()
-        pwm = (ctypes.c_uint16 * self.FAN_NUM)()
+        # The DLL writes PWM/1000.0 as doubles, not the header's WORD PWM[3].
+        pwm = (ctypes.c_double * self.FAN_NUM)()
         status = self.psu_dll.COM_HVPSU2D_GetFanData(
             self.port, enabled, failed, set_rpm, measured_rpm, pwm
         )
@@ -340,7 +341,7 @@ class PSUBase:
             [bool(failed[i]) for i in range(self.FAN_NUM)],
             [int(set_rpm[i]) for i in range(self.FAN_NUM)],
             [int(measured_rpm[i]) for i in range(self.FAN_NUM)],
-            [int(pwm[i]) for i in range(self.FAN_NUM)],
+            [float(pwm[i]) for i in range(self.FAN_NUM)],
         )
 
     def get_led_data(self):

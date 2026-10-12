@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import importlib.util
 import inspect
+import json
 import re
 import types
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASES = sorted(ROOT.glob("*/vendor/runtime/*/*_base.py"))
+ABI = ROOT / "native/worker/src/generated/abi.json"
 
 
 def header_signatures(path):
@@ -44,6 +46,15 @@ def header_signatures(path):
         functions[name] = signature
     assert functions, f"No exports found in {path}"
     return functions
+
+
+def checked_signatures(path):
+    """Header signatures, except exports whose layout was verified on the DLL (wrong header)."""
+    declarations = header_signatures(next((path.parent / "vendor").glob("*.h")))
+    for name, spec in json.loads(ABI.read_text())[path.parent.name]["exports"].items():
+        if "verified_dll_sha256" in spec:
+            declarations[name] = ([arg["type"] + ("*" if arg["pointer"] else "") for arg in spec["args"]], spec["result"])
+    return declarations
 
 
 def native_names(path):
@@ -84,8 +95,7 @@ def dll_attribute(path):
 
 @pytest.mark.parametrize("path", BASES, ids=lambda path: path.parents[3].name)
 def test_all_used_exports_have_the_vendor_signature(path):
-    header = next((path.parent / "vendor").glob("*.h"))
-    declarations = header_signatures(header)
+    declarations = checked_signatures(path)
     used = native_names(path)
     assert used <= declarations.keys(), f"Undocumented exports: {used - declarations.keys()}"
     driver = load_base(path)
@@ -100,7 +110,7 @@ def test_all_used_exports_have_the_vendor_signature(path):
 
 @pytest.mark.parametrize("path", BASES, ids=lambda path: path.parents[3].name)
 def test_getters_pass_arguments_accepted_by_ctypes(path):
-    declarations = header_signatures(next((path.parent / "vendor").glob("*.h")))
+    declarations = checked_signatures(path)
     calls = []
     failures = []
 

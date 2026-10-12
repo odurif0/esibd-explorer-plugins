@@ -284,15 +284,16 @@ impl Dll for MockDll {
                 reply(vec![json!([30.0, 31.0, 32.0])])
             }
             "GetFanData" => {
-                for arg in &args[1..] {
+                for arg in &args[1..5] {
                     assert_eq!(arg, &json!(vec![0; 3]));
                 }
+                assert_eq!(args[5], json!(vec![0.0; 3]));
                 reply(vec![
                     json!([1, 1, 0]),
                     json!([0, 0, 0]),
                     json!([1000, 2000, 3000]),
                     json!([900, 1900, 2900]),
-                    json!([100, 200, 300]),
+                    json!([0.1, 0.2, 0.3]),
                 ])
             }
             "GetLEDData" => reply(vec![json!(0), json!(1), json!(0)]),
@@ -827,7 +828,7 @@ fn telemetry_schema_state_flags_arrays_and_nonfinite_readings_match_python() {
                 json!([0]),
                 json!([1000]),
                 json!([900]),
-                json!([500]),
+                json!([0.5]),
             ]),
         );
     }
@@ -854,9 +855,10 @@ fn telemetry_schema_state_flags_arrays_and_nonfinite_readings_match_python() {
         json!([31.0,{"$float":"nan"},{"$float":"nan"}])
     );
     assert_eq!(snapshot["fans"].as_array().unwrap().len(), 3);
+    assert_eq!(snapshot["fans"][0]["pwm"], json!(0.5));
     assert_eq!(
         snapshot["fans"][2],
-        json!({"fan":2,"enabled":false,"failed":false,"set_rpm":0,"measured_rpm":0,"pwm":0})
+        json!({"fan":2,"enabled":false,"failed":false,"set_rpm":0,"measured_rpm":0,"pwm":{"$float":"nan"}})
     );
     assert_eq!(snapshot["channels"][1]["label"], json!("negative"));
     assert_eq!(

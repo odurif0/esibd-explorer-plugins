@@ -15,6 +15,7 @@ FAMILIES = {"esi": "esi", "psu": "psu_a", "amx": "amx_a",
 TYPES = {"BYTE": "u8", "WORD": "u16", "DWORD": "u32", "unsigned": "u32",
          "BOOL": "i32", "bool": "u8", "double": "f64", "float": "f32",
          "int": "i32", "char": "u8"}
+PSU_FAN_DATA_DLL_SHA256 = "2c951f461702fa2898ae69d5e229a5f5dab41a9e30acdcaba43b4e0f49bd9e75"
 OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
        ast.LShift: operator.lshift, ast.RShift: operator.rshift,
        ast.BitOr: operator.or_, ast.BitAnd: operator.and_, ast.FloorDiv: operator.floordiv,
@@ -126,6 +127,17 @@ def declarations(family, folder):
         functions[name] = signature
     if used - functions.keys():
         raise ValueError(f"Undocumented exports: {used - functions.keys()}")
+    if family == "psu":
+        # The header declares WORD PWM[3], but the DLL stores PWM/1000.0 as three doubles
+        # (24 bytes): a WORD buffer overflows the heap (worker exit 0xC0000374).
+        dll = base.parent / "vendor" / "x64" / "COM-HVPSU2D.dll"
+        if hashlib.sha256(dll.read_bytes()).hexdigest() != PSU_FAN_DATA_DLL_SHA256:
+            raise ValueError(f"Re-verify the COM_HVPSU2D_GetFanData PWM layout of {dll}")
+        pwm = functions["COM_HVPSU2D_GetFanData"]["args"][5]
+        if (pwm["name"], pwm["type"], pwm["length"]) != ("PWM", "WORD", 3):
+            raise ValueError(f"COM_HVPSU2D_GetFanData PWM declaration changed: {pwm}")
+        pwm["type"] = "double"
+        functions["COM_HVPSU2D_GetFanData"]["verified_dll_sha256"] = PSU_FAN_DATA_DLL_SHA256
     if family == "dmmr":
         functions["COM_DMMR_8_OpenDebugFile"] = {"args": [{"type": "char", "pointer": True, "length": 4096, "input": True, "name": "FileName"}], "result": "int", "verified_dll_sha256": "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3"}
         functions["COM_DMMR_8_CloseDebugFile"] = {"args": [], "result": "int", "verified_dll_sha256": "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3"}
