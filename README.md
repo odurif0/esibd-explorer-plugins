@@ -130,7 +130,9 @@ The current `STATE_ON` badge is green; a previous unconfirmed shutdown remains
 separately visible as a warning icon and red summary until discharge is verified.
 ESI checks are described in [ESI](esi/README.md). Worker logs are stored under
 `<Explorer data path>/logs/<device>/native/<family>/`, with an 8 MiB cap per session,
-not in the installed plugin folder. Existing logs are retained.
+not in the installed plugin folder. Existing logs are retained. Logs are always
+written, so the device plugins do not offer Explorer's per-device `Logging`
+setting, which they never read; console detail is set by `General/Log level`.
 
 A failed initial port opening uses **Connection pending** instead, with the
 DMMR button OFF rather than falsely indicating initialized operation. OFF or

@@ -772,6 +772,7 @@ class AMPRDevice(Device):
     version = "0.1.0"
     supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.INPUTDEVICE
+    log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.
     unit = "V"
     useMonitors = True
     useOnOffLogic = True
@@ -1213,6 +1214,7 @@ class AMPRDevice(Device):
 
     def getDefaultSettings(self) -> dict[str, dict]:
         settings = super().getDefaultSettings()
+        settings.pop(f"{self.name}/Logging", None)  # Logs always go to <Data path>/logs.
         settings[f"{self.name}/{self.COM}"] = parameterDict(
             value=1,
             minimum=1,

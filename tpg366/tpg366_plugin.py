@@ -257,6 +257,7 @@ class TPG366(Device):
     version = "0.1.3"
     supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.OUTPUTDEVICE
+    log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.
     unit = "mbar"
     logY = True
     useOnOffLogic = True
@@ -279,6 +280,7 @@ class TPG366(Device):
 
     def getDefaultSettings(self):
         settings = super().getDefaultSettings()
+        settings.pop(f"{self.name}/Logging", None)  # Logs always go to <Data path>/logs.
         settings[f"{self.name}/{self.INTERVAL}"][Parameter.VALUE] = 1000
         settings[f"{self.name}/COM"] = parameterDict(
             value="", parameterType=PARAMETERTYPE.TEXT, attr="com",
