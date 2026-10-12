@@ -20,6 +20,7 @@ import types
 import pytest
 
 import explorer_host
+from support.qt import fatal_stack
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +34,8 @@ def test_transmission_runs_in_the_complete_explorer_application(tmp_path):
                HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "home" / ".config"))
     result = subprocess.run([python, str(Path(__file__)), str(tmp_path)], env=env, text=True, capture_output=True,
                             timeout=300)
-    output = result.stdout[-6000:] + result.stderr[-6000:]
+    output = result.stdout[-6000:] + result.stderr[-6000:] + fatal_stack(result.stderr)
+    assert (tmp_path / "report.json").is_file(), output  # A crash leaves no report.
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert result.returncode == 0 and report["code"] == 0, (report, output)
     assert "Traceback" not in result.stdout + result.stderr, output

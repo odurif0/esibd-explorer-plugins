@@ -382,10 +382,17 @@ def _invoke_gui_callback(callback: Any) -> None:
         return
 
     try:
-        if QThread.currentThread() == app.thread():
+        on_gui_thread = QThread.currentThread() == app.thread()
+    except Exception:
+        on_gui_thread = False
+    if on_gui_thread:
+        try:
             callback()
-            return
+        except Exception:
+            logging.getLogger(__name__).exception("GUI update failed.")
+        return
 
+    try:
         with _GUI_DISPATCH_LOCK:
             dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
             if dispatcher is None:
@@ -1378,6 +1385,8 @@ class PSUDevice(Device):
         controller = getattr(self, "controller", None)
         if controller is None or not getattr(controller, "initialized", False):
             return
+        if getattr(self, "_clearing_interlock", False):
+            return  # _clear_interlock has already applied it.
         controller._interlock_monitoring_changed()
 
     def estimateStorage(self) -> None:
@@ -2228,7 +2237,7 @@ class PSUDevice(Device):
         self._set_action_enabled(getattr(self, "clearInterlockAction", None), initialized)
 
     def _clear_interlock(self) -> None:
-        """Disable interlock monitoring, clear ST_ERR_ILOCK, and persist the setting."""
+        """Switch both outputs OFF, disable interlock monitoring and persist the setting."""
         controller = getattr(self, "controller", None)
         device = getattr(controller, "device", None) if controller is not None else None
         if device is None or not getattr(controller, "initialized", False):
@@ -2237,20 +2246,14 @@ class PSUDevice(Device):
                 flag=PRINT.WARNING,
             )
             return
-        try:
-            timeout_s = float(getattr(self, "connect_timeout_s", 5.0))
-            device.set_interlock_enabled(False, False, timeout_s=timeout_s)
-        except Exception as exc:  # noqa: BLE001
-            self.print(f"Could not disable interlock monitoring: {exc}", flag=PRINT.WARNING)
+        if not controller._interlock_monitoring_changed(enabled=False, outputs_off=True):
             return
-        setting = self._setting(self.INTERLOCK_MONITORING)
-        if setting is not None:
-            with contextlib.suppress(Exception):
-                setting.value = False
-        self.interlock_monitoring = False
-        self.print("Interlock monitoring disabled; ST_ERR_ILOCK cleared.")
-        with contextlib.suppress(Exception):
-            controller._update_state()
+        # Explorer runs the setting's event on this change; it is already applied.
+        self._clearing_interlock = True
+        try:
+            self.interlock_monitoring = False
+        finally:
+            self._clearing_interlock = False
 
     def _hide_channel_table(self) -> None:
         tree = getattr(self, "tree", None)
@@ -4671,17 +4674,23 @@ class PSUController(DeviceController):
             "dropout_values": dropouts,
         }
 
-    def _apply_interlock_setting_unlocked(self, device, *, timeout_s: float) -> None:
-        enabled = _coerce_bool(
-            getattr(self.controllerParent, "interlock_monitoring", False), default=False
-        )
+    def _apply_interlock_setting_unlocked(
+        self, device, *, timeout_s: float, enabled: bool | None = None
+    ) -> None:
+        if enabled is None:
+            enabled = _coerce_bool(
+                getattr(self.controllerParent, "interlock_monitoring", False), default=False
+            )
         device.set_interlock_enabled(enabled, enabled, timeout_s=timeout_s)
-        self._verify_interlock_setting_unlocked(device, timeout_s=timeout_s)
+        self._verify_interlock_setting_unlocked(device, timeout_s=timeout_s, enabled=enabled)
 
-    def _verify_interlock_setting_unlocked(self, device, *, timeout_s: float) -> None:
-        enabled = _coerce_bool(
-            getattr(self.controllerParent, "interlock_monitoring", False), default=False
-        )
+    def _verify_interlock_setting_unlocked(
+        self, device, *, timeout_s: float, enabled: bool | None = None
+    ) -> None:
+        if enabled is None:
+            enabled = _coerce_bool(
+                getattr(self.controllerParent, "interlock_monitoring", False), default=False
+            )
         actual = device.get_interlock_enabled(timeout_s=timeout_s)
         if tuple(actual) != (enabled, enabled):
             raise RuntimeError(
@@ -4689,20 +4698,66 @@ class PSUController(DeviceController):
                 f"requested={(enabled, enabled)}, actual={actual}."
             )
 
-    def _interlock_monitoring_changed(self) -> None:
+    def _interlock_tripped(self) -> bool:
+        """Whether the last readback did not show a closed interlock loop."""
+        return (
+            getattr(self, "interlock_active", None) is not True
+            or _normalize_runtime_state(self.main_state) == "ST_ERR_ILOCK"
+        )
+
+    def _interlock_monitoring_changed(
+        self, *, enabled: bool | None = None, outputs_off: bool = False
+    ) -> bool:
+        """Apply interlock monitoring (the setting unless `enabled` is given).
+
+        Disabling it while the loop is open, or with `outputs_off`, first switches
+        both outputs OFF. The interlock only gates them (COM-HVPSU2D.h): lifting
+        it with an output still enabled would bring the HV back at the old
+        setpoints. Return whether the device confirmed the new state.
+        """
         if self.device is None or not self.initialized:
-            return
+            return False
         timeout_s = float(getattr(self.controllerParent, "connect_timeout_s", 5.0))
+        if enabled is None:
+            enabled = _coerce_bool(
+                getattr(self.controllerParent, "interlock_monitoring", False), default=False
+            )
+        switched_off = False
         try:
             with self._controller_lock_section("Could not acquire lock to change PSU interlocks."):
-                if self.device is None:
-                    return
-                self._apply_interlock_setting_unlocked(self.device, timeout_s=timeout_s)
-            enabled = bool(self.controllerParent.interlock_monitoring)
-            self.print(f"Interlock monitoring {'enabled' if enabled else 'disabled'}.")
+                device = self.device
+                if device is None:
+                    return False
+                if not enabled and (outputs_off or self._interlock_tripped()):
+                    self._discard_pending_manual_state_apply()
+                    device.set_output_enabled(False, False, timeout_s=timeout_s)
+                    if tuple(device.get_output_enabled(timeout_s=timeout_s)) != (False, False):
+                        raise RuntimeError(
+                            "PSU outputs were not confirmed OFF; interlock monitoring stays enabled."
+                        )
+                    self.output_enabled_by_channel = {0: False, 1: False}
+                    switched_off = True
+                self._apply_interlock_setting_unlocked(
+                    device, timeout_s=timeout_s, enabled=enabled
+                )
         except Exception as exc:
             self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
             self.print(f"Could not confirm interlock monitoring: {exc}", flag=PRINT.ERROR)
+            return False
+        self._update_state()
+        if switched_off:
+            sync_manual = getattr(
+                self.controllerParent, "_sync_manual_panel_from_controller", None
+            )
+            if callable(sync_manual):
+                sync_manual()
+            self.print(
+                "Interlock monitoring disabled. Both outputs were switched OFF first; "
+                "enable them again in the panel when it is safe."
+            )
+        else:
+            self.print(f"Interlock monitoring {'enabled' if enabled else 'disabled'}.")
+        return True
 
     def initializeCommunication(self) -> None:
         if getattr(self, "initializing", False):

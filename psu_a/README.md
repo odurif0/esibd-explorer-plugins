@@ -51,6 +51,10 @@ routine experimental use. These checks do not certify physical shutdown.
   Use `-1` to connect with outputs kept OFF until manual values are applied.
 - `Shutdown config`: advanced slot loaded on OFF. Use `-1` to use software shutdown.
 - `Available configs`: live list of config slots reported by the connected PSU.
+- `Interlock monitoring` (advanced, off by default): monitors the output and BNC
+  interlock connectors. Enable it only with the interlock cable connected. It is
+  reapplied at each connection, ON and config load. Disabling it while the
+  interlock loop is open first switches both outputs OFF.
 
 Toolbar notes:
 
@@ -59,6 +63,10 @@ Toolbar notes:
 - device summary: compact CH0/CH1 ON/OFF + measured voltage/current readbacks.
 - `HV outputs`: CH0/CH1 enable readback, not the measured voltage value.
 - `Device flags`: low-level PSU state flags reported by the controller.
+- `Disable interlock`: shown only in `ST_ERR_ILOCK` with the interlock loop open.
+  It switches both outputs OFF, then disables interlock monitoring: the interlock
+  only gates the outputs, which would otherwise come back at their old setpoints.
+  Enable them again in the panel when it is safe.
 
 The plugin now shows a fixed 2-channel operator panel matching the physical PSU
 outputs instead of a generic channel table.

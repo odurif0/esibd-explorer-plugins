@@ -40,6 +40,13 @@ pub trait Backend: Send {
         ctx: &Context,
     ) -> Result<Value>;
 
+    /// Whether `method` runs even when cancelled before it starts. Device calls
+    /// are refused instead; Transmission turns a cancellation into its own
+    /// outcome, and an observation reports an Explorer action already performed.
+    fn runs_when_cancelled(&self, _method: &str) -> bool {
+        false
+    }
+
     fn get_attribute(&self, name: &str) -> Result<Value> {
         Err(Error::new(
             "AttributeError",

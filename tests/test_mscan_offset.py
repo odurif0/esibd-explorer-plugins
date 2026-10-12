@@ -4,74 +4,13 @@ User request (2026-10-08): select the AMPR module/channel of the quadrupole offs
 proportionality coefficient (default 0.2), and make sure the applied offset equals A × coefficient.
 """
 import json
-from threading import Event, Lock
 from types import SimpleNamespace as NS
 
 import h5py
 import numpy as np
 import pytest
 
-from support.mscan import run
-
-
-class Request:
-    def __init__(self, channel, target):
-        self.channel, self.target, self.state, self.detail = channel, target, 'pending', ''
-
-
-class OffsetChannel:
-    """AMPR channel: the value cell rounds to 2 decimals and queues a request, like the AMPR plugin."""
-
-    def __init__(self, device, module=2, number=3):
-        self.device, self.module, self.number = device, module, number
-        self.name, self.unit = 'Q_offset', 'V'
-        self.real = self.enabled = self.active = True
-        self.min, self.max = -100., 100.
-        self._value = self.monitor = 5.
-        self.writes = []
-
-    def getDevice(self):
-        return self.device
-
-    def module_address(self):
-        return self.module
-
-    def channel_number(self):
-        return self.number
-
-    @property
-    def value(self):
-        return self._value
-
-    @value.setter
-    def value(self, value):
-        value = round(float(value), 2)
-        self.writes.append(value)
-        if value != self._value:
-            self._value = value
-            ctrl = self.device.controller
-            ctrl._latest_setpoints[(self.module, self.number)] = Request(self, value)
-
-
-def add_offset(r, factor=.2, monitor_error=0., confirm=True):
-    """Add an AMPR offset channel to the shared rig; each pause confirms its latest request."""
-    s = r.scan
-    ctrl = NS(initialized=True, device=object(), _setpoint_lock=Lock(), _setpoint_cancel=Event(),
-              _latest_setpoints={}, transitioning=False, ramping=False, initializing=False,
-              _module_voltage_limit=lambda module: 500.)
-    device = NS(name='AMPR_A', controller=ctrl, isOn=lambda: True)
-    channel = OffsetChannel(device)
-    r.all_channels.append(channel)
-    s.pluginManager.plugins.append(device)
-    s.offset_channel, s.offset_factor = s._offset_label(channel), factor
-
-    def settle_ampr():
-        for request in ctrl._latest_setpoints.values():
-            if confirm:
-                request.state = 'confirmed'
-                channel.monitor = request.target + monitor_error
-    r.offset = NS(channel=channel, controller=ctrl, device=device, settle=settle_ampr)
-    return channel
+from support.mscan import Request, add_offset, run
 
 
 def prepare(r, n=3):

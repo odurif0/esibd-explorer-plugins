@@ -101,9 +101,7 @@ import numpy as np
 import pytest
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root / 'tests'))
-import test_mscan as fixtures
-from test_mscan_continuous import continuous
-from test_mscan_offset import add_offset
+from support.mscan import add_offset, mscan_continuous, mscan_module, mscan_rig
 
 def load(name, file):
     spec = importlib.util.spec_from_file_location(name, file)
@@ -114,7 +112,7 @@ def load(name, file):
 transport = load('native_transport_test', root / 'native/python/_native_worker.py')
 adapter_module = load('mscan_adapter_test', root / 'mscan/_runtime/_native_scan.py')
 mp = pytest.MonkeyPatch()
-module = fixtures.module.__wrapped__(mp)
+module = mscan_module.__wrapped__(mp)
 if hasattr(module.MScan, '_run_scan_python_reference'):
     reference_runner = module.MScan._run_scan_python_reference
 else:
@@ -129,8 +127,8 @@ else:
     reference_runner = namespace['runScan']
 
 def rig(mode, fault=None, offset=False):
-    r = fixtures.rig.__wrapped__(module)
-    c = continuous.__wrapped__(r, mp)
+    r = mscan_rig.__wrapped__(module)
+    c = mscan_continuous.__wrapped__(r, mp)
     s = c.scan
     s.scan_mode = mode
     if offset:
@@ -310,13 +308,12 @@ import numpy as np
 import pytest
 root = Path(sys.argv[1])
 sys.path.insert(0,str(root/'tests'))
-import test_mscan as fixtures
-from test_mscan_continuous import continuous
+from support.mscan import mscan_continuous, mscan_module, mscan_rig
 mp = pytest.MonkeyPatch()
-module = fixtures.module.__wrapped__(mp)
+module = mscan_module.__wrapped__(mp)
 try:
-    r = fixtures.rig.__wrapped__(module)
-    c = continuous.__wrapped__(r,mp)
+    r = mscan_rig.__wrapped__(module)
+    c = mscan_continuous.__wrapped__(r,mp)
     s = c.scan
     s.scan_mode = s.STEPPED
     s._plan = s._preflight()

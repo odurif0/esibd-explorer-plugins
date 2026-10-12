@@ -527,10 +527,17 @@ def _invoke_gui_callback(callback: Any) -> None:
         return
 
     try:
-        if QThread.currentThread() == app.thread():
+        on_gui_thread = QThread.currentThread() == app.thread()
+    except Exception:
+        on_gui_thread = False
+    if on_gui_thread:
+        try:
             callback()
-            return
+        except Exception:
+            logging.getLogger(__name__).exception("GUI update failed.")
+        return
 
+    try:
         with _GUI_DISPATCH_LOCK:
             dispatcher = getattr(_invoke_gui_callback, "_dispatcher", None)
             if dispatcher is None:

@@ -105,6 +105,14 @@ def probe(path):
     # Direct calls on the GUI thread still work, without event-loop latency.
     invoke(lambda: calls.append("direct"))
     assert calls[-1] == "direct"
+    # A direct callback that fails is reported as such, not as a dropped dispatch.
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logging.getLogger("qt_probe").addHandler(handler)
+    invoke(lambda: 1 / 0)
+    logging.getLogger("qt_probe").removeHandler(handler)
+    assert [record.getMessage() for record in records] == ["GUI update failed."], records
 
     class Parent:
         def __init__(self):
