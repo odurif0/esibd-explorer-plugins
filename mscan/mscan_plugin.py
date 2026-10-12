@@ -331,6 +331,11 @@ class MScan(Scan):
                 # belongs to navToolBar, Data to Clipboard belongs to Display.
                 # Leaving either attached can crash Qt during their destruction.
                 self.titleBar.clear()
+            if self.axes and self.scan.labelAxis is self.axes[0]:
+                # initFig lent this display's axis to the scan's file label; a redraw of a
+                # display still open must not label this closed figure (no renderer left).
+                live = getattr(self.scan, 'display', None)
+                self.scan.labelAxis = live.axes[0] if live not in (None, self) and getattr(live, 'axes', None) else None
             super().closeGUI()
 
         def initGUI(self):
