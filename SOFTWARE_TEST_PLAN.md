@@ -73,6 +73,9 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
 - **PSU worker (fixed 2026-10-12):** connect each PSU with outputs OFF and leave it
   polling for several minutes: no "native worker released" message and no exit
   `3221226356` (`0xC0000374`) in `<Data path>/logs/psu_x/native/psu/`.
+- **PSU Disable interlock (fixed 2026-10-12):** with outputs OFF and the interlock loop open,
+  click `Disable interlock`: the panel must show `Off (not monitored)` and the state leave
+  `ST_ERR_ILOCK`, without a Python error in the console (it raised on `PRINT.INFO` before).
 - **PSU:** check the `Ramp step (V)` / `Ramp step interval (s)` defaults against
   the measured output slew before relying on them. Last values: with outputs OFF and
   `Operating config` `-1`, set Vset/Ilim, disconnect, power-cycle the PSU and
