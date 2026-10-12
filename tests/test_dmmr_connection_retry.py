@@ -1,122 +1,16 @@
 """Failed native opens must be retained until their serial handle is released."""
-import importlib
 import logging
 import threading
-import types
 
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
-
-
-@pytest.fixture
-def connection(monkeypatch, tmp_path):
-    plugin = _load_module()
-    cls = plugin._get_dmmr_driver_class()._PROCESS_CONTROLLER_CLASS
-    base = importlib.import_module(cls.__module__).DMMRBase
-    hw = types.SimpleNamespace(
-        calls=[], opened=False, powered=False, release=threading.Event(),
-        entered=threading.Event(), worker=None, late_status=0, block=True,
-        close_status=0, close_release=threading.Event(), block_close=False,
-        drivers=[],
-    )
-
-    def native_open(self, com):
-        hw.calls.append('open')
-        if hw.opened:
-            return -2
-        hw.opened = True
-        hw.worker = threading.current_thread()
-        hw.entered.set()
-        if hw.block:
-            assert hw.release.wait(5), 'test did not release simulated open'
-            return hw.late_status
-        return 0 if hw.powered else -5
-
-    def native_close(self):
-        # Closing is permitted only after the native open AND its wrapper exit.
-        assert hw.worker is None or not hw.worker.is_alive()
-        assert self.thread_lock.locked()
-        hw.calls.append('close')
-        if hw.block_close:
-            assert hw.close_release.wait(5), 'test did not release simulated close'
-        if hw.close_status == 0:
-            hw.opened = False
-        return hw.close_status
-
-    monkeypatch.setattr(base, 'open_port', native_open)
-    monkeypatch.setattr(base, 'close_port', native_close)
-    monkeypatch.setattr(base, 'set_baud_rate', lambda self, rate: (0, rate))
-    monkeypatch.setattr(base, 'get_io_state', lambda self: (0, 0))
-    monkeypatch.setattr(base, 'get_comm_error', lambda self: (0, 0))
-
-    def factory(**kwargs):
-        driver = cls.__new__(cls)
-        driver.device_id = 'retry-test'
-        driver.com, driver.port_num, driver.baudrate = 15, 0, 230400
-        driver.connected = driver._dll_port_claimed = driver._transport_poisoned = False
-        driver._transport_error = None
-        driver.err_dict = {}
-        driver.thread_lock = threading.Lock()
-        driver.logger = logging.getLogger('dmmr-retry-test')
-        driver._startup_log_dir = tmp_path
-        driver.stop_housekeeping = lambda: None
-        driver._resolve_io_timeout = lambda timeout_s=None: 0.03 if timeout_s is None else timeout_s
-        driver._warn_on_other_process_ports = lambda: None
-        driver._verify_device_type = lambda timeout: driver.DEVICE_TYPE
-        driver._warn_if_unexpected_product_id = lambda timeout: None
-        driver.close = lambda: None  # Public facade cleanup, not a native close.
-        def initialize(timeout_s):
-            driver.connect(timeout_s=timeout_s)
-            return {address: {} for address in range(8)}
-        driver.initialize = initialize
-        hw.drivers.append(driver)
-        return driver
-
-    monkeypatch.setattr(plugin, '_get_dmmr_driver_class', lambda: factory)
-    parent = types.SimpleNamespace(
-        name='DMMR', com=15, baudrate=230400, connect_timeout_s=0.03,
-        poll_timeout_s=0.03, getChannels=lambda: [], isOn=lambda: False,
-        pluginManager=types.SimpleNamespace(Settings=types.SimpleNamespace(dataPath=tmp_path)),
-    )
-    controller = plugin.DMMRController(parent)
-    messages, successes = [], []
-    controller.print = lambda message, **kwargs: messages.append(message)
-    controller._restore_off_ui_state = lambda: None
-    controller._sync_status_to_gui = lambda: None
-    controller._update_state = lambda: True
-    controller.signalComm = types.SimpleNamespace(
-        initCompleteSignal=types.SimpleNamespace(emit=lambda: successes.append(True)),
-    )
-    hw.plugin = plugin
-    hw.controller, hw.factory, hw.messages, hw.successes = controller, factory, messages, successes
-    yield hw
-    hw.release.set()
-    hw.close_release.set()
-    if hw.worker is not None:
-        hw.worker.join(3)
-    for driver in hw.drivers:
-        pending = getattr(driver, '_pending_dll_call', None)
-        if pending is not None:
-            pending['thread'].join(3)
-        driver._dll_port_claimed = False  # Drop this test's simulated handle only.
-    with cls._active_connections_lock:
-        cls._purge_stale_connections()
-
-
-def finish_open(hw):
-    hw.release.set()
-    assert hw.entered.wait(2)
-    hw.worker.join(3)
-    assert not hw.worker.is_alive()
-    hw.block = False
-    hw.powered = True
+from support.dmmr import finish_open
 
 
 @pytest.mark.parametrize('late_status', [0, -5])
-def test_power_off_then_on_reconnects_only_after_old_open_finishes(connection, late_status, caplog):
+def test_power_off_then_on_reconnects_only_after_old_open_finishes(dmmr_connection, late_status, caplog):
     caplog.set_level(logging.INFO, logger='dmmr-retry-test')
-    hw = connection
+    hw = dmmr_connection
     hw.late_status = late_status
     hw.controller.runInitialization()
     old = hw.drivers[0]
@@ -142,8 +36,8 @@ def test_power_off_then_on_reconnects_only_after_old_open_finishes(connection, l
     assert 'high-voltage outputs' not in caplog.text
 
 
-def test_handshake_error_also_releases_the_partially_open_port(connection):
-    hw = connection
+def test_handshake_error_also_releases_the_partially_open_port(dmmr_connection):
+    hw = dmmr_connection
     hw.block = False
     hw.controller.runInitialization()
     assert hw.calls == ['open', 'close']
@@ -154,8 +48,8 @@ def test_handshake_error_also_releases_the_partially_open_port(connection):
     assert hw.successes == [True]
 
 
-def test_failed_close_keeps_backend_and_blocks_new_open(connection):
-    hw = connection
+def test_failed_close_keeps_backend_and_blocks_new_open(dmmr_connection):
+    hw = dmmr_connection
     hw.controller.runInitialization()
     old = hw.drivers[0]
     finish_open(hw)
@@ -169,8 +63,8 @@ def test_failed_close_keeps_backend_and_blocks_new_open(connection):
     assert '-3' in hw.messages[-1]
 
 
-def test_dispose_cannot_erase_a_failed_disconnect(connection):
-    hw = connection
+def test_dispose_cannot_erase_a_failed_disconnect(dmmr_connection):
+    hw = dmmr_connection
     driver = hw.factory()
     driver.connected = driver._dll_port_claimed = True
     driver.disconnect = lambda: False
@@ -182,8 +76,8 @@ def test_dispose_cannot_erase_a_failed_disconnect(connection):
     assert hw.controller.initialized
 
 
-def test_late_measurement_return_does_not_authorize_a_close(connection):
-    hw = connection
+def test_late_measurement_return_does_not_authorize_a_close(dmmr_connection):
+    hw = dmmr_connection
     driver = hw.factory()
     driver.connected = driver._dll_port_claimed = True
     def read():
@@ -203,8 +97,8 @@ def test_late_measurement_return_does_not_authorize_a_close(connection):
 
 
 @pytest.mark.parametrize('blocked_open', [False, True])
-def test_delayed_close_is_awaited_once_without_reopening(connection, blocked_open):
-    hw = connection
+def test_delayed_close_is_awaited_once_without_reopening(dmmr_connection, blocked_open):
+    hw = dmmr_connection
     hw.block, hw.block_close = blocked_open, True
     hw.controller.runInitialization()
     old = hw.drivers[0]
@@ -228,8 +122,8 @@ def test_delayed_close_is_awaited_once_without_reopening(connection, blocked_ope
     assert old._transport_poisoned and old._failed_open_released
 
 
-def test_native_open_not_entered_does_not_require_native_close(connection):
-    hw = connection
+def test_native_open_not_entered_does_not_require_native_close(dmmr_connection):
+    hw = dmmr_connection
     driver = hw.factory()
     driver.thread_lock.acquire()
     try:
@@ -247,8 +141,8 @@ def test_native_open_not_entered_does_not_require_native_close(connection):
     assert driver.connected
 
 
-def test_claim_survives_attempted_release_and_refuses_competing_open(connection):
-    hw = connection
+def test_claim_survives_attempted_release_and_refuses_competing_open(dmmr_connection):
+    hw = dmmr_connection
     hw.controller.runInitialization()
     old = hw.controller.device
     old._set_port_claimed(False)
@@ -268,10 +162,10 @@ def test_claim_survives_attempted_release_and_refuses_competing_open(connection)
     assert hw.calls == ['open', 'close', 'open']
 
 
-def test_registry_retains_orphaned_open_until_a_new_connection_can_retire_it(connection):
+def test_registry_retains_orphaned_open_until_a_new_connection_can_retire_it(dmmr_connection):
     import gc
     import weakref
-    hw = connection
+    hw = dmmr_connection
     hw.controller.runInitialization()
     reference = weakref.ref(hw.controller.device)
     finish_open(hw)
@@ -287,8 +181,8 @@ def test_registry_retains_orphaned_open_until_a_new_connection_can_retire_it(con
     assert old._failed_open_released and not old._dll_port_claimed
 
 
-def test_connected_false_with_a_claim_is_not_a_successful_disconnect(connection):
-    hw = connection
+def test_connected_false_with_a_claim_is_not_a_successful_disconnect(dmmr_connection):
+    hw = dmmr_connection
     driver = hw.factory()
     driver._set_port_claimed(True)
     hw.opened = True
@@ -298,8 +192,8 @@ def test_connected_false_with_a_claim_is_not_a_successful_disconnect(connection)
     assert hw.calls == ['close']
 
 
-def test_close_communication_preserves_a_pending_open(connection):
-    hw = connection
+def test_close_communication_preserves_a_pending_open(dmmr_connection):
+    hw = dmmr_connection
     hw.controller.runInitialization()
     old = hw.controller.device
     hw.controller.closeCommunication()
@@ -314,8 +208,8 @@ def test_close_communication_preserves_a_pending_open(connection):
     assert hw.calls == ['open', 'close']
 
 
-def test_failed_state_verification_does_not_emit_initialization_success(connection):
-    hw = connection
+def test_failed_state_verification_does_not_emit_initialization_success(dmmr_connection):
+    hw = dmmr_connection
     hw.block, hw.powered = False, True
     hw.controller._update_state = lambda: False
     hw.controller.runInitialization()
@@ -324,8 +218,8 @@ def test_failed_state_verification_does_not_emit_initialization_success(connecti
     assert hw.calls == ['open', 'close']
 
 
-def test_failed_normal_disposal_cannot_claim_disconnection(connection):
-    hw = connection
+def test_failed_normal_disposal_cannot_claim_disconnection(dmmr_connection):
+    hw = dmmr_connection
     driver = hw.factory()
     driver.connected = True
     driver._set_port_claimed(True)
@@ -346,8 +240,8 @@ def _connect_in_thread(driver, results):
         results.append(exc)
 
 
-def test_overlapping_connect_cannot_report_ready_during_verification(connection):
-    hw = connection
+def test_overlapping_connect_cannot_report_ready_during_verification(dmmr_connection):
+    hw = dmmr_connection
     hw.block, hw.powered = False, True
     driver = hw.factory()
     verifying, release = threading.Event(), threading.Event()
@@ -374,8 +268,8 @@ def test_overlapping_connect_cannot_report_ready_during_verification(connection)
     assert driver.connected and driver._dll_port_claimed
 
 
-def test_reentrant_connect_does_not_release_outer_setup_guard(connection):
-    hw = connection
+def test_reentrant_connect_does_not_release_outer_setup_guard(dmmr_connection):
+    hw = dmmr_connection
     hw.block, hw.powered = False, True
     driver = hw.factory()
 
@@ -393,8 +287,8 @@ def test_reentrant_connect_does_not_release_outer_setup_guard(connection):
     assert driver.connected and not driver._opening_in_progress
 
 
-def test_late_competing_refusal_cannot_erase_successful_connection(connection):
-    hw = connection
+def test_late_competing_refusal_cannot_erase_successful_connection(dmmr_connection):
+    hw = dmmr_connection
     hw.block, hw.powered = False, True
     driver = hw.factory()
     original_open = driver._call_initial_open
@@ -451,8 +345,8 @@ def test_late_competing_refusal_cannot_erase_successful_connection(connection):
             winner.join(3)
 
 
-def test_connection_readiness_uses_the_reservation_lock(connection, monkeypatch):
-    driver = connection.factory()
+def test_connection_readiness_uses_the_reservation_lock(dmmr_connection, monkeypatch):
+    driver = dmmr_connection.factory()
     cls = type(driver)
     original_getattribute = cls.__getattribute__
     reads = []

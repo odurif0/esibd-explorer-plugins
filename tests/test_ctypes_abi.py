@@ -1,12 +1,12 @@
-"""Compare the declared ctypes ABI directly with the bundled vendor headers."""
+"""Compare the declared ctypes ABI with the vendor headers, as tools/generate_native_abi.py reads them.
+
+The generator also applies the DLL-verified corrections (e.g. PSU GetFanData PWM is double[3])."""
 
 import ast
 import ctypes
 from ctypes import wintypes
 import importlib.util
 import inspect
-import json
-import re
 import types
 from pathlib import Path
 
@@ -14,47 +14,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASES = sorted(ROOT.glob("*/vendor/runtime/*/*_base.py"))
-ABI = ROOT / "native/worker/src/generated/abi.json"
-
-
-def header_signatures(path):
-    # These headers use only scalar types, C++ references and fixed arrays.
-    # Reject anything outside that small grammar instead of guessing an ABI.
-    text = re.sub(r"/\*.*?\*/|//[^\n]*", "", path.read_text(), flags=re.S)
-    text = re.sub(r"\b(?:FAR|_export)\b", "", text)
-    functions = {}
-    for match in re.finditer(
-        r"^[ \t#]*(WORD|int|const\s+char\s*\*)\s*(COM_\w+)\s*\(([^;]*)\);",
-        text, re.M,
-    ):
-        result, name, arguments = match.groups()
-        result = re.sub(r"\s+", "", result)
-        params = []
-        for argument in arguments.split(",") if arguments.strip() else []:
-            argument = re.sub(r"\bconst\b", "", argument)
-            parsed = re.fullmatch(
-                r"\s*(unsigned|WORD|DWORD|BYTE|BOOL|bool|double|float|int|char)"
-                r"\s*([&*]?)\s*(\w+)\s*(\[[^\]]+\])?\s*",
-                argument,
-            )
-            assert parsed, f"Unsupported C declaration: {path}: {argument}"
-            scalar, reference, _param, array = parsed.groups()
-            params.append(scalar + ("*" if reference or array else ""))
-        signature = (params, result)
-        if name in functions:
-            assert functions[name] == signature, f"Conflicting declarations for {name}"
-        functions[name] = signature
-    assert functions, f"No exports found in {path}"
-    return functions
+SPEC = importlib.util.spec_from_file_location("ctypes_abi_generator", ROOT / "tools/generate_native_abi.py")
+GENERATOR = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(GENERATOR)
 
 
 def checked_signatures(path):
-    """Header signatures, except exports whose layout was verified on the DLL (wrong header)."""
-    declarations = header_signatures(next((path.parent / "vendor").glob("*.h")))
-    for name, spec in json.loads(ABI.read_text())[path.parent.name]["exports"].items():
-        if "verified_dll_sha256" in spec:
-            declarations[name] = ([arg["type"] + ("*" if arg["pointer"] else "") for arg in spec["args"]], spec["result"])
-    return declarations
+    """{export: ([C types], result)} for the exports this *_base.py uses."""
+    functions, _metadata = GENERATOR.declarations(path.parent.name, path.parents[3].name)
+    return {name: ([arg["type"] + ("*" if arg["pointer"] else "") for arg in spec["args"]], spec["result"])
+            for name, spec in functions.items()}
 
 
 def native_names(path):

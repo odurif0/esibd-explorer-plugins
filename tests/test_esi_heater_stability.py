@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from support.esi_heater import snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('_esi_stability_test', ROOT / 'esi/_heater_stability.py')
@@ -101,18 +102,9 @@ def test_bad_parameters_rejected(parameter, bad):
         TemperatureStability(**{parameter: bad})
 
 
-def snapshot():
-    return dict(main_state={'name': 'STATE_ON'}, device_state={'hex': '0x0'}, enabled=True,
-                modules={}, interlock_state={'flags': []}, heat=dict(
-                    monitor_temperature_c=50., target_temperature_c=50., monitor_current_a=2.,
-                    heater_power_w=8., hardware_limits={'max_temperature_c': 175.}, valid=True,
-                    interlock_state=0, active=True, module_active=True, module_gate_active=True,
-                    device_gate_active=True, control_active=True))
-
-
 @pytest.fixture
 def controller():
-    from test_esi_plugin_behavior import _load_plugin
+    from support.esi import load_plugin as _load_plugin
     module = _load_plugin()
     clock = [0.]
     module.time = SimpleNamespace(monotonic=lambda: clock[0])

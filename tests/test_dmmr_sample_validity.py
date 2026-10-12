@@ -6,12 +6,12 @@ import types
 
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
+from support.dmmr import load_plugin
 
 
 @pytest.mark.parametrize("failure", ["status", "exception", "lock"])
 def test_missing_dmmr_sample_becomes_nan_without_losing_other_channels(failure):
-    module = _load_module()
+    module = load_plugin()
     channels = [types.SimpleNamespace(real=True, module_address=lambda n=n: n) for n in (1, 2)]
     parent = types.SimpleNamespace(
         getChannels=lambda: channels, isOn=lambda: True, poll_timeout_s=0.1,
@@ -50,7 +50,7 @@ def test_missing_dmmr_sample_becomes_nan_without_losing_other_channels(failure):
 
 
 def test_dmmr_state_poll_failure_cannot_leave_old_samples():
-    module = _load_module()
+    module = load_plugin()
     channel = types.SimpleNamespace(real=True, module_address=lambda: 1)
     parent = types.SimpleNamespace(getChannels=lambda: [channel], isOn=lambda: True)
     controller = module.DMMRController(parent)

@@ -1,7 +1,6 @@
 """Filesystem/process proofs only: no runtime import, COM or instrument access."""
 import importlib.util
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys

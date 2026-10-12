@@ -62,6 +62,10 @@ If family membership changes, also update `tests/test_plugin_family_parity.py` (
 
 Tests run locally only: no GitHub Actions or other CI (the owner does not want tests run on GitHub).
 Run the smallest check that covers the change, then widen only if needed.
+Put code shared by several test modules in `tests/support/` (register fixture modules in
+`tests/conftest.py` `pytest_plugins`); never import one test module from another
+(`tests/test_suite_layout.py`). Import plugins in unit tests through `support.explorer`
+(the checked Explorer 1.0.2 stand-in) and run real-Qt probes with `support.qt.run_probe`.
 
 ```bash
 python3 -m pytest -q

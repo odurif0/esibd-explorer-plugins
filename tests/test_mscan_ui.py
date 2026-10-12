@@ -3,19 +3,18 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import sys
 from types import ModuleType, SimpleNamespace as NS
 
 import pytest
+from support.qt import run_probe
 
-from test_mscan import module, rig  # noqa: F401 -- fixtures only; native tests never run the Python reference.
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize('outcome', ['error', 'raised-error', 'transport-error', 'stopped', 'raised-stopped', 'completed'])
-def test_native_terminal_status_logs_once_and_closes_worker(module, monkeypatch, tmp_path, outcome):
+def test_native_terminal_status_logs_once_and_closes_worker(mscan_module, monkeypatch, tmp_path, outcome):
     from threading import Event
 
     events, errors, loaded = [], [], []
@@ -49,11 +48,11 @@ def test_native_terminal_status_logs_once_and_closes_worker(module, monkeypatch,
         def run(self):
             assert scan._native_worker is worker
             if outcome == 'raised-error':
-                raise module.ScanError(message)
+                raise mscan_module.ScanError(message)
             if outcome == 'transport-error':
                 raise TimeoutError(message)
             if outcome == 'raised-stopped':
-                raise module.ScanStopped(message)
+                raise mscan_module.ScanStopped(message)
             # The native adapter returns terminal errors without raising and
             # replaces validation when applying its exported result.
             scan._validation = validation
@@ -62,13 +61,13 @@ def test_native_terminal_status_logs_once_and_closes_worker(module, monkeypatch,
         loaded.append(part)
         return {'_native_worker': NS(NativeWorkerProxy=create_worker),
                 '_native_scan': NS(NativeScanAdapter=TerminalAdapter)}[part]
-    monkeypatch.setattr(module, '_load_native_runtime', load_native)
-    module.MScan.runScan(scan, lambda: True)
+    monkeypatch.setattr(mscan_module, '_load_native_runtime', load_native)
+    mscan_module.MScan.runScan(scan, lambda: True)
 
     assert loaded == ['_native_worker', '_native_scan']
     assert scan._validation['status'] == status
     assert scan._validation['point_status'] == [status]
-    expected_errors = [(f'Scan aborted: {message}', module.PRINT.ERROR)] if status == 'error' else []
+    expected_errors = [(f'Scan aborted: {message}', mscan_module.PRINT.ERROR)] if status == 'error' else []
     assert errors == expected_errors
     assert events == [('close', {'grace_s': 0}),
                       ('status', status.capitalize() + (': ' + message if status != 'completed' else '')),
@@ -78,7 +77,7 @@ def test_native_terminal_status_logs_once_and_closes_worker(module, monkeypatch,
 
 @pytest.mark.parametrize('emit_completion', [None, False], ids=['standalone-default', 'entrypoint-owned'])
 @pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
-def test_native_adapter_completion_owner_preserves_point_updates(module, monkeypatch, emit_completion, transport_error):
+def test_native_adapter_completion_owner_preserves_point_updates(mscan_module, monkeypatch, emit_completion, transport_error):
     from threading import Event
     import numpy as np
 
@@ -96,7 +95,7 @@ def test_native_adapter_completion_owner_preserves_point_updates(module, monkeyp
     def unavailable(*args):
         raise failure
     kwargs = {} if emit_completion is None else {'emit_completion': emit_completion}
-    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable, **kwargs)
+    adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable, **kwargs)
     adapter._bind()
     adapter._apply_updates(dict(state='acquiring', status='running', updates=[
         dict(index=0, mean=13., rail_v=[10.], rail_i=[.1], window_start=1., window_end=2.,
@@ -137,14 +136,16 @@ def test_native_adapter_completion_owner_preserves_point_updates(module, monkeyp
 @pytest.mark.parametrize(('native_confirmation', 'native_revision', 'python_confirmation'),
                          [(10., 1, None), (None, 1, 10.), (99., 0, 10.)],
                          ids=['sync-native', 'keep-confirmed-on-none', 'ignore-stale-revision'])
-def test_native_prewrite_rejects_hardware_change_after_point_update(rig, native_confirmation, native_revision,
+
+
+def test_native_prewrite_rejects_hardware_change_after_point_update(mscan_rig, native_confirmation, native_revision,
                                                                  python_confirmation):
-    scan = rig.scan
+    scan = mscan_rig.scan
     def forbidden(*args, **kwargs):
         raise AssertionError('This native-adapter test must not run the Python reference.')
     scan.runScan = forbidden
     scan._command([10., 10.])
-    psu = rig.psus[0]
+    psu = mscan_rig.psus[0]
     psu.controller._manual_apply_worker_running = False
     for rail in scan._plan['rails']:
         c = rail['channel']
@@ -152,7 +153,7 @@ def test_native_prewrite_rejects_hardware_change_after_point_update(rig, native_
         rail['confirmed_vset'] = python_confirmation
     channel = psu.channels[0]
     revision = channel.voltage_request_revision
-    adapter = rig.module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden, emit_completion=False)
+    adapter = mscan_rig.module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden, emit_completion=False)
     adapter._bind()
     action = dict(session=7, action_id=2, expected_revisions=[1, 1], restore=False,
                   index=1, targets=[20., 20.], latest_mono=None, offset=None)
@@ -167,11 +168,11 @@ def test_native_prewrite_rejects_hardware_change_after_point_update(rig, native_
         published.append(done)
     scan.signalComm.scanUpdateSignal.emit = change_hardware_after_point
     adapter._apply_updates(adapter._status)
-    with pytest.raises(rig.module.ScanError, match='PSU setpoint changed outside the scan'):
+    with pytest.raises(mscan_rig.module.ScanError, match='PSU setpoint changed outside the scan'):
         adapter._command_on_gui(action)
     assert published == [False]
     assert psu.writes == [(0, 10.), (1, 10.)]  # No next amplitude or restoration write.
-    assert rig.psus[1].writes == []
+    assert mscan_rig.psus[1].writes == []
     assert psu.isOn()
     assert channel.value == channel.voltage_setpoint_readback == 10.001
     assert channel.voltage_request_revision == revision == 1
@@ -179,14 +180,14 @@ def test_native_prewrite_rejects_hardware_change_after_point_update(rig, native_
     assert [r['confirmed_vset'] for r in scan._plan['rails']] == [10., 10.]
 
 
-def test_native_late_updates_cannot_publish_into_replaced_plan(module):
+def test_native_late_updates_cannot_publish_into_replaced_plan(mscan_module):
     from threading import Event
 
     validation = dict(status='running', error='', point_status=['not acquired'])
     notifications = []
     scan = NS(_plan=object(), _cancel=Event(), _validation=validation, _gui=lambda action, **kwargs: action(),
               signalComm=NS(scanUpdateSignal=NS(emit=notifications.append)))
-    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, lambda *args: None)
+    adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, lambda *args: None)
     adapter._bind()
     scan._plan = object()
     with pytest.raises(RuntimeError, match='plan was replaced'):
@@ -198,7 +199,7 @@ def test_native_late_updates_cannot_publish_into_replaced_plan(module):
 
 @pytest.mark.parametrize('replacement', ['plan', 'cancel'])
 @pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
-def test_native_late_finish_cannot_overwrite_replacement(module, monkeypatch, replacement, transport_error):
+def test_native_late_finish_cannot_overwrite_replacement(mscan_module, monkeypatch, replacement, transport_error):
     from threading import Event
     import numpy as np
 
@@ -229,7 +230,7 @@ def test_native_late_finish_cannot_overwrite_replacement(module, monkeypatch, re
     failure = TimeoutError('Original worker transport deadline expired.')
     def unavailable(*args):
         raise failure
-    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable)
+    adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable)
     adapter._bind()
     monkeypatch.setattr(adapter, 'start', adapter._running.set)
     monkeypatch.setattr(adapter, 'step', adapter._running.clear)
@@ -256,7 +257,7 @@ def test_native_late_finish_cannot_overwrite_replacement(module, monkeypatch, re
 
 @pytest.mark.parametrize('replacement', ['plan', 'cancel', 'worker', 'all'])
 @pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
-def test_native_old_finally_only_retires_its_worker(module, monkeypatch, tmp_path, replacement, transport_error):
+def test_native_old_finally_only_retires_its_worker(mscan_module, monkeypatch, tmp_path, replacement, transport_error):
     from threading import Event
 
     events, errors = [], []
@@ -304,8 +305,8 @@ def test_native_old_finally_only_retires_its_worker(module, monkeypatch, tmp_pat
             validation['status'] = 'completed'
     runtimes = {'_native_worker': NS(NativeWorkerProxy=lambda *args, **kwargs: old_worker),
                 '_native_scan': NS(NativeScanAdapter=Adapter)}
-    monkeypatch.setattr(module, '_load_native_runtime', runtimes.__getitem__)
-    module.MScan.runScan(scan, lambda: True)
+    monkeypatch.setattr(mscan_module, '_load_native_runtime', runtimes.__getitem__)
+    mscan_module.MScan.runScan(scan, lambda: True)
     assert publications == ['finish']
     assert old_worker.closed and events == [('close', 'original')]
     assert not errors
@@ -318,7 +319,7 @@ def test_native_old_finally_only_retires_its_worker(module, monkeypatch, tmp_pat
 
 @pytest.mark.parametrize('replacement', ['plan', 'cancel'])
 @pytest.mark.parametrize('dispatch', ['bind', 'snapshot', 'command', 'updates'])
-def test_native_adapter_rejects_replaced_origin_before_dispatch(module, replacement, dispatch):
+def test_native_adapter_rejects_replaced_origin_before_dispatch(mscan_module, replacement, dispatch):
     from threading import Event
 
     notifications = []
@@ -329,7 +330,7 @@ def test_native_adapter_rejects_replaced_origin_before_dispatch(module, replacem
               signalComm=NS(scanUpdateSignal=NS(emit=notifications.append)))
     def forbidden(*args):
         raise AssertionError('A replaced session must not read hardware, execute RPCs or publish data.')
-    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden)
+    adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden)
     if dispatch != 'bind':
         adapter._bind()
     replacement_plan, replacement_cancel = object(), Event()
@@ -358,7 +359,7 @@ def test_native_adapter_rejects_replaced_origin_before_dispatch(module, replacem
 
 
 @pytest.mark.parametrize('replacement', ['plan', 'cancel', 'worker', 'all'])
-def test_native_worker_startup_cannot_claim_replaced_session(module, monkeypatch, tmp_path, replacement):
+def test_native_worker_startup_cannot_claim_replaced_session(mscan_module, monkeypatch, tmp_path, replacement):
     from threading import Event
 
     events, errors = [], []
@@ -392,8 +393,8 @@ def test_native_worker_startup_cannot_claim_replaced_session(module, monkeypatch
         loaded.append(name)
         assert name == '_native_worker', 'A replaced startup must not construct or bind an adapter.'
         return NS(NativeWorkerProxy=startup)
-    monkeypatch.setattr(module, '_load_native_runtime', runtime)
-    module.MScan.runScan(scan, lambda: True)
+    monkeypatch.setattr(mscan_module, '_load_native_runtime', runtime)
+    mscan_module.MScan.runScan(scan, lambda: True)
     assert loaded == ['_native_worker']
     assert events == [('close', {'grace_s': 0})] and not errors
     assert scan._validation is new_validation
@@ -404,7 +405,7 @@ def test_native_worker_startup_cannot_claim_replaced_session(module, monkeypatch
     assert not replacement_cancel.is_set()
 
 
-def test_native_cancel_during_startup_completes_only_after_close(module, monkeypatch, tmp_path):
+def test_native_cancel_during_startup_completes_only_after_close(mscan_module, monkeypatch, tmp_path):
     from threading import Event
 
     events, closed = [], []
@@ -428,15 +429,15 @@ def test_native_cancel_during_startup_completes_only_after_close(module, monkeyp
     def runtime(name):
         assert name == '_native_worker'
         return NS(NativeWorkerProxy=startup)
-    monkeypatch.setattr(module, '_load_native_runtime', runtime)
-    module.MScan.runScan(scan, lambda: True)
+    monkeypatch.setattr(mscan_module, '_load_native_runtime', runtime)
+    mscan_module.MScan.runScan(scan, lambda: True)
     assert closed == [{'grace_s': 0}]
     assert events == [('status', 'Stopped: Scan stopped before native start.'),
                       ('recording', False), ('update', True)]
     assert scan._validation['point_status'] == ['stopped']
 
 
-def test_native_transport_exception_survives_unavailable_gui(module, monkeypatch):
+def test_native_transport_exception_survives_unavailable_gui(mscan_module, monkeypatch):
     from threading import Event
 
     failure = TimeoutError('Original native transport deadline expired.')
@@ -447,7 +448,7 @@ def test_native_transport_exception_survives_unavailable_gui(module, monkeypatch
     def gui(action, **kwargs):
         raise RuntimeError('Qt response timed out before publication.')
     scan._gui = gui
-    adapter = module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable)
+    adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, unavailable)
     adapter._bind()
     monkeypatch.setattr(adapter, 'start', unavailable)
     with pytest.raises(TimeoutError) as caught:
@@ -458,7 +459,7 @@ def test_native_transport_exception_survives_unavailable_gui(module, monkeypatch
 
 
 @pytest.mark.parametrize('transport_error', [False, True], ids=['completed', 'transport-error'])
-def test_native_failed_close_never_announces_reaped_or_done(module, monkeypatch, tmp_path, transport_error):
+def test_native_failed_close_never_announces_reaped_or_done(mscan_module, monkeypatch, tmp_path, transport_error):
     from threading import Event
 
     events, publications = [], []
@@ -490,16 +491,16 @@ def test_native_failed_close_never_announces_reaped_or_done(module, monkeypatch,
             scan._validation['status'] = 'completed'
     runtimes = {'_native_worker': NS(NativeWorkerProxy=lambda *args, **kwargs: worker),
                 '_native_scan': NS(NativeScanAdapter=Adapter)}
-    monkeypatch.setattr(module, '_load_native_runtime', runtimes.__getitem__)
+    monkeypatch.setattr(mscan_module, '_load_native_runtime', runtimes.__getitem__)
     with pytest.raises(TimeoutError) as caught:
-        module.MScan.runScan(scan, lambda: True)
+        mscan_module.MScan.runScan(scan, lambda: True)
     assert caught.value is failure
     assert publications == ['claim'] and events == ['close-failed']
     assert scan._native_worker is worker
 
 
 @pytest.mark.parametrize('replacement', ['current', 'plan', 'cancel', 'worker', 'all'])
-def test_native_delayed_completion_only_publishes_current_session(module, monkeypatch, tmp_path, replacement):
+def test_native_delayed_completion_only_publishes_current_session(mscan_module, monkeypatch, tmp_path, replacement):
     from threading import Event
 
     events, queued = [], []
@@ -518,7 +519,7 @@ def test_native_delayed_completion_only_publishes_current_session(module, monkey
     scan = NS(_plan=original_plan, _cancel=original_cancel, _native_worker=None, _validation=validation,
               pluginManager=NS(Settings=NS(dataPath=tmp_path)), print=forbidden,
               _run_scan_python_reference=forbidden, _gui=lambda action, **kwargs: action())
-    scan._queue_completion = lambda action: module.MScan._queue_completion(scan, action)
+    scan._queue_completion = lambda action: mscan_module.MScan._queue_completion(scan, action)
     def emit(kind, value):
         assert worker.closed and scan._native_worker is None
         events.append((kind, value))
@@ -533,8 +534,8 @@ def test_native_delayed_completion_only_publishes_current_session(module, monkey
             validation['status'] = 'completed'
     runtimes = {'_native_worker': NS(NativeWorkerProxy=lambda *args, **kwargs: worker),
                 '_native_scan': NS(NativeScanAdapter=Adapter)}
-    monkeypatch.setattr(module, '_load_native_runtime', runtimes.__getitem__)
-    module.MScan.runScan(scan, lambda: True)
+    monkeypatch.setattr(mscan_module, '_load_native_runtime', runtimes.__getitem__)
+    mscan_module.MScan.runScan(scan, lambda: True)
     assert events == [('close', 'original')]
     assert worker.closed and scan._native_worker is worker
     assert len(queued) == 1
@@ -550,9 +551,9 @@ def test_native_delayed_completion_only_publishes_current_session(module, monkey
         scan._validation = new_validation
     # The GUI resumes beyond the normal 5s command deadline. This pure GUI
     # completion remains queued; its ownership guard runs only on delivery.
-    monkeypatch.setattr(module, 'time', NS(monotonic=lambda: 10.))
+    monkeypatch.setattr(mscan_module, 'time', NS(monotonic=lambda: 10.))
     assert not call.expired.is_set()
-    module._GuiBridge.execute(scan._bridge, call)
+    mscan_module._GuiBridge.execute(scan._bridge, call)
     assert call.done.is_set() and call.error is None
     if replacement == 'current':
         assert events == [('close', 'original'), ('status', 'Completed'), ('recording', False), ('update', True)]
@@ -564,18 +565,18 @@ def test_native_delayed_completion_only_publishes_current_session(module, monkey
         assert scan._native_worker is (new_worker if replacement in ('worker', 'all') else None)
 
 
-def test_native_command_dispatch_still_expires_without_late_write(module, monkeypatch):
+def test_native_command_dispatch_still_expires_without_late_write(mscan_module, monkeypatch):
     from threading import Event
 
     queued, writes = [], []
     scan = NS(_cancel=Event(), _bridge=NS(thread=lambda: object(), request=NS(emit=queued.append)))
     clock = iter([0., 6.])
-    monkeypatch.setattr(module, 'time', NS(monotonic=lambda: next(clock)))
-    with pytest.raises(module.ScanError, match='Qt response timed out'):
-        module.MScan._gui(scan, lambda: writes.append(70.))
+    monkeypatch.setattr(mscan_module, 'time', NS(monotonic=lambda: next(clock)))
+    with pytest.raises(mscan_module.ScanError, match='Qt response timed out'):
+        mscan_module.MScan._gui(scan, lambda: writes.append(70.))
     assert len(queued) == 1 and queued[0].expired.is_set()
-    module._GuiBridge.execute(scan._bridge, queued[0])
-    assert queued[0].done.is_set() and isinstance(queued[0].error, module.ScanStopped)
+    mscan_module._GuiBridge.execute(scan._bridge, queued[0])
+    assert queued[0].done.is_set() and isinstance(queued[0].error, mscan_module.ScanStopped)
     assert not writes
 
 
@@ -595,14 +596,11 @@ def test_native_command_dispatch_still_expires_without_late_write(module, monkey
     ('dmmr-interval', '1'), ('dmmr-interval', '1.5'),
     ('rate-legacy-ini', '1'), ('rate-legacy-hdf', '1'),
 ])
+
+
 def test_mscan_in_real_explorer_and_qt(tmp_path, scenario, scale):
-    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONUNBUFFERED='1',
-               PYTHONFAULTHANDLER='1', QT_SCALE_FACTOR=scale)
-    result = subprocess.run([env.get('ESIBD_QT_PYTHON', sys.executable), str(Path(__file__)),
-                             scenario, str(tmp_path)], env=env, text=True, capture_output=True, timeout=45)
-    if result.returncode == 77:
-        pytest.skip(result.stdout + result.stderr)
-    assert result.returncode == 0, result.stdout + result.stderr
+    run_probe(__file__, scenario, tmp_path, timeout=45, scale=scale,
+              env={'PYTHONUNBUFFERED': '1', 'PYTHONFAULTHANDLER': '1'})
 
 
 def run(scenario, target, app_holder=None):
@@ -622,10 +620,10 @@ def run(scenario, target, app_holder=None):
     except ImportError as exc:
         print(f'Full Explorer/Qt dependencies unavailable: {exc}. Set ESIBD_QT_PYTHON and optionally ESIBD_EXPLORER_SOURCE.')
         return 77
-    from threading import Lock, Event
+    from threading import Lock
     import configparser
     import time
-    from psu_fakes import StatefulPSU
+    from support.psu_fakes import StatefulPSU
 
     app = QApplication([])
     if app_holder is not None:
@@ -633,7 +631,7 @@ def run(scenario, target, app_holder=None):
     app.setStyleSheet('QWidget { background: #20232a; color: #eeeeee; }'
                      'QHeaderView::section { background: #41464f; color: #eeeeee; }'
                      'QAbstractItemView { alternate-background-color: #30343c; }')
-    errors, actions = [], []
+    errors = []
     def log(**kw):
         print('LOG', kw)
         if kw.get('flag') == core.PRINT.ERROR:
@@ -669,7 +667,7 @@ def run(scenario, target, app_holder=None):
     psum = load('psu_d' if scenario.startswith('setpoint-') else 'psu_a', 'psu_plugin.py')
     mscan = load('mscan', 'mscan_plugin.py')
     amxm = load('amx_a', 'amx_plugin.py')
-    from test_amx_outputs import config79_snapshot
+    from support.amx import config79_snapshot
     window = QWidget()
     outer = QHBoxLayout(window)
     sources_widget, scan_widget, plot_widget = QWidget(), QWidget(), QWidget()
@@ -1064,6 +1062,9 @@ def run(scenario, target, app_holder=None):
                 sip.delete(widget)
             app.processEvents()
         assert hw.calls == before_calls and not errors
+        # A closed display hands the file label back to the open one: a late redraw of that
+        # display once labelled a closed figure ('FigureCanvasBase' has no get_renderer).
+        assert scan.labelAxis is scan.display.axes[0]
         scan_toolbar = scan.titleBar
         scan.closeGUI()
         assert not scan_toolbar.actions()
@@ -1843,7 +1844,6 @@ def run(scenario, target, app_holder=None):
                 controller._cancel_output_commands()
                 psu.isOn = lambda: False
             interrupted = True
-            actions = list(hw.calls)
         time.sleep(.001)
     thread.join(.5)
     assert not thread.is_alive(), 'Scan worker hung'

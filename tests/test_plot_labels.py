@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_shutdown_confirmation_regressions import FAMILIES
+from support.shutdown import FAMILIES
 
 PLUGINS = (
     ("ampr_a", "ampr", "AMPRChannel"), ("ampr_b", "ampr", "AMPRChannel"),

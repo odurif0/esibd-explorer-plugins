@@ -1,14 +1,12 @@
 """Real Qt input/feedback tests using Explorer's Parameter and spinbox code."""
 from __future__ import annotations
 
-import ast
 import importlib.util
-import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,16 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize('action', ['enter', 'tab', 'click', 'blank', 'paste', 'feedback', 'background',
                                     'toolbar', 'toolbar_pending', 'toolbar_off',
                                     'cross_update', 'header', 'off_colors', 'off_error', 'ramp_column', 'channel_toggle'])
+
+
 def test_ampr_commit_and_feedback(folder, action, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), folder, action, str(tmp_path)],
-        env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen'},
-        capture_output=True, text=True, timeout=25,
-    )
-    if result.returncode == 77:
-        pytest.skip('Real Qt or Explorer sources unavailable')
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert 'Traceback' not in result.stderr, result.stderr
+    run_probe(__file__, folder, action, tmp_path, timeout=25)
 
 
 def probe(folder, action, output):
@@ -57,17 +49,15 @@ def probe(folder, action, output):
     ns.update(pyqtSignal=QtCore.pyqtSignal, pyqtSlot=QtCore.pyqtSlot)  # Explorer 1.0.1 Parameter
     from explorer_host import add_const_names
     add_const_names(host.parent, ns)
-    tree = ast.parse(host.read_text())
+
+    from explorer_host import compile_definition
 
     def extract(name, parent=None):
-        nodes = tree.body if parent is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == parent).body
-        node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
-        source = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), node], type_ignores=[])
-        exec(compile(ast.fix_missing_locations(source), str(host), 'exec'), ns)
+        exec(compile_definition(host, name, parent), ns)
         return ns[name]
 
-    from test_ampr_plugin_packaging import _install_esibd_stubs
-    _install_esibd_stubs()
+    from support import explorer
+    explorer.install()
     core = sys.modules['esibd.core']
     core.DeviceController.__init__ = lambda self, controllerParent: setattr(self, 'controllerParent', controllerParent)
     core.DeviceController.applyValueFromThread = extract('applyValueFromThread', 'DeviceController')
@@ -142,7 +132,7 @@ def probe(folder, action, output):
         channel.channelParent = parent
         channel.name, channel.module, channel.id = f'CH{number}', '0', str(number)
         channel.enabled = channel.real = channel.active = True
-        channel.loading = True
+        parent.loading = True  # Channel.loading follows the device.
         channel.waitToStabilize = False
         channel.controller = None
         channel.inout = ns['INOUT'].IN
@@ -166,7 +156,7 @@ def probe(folder, action, output):
             window.setItemWidget(row, index, widget)
         channel.parameters = list(channel.params.values())
         channel.initGUI({})
-        channel.loading = False
+        parent.loading = False
         channels.append(channel)
 
     window.show()
@@ -201,7 +191,7 @@ def probe(folder, action, output):
             extract(name)
         check = ns['CheckBox']()
         check.setParent(window)
-        channel.loading = True
+        parent.loading = True  # Channel.loading follows the device.
         def changed():
             channel.enabled = enabled.value
             channel.enabledChanged()
@@ -211,7 +201,7 @@ def probe(folder, action, output):
         enabled.value = True
         channel.params['Enabled'] = enabled
         channel.parameters.append(enabled)
-        channel.loading = False
+        parent.loading = False
         channel._sync_enabled_toggle_widget()
         assert enabled.check is check
         assert check.focusPolicy() == QtCore.Qt.FocusPolicy.TabFocus, check.focusPolicy()
@@ -339,7 +329,7 @@ def probe(folder, action, output):
         flush()
         window.grab().save(str(output / f'{folder}-{action}.png'))
     elif action.startswith('toolbar'):
-        from test_on_off_action_ui import explorer_state_action
+        from support.ui import explorer_state_action
         StateAction = explorer_state_action()
         window.name = folder
         window.titleBar = QtWidgets.QToolBar(window)

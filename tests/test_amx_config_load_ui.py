@@ -3,16 +3,15 @@ from __future__ import annotations
 
 import ast
 from enum import Enum
-import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import time
 
 import pytest
 
-from test_amx_config_load import FOLDERS
+from support.amx import FOLDERS
+from support.qt import run_probe
 
 CASES = [(folder, surface) for folder in FOLDERS
          for surface in ("frequency", "frequency_setting", "table")]
@@ -21,15 +20,7 @@ CASES += [(folder, "width") for folder in FOLDERS if folder != "amx_hd"]
 
 @pytest.mark.parametrize("folder,surface", CASES)
 def test_config_load_replaces_old_fields_without_sending_them(folder, surface, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), folder, surface, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        text=True, capture_output=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt / Explorer sources unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, folder, surface, tmp_path, timeout=30)
 
 
 def probe(folder, surface, output):
@@ -41,7 +32,7 @@ def probe(folder, surface, output):
         host = Path(distribution("esibd-explorer").locate_file("esibd/core.py"))
     except (ImportError, PackageNotFoundError):
         return 77
-    from test_amx_config_load import make_case
+    from support.amx import make_case
     app = QtWidgets.QApplication([])
     module, parent, controller = make_case(folder)
     core = sys.modules["esibd.core"]
@@ -104,7 +95,7 @@ def probe(folder, surface, output):
         channel.channelParent = parent
         channel.controller = controller
         channel.id, channel.name, channel.real = p, f"P{p}", True
-        channel.loading = True
+        parent.loading = True  # Channel.loading follows the device.
         channel.tree = None
         channel.print = parent.print
         channel.equation = "123"
@@ -121,7 +112,7 @@ def probe(folder, surface, output):
             channel.params[name] = parameter
             parameter.value = value
         channel.params["Value"].spin.setKeyboardTracking(False)
-        channel.loading = False
+        parent.loading = False
         channels.append(channel)
     parent.channels = channels
     # The table's actual value widget is shown alongside the production panel.
@@ -154,9 +145,9 @@ def probe(folder, surface, output):
     if surface == "width":
         # A card is only editable in manual mode; other channels retain their
         # old equation mode to verify that loading takes precedence over it.
-        channels[0].loading = True
+        parent.loading = True  # Channel.loading follows the device.
         channels[0].active = True
-        channels[0].loading = False
+        parent.loading = False
         parent._update_operator_panel()
         spin = parent.amxPanelCards[0]["width"]
     spin.setFocus()

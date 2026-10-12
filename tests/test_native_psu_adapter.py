@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from psu_fakes import StatefulPSU
-from test_psu_plugin_behavior import _load_module
+from support.psu_fakes import StatefulPSU
+from support.psu import load_plugin
 
 
 class NativeProxy:
@@ -38,7 +38,7 @@ class NativeProxy:
 
 @pytest.fixture
 def native_case():
-    module = _load_module()
+    module = load_plugin()
     parent = SimpleNamespace(
         name="PSU_A", isOn=lambda: True, getChannels=lambda: [],
         startup_timeout_s=1.0, poll_timeout_s=0.1, interlock_monitoring=True,
@@ -249,7 +249,7 @@ def test_invalid_timeout_is_rejected_before_dispatch(native_case):
 
 
 def test_transport_consumes_cancel_locally_and_preserves_integer_channel_maps(native_case, monkeypatch):
-    from test_native_worker import TRANSPORT
+    from support.native import TRANSPORT
 
     _module, controller, device, _proxy, _updates, _messages = native_case
     proxy = TRANSPORT.NativeWorkerProxy.__new__(TRANSPORT.NativeWorkerProxy)

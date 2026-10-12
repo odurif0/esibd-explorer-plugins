@@ -9,13 +9,12 @@ import ast
 import configparser
 from importlib.metadata import distribution
 import importlib.util
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,15 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("scale", ["1", "1.5"])
 @pytest.mark.parametrize("legacy", [True, False])
 def test_existing_configuration_loads_before_on_action(legacy, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, __file__, str(int(legacy)), str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-        capture_output=True, text=True, timeout=45,
-    )
-    if result.returncode == 77:
-        pytest.skip("Qt or Explorer unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, str(int(legacy)), tmp_path, timeout=45, scale=scale)
 
 
 def probe(legacy, output):
@@ -40,8 +31,8 @@ def probe(legacy, output):
         from PyQt6.QtGui import QIcon
     except ImportError:
         return 77
-    from test_psu_channel_integration_ui import real_framework
-    from test_on_off_action_ui import explorer_state_action
+    from support.ui import real_framework
+    from support.ui import explorer_state_action
 
     app = QApplication([])
     ns = real_framework()  # Actual Channel, Parameter and their Qt widgets.

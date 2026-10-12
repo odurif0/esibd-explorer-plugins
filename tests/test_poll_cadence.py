@@ -7,14 +7,13 @@ import types
 
 import pytest
 
-import test_amx_hd_plugin_behavior
-import test_amx_plugin_behavior
-import test_dmmr_plugin_behavior
+import support.amx
+import support.dmmr
 
 LOADERS = {
-    "amx": test_amx_plugin_behavior._load_module,
-    "amx_hd": test_amx_hd_plugin_behavior._load_hd_plugin_module,
-    "dmmr": test_dmmr_plugin_behavior._load_module,
+    "amx": support.amx.load_plugin,
+    "amx_hd": lambda: support.amx.load_plugin("amx_hd"),
+    "dmmr": support.dmmr.load_plugin,
 }
 
 

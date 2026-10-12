@@ -10,7 +10,7 @@ import types
 
 import pytest
 
-from test_amx_hd_plugin_behavior import _load_hd_controller_classes
+from support.amx import load_hd_controller_classes
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON = sorted(ROOT.glob("*/vendor/runtime/_driver_common.py"))
@@ -115,7 +115,7 @@ def test_poison_hook_error_must_not_release_a_blocked_dll(transport):
 
 @pytest.fixture
 def hd_base():
-    _controller, cls = _load_hd_controller_classes()
+    _controller, cls = load_hd_controller_classes()
     device = cls.__new__(cls)
     device.stream = 1
     calls = []

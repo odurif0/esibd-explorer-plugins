@@ -8,11 +8,11 @@ import inspect
 import shutil
 import sys
 import types
-from enum import Enum
 from pathlib import Path
 
 from PIL import Image
 import pytest
+from support.dmmr import load_plugin
 
 
 PLUGIN_PATH = (
@@ -27,154 +27,8 @@ ICON_PATH = (
 )
 
 
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"
-        FLOAT = "FLOAT"
-        LABEL = "LABEL"
-        TEXT = "TEXT"
-        BOOL = "BOOL"
-        COMBO = "COMBO"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        ADVANCED = "Advanced"
-        EVENT = "Event"
-        TOOLTIP = "Tooltip"
-        INDICATOR = "Indicator"
-        PARAMETER_TYPE = "PARAMETER_TYPE"
-
-    class Channel:
-        range_mode = "Auto"
-        COLLAPSE = "Collapse"
-        NAME = "Name"
-        ACTIVE = "Active"
-        DISPLAY = "Display"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-        SCALING = "Scaling"
-        MIN = "Min"
-        MAX = "Max"
-        OPTIMIZE = "Optimize"
-
-        def __init__(self, channelParent=None, tree=None):
-            self.channelParent = channelParent
-            self.tree = tree
-
-        def getDefaultChannel(self):
-            return {
-                self.ACTIVE: {Parameter.HEADER: "A", Parameter.ADVANCED: True},
-                self.DISPLAY: {Parameter.HEADER: "D", Parameter.ADVANCED: False},
-                self.REAL: {Parameter.HEADER: "R", Parameter.ADVANCED: True},
-                self.ENABLED: {Parameter.HEADER: "E", Parameter.ADVANCED: True},
-                self.VALUE: {Parameter.HEADER: "Value"},
-                self.SCALING: {Parameter.VALUE: "normal"},
-                self.MIN: {},
-                self.MAX: {},
-            }
-
-        def getSortedDefaultChannel(self):
-            return self.getDefaultChannel()
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-
-    class ToolButton:
-        def __init__(self):
-            self.style = None
-            self.checked = None
-
-        def setStyleSheet(self, style):
-            self.style = style
-
-        def setChecked(self, checked):
-            self.checked = checked
-
-    class Device:
-        MAXDATAPOINTS = "Max data points"
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        parameter = {}
-        if "value" in kwargs:
-            parameter[Parameter.VALUE] = kwargs["value"]
-        if "advanced" in kwargs:
-            parameter[Parameter.ADVANCED] = kwargs["advanced"]
-        if "header" in kwargs:
-            parameter[Parameter.HEADER] = kwargs["header"]
-        if "toolTip" in kwargs:
-            parameter[Parameter.TOOLTIP] = kwargs["toolTip"]
-        if "indicator" in kwargs:
-            parameter[Parameter.INDICATOR] = kwargs["indicator"]
-        if "parameterType" in kwargs:
-            parameter[Parameter.PARAMETER_TYPE] = kwargs["parameterType"]
-        parameter.update(kwargs)
-        return parameter
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.parameterDict = parameterDict
-    core.getTestMode = lambda: False
-    plugins.Device = Device
-    plugins.LiveDisplay = type("LiveDisplay", (), {})
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name.startswith("_esibd_bundled_dmmr_runtime")
-        or name in {"dmmr_plugin_test", "dmmr_plugin_missing_runtime_test"}
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _import_plugin_module_from_path(module_name: str, plugin_path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, plugin_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_dmmr_plugin_exposes_expected_metadata():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     assert ICON_PATH.exists()
     assert module.providePlugins() == [module.DMMRDevice]
@@ -189,10 +43,7 @@ def test_dmmr_plugin_exposes_expected_metadata():
 
 
 def test_dmmr_plugin_loads_driver_from_private_runtime():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
     driver_class = module._get_dmmr_driver_class()
 
     assert driver_class.__name__ == "DMMR"
@@ -201,15 +52,13 @@ def test_dmmr_plugin_loads_driver_from_private_runtime():
 
 @pytest.mark.parametrize('missing_recovery', [False, True])
 def test_copied_dmmr_folder_includes_private_recovery_without_repo_imports(tmp_path, missing_recovery):
-    _clear_test_modules()
-    _install_esibd_stubs()
     target = tmp_path / 'standalone_dmmr'
     shutil.copytree(PLUGIN_PATH.parent, target, ignore=shutil.ignore_patterns('__pycache__', 'logs'))
     recovery_file = target / 'vendor/runtime/dmmr/read_recovery.py'
     if missing_recovery:
         recovery_file.unlink()
     before = list(sys.path)
-    module = _import_plugin_module_from_path('dmmr_plugin_test', target / PLUGIN_PATH.name)
+    module = load_plugin(target / PLUGIN_PATH.name, 'dmmr_plugin_test')
     if missing_recovery:
         with pytest.raises(ModuleNotFoundError, match='read_recovery'):
             module._get_dmmr_driver_class()
@@ -221,10 +70,7 @@ def test_copied_dmmr_folder_includes_private_recovery_without_repo_imports(tmp_p
 
 
 def test_dmmr_plugin_runtime_supports_explicit_process_backend_when_supported(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
     driver_class = module._get_dmmr_driver_class()
     runtime_root = driver_class.__module__.rsplit(".", 2)[0]
     driver_common = importlib.import_module(f"{runtime_root}._driver_common")
@@ -265,10 +111,7 @@ def test_dmmr_plugin_runtime_supports_explicit_process_backend_when_supported(mo
 
 
 def test_dmmr_process_backend_calls_methods_with_rpc_timeout(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
     driver_class = module._get_dmmr_driver_class()
     runtime_root = driver_class.__module__.rsplit(".", 2)[0]
     driver_common = importlib.import_module(f"{runtime_root}._driver_common")
@@ -309,10 +152,7 @@ def test_dmmr_process_backend_calls_methods_with_rpc_timeout(monkeypatch):
 
 
 def test_dmmr_plugin_runtime_defaults_to_inline_backend(monkeypatch):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
     driver_class = module._get_dmmr_driver_class()
     runtime_root = driver_class.__module__.rsplit(".", 2)[0]
     driver_common = importlib.import_module(f"{runtime_root}._driver_common")
@@ -339,15 +179,9 @@ def test_dmmr_plugin_runtime_defaults_to_inline_backend(monkeypatch):
 
 
 def test_dmmr_plugin_fails_cleanly_when_runtime_is_missing(tmp_path):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
     plugin_copy = tmp_path / "dmmr_plugin.py"
     shutil.copy2(PLUGIN_PATH, plugin_copy)
-    module = _import_plugin_module_from_path(
-        "dmmr_plugin_missing_runtime_test",
-        plugin_copy,
-    )
+    module = load_plugin(plugin_copy, "dmmr_plugin_missing_runtime_test")
 
     try:
         module._get_dmmr_driver_class()
@@ -358,10 +192,7 @@ def test_dmmr_plugin_fails_cleanly_when_runtime_is_missing(tmp_path):
 
 
 def test_dmmr_recording_action_reflects_device_readiness():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     class FakeAction:
         def __init__(self):
@@ -424,10 +255,7 @@ def test_dmmr_recording_action_reflects_device_readiness():
 
 
 def test_dmmr_partial_startup_exposes_toolbar_disconnect_action():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     class FakeAction:
         def __init__(self):
@@ -475,10 +303,7 @@ def test_dmmr_partial_startup_exposes_toolbar_disconnect_action():
 
 
 def test_dmmr_toggle_recording_rejects_unready_device():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
     super_calls = []
 
     def fake_super_toggle(self, on=None, manual=True):
@@ -524,10 +349,7 @@ def test_dmmr_toggle_recording_rejects_unready_device():
 
 
 def test_dmmr_init_gui_hides_table_and_creates_panel():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     super_calls = []
     original_init_gui = getattr(module.Device, "initGUI", None)
@@ -557,10 +379,7 @@ def test_dmmr_init_gui_hides_table_and_creates_panel():
 
 
 def test_dmmr_finalize_init_refreshes_panel_hooks():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     super_calls = []
     original_finalize = getattr(module.Device, "finalizeInit", None)
@@ -604,10 +423,7 @@ def test_dmmr_finalize_init_refreshes_panel_hooks():
 
 
 def test_dmmr_channel_keeps_active_parameter_for_core_init():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     channel = object.__new__(module.DMMRChannel)
     original_set_displayed = getattr(module.Channel, "setDisplayedParameters", None)
@@ -629,10 +445,7 @@ def test_dmmr_channel_keeps_active_parameter_for_core_init():
 
 
 def test_dmmr_channel_marks_reference_as_advanced_only():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     channel = object.__new__(module.DMMRChannel)
     defaults = module.DMMRChannel.getDefaultChannel(channel)
@@ -642,10 +455,7 @@ def test_dmmr_channel_marks_reference_as_advanced_only():
 
 
 def test_dmmr_channel_renames_monitor_header_to_current():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     channel = object.__new__(module.DMMRChannel)
     original_get_default = getattr(module.Channel, "getDefaultChannel", None)
@@ -668,10 +478,7 @@ def test_dmmr_channel_renames_monitor_header_to_current():
 
 
 def test_dmmr_formats_currents_with_si_prefixes():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     assert module._format_si_current(0.0) == ("0 A", "0.000000e+00 A")
     assert module._format_si_current(2.3e-12) == ("2.3 pA", "2.300000e-12 A")
@@ -682,10 +489,7 @@ def test_dmmr_formats_currents_with_si_prefixes():
 
 
 def test_dmmr_sync_monitor_widget_uses_formatted_current_and_tooltip():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     class FakeLineEdit:
         def __init__(self):
@@ -730,10 +534,7 @@ def test_dmmr_sync_monitor_widget_uses_formatted_current_and_tooltip():
 
 
 def test_dmmr_status_badge_shows_off_when_ui_is_off():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     device = object.__new__(module.DMMRDevice)
     device.main_state = "ST_ON"
@@ -750,10 +551,7 @@ def test_dmmr_status_badge_shows_off_when_ui_is_off():
 
 
 def test_dmmr_status_badge_keeps_unconfirmed_shutdown_visible_when_ui_is_off():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     device = object.__new__(module.DMMRDevice)
     device.main_state = module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
@@ -770,10 +568,7 @@ def test_dmmr_status_badge_keeps_unconfirmed_shutdown_visible_when_ui_is_off():
 
 
 def test_dmmr_channel_panel_snapshot_formats_live_current():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     enabled_parameter = types.SimpleNamespace(value=True)
     display_parameter = types.SimpleNamespace(value=True)
@@ -808,10 +603,7 @@ def test_dmmr_channel_panel_snapshot_formats_live_current():
 
 
 def test_dmmr_channel_panel_read_toggle_updates_underlying_channel():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     parameter_updates = []
     enabled_changed = []
@@ -848,10 +640,7 @@ def test_dmmr_channel_panel_read_toggle_updates_underlying_channel():
 
 
 def test_dmmr_channel_panel_display_toggle_updates_underlying_channel():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     parameter_updates = []
     display_changed = []
@@ -889,10 +678,7 @@ def test_dmmr_channel_panel_display_toggle_updates_underlying_channel():
 
 @pytest.mark.parametrize("initial_open,expected_on", [(False, True), (True, False)])
 def test_dmmr_device_shutdown_keeps_established_output_distinct_from_pending_open(initial_open, expected_on):
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     device = object.__new__(module.DMMRDevice)
     device.useOnOffLogic = True
@@ -919,10 +705,7 @@ def test_dmmr_device_shutdown_keeps_established_output_distinct_from_pending_ope
 
 
 def test_dmmr_device_close_communication_bypasses_shutdown_when_transport_is_lost():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     close_calls = []
     device = object.__new__(module.DMMRDevice)
@@ -951,10 +734,7 @@ def test_dmmr_device_close_communication_bypasses_shutdown_when_transport_is_los
 
 
 def test_dmmr_device_set_on_uses_controller_initialized_for_restart():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     init_calls = []
     toggle_calls = []
@@ -981,12 +761,10 @@ def test_dmmr_device_set_on_uses_controller_initialized_for_restart():
 
 
 def test_dmmr_channel_keeps_display_widget_default():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     channel = object.__new__(module.DMMRChannel)
+    channel.range_mode = "Auto"  # Normally created from the channel parameters.
     channel.useDisplays = True
     channel.scalingChanged = lambda: setattr(channel, "scaling_changed", True)
     upgrade_calls = []
@@ -1012,13 +790,11 @@ def test_dmmr_channel_keeps_display_widget_default():
 
 
 def test_dmmr_channel_init_gui_applies_neutral_display_and_module_styles():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     neutral_calls = []
     channel = object.__new__(module.DMMRChannel)
+    channel.range_mode = "Auto"  # Normally created from the channel parameters.
     channel.useDisplays = True
     channel._upgrade_monitor_widget = lambda: None
     channel._upgrade_toggle_widget = lambda *args, **kwargs: None
@@ -1040,10 +816,7 @@ def test_dmmr_channel_init_gui_applies_neutral_display_and_module_styles():
 
 
 def test_dmmr_channel_neutralizes_display_and_module_widgets():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     class FakeWidget:
         def __init__(self):
@@ -1084,10 +857,7 @@ def test_dmmr_channel_neutralizes_display_and_module_widgets():
 
 
 def test_dmmr_enabled_toggle_widget_syncs_checked_state_and_style():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     widget = module.ToolButton()
     parameter = types.SimpleNamespace(check=widget)
@@ -1102,10 +872,7 @@ def test_dmmr_enabled_toggle_widget_syncs_checked_state_and_style():
 
 
 def test_dmmr_parameter_widget_style_updates_widget_and_container():
-    _clear_test_modules()
-    _install_esibd_stubs()
-
-    module = _import_plugin_module_from_path("dmmr_plugin_test", PLUGIN_PATH)
+    module = load_plugin(module_name="dmmr_plugin_test")
 
     class FakeContainer:
         def __init__(self):

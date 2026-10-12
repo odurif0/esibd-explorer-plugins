@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = (
@@ -25,15 +24,7 @@ PLUGINS = (
 @pytest.mark.parametrize("scale", ["1", "1.5"])
 @pytest.mark.parametrize("folder", PLUGINS)
 def test_plugin_dock_can_shrink_and_controls_remain_reachable(folder, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--probe", folder, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-        capture_output=True, text=True, timeout=45,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real PyQt6 unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, '--probe', folder, tmp_path, timeout=45, scale=scale)
 
 
 def probe(folder, output):
@@ -51,11 +42,8 @@ def probe(folder, output):
 
     app = QApplication([])
     family = folder if folder in ("dmmr", "esi", "amx_hd") else folder.rsplit("_", 1)[0]
-    stub_file = {
-        "ampr": "test_ampr_plugin_channel_sync",
-        "amx_hd": "test_amx_hd_plugin_packaging",
-    }.get(family, f"test_{family}_plugin_behavior")
-    importlib.import_module(stub_file)._install_esibd_stubs()
+    from support import esi, explorer
+    (esi.install if family == "esi" else explorer.install)()
     spec = importlib.util.spec_from_file_location(
         "panel_resize_probe", ROOT / folder / f"{family}_plugin.py",
     )

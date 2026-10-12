@@ -1,67 +1,13 @@
 """OFF/Disconnect/Explorer close must retire an initial open, not shut down acquisition."""
 from __future__ import annotations
 
-from types import MethodType, SimpleNamespace
 import importlib
 import threading
 
 import pytest
 
-from test_dmmr_connection_retry import connection, finish_open  # noqa: F401
-
-
-@pytest.fixture
-def failed_open(connection, monkeypatch):
-    hw = connection
-    p, c, mod = hw.controller.controllerParent, hw.controller, hw.plugin
-    p.controller = c
-    p.useOnOffLogic, p.loading = True, False
-    p.onAction = SimpleNamespace(state=False)
-    p.isOn = lambda: p.onAction.state
-    p._set_on_ui_state = lambda on: setattr(p.onAction, 'state', on)
-    p.stopAcquisition, p.print = c.stopAcquisition, c.print
-    for name in ('_sync_acquisition_controls', '_sync_local_on_action',
-                 '_sync_toolbar_communication_controls', '_update_status_widgets'):
-        setattr(p, name, lambda: None)
-    for name in ('closeCommunication', 'shutdownCommunication', 'setOn'):
-        setattr(p, name, MethodType(getattr(mod.DMMRDevice, name), p))
-    for name in ('_restore_off_ui_state', '_restore_on_ui_state', '_update_state'):
-        setattr(c, name, MethodType(getattr(mod.DMMRController, name), c))
-    c.toggleOnFromThread = lambda **kwargs: c.toggleOn()
-    hw.runtime_calls = []
-    factory = hw.factory
-
-    def tracked_factory(**kwargs):
-        d = factory(**kwargs)
-        for name in ('shutdown', 'get_state', 'get_device_state', 'get_voltage_state',
-                     'get_temperature_state', 'set_enable', 'set_automatic_current'):
-            original = getattr(d, name)
-
-            def tracked(*args, _method=original, _name=name, **kw):
-                hw.runtime_calls.append(_name)
-                return _method(*args, **kw)
-
-            setattr(d, name, tracked)
-        return d
-
-    monkeypatch.setattr(mod, '_get_dmmr_driver_class', lambda: tracked_factory)
-    return hw
-
-
-ACTIONS = ('controller_close', 'device_close', 'controller_shutdown',
-           'device_shutdown', 'controller_off', 'device_off')
-
-
-def request(hw, action):
-    c, p = hw.controller, hw.controller.controllerParent
-    if action.endswith('_off'):
-        p.onAction.state = False
-        if action == 'device_off':
-            return p.setOn(on=False)
-        assert c._begin_transition(False)
-        return c.toggleOn()
-    owner = p if action.startswith('device_') else c
-    return getattr(owner, 'shutdownCommunication' if action.endswith('shutdown') else 'closeCommunication')()
+from support.dmmr import finish_open
+from support.dmmr import ACTIONS, request
 
 
 def assert_pending(hw, old):
@@ -87,8 +33,8 @@ def assert_released(hw, old):
 
 @pytest.mark.parametrize('action', ACTIONS)
 @pytest.mark.parametrize('phase', ['pending_open', 'returned_open', 'close_error', 'pending_close'])
-def test_failed_initial_open_shutdown_paths(failed_open, action, phase):
-    hw, c = failed_open, failed_open.controller
+def test_failed_initial_open_shutdown_paths(dmmr_failed_open, action, phase):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     c.runInitialization()
     old = c.device
     if phase != 'pending_open':
@@ -123,8 +69,8 @@ def test_failed_initial_open_shutdown_paths(failed_open, action, phase):
 
 
 @pytest.mark.parametrize('action', ACTIONS)
-def test_initial_open_cleanup_precedes_stale_shutdown_guard(failed_open, action):
-    hw, c = failed_open, failed_open.controller
+def test_initial_open_cleanup_precedes_stale_shutdown_guard(dmmr_failed_open, action):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     c.runInitialization()
     old = c.device
     c.main_state = c._forced_close_state = 'Shutdown unconfirmed'
@@ -134,8 +80,8 @@ def test_initial_open_cleanup_precedes_stale_shutdown_guard(failed_open, action)
     assert_released(hw, old)
 
 
-def test_unpoisoned_failed_open_never_queries_state_during_shutdown(failed_open):
-    hw, c = failed_open, failed_open.controller
+def test_unpoisoned_failed_open_never_queries_state_during_shutdown(dmmr_failed_open):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     hw.block, hw.close_status = False, -3
     c.runInitialization()
     old = c.device
@@ -146,8 +92,8 @@ def test_unpoisoned_failed_open_never_queries_state_during_shutdown(failed_open)
 
 
 @pytest.mark.parametrize('action', ['device_close', 'device_shutdown'])
-def test_close_while_open_still_running_then_error_return(failed_open, action):
-    hw, c = failed_open, failed_open.controller
+def test_close_while_open_still_running_then_error_return(dmmr_failed_open, action):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     p = c.controllerParent
     p.connect_timeout_s = 0.5
     c.initializing = True
@@ -172,8 +118,8 @@ def test_close_while_open_still_running_then_error_return(failed_open, action):
 
 @pytest.mark.parametrize('action', ['device_close', 'device_shutdown', 'device_off'])
 @pytest.mark.parametrize('verified_stop', [True, False])
-def test_close_during_open_cancels_later_activation(failed_open, action, verified_stop):
-    hw, c = failed_open, failed_open.controller
+def test_close_during_open_cancels_later_activation(dmmr_failed_open, action, verified_stop):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     c.controllerParent.connect_timeout_s = 0.5
     c.initializing = True
     worker = threading.Thread(target=c.runInitialization)
@@ -215,8 +161,8 @@ def test_close_during_open_cancels_later_activation(failed_open, action, verifie
         worker.join(3)
 
 
-def test_close_during_connect_verification_sends_no_parallel_gate_commands(failed_open, monkeypatch):
-    hw, c = failed_open, failed_open.controller
+def test_close_during_connect_verification_sends_no_parallel_gate_commands(dmmr_failed_open, monkeypatch):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     hw.block, hw.powered = False, True
     c.controllerParent.connect_timeout_s = 1.0
     c.initializing = True
@@ -257,8 +203,8 @@ def test_close_during_connect_verification_sends_no_parallel_gate_commands(faile
         worker.join(3)
 
 
-def test_late_init_complete_cannot_activate_after_initial_close_request(failed_open):
-    hw, c = failed_open, failed_open.controller
+def test_late_init_complete_cannot_activate_after_initial_close_request(dmmr_failed_open):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     c.runInitialization()
     old = c.device
     request(hw, 'device_close')
@@ -267,8 +213,8 @@ def test_late_init_complete_cannot_activate_after_initial_close_request(failed_o
     assert hw.calls == ['open'] and hw.successes == []
 
 
-def test_open_finishing_during_close_cannot_become_unverified_bare_disconnect(failed_open, monkeypatch):
-    hw, c = failed_open, failed_open.controller
+def test_open_finishing_during_close_cannot_become_unverified_bare_disconnect(dmmr_failed_open, monkeypatch):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     c.controllerParent.connect_timeout_s = 1.0
     c.initializing = True
     connected, proceed = threading.Event(), threading.Event()
@@ -329,8 +275,8 @@ def test_open_finishing_during_close_cannot_become_unverified_bare_disconnect(fa
 
 @pytest.mark.parametrize('action', ['controller_close', 'device_close', 'device_shutdown', 'device_off'])
 @pytest.mark.parametrize('operation', ['get_module_current', 'set_enable', 'set_baud_rate'])
-def test_post_open_timeout_still_forbids_initial_open_cleanup(failed_open, action, operation):
-    hw, c = failed_open, failed_open.controller
+def test_post_open_timeout_still_forbids_initial_open_cleanup(dmmr_failed_open, action, operation):
+    hw, c = dmmr_failed_open, dmmr_failed_open.controller
     d = hw.factory()
     d.connected = operation != 'set_baud_rate'
     d._set_port_claimed(True)

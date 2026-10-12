@@ -7,13 +7,7 @@ import shutil
 from pathlib import Path
 
 from conftest import PLUGIN_SPECS
-from test_plugin_family_parity import (
-    PARITY_FAMILIES,
-    assert_family_parity,
-    group_by_family,
-    plugin_source,
-    runtime_root,
-)
+from support.parity import PARITY_FAMILIES, assert_family_parity, group_by_family, plugin_source, runtime_root
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

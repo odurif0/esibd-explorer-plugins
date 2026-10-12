@@ -6,30 +6,20 @@ No driver, serial port, or user settings are opened.
 
 from __future__ import annotations
 
-import ast
 import importlib.util
-import os
-import subprocess
 import sys
 import types
 from pathlib import Path
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("case", ["constant", "varying", "manual", "empty", "log", "panel", "history"])
 def test_dmmr_plot_and_panel(case, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--probe", case, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt/pyqtgraph or installed Explorer sources unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, '--probe', case, tmp_path, timeout=30)
 
 
 def probe(case, output):
@@ -60,12 +50,10 @@ def probe(case, output):
     from explorer_host import add_const_names
     add_const_names(host, ns)  # e.g. getTestMode, used by Explorer 1.0.1 plot widgets
 
+    from explorer_host import compile_definition
+
     def extract(path, name, parent=None):
-        tree = ast.parse(path.read_text())
-        nodes = tree.body if parent is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == parent).body
-        node = next(n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name)
-        module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
-        exec(compile(ast.fix_missing_locations(module), str(path), "exec"), ns)
+        exec(compile_definition(path, name, parent), ns)
         return ns[name]
 
     for name in ("ViewBox", "LabelItem", "SciAxisItem", "PlotItem", "PlotWidget"):
@@ -79,8 +67,8 @@ def probe(case, output):
     if has_method(host, "Plugin", "getQtPen"):  # Explorer 1.0.1 plotGroup builds pens through it
         host_live.getQtPen = extract(host / "plugins.py", "getQtPen", "Plugin")
 
-    from test_dmmr_plugin_behavior import _install_esibd_stubs
-    _install_esibd_stubs()
+    from support import explorer
+    explorer.install()
     sys.modules["esibd.plugins"].LiveDisplay = host_live
     ns["Device"] = sys.modules["esibd.plugins"].Device
     spec = importlib.util.spec_from_file_location("dmmr_plot_probe", ROOT / "dmmr/dmmr_plugin.py")

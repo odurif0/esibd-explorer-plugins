@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
-import sys
-import threading
 import types
-from enum import Enum
 from pathlib import Path
 
 import pytest
+from support import explorer
+from support.amx import load_plugin
 
 
 PLUGIN_PATH = (
@@ -20,131 +18,9 @@ PLUGIN_PATH = (
 )
 
 
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        COMBO = "COMBO"
-        INT = "INT"
-        FLOAT = "FLOAT"
-        LABEL = "LABEL"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        NAME = "Name"
-        ADVANCED = "Advanced"
-        EVENT = "Event"
-        TOOLTIP = "Tooltip"
-
-    class Channel:
-        NAME = "Name"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-
-    class _Signal:
-        def emit(self, *args, **kwargs):
-            self.last_emit = (args, kwargs)
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-            self.lock = threading.Lock()
-            self.signalComm = types.SimpleNamespace(initCompleteSignal=_Signal())
-            self.errorCount = 0
-            self.initializing = False
-            self.acquiring = False
-            self.print = lambda *args, **kwargs: None
-
-    class ToolButton:
-        pass
-
-    class Device:
-        pass
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        return kwargs
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.parameterDict = parameterDict
-    plugins.Device = Device
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name.startswith("_esibd_bundled_amx_runtime")
-        or name == "amx_plugin_behavior_test"
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _load_module():
-    _clear_test_modules()
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("amx_plugin_behavior_test", PLUGIN_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _install_fake_qtcore(monkeypatch):
-    pyqt = types.ModuleType("PyQt6")
-    pyqt.__path__ = []
-    qtcore = types.ModuleType("PyQt6.QtCore")
-
-    class FakeQObject:
-        def __init__(self, parent=None):
-            self.parent = parent
-
-    class FakeQEvent:
-        class Type:
-            Wheel = "wheel"
-
-    qtcore.QObject = FakeQObject
-    qtcore.QEvent = FakeQEvent
-    pyqt.QtCore = qtcore
-    monkeypatch.setitem(sys.modules, "PyQt6", pyqt)
-    monkeypatch.setitem(sys.modules, "PyQt6.QtCore", qtcore)
-    return FakeQEvent
-
-
 def test_spinbox_wheel_events_are_blocked(monkeypatch):
-    module = _load_module()
-    fake_event_class = _install_fake_qtcore(monkeypatch)
+    module = load_plugin(module_name="amx_plugin_behavior_test")
+    fake_event_class = explorer.install_fake_qtcore(monkeypatch)
 
     class FakeWidget:
         def __init__(self):
@@ -178,7 +54,7 @@ def test_spinbox_wheel_events_are_blocked(monkeypatch):
 
 
 def test_amx_channel_width_widget_disables_wheel(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     disabled_widgets = []
     widget = object()
 
@@ -196,7 +72,7 @@ def test_amx_channel_width_widget_disables_wheel(monkeypatch):
 
 
 def test_bootstrap_config_is_replaced_with_fixed_pulsers():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     default_item = {
         "Pulser": "0",
         "Real": True,
@@ -227,7 +103,7 @@ def test_bootstrap_config_is_replaced_with_fixed_pulsers():
 
 
 def test_existing_config_is_merged_and_duplicates_are_neutralized():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     current_items = [
         {"Name": "Keep0", "Pulser": 0, "Real": True, "Enabled": True},
@@ -257,7 +133,7 @@ def test_existing_config_is_merged_and_duplicates_are_neutralized():
 
 
 def test_controller_read_numbers_maps_pulser_snapshot():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         OSC_OFFSET = 2
@@ -313,7 +189,7 @@ def test_controller_read_numbers_maps_pulser_snapshot():
 
 
 def test_operator_panel_register_helpers_match_driver_encoding():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     assert module._expected_oscillator_period(1.0) == 99998
     assert module._expected_width_register(True, 500.0) == 49998
@@ -324,7 +200,7 @@ def test_operator_panel_register_helpers_match_driver_encoding():
 
 
 def test_operator_panel_expected_registers_match_real_write_paths():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     width_writes = []
 
     class FakeDevice:
@@ -438,7 +314,7 @@ def _operator_panel_fixture(
 
 
 def test_operator_panel_snapshot_separates_request_from_register_readback():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     device, _channel, _parameters = _operator_panel_fixture(module)
 
     snapshot = module.AMXDevice._pulser_panel_snapshot(device, 0)
@@ -455,7 +331,7 @@ def test_operator_panel_snapshot_separates_request_from_register_readback():
 
 
 def test_operator_panel_snapshot_does_not_claim_active_while_standby_or_disconnected():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     standby, _channel, _parameters = _operator_panel_fixture(
         module,
         main_state="ST_STBY",
@@ -484,7 +360,7 @@ def test_operator_panel_snapshot_does_not_claim_active_while_standby_or_disconne
 
 
 def test_operator_panel_snapshot_reports_zero_width_off_and_register_mismatch():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     zero_width, _channel, _parameters = _operator_panel_fixture(
         module,
         requested_enabled=True,
@@ -527,7 +403,7 @@ def test_operator_panel_snapshot_reports_zero_width_off_and_register_mismatch():
 
 
 def test_operator_panel_green_requires_global_enable_and_complete_readback():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     disabled, _channel, _parameters = _operator_panel_fixture(
         module,
         main_state="ST_ON",
@@ -552,7 +428,7 @@ def test_operator_panel_green_requires_global_enable_and_complete_readback():
 
 
 def test_operator_panel_routes_edits_through_existing_channel_events():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     device, channel, parameters = _operator_panel_fixture(module)
     calls = []
 
@@ -597,7 +473,7 @@ def test_operator_panel_routes_edits_through_existing_channel_events():
 
 
 def test_operator_panel_refresh_blocks_control_signals():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeWidget:
         def __init__(self):
@@ -690,7 +566,7 @@ def test_operator_panel_refresh_blocks_control_signals():
 
 
 def test_operator_panel_keeps_equation_width_read_only_and_table_available():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     device, channel, _parameters = _operator_panel_fixture(module, manual=False)
     snapshot = module.AMXDevice._pulser_panel_snapshot(device, 0)
 
@@ -710,7 +586,7 @@ def test_operator_panel_keeps_equation_width_read_only_and_table_available():
 
 
 def test_controller_exposes_available_amx_configs_in_gui_state():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def list_configs(self, timeout_s=None):
@@ -744,7 +620,7 @@ def test_controller_exposes_available_amx_configs_in_gui_state():
 
 
 def test_controller_exposes_loaded_amx_config_in_gui_state():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def get_status(self):
@@ -772,7 +648,7 @@ def test_controller_exposes_loaded_amx_config_in_gui_state():
 
 
 def test_controller_toggle_on_refreshes_loaded_config_after_initialize():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def __init__(self):
@@ -853,7 +729,7 @@ def test_controller_toggle_on_refreshes_loaded_config_after_initialize():
 
 
 def test_controller_toggle_on_enables_before_config_load_and_width_remains_writable():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     calls = []
 
     class FakeDevice:
@@ -951,7 +827,7 @@ def test_controller_toggle_on_enables_before_config_load_and_width_remains_writa
 
 
 def test_controller_startup_disables_device_enable_after_config_load_failure():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     calls = []
 
     class FakeDevice:
@@ -980,7 +856,7 @@ def test_controller_startup_disables_device_enable_after_config_load_failure():
 
 
 def test_controller_toggle_on_waits_for_state_on_after_enable():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def __init__(self):
@@ -1076,7 +952,7 @@ def test_controller_toggle_on_waits_for_state_on_after_enable():
 
 
 def test_controller_startup_wait_logs_progress_when_state_is_slow(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     now = {"value": 0.0}
     snapshots = [
         {
@@ -1141,7 +1017,7 @@ def test_controller_startup_wait_logs_progress_when_state_is_slow(monkeypatch):
 
 
 def test_controller_toggle_on_reconnects_transport_before_loading_operating_config():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def __init__(self):
@@ -1214,7 +1090,7 @@ def test_controller_toggle_on_reconnects_transport_before_loading_operating_conf
 
 
 def test_controller_toggle_on_requires_operating_config():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def initialize(self, timeout_s=None, **kwargs):
@@ -1254,7 +1130,7 @@ def test_controller_toggle_on_requires_operating_config():
 
 
 def test_controller_defaults_standby_to_slot_zero_when_available():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         standby_config=-1,
@@ -1274,7 +1150,7 @@ def test_controller_defaults_standby_to_slot_zero_when_available():
 
 
 def test_controller_shutdown_kwargs_use_explicit_standby_slot_when_valid():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         standby_config=0,
@@ -1293,7 +1169,7 @@ def test_controller_shutdown_kwargs_use_explicit_standby_slot_when_valid():
 
 
 def test_controller_ignores_slot_zero_when_it_is_not_a_standby_config():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         standby_config=-1,
@@ -1310,7 +1186,7 @@ def test_controller_ignores_slot_zero_when_it_is_not_a_standby_config():
 
 
 def test_controller_skips_implicit_slot_zero_when_unavailable():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         standby_config=-1,
@@ -1326,7 +1202,7 @@ def test_controller_skips_implicit_slot_zero_when_unavailable():
 
 
 def test_controller_load_now_is_rejected_while_amx_is_off():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def __init__(self):
@@ -1356,7 +1232,7 @@ def test_controller_load_now_is_rejected_while_amx_is_off():
 
 
 def test_controller_load_now_requires_operating_config():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         name="AMX",
@@ -1381,7 +1257,7 @@ def test_controller_load_now_requires_operating_config():
 
 
 def test_amx_acquisition_readiness_accepts_state_on():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     device = object.__new__(module.AMXDevice)
     device.isOn = lambda: True
@@ -1397,7 +1273,7 @@ def test_amx_acquisition_readiness_accepts_state_on():
 
 
 def test_controller_close_communication_syncs_after_device_is_disposed():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def disconnect(self):
@@ -1431,7 +1307,7 @@ def test_controller_close_communication_syncs_after_device_is_disposed():
 
 
 def test_controller_init_complete_resumes_pending_on_request():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     toggle_calls = []
     sync_calls = []
@@ -1455,7 +1331,7 @@ def test_controller_init_complete_resumes_pending_on_request():
 
 
 def test_controller_init_complete_does_not_toggle_when_ui_is_off():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     toggle_calls = []
     parent = types.SimpleNamespace(
@@ -1477,7 +1353,7 @@ def test_controller_init_complete_does_not_toggle_when_ui_is_off():
 
 
 def test_controller_shutdown_uses_full_software_shutdown():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def __init__(self):
@@ -1509,7 +1385,7 @@ def test_controller_shutdown_uses_full_software_shutdown():
 
 
 def test_controller_shutdown_failure_marks_state_unconfirmed():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def shutdown(self, timeout_s=None, **kwargs):
@@ -1550,7 +1426,7 @@ def test_controller_shutdown_failure_marks_state_unconfirmed():
 
 
 def test_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     device = object.__new__(module.AMXDevice)
     device.useOnOffLogic = True
@@ -1575,7 +1451,7 @@ def test_device_shutdown_keeps_ui_on_when_shutdown_is_unconfirmed():
 
 
 def test_device_close_communication_stops_recording_when_disconnected():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     close_calls = []
     device = object.__new__(module.AMXDevice)
@@ -1604,7 +1480,7 @@ def test_device_close_communication_stops_recording_when_disconnected():
 
 
 def test_controller_shutdown_parks_standby_before_disconnect_when_available():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def __init__(self):
@@ -1650,7 +1526,7 @@ def test_controller_shutdown_parks_standby_before_disconnect_when_available():
 
 
 def test_amx_controller_lock_section_uses_raw_lock_and_propagates_errors():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeLock:
         def __init__(self):
@@ -1683,7 +1559,7 @@ def test_amx_controller_lock_section_uses_raw_lock_and_propagates_errors():
 
 
 def test_amx_controller_lock_section_logs_slow_lock_acquisition(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     now = {"value": 0.0}
     printed = []
 
@@ -1717,7 +1593,7 @@ def test_amx_controller_lock_section_logs_slow_lock_acquisition(monkeypatch):
 
 
 def test_amx_controller_read_numbers_acquires_lock_for_housekeeping():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         def collect_housekeeping(self, timeout_s=None):
@@ -1763,7 +1639,7 @@ def test_amx_controller_read_numbers_acquires_lock_for_housekeeping():
 
 
 def test_amx_controller_read_numbers_skips_busy_poll_without_error():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     parent = types.SimpleNamespace(
         poll_timeout_s=2.5,
@@ -1803,7 +1679,7 @@ def test_controller_read_numbers_runs_while_framework_holds_the_lock():
     Forwarding already_acquired=True keeps the duty monitors and status badge live
     during operation; without it every poll silently aborted.
     """
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         OSC_OFFSET = 2
@@ -1854,7 +1730,7 @@ def test_controller_read_numbers_runs_while_framework_holds_the_lock():
 
 def test_controller_run_acquisition_reads_and_emits_under_lock(monkeypatch):
     """runAcquisition forwards already_acquired=True so each tick actually reads."""
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
 
     class FakeDevice:
         OSC_OFFSET = 2
@@ -1911,7 +1787,7 @@ def test_controller_run_acquisition_reads_and_emits_under_lock(monkeypatch):
 
 
 def test_frequency_widget_change_is_debounced_until_timer_fires():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     calls = []
 
     class FakeTimer:
@@ -1954,7 +1830,7 @@ def test_frequency_widget_change_is_debounced_until_timer_fires():
 
 
 def test_frequency_change_clamps_channel_and_parameter_width_together():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     duty_updates = []
 
     class FakeParameter:
@@ -1987,7 +1863,7 @@ def test_frequency_change_clamps_channel_and_parameter_width_together():
 
 
 def test_amx_channel_value_change_is_debounced_until_timer_fires():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     calls = []
 
     class FakeTimer:
@@ -2028,7 +1904,7 @@ def test_amx_channel_value_change_is_debounced_until_timer_fires():
 
 
 def test_amx_channel_staging_while_off_does_not_start_apply_worker():
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     calls = []
     channel = object.__new__(module.AMXChannel)
     channel.channelParent = types.SimpleNamespace(
@@ -2047,7 +1923,7 @@ def test_amx_channel_staging_while_off_does_not_start_apply_worker():
 
 
 def test_amx_global_settings_queue_keeps_latest_pending_request(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     created_threads = []
     applied = []
 
@@ -2079,7 +1955,7 @@ def test_amx_global_settings_queue_keeps_latest_pending_request(monkeypatch):
 
 
 def test_amx_channel_timing_queue_keeps_latest_per_pulser(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     created_threads = []
     applied = []
 
@@ -2127,7 +2003,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     """A timed-out open_port locks the COM port for the process lifetime; the
     init-failure guidance must tell the operator to restart ESIBD Explorer
     instead of letting retries loop on a confusing '-2 (Error opening port)'."""
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     controller = module.AMXController(types.SimpleNamespace(com=10))
 
     # Attempt 1: device OFF, open_port times out and poisons the transport.
@@ -2151,7 +2027,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
 def test_init_failure_guidance_silent_without_prior_poisoning():
     """A garden-variety init failure with no prior poisoning yields no guidance,
     so unrelated cabling / COM-number problems are not mis-attributed."""
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     controller = module.AMXController(types.SimpleNamespace(com=10))
 
     assert controller._init_failure_guidance(
@@ -2163,7 +2039,7 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
 def test_restore_ui_state_for_device_reflects_real_hardware_state():
     """Mirror of the AMX HD test: a failed ON must keep the button ON when the
     AMX is genuinely ON, so the OFF toggle stays reachable (deadlock fix)."""
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     restored = []
     parent = types.SimpleNamespace(com=10)
     parent._set_on_ui_state = lambda on: restored.append(bool(on))
@@ -2182,7 +2058,7 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
 def test_warn_if_standby_operating_does_not_emit():
     """A standby-named Operating config is a normal operator choice. The plugin
     must NOT emit a warning — the operator knows HV will not be applied."""
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     parent = types.SimpleNamespace(name="AMX")
     controller = module.AMXController(parent)
     controller.available_configs = [
@@ -2204,7 +2080,7 @@ def test_stop_acquisition_for_transition_does_not_call_base_stopAcquisition():
     directly, without calling the base stopAcquisition (which uses a 1s lock timeout
     and logs spurious 'Could not acquire lock to stop acquisition' errors when
     runAcquisition holds the lock for collect_housekeeping)."""
-    module = _load_module()
+    module = load_plugin(module_name="amx_plugin_behavior_test")
     parent = types.SimpleNamespace(name="AMX")
     controller = module.AMXController(parent)
 

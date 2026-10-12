@@ -1,13 +1,13 @@
 """Transmission plugin with real Explorer Scan/Settings/Display classes under Qt (isolated process)."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import ModuleType, SimpleNamespace as NS
 
 import pytest
+from operator import itemgetter
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = ("simulation-total", "simulation-mass", "stop", "not-ready", "advanced", "spectrum",
@@ -75,13 +75,7 @@ max_step = 1.0
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_transmission_in_real_explorer_and_qt(tmp_path, scenario):
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONUNBUFFERED="1", PYTHONFAULTHANDLER="1")
-    result = subprocess.run([env.get("ESIBD_QT_PYTHON", sys.executable), str(Path(__file__)), scenario, str(tmp_path)],
-                            env=env, text=True, capture_output=True, timeout=240)
-    if result.returncode == 77:
-        pytest.skip(result.stdout + result.stderr)
-    assert result.returncode == 0, result.stdout[-6000:] + result.stderr[-6000:]
-    assert "Traceback" not in result.stderr, result.stderr[-6000:]
+    run_probe(__file__, scenario, tmp_path, timeout=240, env={"PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"})
 
 
 def run(scenario, target, app_holder):
@@ -90,12 +84,11 @@ def run(scenario, target, app_holder):
         from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout
         from PyQt6.QtTest import QTest
         from esibd import core, plugins
-        import h5py
-        import numpy as np
+        import h5py  # noqa: F401  (handed to the scenarios through locals())
+        import numpy as np  # noqa: F401
     except ImportError as exc:
         print(f"Full Explorer/Qt dependencies unavailable: {exc}")
         return 77
-    import json
     import time
 
     app = QApplication([])
@@ -241,7 +234,13 @@ def write_mscan(path, amplitude, current, rails):
 
 
 def scenario_body(env):
-    globals().update(env)
+    # The Explorer objects and helpers run() built (see its env).
+    (QTest, app, confirmations, errors, exports, h5py, logs, module, np, panel, progress, run_logs,
+     scan, scenario, session_events, stage_choice, target, wait_finished, wait_saved, wait_worker,
+     window) = itemgetter(
+        "QTest", "app", "confirmations", "errors", "exports", "h5py", "logs", "module", "np", "panel",
+        "progress", "run_logs", "scan", "scenario", "session_events", "stage_choice", "target",
+        "wait_finished", "wait_saved", "wait_worker", "window")(env)
     import json
     import time
     simulator, beamline_module = module._simulator, module._beamline
@@ -489,6 +488,11 @@ def scenario_body(env):
 
 
 def explorer_scenario(env):
+    # The Explorer objects and helpers run() built (see its env).
+    (QTest, app, confirmations, core, devices, errors, module, panel, progress, run_logs, scan,
+     scenario, target, wait_finished, wait_saved, wait_worker) = itemgetter(
+        "QTest", "app", "confirmations", "core", "devices", "errors", "module", "panel", "progress",
+        "run_logs", "scan", "scenario", "target", "wait_finished", "wait_saved", "wait_worker")(env)
     import json
     import math
     import threading
@@ -783,7 +787,11 @@ def explorer_scenario(env):
 
 def devices_scenario(env, ctx):
     """Devices that are OFF or not recording are proposed for turning ON, never turned ON without consent."""
-    globals().update(env)
+    # The Explorer objects and helpers run() built (see its env).
+    (QTest, answer, app, confirmations, devices, module, panel, progress, scan, session_events,
+     target, window) = itemgetter(
+        "QTest", "answer", "app", "confirmations", "devices", "module", "panel", "progress", "scan",
+        "session_events", "target", "window")(env)
     import threading
     import time
     psu, dmmr, tpg, timer, sets = ctx["psu"], ctx["dmmr"], ctx["tpg"], ctx["timer"], ctx["sets"]
@@ -858,10 +866,11 @@ def devices_scenario(env, ctx):
 
 def psu_scenario(env, ctx):
     """PSU protections taken from MScan: device states, applying worker, Ilim, hardware voltage limit."""
-    globals().update(env)
+    # The Explorer objects and helpers run() built (see its env).
+    QTest, app, module, progress, scan = itemgetter("QTest", "app", "module", "progress", "scan")(env)
     import threading
     import time
-    knobs, sets, psu, timer, start = ctx["knobs"], ctx["sets"], ctx["psu"], ctx["timer"], ctx["start"]
+    knobs, sets, psu, timer = ctx["knobs"], ctx["sets"], ctx["psu"], ctx["timer"]
     wait_finished, run_logs = env["wait_finished"], env["run_logs"]
     for channel in knobs.values():
         channel.hardware_voltage_limit, channel.current_readback, channel.current_limit_readback = 1000.0, 1e-4, 1e-3

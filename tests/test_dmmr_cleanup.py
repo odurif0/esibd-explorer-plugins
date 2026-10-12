@@ -7,7 +7,7 @@ import types
 import pandas as pd
 import pytest
 
-from test_dmmr_zero_notebook import Clock, DMMR, ROOT, ns  # noqa: F401
+from support.dmmr_notebook import Clock, DMMR, ROOT
 
 
 class FramingFaultDMMR(DMMR):
@@ -122,15 +122,15 @@ class FramingFaultDMMR(DMMR):
 
 
 @pytest.fixture
-def boundary(ns, tmp_path):
-    runtime = ns['load_driver'](ROOT / 'dmmr')._PROCESS_CONTROLLER_CLASS
-    device = FramingFaultDMMR(Clock(), ns['CERTIFICATE'], runtime)
-    cfg = dict(ns['PROTOCOL'], series_count=2, duration_s=2., bin_s=.5, tail_s=1.,
+def boundary(dmmr_notebook_ns, tmp_path):
+    runtime = dmmr_notebook_ns['load_driver'](ROOT / 'dmmr')._PROCESS_CONTROLLER_CLASS
+    device = FramingFaultDMMR(Clock(), dmmr_notebook_ns['CERTIFICATE'], runtime)
+    cfg = dict(dmmr_notebook_ns['PROTOCOL'], series_count=2, duration_s=2., bin_s=.5, tail_s=1.,
                stall_timeout_s=.5, io_timeout_s=.1, pause_s=1., diagnostics_interval_s=1.)
     output = tmp_path / 'campaign'
 
     def run():
-        return ns['run_campaign'](device, output, cfg, clock=device.clock, sleep=device.clock.sleep)
+        return dmmr_notebook_ns['run_campaign'](device, output, cfg, clock=device.clock, sleep=device.clock.sleep)
 
     return device, cfg, output, run
 
@@ -352,13 +352,13 @@ def test_native_capture_start_failure_cannot_bypass_shutdown(boundary, exception
         assert report['status'] == 'complete'
 
 
-def test_recovery_does_not_change_recorded_measurements(ns, boundary):
+def test_recovery_does_not_change_recorded_measurements(dmmr_notebook_ns, boundary):
     device, cfg, output, run = boundary
     assert run()['status'] == 'complete'
-    healthy = FramingFaultDMMR(Clock(), ns['CERTIFICATE'], device.runtime)
+    healthy = FramingFaultDMMR(Clock(), dmmr_notebook_ns['CERTIFICATE'], device.runtime)
     healthy.inject_at = None
     control = output.parent / 'control'
-    report = ns['run_campaign'](healthy, control, cfg, clock=healthy.clock, sleep=healthy.clock.sleep)
+    report = dmmr_notebook_ns['run_campaign'](healthy, control, cfg, clock=healthy.clock, sleep=healthy.clock.sleep)
     assert report['status'] == 'complete'
     for index in (1, 2):
         before = pd.read_csv(control / f'series_{index:02d}/raw.csv').drop(columns=['host_utc'])
@@ -366,11 +366,11 @@ def test_recovery_does_not_change_recorded_measurements(ns, boundary):
         pd.testing.assert_frame_equal(before, after)
 
 
-def test_purge_uses_the_real_ctypes_runtime_with_one_lock_at_a_time(ns):
+def test_purge_uses_the_real_ctypes_runtime_with_one_lock_at_a_time(dmmr_notebook_ns):
     import logging
     import threading
 
-    cls = ns['load_driver'](ROOT / 'dmmr')._PROCESS_CONTROLLER_CLASS
+    cls = dmmr_notebook_ns['load_driver'](ROOT / 'dmmr')._PROCESS_CONTROLLER_CLASS
     backend = cls.__new__(cls)
     backend.thread_lock = threading.Lock()
     backend._transport_poisoned = False
@@ -397,7 +397,7 @@ def test_purge_uses_the_real_ctypes_runtime_with_one_lock_at_a_time(ns):
 
     backend.dll = DLL()
     report = {}
-    command = ns['CleanupCommands'](backend, .2, report)
+    command = dmmr_notebook_ns['CleanupCommands'](backend, .2, report)
     assert command.call('disable', backend.set_enable, False) == ()
     assert calls == [('enable', False), ('purge',), ('state',), ('enable', False)]
     assert not backend.thread_lock.locked() and not backend._transport_poisoned
@@ -424,7 +424,7 @@ def test_blocked_cleanup_log_prevents_the_next_series(boundary):
     assert not report['link_released'] and device.calls.count(('connect',)) == 1
 
 
-def test_old_reports_keep_acquisition_success_separate_from_failed_cleanup(ns, boundary):
+def test_old_reports_keep_acquisition_success_separate_from_failed_cleanup(dmmr_notebook_ns, boundary):
     device, _, output, run = boundary
     device.close_fails = True
     report = run()
@@ -433,7 +433,7 @@ def test_old_reports_keep_acquisition_success_separate_from_failed_cleanup(ns, b
     for entry in report['series']:
         entry.pop('acquisition_complete')
     (output / 'report.json').write_text(json.dumps(report))
-    _, _, analysed = ns['analyse_campaign'](output)
+    _, _, analysed = dmmr_notebook_ns['analyse_campaign'](output)
     assert analysed['recorded_series'] == 1 and analysed['completed_series'] == 0
     assert analysed['status'] == 'failed'
     assert analysed['series'][0]['cleanup'] == json.loads(json.dumps(report['series'][0]['cleanup']))

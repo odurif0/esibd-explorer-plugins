@@ -19,7 +19,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_esi_heater_activation import rig as real_driver_rig  # simulated vendor backend only
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK = ROOT / 'notebooks/esi_heater_characterization.ipynb'
@@ -267,11 +266,11 @@ def rig(tmp_path):
     return SimpleNamespace(ns=ns, fake=fake, clock=clock, run=run)
 
 
-def test_stop_during_limit_write_cancels_remaining_setters(real_driver_rig, monkeypatch, tmp_path):
+def test_stop_during_limit_write_cancels_remaining_setters(esi_heater_rig, monkeypatch, tmp_path):
     ns = namespace()
     run = ns['Experiment'](tmp_path / 'never-opened', lambda _: pytest.fail('No constructor'))
     calls, queued = [], []
-    run.esi = real_driver_rig.driver
+    run.esi = esi_heater_rig.driver
     run.trace = SimpleNamespace(record=lambda *a, **kw: None)
     run.owner = SimpleNamespace(thread=SimpleNamespace(ident=-1), call=lambda label, fn: fn(),
                                 begin_close=lambda cleanup: queued.append(cleanup))
@@ -279,11 +278,11 @@ def test_stop_during_limit_write_cancels_remaining_setters(real_driver_rig, monk
     for kind in ('voltage', 'current', 'power'):
         def setter(self, value, kind=kind):
             calls.append((kind, value))
-            real_driver_rig.state.limits[kind] = value
+            esi_heater_rig.state.limits[kind] = value
             if kind == 'voltage':
                 run.request_stop()
             return 0, value
-        monkeypatch.setattr(real_driver_rig.base, f'set_heat_ctrl_{kind}_limit', setter)
+        monkeypatch.setattr(esi_heater_rig.base, f'set_heat_ctrl_{kind}_limit', setter)
     with pytest.raises(KeyboardInterrupt, match='cancelled'):
         run.call('configure_heat_limits', voltage_v=22., current_a=10., power_w=50., timeout_s=.1)
     assert run.heat_cancel.is_set() and queued
@@ -470,12 +469,11 @@ def test_all_discharge_callbacks_are_saved_without_instrument_calls(rig):
 
 
 # Real ESI controller with simulated base methods, never a vendor DLL.
-from test_esi_heater_activation import rig as heater_driver_rig
 
 
 @pytest.mark.parametrize('valid,temperature', [(False, 0.), (True, float('nan')), (True, 176.)])
-def test_raw_failed_temperature_precheck_is_saved(heater_driver_rig, tmp_path, monkeypatch, valid, temperature):
-    r = heater_driver_rig
+def test_raw_failed_temperature_precheck_is_saved(esi_heater_rig, tmp_path, monkeypatch, valid, temperature):
+    r = esi_heater_rig
     ns = namespace()
     returned = (0, valid, .01, .02, .03, temperature)
     monkeypatch.setattr(r.base, 'get_heat_ctrl_monitoring', lambda self: returned)
@@ -492,8 +490,8 @@ def test_raw_failed_temperature_precheck_is_saved(heater_driver_rig, tmp_path, m
     assert rows[0]['result'] == ns['NativeTrace'].encode(returned)
 
 
-def test_driver_call_sequence_is_unchanged_by_tracing(heater_driver_rig, tmp_path):
-    r = heater_driver_rig
+def test_driver_call_sequence_is_unchanged_by_tracing(esi_heater_rig, tmp_path):
+    r = esi_heater_rig
     ns = namespace()
     def sequence():
         r.driver.collect_diagnostics(timeout_s=.2)
@@ -678,7 +676,6 @@ def test_quantization_stays_inside_cap(cap, power):
 
 def test_native_quantization_evidence_is_from_matched_dll():
     """Read PE bytes, never execute the vendor binary."""
-    ns = namespace()
     path = ROOT / 'esi/vendor/runtime/esi/vendor/x64/COM-ESI-CTRL.dll'
     blob = path.read_bytes()
     pe = struct.unpack_from('<I', blob, 0x3c)[0]
@@ -710,6 +707,8 @@ def test_non_attainment_including_100_has_deadline_no_escalation(rig, saturation
 @pytest.mark.parametrize('field,value', [('valid', False), ('monitor_temperature_c', math.nan),
     ('monitor_output_v', math.nan), ('monitor_voltage_v', math.inf), ('monitor_current_a', math.nan),
     ('target_temperature_c', 90.), ('module_active', True)])
+
+
 def test_invalid_initial_diagnostics_never_heat(rig, field, value):
     rig.fake.hooks['diagnostic'] = lambda d: d['heat'].update({field: value})
     rig.run.run()
@@ -872,8 +871,8 @@ def test_disarmed_main_never_imports_or_constructs(monkeypatch, tmp_path, capsys
 
 
 @pytest.mark.parametrize('operation,args', [('collect_diagnostics', ()), ('set_heater_temperature', (30.,)), ('set_output_active', (0, True))])
-def test_notebook_stop_cancels_real_readiness_wait_before_heating(heater_driver_rig, tmp_path, monkeypatch, operation, args):
-    r = heater_driver_rig
+def test_notebook_stop_cancels_real_readiness_wait_before_heating(esi_heater_rig, tmp_path, monkeypatch, operation, args):
+    r = esi_heater_rig
     ns = namespace()
     run = ns['Experiment'](tmp_path / 'runs', lambda _: r.driver, plots_factory=Plots,
                            run_guard=make_test_guard(ns, tmp_path, tmp_path / 'runs'))
@@ -914,8 +913,8 @@ def test_notebook_stop_cancels_real_readiness_wait_before_heating(heater_driver_
 
 
 @pytest.mark.parametrize('stop_during_transition', [False, True])
-def test_notebook_waits_for_real_runtime_activation_or_stops(heater_driver_rig, tmp_path, monkeypatch, stop_during_transition):
-    r = heater_driver_rig
+def test_notebook_waits_for_real_runtime_activation_or_stops(esi_heater_rig, tmp_path, monkeypatch, stop_during_transition):
+    r = esi_heater_rig
     ns = namespace()
     run = ns['Experiment'](tmp_path / 'runs', lambda _: r.driver, plots_factory=Plots,
                            run_guard=make_test_guard(ns, tmp_path, tmp_path / 'runs'))
@@ -1334,7 +1333,7 @@ def test_restart_changed_guard_after_archive_never_constructs(restart_case):
 
 def test_restart_declaration_cannot_be_reused(restart_case):
     c = restart_case
-    restart = c.guard.authorize_restart(input_fn=c.ns['input'])
+    c.guard.authorize_restart(input_fn=c.ns['input'])
     with pytest.raises(RuntimeError, match='already used'):
         c.guard.authorize_restart(input_fn=c.ns['input'])
     assert c.marker.read_bytes() == c.raw

@@ -1,43 +1,9 @@
 """Live PSU setpoints must not restart the gates or rewrite the other rail."""
 from copy import deepcopy
 from threading import Event, Lock, Thread
-from types import SimpleNamespace
 
 import pytest
 
-from psu_fakes import StatefulPSU
-from test_psu_channels import load_psu
-from test_psu_measurements import setup as dll_case
-
-
-@pytest.fixture(params=[f"psu_{suffix}" for suffix in "abcde"])
-def rig(request, monkeypatch):
-    module = load_psu(request.param)
-    parent = SimpleNamespace(
-        name=request.param.upper(), getChannels=lambda: [], isOn=lambda: True,
-        startup_timeout_s=1., poll_timeout_s=.1, interlock_monitoring=True,
-    )
-    controller = module.PSUController(parent)
-    controller.lock = Lock()
-    controller.initialized = True
-    controller.errorCount = 0
-    controller._update_state = lambda: None
-    controller._sync_status_to_gui = lambda **kw: None
-    messages = []
-    controller.print = lambda msg, **kw: messages.append(msg)
-    device = controller.device = StatefulPSU()
-    device.enabled = True
-    device.outputs = (True, True)
-    device.interlocks = (True, True)
-    device.voltages = {0: 100., 1: 240.}
-    device.currents = {0: .01, 1: .02}
-    # A stale housekeeping cache must not supply the start of a live ramp.
-    controller.voltage_setpoint_values = {0: 0., 1: 500.}
-    controller.full_range_by_channel = {0: True, 1: True}
-    state = dict(output_enabled={0: True, 1: True}, full_range_enabled={0: False, 1: False},
-                 voltage_values=dict(device.voltages), current_limit_values=dict(device.currents))
-    monkeypatch.setattr(controller._output_cancel, "wait", lambda _: controller._output_cancel.is_set())
-    return module, controller, device, state, messages
 
 
 @pytest.mark.parametrize("channel,start,target", [
@@ -46,8 +12,8 @@ def rig(request, monkeypatch):
     (0, 100., 100.), (0, 100., 100.001),
 ])
 @pytest.mark.parametrize("partial", [False, True])
-def test_voltage_edit_only_steps_modified_channel_without_gate_commands(rig, channel, start, target, partial):
-    module, controller, device, state, messages = rig
+def test_voltage_edit_only_steps_modified_channel_without_gate_commands(psu_live_rig, channel, start, target, partial):
+    module, controller, device, state, messages = psu_live_rig
     device.voltages[channel] = start
     state["voltage_values"][channel] = target
     if partial:
@@ -69,10 +35,10 @@ def test_voltage_edit_only_steps_modified_channel_without_gate_commands(rig, cha
     assert controller.errorCount == 0, messages
 
 
-def test_voltage_edit_through_real_driver_and_ctypes(dll_case):
+def test_voltage_edit_through_real_driver_and_ctypes(psu_dll_case):
     import ctypes
 
-    controller, driver, calls, _status = dll_case
+    controller, driver, calls, _status = psu_dll_case
     controller.lock = Lock()
     controller.errorCount = 0
     controller.controllerParent.name = "PSU"
@@ -129,8 +95,8 @@ def test_voltage_edit_through_real_driver_and_ctypes(dll_case):
 
 
 @pytest.mark.parametrize("partial", [False, True])
-def test_current_limit_edit_also_keeps_voltage_and_gates(rig, partial):
-    _, controller, device, state, messages = rig
+def test_current_limit_edit_also_keeps_voltage_and_gates(psu_live_rig, partial):
+    _, controller, device, state, messages = psu_live_rig
     state["current_limit_values"][0] = .015
     if partial:
         state = {"setpoints_only": True, "current_limit_values": {0: .015}}
@@ -141,8 +107,8 @@ def test_current_limit_edit_also_keeps_voltage_and_gates(rig, partial):
     assert controller.errorCount == 0, messages
 
 
-def test_disabled_channel_stays_disabled_during_edit(rig):
-    _, controller, device, state, messages = rig
+def test_disabled_channel_stays_disabled_during_edit(psu_live_rig):
+    _, controller, device, state, messages = psu_live_rig
     device.outputs = (False, True)
     state["output_enabled"][0] = False
     state["voltage_values"][0] = 80.
@@ -154,8 +120,8 @@ def test_disabled_channel_stays_disabled_during_edit(rig):
 
 @pytest.mark.parametrize("fault", ["voltage_nan", "voltage_negative", "voltage_missing", "current_nan",
                                    "limit_missing", "limit_low", "current_limit_missing", "interlocks"])
-def test_unverified_live_state_cannot_start_a_voltage_ramp(rig, fault):
-    _, controller, device, state, messages = rig
+def test_unverified_live_state_cannot_start_a_voltage_ramp(psu_live_rig, fault):
+    _, controller, device, state, messages = psu_live_rig
     state["voltage_values"][0] = 380.
     if fault == "voltage_nan":
         device.voltages[0] = float("nan")
@@ -180,8 +146,8 @@ def test_unverified_live_state_cannot_start_a_voltage_ramp(rig, fault):
 
 
 @pytest.mark.parametrize("fault", ["ignored_voltage", "lost_ack", "gate_off", "range_changed", "current_ignored"])
-def test_failed_live_write_disables_without_retrying_a_cold_start(rig, fault):
-    _, controller, device, state, messages = rig
+def test_failed_live_write_disables_without_retrying_a_cold_start(psu_live_rig, fault):
+    _, controller, device, state, messages = psu_live_rig
     state["voltage_values"][0] = 80.
     setter = device.set_channel_voltage
 
@@ -209,8 +175,8 @@ def test_failed_live_write_disables_without_retrying_a_cold_start(rig, fault):
     assert "Applied PSU manual values." not in messages
 
 
-def test_range_change_still_disables_before_relay_even_with_stale_cache(rig):
-    _, controller, device, state, messages = rig
+def test_range_change_still_disables_before_relay_even_with_stale_cache(psu_live_rig):
+    _, controller, device, state, messages = psu_live_rig
     state["full_range_enabled"][0] = True
     controller.full_range_by_channel = {0: True, 1: False}  # misleading cache
     switch = device.set_output_full_range
@@ -230,8 +196,8 @@ def test_range_change_still_disables_before_relay_even_with_stale_cache(rig):
     assert controller.errorCount == 0, messages
 
 
-def test_range_change_refused_if_disable_is_not_confirmed(rig):
-    _, controller, device, state, messages = rig
+def test_range_change_refused_if_disable_is_not_confirmed(psu_live_rig):
+    _, controller, device, state, messages = psu_live_rig
     state["full_range_enabled"][0] = True
     device.set_output_enabled = lambda *a, **kw: None
     controller.applyManualState(state)
@@ -239,8 +205,8 @@ def test_range_change_refused_if_disable_is_not_confirmed(rig):
     assert any("not confirmed disabled before reconfiguration" in msg for msg in messages)
 
 
-def test_queued_field_edits_preserve_each_other_and_cancel_on_off(rig):
-    _, controller, device, _, messages = rig
+def test_queued_field_edits_preserve_each_other_and_cancel_on_off(psu_live_rig):
+    _, controller, device, _, messages = psu_live_rig
     # Hold the worker to reproduce several GUI commits before it dequeues.
     controller._manual_apply_worker_running = True
     for key, channel, target in (("voltage_values", 0, 80.),
@@ -263,8 +229,8 @@ def test_queued_field_edits_preserve_each_other_and_cancel_on_off(rig):
     assert device.calls == [] and controller._manual_apply_pending_state is None
 
 
-def test_cancel_during_live_readback_does_not_write(rig):
-    _, controller, device, state, messages = rig
+def test_cancel_during_live_readback_does_not_write(psu_live_rig):
+    _, controller, device, state, messages = psu_live_rig
     state["voltage_values"][0] = 80.
     getter = device.get_channel_voltage_limits
 
@@ -280,8 +246,8 @@ def test_cancel_during_live_readback_does_not_write(rig):
 
 @pytest.mark.parametrize("target", [80., 480.])
 @pytest.mark.parametrize("partial", [False, True])
-def test_off_interrupts_live_ramp_and_cancels_queued_edits(rig, target, partial):
-    _, controller, device, state, messages = rig
+def test_off_interrupts_live_ramp_and_cancels_queued_edits(psu_live_rig, target, partial):
+    _, controller, device, state, messages = psu_live_rig
     state["voltage_values"][0] = target
     if partial:
         state = {"setpoints_only": True, "voltage_values": {0: target}}

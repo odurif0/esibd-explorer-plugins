@@ -197,8 +197,8 @@ beside the plugin folders. Notebooks are not included in the plugin release ZIP.
 Development checks run from the repository root:
 
 ```bash
-python3 -m pytest -q                     # default: behaviour tests on canonical copies (~15 min)
-python3 -m pytest -q -m "not slow"       # without real Explorer/Qt subprocesses (~3 min)
+python3 -m pytest -q                     # default: behaviour tests on canonical copies (~25 min)
+python3 -m pytest -q -m "not slow"       # without real Explorer/Qt subprocesses (~6 min)
 python3 -m pytest -q --all-siblings      # release validation: every sibling copy too
 ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
@@ -244,3 +244,8 @@ sources for MScan and TPG366 include vendored build dependencies. See
 qualification or an automatic release.
 
 Tests remain in this repository's `tests/` directory. They are not part of plugin folders or release archives.
+Code shared by several test modules lives in `tests/support/` (fixtures are registered in
+`tests/conftest.py`); test modules never import one another. Unit tests import the plugins
+against `tests/support/explorer.py`, a small stand-in for the Explorer 1.0.2 API whose names
+and constants `tests/test_fake_explorer.py` compares with the installed host; real-Qt probes
+run through `support.qt.run_probe`.

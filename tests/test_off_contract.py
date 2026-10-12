@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_shutdown_confirmation_regressions import FAMILIES, controller_for, runtime_for
+from support.shutdown import FAMILIES, controller_for, runtime_for
 
 
 @pytest.mark.parametrize("family", FAMILIES)

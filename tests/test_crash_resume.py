@@ -15,6 +15,7 @@ import types
 
 import pytest
 from conftest import PLUGIN_SPECS
+from support.amx import load_plugin as load_amx
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_ENTRYPOINTS = sorted(
@@ -146,7 +147,7 @@ def test_a_crash_record_schedules_a_resume_that_reconnects_and_restarts_recordin
 # ---------------------------------------------------------------- per plugin: nothing commanded
 
 def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch, tmp_path):
-    from test_esi_plugin_behavior import _ExplorerLikeChannel, _counting_device, _load_plugin
+    from support.esi import ExplorerLikeChannel as _ExplorerLikeChannel, counting_device as _counting_device, load_plugin as _load_plugin
 
     module = _load_plugin()
     calls = []
@@ -224,7 +225,7 @@ def test_esi_resume_reads_only_and_adopts_targets_and_active_outputs(monkeypatch
 
 
 def test_esi_on_during_a_resume_keeps_the_running_outputs_selected():
-    from test_esi_plugin_behavior import _ExplorerLikeChannel, _counting_device, _load_plugin
+    from support.esi import ExplorerLikeChannel as _ExplorerLikeChannel, counting_device as _counting_device, load_plugin as _load_plugin
 
     module = _load_plugin()
     channels = []
@@ -256,9 +257,9 @@ class _Recorder:
 
 
 def test_ampr_resume_adopts_the_setpoints_it_holds_without_ramp_or_apply():
-    from test_ampr_plugin_channel_sync import _load_module
+    from support.ampr import load_plugin
 
-    module = _load_module()
+    module = load_plugin()
     record = _Recorder()
 
     class Channel:
@@ -309,12 +310,10 @@ def test_ampr_resume_adopts_the_setpoints_it_holds_without_ramp_or_apply():
 @pytest.mark.parametrize("loader", ["amx", "amx_hd"])
 def test_amx_resume_loads_no_config_and_changes_no_setting(loader, monkeypatch):
     if loader == "amx":
-        from test_amx_plugin_behavior import _load_module
-        module = _load_module()
+        module = load_amx()
         cls = module.AMXController
     else:
-        from test_amx_hd_plugin_behavior import _load_hd_plugin_module
-        module = _load_hd_plugin_module()
+        module = load_amx("amx_hd")
         cls = module.AMXHDController
     record = _Recorder()
     parent = types.SimpleNamespace(isOn=lambda: True, name=loader.upper(),
@@ -353,7 +352,7 @@ def test_amx_resume_loads_no_config_and_changes_no_setting(loader, monkeypatch):
 
 
 def test_psu_resume_only_connects_and_dmmr_resume_is_a_normal_on():
-    from test_psu_plugin_behavior import _load_module as load_psu
+    from support.psu import load_plugin as load_psu
 
     module = load_psu()
     controller = module.PSUController.__new__(module.PSUController)
@@ -375,7 +374,7 @@ def test_psu_resume_only_connects_and_dmmr_resume_is_a_normal_on():
     assert controller._native_initialization_ready is None
     assert controller.resume_session is False and "nothing was switched" in printed[0]
 
-    from test_dmmr_plugin_behavior import _load_module as load_dmmr
+    from support.dmmr import load_plugin as load_dmmr
 
     module = load_dmmr()
     controller = module.DMMRController.__new__(module.DMMRController)

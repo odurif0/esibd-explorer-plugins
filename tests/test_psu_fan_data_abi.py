@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from test_psu_plugin_behavior import _load_module
+from support.psu import load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("psu_fan_abi_generator", ROOT / "tools/generate_native_abi.py")
@@ -41,7 +41,7 @@ def test_generation_refuses_an_unverified_psu_dll(monkeypatch):
 
 
 def test_python_reference_passes_double_pwm_buffers():
-    module = _load_module()
+    module = load_plugin()
     cls = module._get_psu_driver_class()._PROCESS_CONTROLLER_CLASS
     base = importlib.import_module(cls.__module__).PSUBase
     seen = {}

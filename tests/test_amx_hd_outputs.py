@@ -8,47 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_amx_config_load import load_module, make_case
-from test_mscan import module, rig  # noqa: F401
+from support.amx import load_module, make_case
+from support.amx import INVERT, OSC0, SWITCH_SYM, TIMER_OUT0, TIMER_RUN0, config273, routing, snapshot
 
-FLAGS = ["ST_ENABLE", "ST_ENB_TIMER", "ST_ENB_OSC0", "ST_ENB_SWITCH", "ST_ENB_PULS_GEN", "ST_CLRN"]
 STATIC_FLAGS = ["ST_ENABLE", "ST_ENB_SWITCH", "ST_CLRN"]  # Configurations 100-121: generators off.
-TIMER_OUT0, TIMER_RUN0, OSC0, INVERT = 4, 20, 36, 0x80
-SWITCH_SYM = [(TIMER_OUT0, INVERT), (TIMER_OUT0 | INVERT, INVERT), (TIMER_OUT0, INVERT), (TIMER_OUT0 | INVERT, INVERT)]
 
 
 @pytest.fixture(scope="module")
 def hd():
     return load_module("amx_hd")
-
-
-def snapshot(timers=None, flags=FLAGS, enabled=True):
-    """collect_housekeeping shape: timers {t: (delay, width, burst)}; 16 timers, 8 with burst."""
-    timers = timers or {}
-    return {
-        "device_enabled": enabled, "main_state": {"name": "STATE_ON"},
-        "controller_state": {"flags": list(flags)}, "oscillator": {"period": 9998},
-        "pulsers": [dict(pulser=t, delay_ticks=timers.get(t, (0, 0, 0))[0], width_ticks=timers.get(t, (0, 0, 0))[1],
-                         burst=timers.get(t, (0, 0, 0))[2] if t < 8 else None) for t in range(16)],
-    }
-
-
-def routing(switches, *, clocks=(3, 0, 0, 0), periods=(9998, 0, 0, 0), triggers=None, stops=None,
-            delays=(0, 0, 0, 0)):
-    triggers = {0: OSC0} if triggers is None else triggers
-    stops = {t: 0 for t in triggers if t < 8} if stops is None else stops
-    return {
-        "clock_sources": list(clocks), "oscillator_periods": list(periods), "burst_timers": 8,
-        "timer_triggers": dict(triggers), "timer_stops": dict(stops),
-        "switches": [dict(switch=ch, trigger_source=trigger, enable_source=enable,
-                          delay=dict(rise=delays[0], fall=delays[1]), fine_delay=dict(rise=delays[2], fall=delays[3]))
-                     for ch, (trigger, enable) in enumerate(switches)],
-    }
-
-
-def config273():
-    """Clock0=CLK100M, Oscillator0=9998, Timer00=7,4998,Osc0,Pos,0,0,Pos, SwitchSym, enables 0,Neg."""
-    return snapshot({0: (7, 4998, 0)}), routing(SWITCH_SYM)
 
 
 def test_signal_table_is_cgcs_4edh_table(hd):
@@ -96,6 +64,8 @@ def test_config272_quadrature_is_reported_from_registers(hd):
     ("[Configuration111] Out0=Vpos", (INVERT, INVERT), ("Static", "Vpos")),
     ("[Configuration100] Out0-3=Hi-Z", (0, 0), ("Hi-Z", "Hi-Z")),
 ])
+
+
 def test_static_test_configurations(hd, name, switch0, expected):
     rows = hd._amx_hd_output_rows(snapshot(flags=STATIC_FLAGS), routing([switch0] + [(0, 0)] * 3, triggers={}))
     assert (rows[0]["state"], rows[0]["levels"]) == expected, name
@@ -140,6 +110,8 @@ def test_timer_clock_must_match_its_trigger_oscillator_clock(hd, clock1, expecte
     ("missing_flags", "Unknown"), ("missing_switch", "Unknown"), ("skip_triggers", "Unknown"),
     ("not_enabled", "Not enabled"),
 ])
+
+
 def test_non_simple_signals_never_inherit_an_oscillator_frequency(hd, case, expected):
     state, route = config273()
     timer, switch = state["pulsers"][0], route["switches"][0]
@@ -330,25 +302,25 @@ def test_output_rows_invalidated_on_write_transition_poll_failure_and_dispose(hd
     assert controller.output_rows is None and controller.hd_routing is None
 
 
-def test_mscan_offers_and_accepts_amx_hd(rig, hd):
-    assert "AMX_HD" in rig.scan.AMX_PLUGINS
-    rig.amx.name = rig.scan.amx_name = "AMX_HD"
+def test_mscan_offers_and_accepts_amx_hd(mscan_rig, hd):
+    assert "AMX_HD" in mscan_rig.scan.AMX_PLUGINS
+    mscan_rig.amx.name = mscan_rig.scan.amx_name = "AMX_HD"
     state, _ = config273()
-    rig.amx.controller.output_rows = hd._amx_hd_output_rows(state, routing(SWITCH_SYM, delays=(3, 7, 120, 0)))
-    rig.scan._plan = rig.scan._preflight()
-    assert not rig.psus[0].writes  # preflight is read-only
-    rig.scan.runScan(lambda: True)
-    assert rig.scan._validation["status"] == "completed", rig.scan._validation
-    rows = rig.scan._plan["metadata"]["waveform"]
+    mscan_rig.amx.controller.output_rows = hd._amx_hd_output_rows(state, routing(SWITCH_SYM, delays=(3, 7, 120, 0)))
+    mscan_rig.scan._plan = mscan_rig.scan._preflight()
+    assert not mscan_rig.psus[0].writes  # preflight is read-only
+    mscan_rig.scan.runScan(lambda: True)
+    assert mscan_rig.scan._validation["status"] == "completed", mscan_rig.scan._validation
+    rows = mscan_rig.scan._plan["metadata"]["waveform"]
     assert rows[0]["waveform"]["fine_delay"] == {"rise": 120, "fall": 0}
 
 
-def test_mscan_refuses_an_undecoded_amx_hd_output(rig, hd):
-    rig.amx.name = rig.scan.amx_name = "AMX_HD"
+def test_mscan_refuses_an_undecoded_amx_hd_output(mscan_rig, hd):
+    mscan_rig.amx.name = mscan_rig.scan.amx_name = "AMX_HD"
     state, route = config273()
     route["switches"][0]["trigger_source"] = 40  # mapping engine output
-    rig.amx.controller.output_rows = hd._amx_hd_output_rows(state, route)
-    with pytest.raises(rig.module.ScanError, match="AMX_HD CH0: Unknown") as error:
-        rig.scan._prepare()
+    mscan_rig.amx.controller.output_rows = hd._amx_hd_output_rows(state, route)
+    with pytest.raises(mscan_rig.module.ScanError, match="AMX_HD CH0: Unknown") as error:
+        mscan_rig.scan._prepare()
     assert "Mapping engine" in str(error.value)
-    assert not rig.psus[0].writes
+    assert not mscan_rig.psus[0].writes

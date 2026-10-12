@@ -8,26 +8,29 @@ import threading
 
 import pytest
 
-from test_cgc_initial_connection_recovery import SPECS, rig  # noqa: F401
-from test_cgc_plugin_connection_recovery import plugin  # noqa: F401
+from support.cgc import SPECS
 
 
 INITIAL_CLEANUP_SPECS = [spec for spec in SPECS if spec[1] != "esi"]
 
 
-@pytest.mark.parametrize("rig", INITIAL_CLEANUP_SPECS, indirect=True,
+@pytest.mark.parametrize("cgc_rig", INITIAL_CLEANUP_SPECS, indirect=True,
                          ids=[spec[0] for spec in INITIAL_CLEANUP_SPECS])
+
+
 @pytest.mark.parametrize(("action", "completion_point"), [
     ("close", "cleanup"), ("shutdown", "cleanup"),
     ("close", "classification"), ("shutdown", "classification"),
     ("close", "before_close"),
 ])
+
+
 @pytest.mark.parametrize("shutdown_confirmed", [True, False])
 def test_successful_open_during_cleanup_requires_verified_shutdown(
-    plugin, rig, monkeypatch, action, completion_point, shutdown_confirmed,
+    cgc_plugin, cgc_rig, monkeypatch, action, completion_point, shutdown_confirmed,
 ):
-    c, hw = plugin.controller, rig.hw
-    plugin.parent.connect_timeout_s = 2.0
+    c, hw = cgc_plugin.controller, cgc_rig.hw
+    cgc_plugin.parent.connect_timeout_s = 2.0
     hw.open_release.clear()
     finished, proceed = threading.Event(), threading.Event()
     worker = threading.Thread(target=c.initializeCommunication, daemon=True)
@@ -75,14 +78,14 @@ def test_successful_open_during_cleanup_requires_verified_shutdown(
             assert c.shutdownCommunication() is False
         else:
             c.closeCommunication()
-        if rig.family == "psu":
+        if cgc_rig.family == "psu":
             assert c._output_cancel.is_set()
         else:
             assert c._initial_open_close_requested
         assert c.device is old and old.connected and old._dll_port_claimed
         assert c.main_state == "Shutdown unconfirmed"
         assert hw.count("close") == hw.count("dispose") == 0
-        assert not plugin.successes
+        assert not cgc_plugin.successes
 
         # Restore only the interleaving hook, keeping all native simulation
         # installed until the initializer and its pending stop have finished.
@@ -94,7 +97,7 @@ def test_successful_open_during_cleanup_requires_verified_shutdown(
             shutdown_calls.append(old)
             hw.invoke("verified_shutdown", old)
             if shutdown_confirmed:
-                assert rig.disconnect(old) is True
+                assert cgc_rig.disconnect(old) is True
             c.closeCommunication(final_state=("Disconnected" if shutdown_confirmed
                                               else "Shutdown unconfirmed"))
             return shutdown_confirmed
@@ -104,7 +107,7 @@ def test_successful_open_during_cleanup_requires_verified_shutdown(
         worker.join(3)
         assert not worker.is_alive()
         assert shutdown_calls == [old]
-        assert not plugin.successes and len(plugin.created) == 1
+        assert not cgc_plugin.successes and len(cgc_plugin.created) == 1
         assert not c.initializing
         if shutdown_confirmed:
             assert c.device is None and not c.initialized
@@ -123,24 +126,28 @@ def test_successful_open_during_cleanup_requires_verified_shutdown(
         assert not worker.is_alive()
 
 
-@pytest.mark.parametrize("rig", INITIAL_CLEANUP_SPECS, indirect=True,
+@pytest.mark.parametrize("cgc_rig", INITIAL_CLEANUP_SPECS, indirect=True,
                          ids=[spec[0] for spec in INITIAL_CLEANUP_SPECS])
+
+
 @pytest.mark.parametrize(("state", "forced_state"), [
     ("Initializing", None), ("Disconnected", None),
     ("Shutdown unconfirmed", None), ("Shutdown unconfirmed", "Communication lost"),
 ])
+
+
 def test_plain_close_keeps_backend_without_verified_stop(
-    plugin, rig, monkeypatch, state, forced_state,
+    cgc_plugin, cgc_rig, monkeypatch, state, forced_state,
 ):
-    c, hw = plugin.controller, rig.hw
+    c, hw = cgc_plugin.controller, cgc_rig.hw
     hw.open_release.set()
-    old = rig.new()
+    old = cgc_rig.new()
     assert old.connect(timeout_s=1.0)
     c.device, c.initialized, c.initializing = old, False, False
     c.main_state, c._forced_close_state = state, forced_state
     before = list(hw.operations)
     base_closes = []
-    monkeypatch.setattr(plugin.module.DeviceController, "closeCommunication",
+    monkeypatch.setattr(cgc_plugin.module.DeviceController, "closeCommunication",
                         lambda self: base_closes.append(True), raising=False)
 
     c.closeCommunication()
@@ -149,9 +156,9 @@ def test_plain_close_keeps_backend_without_verified_stop(
     assert c.device is old and old._dll_port_claimed
     assert c.main_state == "Shutdown unconfirmed" and c.initialized
     assert not c.acquiring
-    if rig.family == "psu":
+    if cgc_rig.family == "psu":
         assert c._output_cancel.is_set()
     else:
         assert c._initial_open_close_requested
     c.initComplete()  # A queued success must not undo the Close request.
-    assert hw.operations == before and c.device is old and not plugin.successes
+    assert hw.operations == before and c.device is old and not cgc_plugin.successes

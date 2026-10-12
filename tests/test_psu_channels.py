@@ -4,59 +4,16 @@ The headless fixtures use plain Channels. The Qt integration test additionally
 executes Explorer's actual Channel, Parameter, DeviceManager and UCM machinery.
 """
 from contextlib import contextmanager
-import importlib.util
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from support.psu import make_psu, snapshot
 
-from test_psu_plugin_behavior import _install_esibd_stubs
-from test_psu_measurements import setup as dll_case
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def load_psu(folder):
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location(f"channel_{folder}", ROOT / folder / "psu_plugin.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def snapshot(positive=123., negative=234., enabled=(True, True)):
-    return {
-        "main_state": {"name": "ST_ON"}, "device_enabled": True,
-        "output_enabled": enabled,
-        "channels": [dict(channel=ch, enabled=enabled[ch],
-                          voltage={"measured_v": voltage, "set_v": 999.})
-                     for ch, voltage in enumerate((positive, negative))],
-    }
-
-
-def make_psu(folder="psu_a"):
-    module = load_psu(folder)
-    parent = module.PSUDevice.__new__(module.PSUDevice)
-    parent.interval = 1000
-    parent.loading = False
-    parent.print = lambda *a, **kw: None
-    parent.isOn = lambda: True
-    parent.channels = [SimpleNamespace(
-        id=ch, name=f"{parent.name}_CH{ch}", channelParent=parent,
-        real=True, enabled=True, active=True, useMonitors=True, initialized=True,
-        value=0., monitor=np.nan, unit="V", readback_status="PSU disconnected.",
-        channel_number=lambda ch=ch: ch, getDevice=lambda: parent,
-    ) for ch in (0, 1)]
-    parent.getChannels = lambda: parent.channels
-    controller = parent.controller = module.PSUController(parent)
-    controller.device = SimpleNamespace(connected=True, _transport_poisoned=False)
-    controller.initialized = True
-    # Omit only unrelated toolbars/settings, not production Channel publication.
-    controller._sync_status_to_gui = lambda sync_manual_panel=False: module._invoke_gui_callback(
-        lambda: controller._update_channel_values(sync_setpoints=sync_manual_panel))
-    return module, parent, controller
 
 
 @pytest.fixture(params=[f"psu_{suffix}" for suffix in "abcde"])
@@ -269,8 +226,8 @@ def test_late_read_and_unconfirmed_shutdown_stay_invalid(rig):
     assert np.isnan(parent.channels[0].monitor)
 
 
-def test_real_ctypes_readback_is_published_without_extra_dll_calls(dll_case):
-    controller, _driver, calls, _status = dll_case
+def test_real_ctypes_readback_is_published_without_extra_dll_calls(psu_dll_case):
+    controller, _driver, calls, _status = psu_dll_case
     controller.hardware_main_state = "ST_ON"
     controller._apply_live_readbacks(controller._read_live_readbacks(timeout_s=.5))
     before = list(calls)

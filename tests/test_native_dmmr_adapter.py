@@ -7,8 +7,6 @@ from threading import Event
 import numpy as np
 import pytest
 
-from test_dmmr_ranges import rig as legacy_rig
-
 
 class NativeBackend:
     family = "dmmr"
@@ -154,12 +152,12 @@ class NativeFacade:
 
 
 @pytest.fixture
-def native_rig(legacy_rig):
+def native_rig(dmmr_range_rig):
     backend = NativeBackend()
-    legacy_rig.backend = backend
-    legacy_rig.hardware = NativeFacade(backend)
-    legacy_rig.controller.device = legacy_rig.hardware
-    return legacy_rig
+    dmmr_range_rig.backend = backend
+    dmmr_range_rig.hardware = NativeFacade(backend)
+    dmmr_range_rig.controller.device = dmmr_range_rig.hardware
+    return dmmr_range_rig
 
 
 def methods(rig):
@@ -251,6 +249,8 @@ def test_native_poll_publishes_paired_actual_ranges_with_fresh_tokens(native_rig
     (np.nan, 0, True), (np.inf, 0, True), (1e-12, 5, True),
     (1e-12, True, True), (1e-12, 0, False), (1e-12, 0, 1),
 ])
+
+
 def test_invalid_native_sample_invalidates_current_and_range_together(
         native_rig, current, meas_range, valid):
     rig = native_rig

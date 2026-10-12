@@ -5,45 +5,8 @@ import time
 
 import pytest
 
-from test_native_worker import TRANSPORT, ROOT, binary  # noqa: F401
-from test_shutdown_confirmation_regressions import controller_for
-
-
-class NativeDevice:
-    NO_ERR = 0
-    _backend_mode = "process"
-    _open_failed = _failed_open_released = False
-
-    def __init__(self, backend, *, opening=False):
-        self._backend = backend
-        self._opening_in_progress = opening
-
-    @property
-    def connected(self):
-        return not self._backend.closed
-
-    @property
-    def _transport_poisoned(self):
-        return self._backend.closed
-
-    @property
-    def _dll_port_claimed(self):
-        return self._backend._process.poll() is None
-
-    def disconnect(self, **kwargs):
-        raise AssertionError("A dead/hung process must not receive a new hardware command")
-
-    def close(self):
-        return self._backend.close(grace_s=0)
-
-
-def proxy(binary, tmp_path, family):
-    worker = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, log_dir=tmp_path,
-                                        command=[str(binary), "--family", "test"], stop_grace_s=.05)
-    # Only the GUI device marker is adapted; the child is explicitly the fault
-    # backend, not evidence that an instrument DLL or real COM port was tested.
-    worker.family = family
-    return worker
+from support.shutdown import controller_for
+from support.native import NativeDevice, proxy
 
 
 def gui(family):
@@ -87,12 +50,12 @@ def qt_app():
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
 @pytest.mark.parametrize("callback", ["off", "on", "status", "init", "device_off"])
-def test_queued_old_success_off_on_status_cannot_touch_replacement(binary, tmp_path, monkeypatch, qt_app, family, callback):
+def test_queued_old_success_off_on_status_cannot_touch_replacement(worker_binary, tmp_path, monkeypatch, qt_app, family, callback):
     module, controller, parent, _ = gui(family)
     cls = toolbar(module, controller, parent, family)
     parent._set_on_ui_state = lambda value: cls._set_on_ui_state(parent, value)
-    old = proxy(binary, tmp_path, family)
-    fresh = proxy(binary, tmp_path, family)
+    old = proxy(worker_binary, tmp_path, family)
+    fresh = proxy(worker_binary, tmp_path, family)
     try:
         controller.device = NativeDevice(old)
         controller._native_initialization_required = True
@@ -132,9 +95,9 @@ def test_queued_old_success_off_on_status_cannot_touch_replacement(binary, tmp_p
 
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
-def test_toolbar_dead_worker_off_is_reconnectable(binary, tmp_path, family):
+def test_toolbar_dead_worker_off_is_reconnectable(worker_binary, tmp_path, family):
     module, controller, parent, _ = gui(family)
-    worker = proxy(binary, tmp_path, family)
+    worker = proxy(worker_binary, tmp_path, family)
     toolbar(module, controller, parent, family)
     try:
         controller.device = NativeDevice(worker)
@@ -149,10 +112,10 @@ def test_toolbar_dead_worker_off_is_reconnectable(binary, tmp_path, family):
 
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
-def test_force_reconnect_validated_init_then_verified_off_not_bare_close(binary, tmp_path, monkeypatch, family):
+def test_force_reconnect_validated_init_then_verified_off_not_bare_close(worker_binary, tmp_path, monkeypatch, family):
     module, controller, parent, _ = gui(family)
-    old = proxy(binary, tmp_path, family)
-    fresh = proxy(binary, tmp_path, family)
+    old = proxy(worker_binary, tmp_path, family)
+    fresh = proxy(worker_binary, tmp_path, family)
     cls = toolbar(module, controller, parent, family)
     calls = []
     class Hardware(NativeDevice):
@@ -205,9 +168,9 @@ def test_force_reconnect_validated_init_then_verified_off_not_bare_close(binary,
 
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
-def test_healthy_unconfirmed_toolbar_off_keeps_owner_and_retry(binary, tmp_path, family):
+def test_healthy_unconfirmed_toolbar_off_keeps_owner_and_retry(worker_binary, tmp_path, family):
     module, controller, parent, _ = gui(family)
-    worker = proxy(binary, tmp_path, family)
+    worker = proxy(worker_binary, tmp_path, family)
     toolbar(module, controller, parent, family)
     device = NativeDevice(worker)
     device.shutdown = lambda **kwargs: False
@@ -243,9 +206,9 @@ def test_failed_reap_does_not_escape_or_release_owner(family):
 
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
-def test_late_state_read_failure_cannot_retire_replacement(binary, tmp_path, family):
+def test_late_state_read_failure_cannot_retire_replacement(worker_binary, tmp_path, family):
     _, controller, _, _ = gui(family)
-    worker = proxy(binary, tmp_path, family)
+    worker = proxy(worker_binary, tmp_path, family)
     fresh = NativeDevice(worker)
     def late_failure(**kwargs):
         controller.device = fresh
@@ -262,10 +225,10 @@ def test_late_state_read_failure_cannot_retire_replacement(binary, tmp_path, fam
 
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
-def test_crashed_worker_is_off_and_reconnectable_not_confirmed_safe(binary, tmp_path, family):
+def test_crashed_worker_is_off_and_reconnectable_not_confirmed_safe(worker_binary, tmp_path, family):
     _, controller, parent, messages = gui(family)
-    worker = proxy(binary, tmp_path, family)
-    other = proxy(binary, tmp_path, family)
+    worker = proxy(worker_binary, tmp_path, family)
+    other = proxy(worker_binary, tmp_path, family)
     try:
         controller.device = NativeDevice(worker)
         with pytest.raises(RuntimeError):
@@ -277,7 +240,7 @@ def test_crashed_worker_is_off_and_reconnectable_not_confirmed_safe(binary, tmp_
         assert any("not confirmed" in message for message in messages)
         assert controller.shutdownCommunication() is False
         assert other.call("echo", "independent") == "independent"
-        fresh = proxy(binary, tmp_path, family)
+        fresh = proxy(worker_binary, tmp_path, family)
         try:
             controller.device = NativeDevice(fresh)
             controller._restore_on_ui_state()
@@ -291,9 +254,9 @@ def test_crashed_worker_is_off_and_reconnectable_not_confirmed_safe(binary, tmp_
 
 @pytest.mark.parametrize("family", ["ampr", "dmmr", "psu"])
 @pytest.mark.parametrize("opening", [True, False])
-def test_explicit_disconnect_reaps_hung_worker_without_controller_lock(binary, tmp_path, family, opening):
+def test_explicit_disconnect_reaps_hung_worker_without_controller_lock(worker_binary, tmp_path, family, opening):
     _, controller, parent, _ = gui(family)
-    worker = proxy(binary, tmp_path, family)
+    worker = proxy(worker_binary, tmp_path, family)
     controller.device = NativeDevice(worker, opening=opening)
     failures = []
     def blocked():

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import types
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
+from support.ampr import load_plugin
 
 
 PLUGIN_PATH = (
@@ -16,104 +14,6 @@ PLUGIN_PATH = (
     / "ampr_a"
     / "ampr_plugin.py"
 )
-
-
-def _install_esibd_stubs() -> None:
-    esibd = types.ModuleType("esibd")
-    core = types.ModuleType("esibd.core")
-    plugins = types.ModuleType("esibd.plugins")
-
-    class PARAMETERTYPE(Enum):
-        INT = "INT"
-        FLOAT = "FLOAT"
-        LABEL = "LABEL"
-
-    class _PluginTypeValue:
-        def __init__(self, value):
-            self.value = value
-
-    class PLUGINTYPE(Enum):
-        INPUTDEVICE = _PluginTypeValue("INPUTDEVICE")
-
-    class PRINT(Enum):
-        WARNING = "WARNING"
-        ERROR = "ERROR"
-
-    class Parameter:
-        VALUE = "Value"
-        HEADER = "Header"
-        NAME = "Name"
-
-    class Channel:
-        NAME = "Name"
-        REAL = "Real"
-        ENABLED = "Enabled"
-        VALUE = "Value"
-
-    class DeviceController:
-        def __init__(self, controllerParent=None):
-            self.controllerParent = controllerParent
-
-        def initComplete(self):
-            self.super_init_complete_called = True
-
-    class ToolButton:
-        def setChecked(self, checked):
-            self.checked = checked
-
-    class Device:
-        pass
-
-    class Plugin:
-        pass
-
-    def parameterDict(**kwargs):
-        return kwargs
-
-    core.PARAMETERTYPE = PARAMETERTYPE
-    core.PLUGINTYPE = PLUGINTYPE
-    core.PRINT = PRINT
-    core.Channel = Channel
-    core.DeviceController = DeviceController
-    core.Parameter = Parameter
-    core.ToolButton = ToolButton
-    core.parameterDict = parameterDict
-    plugins.Device = Device
-    plugins.Plugin = Plugin
-
-    sys.modules["esibd"] = esibd
-    sys.modules["esibd.core"] = core
-    sys.modules["esibd.plugins"] = plugins
-
-
-def _clear_test_modules() -> None:
-    for name in [
-        name
-        for name in list(sys.modules)
-        if name == "esibd"
-        or name.startswith("esibd.")
-        or name == "cgc"
-        or name.startswith("cgc.")
-        or name.startswith("esibd_ampr")
-        or name.startswith("_esibd_bundled_ampr_runtime")
-        or name == "ampr_plugin_sync_test"
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _import_plugin_module():
-    spec = importlib.util.spec_from_file_location("ampr_plugin_sync_test", PLUGIN_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_module():
-    _clear_test_modules()
-    _install_esibd_stubs()
-    return _import_plugin_module()
 
 
 def _new_controller(module):
@@ -127,7 +27,7 @@ def _new_controller(module):
 
 
 def test_bootstrap_config_is_replaced_from_detected_modules():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     default_item = {
         "Module": "0",
         "CH": "1",
@@ -161,7 +61,7 @@ def test_bootstrap_config_is_replaced_from_detected_modules():
 
 
 def test_bootstrap_detection_accepts_stringified_numeric_defaults():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     assert module._looks_like_bootstrap_items(
         items=[
@@ -203,7 +103,7 @@ def test_bootstrap_detection_accepts_stringified_numeric_defaults():
 
 
 def test_sequential_names_with_user_changes_are_not_treated_as_bootstrap():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     assert module._looks_like_bootstrap_items(
         items=[
@@ -216,7 +116,7 @@ def test_sequential_names_with_user_changes_are_not_treated_as_bootstrap():
 
 
 def test_existing_config_is_merged_and_new_channels_are_generic():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     current_items = [
         {
@@ -275,7 +175,7 @@ def test_existing_config_is_merged_and_new_channels_are_generic():
 
 
 def test_legacy_bootstrap_residue_is_removed_from_mixed_config():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     default_item = {
         "Module": "0",
@@ -313,7 +213,7 @@ def test_legacy_bootstrap_residue_is_removed_from_mixed_config():
 
 
 def test_duplicate_mappings_are_neutralized():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     current_items = [
         {"Name": "First", "Module": 1, "CH": 1, "Real": True, "Enabled": True},
@@ -332,7 +232,7 @@ def test_duplicate_mappings_are_neutralized():
 
 
 def test_device_applies_detected_module_voltage_limits_to_channels():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     applied_limits = []
 
     class FakeChannel:
@@ -357,7 +257,7 @@ def test_device_applies_detected_module_voltage_limits_to_channels():
 
 
 def test_controller_refreshes_detected_module_voltage_limits():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     logs = []
 
     class FakeDevice:
@@ -401,7 +301,7 @@ def test_controller_refreshes_detected_module_voltage_limits():
 
 
 def test_channel_sync_uses_detected_module_channel_counts():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     synced_items, _log_entries = module._plan_channel_sync(
         current_items=[],
@@ -422,7 +322,7 @@ def test_channel_sync_uses_detected_module_channel_counts():
 
 
 def test_empty_detection_does_not_modify_channels():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     current_items = [{"Name": "UserKeep", "Module": 1, "CH": 1, "Real": True}]
     synced_items, log_entries = module._plan_channel_sync(
@@ -436,7 +336,7 @@ def test_empty_detection_does_not_modify_channels():
 
 
 def test_init_complete_skips_sync_without_real_device():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     parent = types.SimpleNamespace(main_state="", detected_modules="", sync_calls=[])
     parent._sync_channels_from_detected_modules = lambda modules: parent.sync_calls.append(
@@ -463,7 +363,7 @@ def test_init_complete_skips_sync_without_real_device():
 
 
 def test_init_complete_logs_success_for_real_initialization():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     parent = types.SimpleNamespace(com=5, main_state="", detected_modules="", sync_calls=[])
     parent._sync_channels_from_detected_modules = lambda modules: parent.sync_calls.append(
@@ -491,7 +391,7 @@ def test_init_complete_logs_success_for_real_initialization():
 
 
 def test_init_complete_starts_acquisition_only_when_device_is_st_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     parent = types.SimpleNamespace(com=5, main_state="", detected_modules="", sync_calls=[])
     parent._sync_channels_from_detected_modules = lambda modules: parent.sync_calls.append(
@@ -514,7 +414,7 @@ def test_init_complete_starts_acquisition_only_when_device_is_st_on():
 
 
 def test_read_numbers_skips_acquisition_before_successful_initialization():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeChannel:
         real = True
@@ -557,7 +457,7 @@ def test_read_numbers_skips_acquisition_before_successful_initialization():
 
 
 def test_read_numbers_blocks_channel_acquisition_until_st_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeChannel:
         real = True
@@ -600,7 +500,7 @@ def test_read_numbers_blocks_channel_acquisition_until_st_on():
 
 
 def test_read_numbers_reads_voltages_only_once_st_on_is_reached():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeChannel:
         real = True
@@ -647,7 +547,7 @@ def test_read_numbers_reads_voltages_only_once_st_on_is_reached():
 
 
 def test_read_numbers_acquires_lock_for_ampr_module_polling():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeTimeoutLock:
         def __init__(self):
@@ -712,7 +612,7 @@ def test_read_numbers_acquires_lock_for_ampr_module_polling():
 
 
 def test_update_values_clears_monitor_styles_when_device_turns_off():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeWidget:
         def __init__(self):
@@ -764,7 +664,7 @@ def test_update_values_clears_monitor_styles_when_device_turns_off():
 
 
 def test_update_values_reapplies_monitor_styles_while_device_is_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeWidget:
         def __init__(self):
@@ -821,7 +721,7 @@ def test_update_values_reapplies_monitor_styles_while_device_is_on():
 
 
 def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeFrameworkLock:
         def __init__(self):
@@ -923,7 +823,7 @@ def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch
 
 
 def test_update_state_marks_communication_lost_after_repeated_generic_failures():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     ui_states = []
     close_emits = []
 
@@ -986,7 +886,7 @@ def test_update_state_marks_communication_lost_after_repeated_generic_failures()
 
 
 def test_fake_numbers_does_not_invent_ampr_monitors():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeChannel:
         enabled = True
@@ -1013,7 +913,7 @@ def test_fake_numbers_does_not_invent_ampr_monitors():
 
 
 def test_run_initialization_logs_explicit_failure():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     controller = _new_controller(module)
     controller.device = None
@@ -1051,7 +951,7 @@ def test_run_initialization_logs_explicit_failure():
 
 
 def test_run_initialization_uses_native_backend_without_inline_fallback(tmp_path):
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeDriver:
         def __init__(self, **kwargs):
@@ -1106,7 +1006,7 @@ def test_run_initialization_uses_native_backend_without_inline_fallback(tmp_path
 
 
 def test_refresh_module_scan_ignores_bootstrap_module_zero_warning():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeDevice:
         NO_ERR = 0
@@ -1140,7 +1040,7 @@ def test_refresh_module_scan_ignores_bootstrap_module_zero_warning():
 
 
 def test_apply_value_ignores_device_disposal_race():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeContext:
         def __enter__(self):
@@ -1196,7 +1096,7 @@ def test_apply_value_ignores_device_disposal_race():
 
 
 def test_apply_value_skips_hardware_writes_until_psu_is_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeContext:
         def __enter__(self):
@@ -1246,7 +1146,7 @@ def test_apply_value_skips_hardware_writes_until_psu_is_on():
 
 
 def test_toggle_on_runs_full_initialize_sequence_when_switching_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeContext:
         def __enter__(self):
@@ -1311,7 +1211,7 @@ def test_toggle_on_runs_full_initialize_sequence_when_switching_on():
 
 
 def test_toggle_on_runs_shutdown_when_switching_off():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeContext:
         def __enter__(self):
@@ -1377,7 +1277,7 @@ def test_toggle_on_runs_shutdown_when_switching_off():
 
 
 def test_toggle_on_does_not_log_success_outside_st_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeContext:
         def __enter__(self):
@@ -1449,7 +1349,7 @@ def _ramp_clock(module, monkeypatch):
 
 
 def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
@@ -1535,7 +1435,7 @@ def test_toggle_on_ramps_enabled_channels_after_startup(monkeypatch):
 
 
 def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
@@ -1622,7 +1522,7 @@ def test_toggle_off_ramps_down_before_shutdown(monkeypatch):
 
 
 def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
@@ -1740,7 +1640,7 @@ def test_toggle_on_cleans_up_psu_after_ramp_failure(monkeypatch):
 
 
 def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     _ramp_clock(module, monkeypatch)
 
     class FakeChannel:
@@ -1817,7 +1717,7 @@ def test_ramp_replays_updated_targets_changed_during_transition(monkeypatch):
 
 
 def test_toggle_on_failure_logs_runtime_diagnostics():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeContext:
         def __enter__(self):
@@ -1888,7 +1788,7 @@ def test_toggle_on_failure_logs_runtime_diagnostics():
 
 
 def test_shutdown_communication_runs_full_device_shutdown():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeDevice:
         def __init__(self):
@@ -1939,7 +1839,7 @@ def test_shutdown_communication_runs_full_device_shutdown():
 
 
 def test_shutdown_communication_logs_diagnostics_on_failure():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeDevice:
         NO_ERR = 0
@@ -2004,7 +1904,7 @@ def test_shutdown_communication_logs_diagnostics_on_failure():
 
 
 def test_update_values_clears_monitor_when_channel_or_device_is_off():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     channel_enabled = types.SimpleNamespace(
         enabled=True,
@@ -2038,7 +1938,7 @@ def test_update_values_clears_monitor_when_channel_or_device_is_off():
 
 
 def test_read_numbers_clears_existing_values_when_state_leaves_st_on():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeChannel:
         real = True
@@ -2066,7 +1966,7 @@ def test_read_numbers_clears_existing_values_when_state_leaves_st_on():
 
 
 def test_toggle_on_clears_transition_when_device_is_missing():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     original_toggle_on = getattr(module.DeviceController, "toggleOn", None)
     module.DeviceController.toggleOn = lambda self: None
@@ -2091,7 +1991,7 @@ def test_toggle_on_clears_transition_when_device_is_missing():
 
 
 def test_controller_formats_open_port_timeout_with_operator_hint():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     controller = module.AMPRController(types.SimpleNamespace(com=5))
 
@@ -2108,7 +2008,7 @@ def test_controller_formats_open_port_timeout_with_operator_hint():
 
 
 def test_controller_formats_open_port_error_with_operator_hint():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     controller = module.AMPRController(types.SimpleNamespace(com=5))
 
@@ -2127,7 +2027,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     instead of letting retries loop on a confusing '-2 (Error opening port)'.
     AMPR's _format_exception already hints 'already in use' for the -2 case but
     never recommends a restart, so the poisoned-port guidance complements it."""
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     controller = module.AMPRController(types.SimpleNamespace(com=10))
 
     fatal_exc = RuntimeError(
@@ -2146,7 +2046,7 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
 
 
 def test_init_failure_guidance_silent_without_prior_poisoning():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     controller = module.AMPRController(types.SimpleNamespace(com=10))
 
     assert controller._init_failure_guidance(
@@ -2156,7 +2056,7 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
 
 
 def test_update_state_ignores_device_state_read_before_disposal():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeDevice:
         NO_ERR = 0
@@ -2180,7 +2080,7 @@ def test_update_state_ignores_device_state_read_before_disposal():
 
 def test_invalid_module_and_channel_never_fall_back_to_m0_ch1():
     """A corrupt config must surface as skip (-1/0), not silent M0/CH1."""
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     for raw_module, expected in (("not-a-number", -1), (12, -1), (-3, -1), ("5", 5)):
         channel = object.__new__(module.AMPRChannel)
@@ -2194,7 +2094,7 @@ def test_invalid_module_and_channel_never_fall_back_to_m0_ch1():
 
 
 def test_channel_target_voltages_skips_invalid_channels():
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
 
     def make_channel(raw_module, raw_id, value):
         channel = object.__new__(module.AMPRChannel)
@@ -2225,7 +2125,7 @@ def test_channel_target_voltages_skips_invalid_channels():
 
 def test_safe_query_state_uses_setting_or_default():
     """Without the poll_timeout_s setting the default 5.0 applies (no crash)."""
-    module = _load_module()
+    module = load_plugin(module_name="ampr_plugin_sync_test")
     controller = _new_controller(module)
     controller.controllerParent = types.SimpleNamespace()  # no poll_timeout_s
 

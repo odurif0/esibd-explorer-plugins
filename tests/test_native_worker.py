@@ -1,12 +1,9 @@
 """Fault injection through an actual native process, without instrument hardware."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import math
-from pathlib import Path
 import select
-import shutil
 import struct
 import subprocess
 import sys
@@ -14,11 +11,7 @@ import threading
 import time
 
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("native_transport_test", ROOT / "native/python/_native_worker.py")
-TRANSPORT = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(TRANSPORT)
+from support.native import ROOT, TRANSPORT
 
 
 def test_numpy_scalars_encode_as_their_python_values():
@@ -31,28 +24,18 @@ def test_numpy_scalars_encode_as_their_python_values():
         TRANSPORT.encode(np.array([1, 2]))
 
 
-@pytest.fixture(scope="module")
-def binary():
-    if shutil.which("cargo") is None:
-        pytest.skip("Native process tests require local Rust toolchain")
-    subprocess.run(["cargo", "build", "--offline", "--manifest-path", str(ROOT / "native/Cargo.toml"),
-                    "--target-dir", str(ROOT / "native/target/transport-tests"),
-                    "--no-default-features", "--features", "test-backend"], check=True, capture_output=True, timeout=120)
-    return ROOT / "native/target/transport-tests/debug/esibd-native-worker"
-
-
 @pytest.fixture
-def worker(binary, tmp_path):
+def worker(worker_binary, tmp_path):
     proxy = TRANSPORT.NativeWorkerProxy(ROOT, "test", {"name": "one"},
-                                       command=[str(binary), "--family", "test"],
+                                       command=[str(worker_binary), "--family", "test"],
                                        log_dir=tmp_path, stop_grace_s=.1)
     yield proxy
     proxy.close(grace_s=0)
 
 
 @pytest.fixture
-def raw_worker(binary):
-    process = subprocess.Popen([str(binary), "--family", "test"], stdin=subprocess.PIPE,
+def raw_worker(worker_binary):
+    process = subprocess.Popen([str(worker_binary), "--family", "test"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         yield process
@@ -155,8 +138,8 @@ def test_relative_log_directory_fails_before_launch(monkeypatch, log_dir):
         TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, log_dir=log_dir, command=["unused"])
 
 
-def test_idle_watchdog_exits_with_undrained_stderr(raw_worker, binary):
-    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(binary), "--family", "test"])
+def test_idle_watchdog_exits_with_undrained_stderr(raw_worker, worker_binary):
+    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(worker_binary), "--family", "test"])
     try:
         _raw_initialize(raw_worker, {"housekeeping_stderr_hang": True})
         assert raw_worker.wait(timeout=2) == 77
@@ -194,9 +177,9 @@ def test_blocked_log_sink_cannot_delay_native_io_watchdog(worker, blocked_log_si
     assert set(sink.filesystem_threads) == {worker._log_thread.ident}
 
 
-def test_blocked_log_sink_cannot_delay_close_or_other_worker(worker, blocked_log_sink, binary):
+def test_blocked_log_sink_cannot_delay_close_or_other_worker(worker, blocked_log_sink, worker_binary):
     sink = blocked_log_sink()
-    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(binary), "--family", "test"])
+    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(worker_binary), "--family", "test"])
     thread, errors = _native_hang_thread(worker, 5.)
     closed = []
     closer = None
@@ -308,8 +291,8 @@ def test_fast_native_calls_have_matched_watchdog_frames(worker):
     assert not worker.closed
 
 
-def test_crash_does_not_affect_another_plugin(worker, binary):
-    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(binary), "--family", "test"])
+def test_crash_does_not_affect_another_plugin(worker, worker_binary):
+    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(worker_binary), "--family", "test"])
     try:
         with pytest.raises(RuntimeError, match="pipe closed"):
             worker.call("crash")
@@ -320,8 +303,8 @@ def test_crash_does_not_affect_another_plugin(worker, binary):
         other.close(grace_s=0)
 
 
-def test_idle_housekeeping_hang_is_reaped_without_a_new_request(worker, binary):
-    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(binary), "--family", "test"])
+def test_idle_housekeeping_hang_is_reaped_without_a_new_request(worker, worker_binary):
+    other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(worker_binary), "--family", "test"])
     try:
         worker.set_attribute("housekeeping_hang", True)
         deadline = time.monotonic() + 3
@@ -378,10 +361,10 @@ def test_cancellation_does_not_reuse_late_reply(worker):
     assert worker.call("echo", "new session request") == "new session request"
 
 
-def test_parent_eof_terminates_even_blocked_native_call(binary):
+def test_parent_eof_terminates_even_blocked_native_call(worker_binary):
     import json
     import struct
-    process = subprocess.Popen([str(binary), "--family", "test"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen([str(worker_binary), "--family", "test"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     def write(value):
         payload = json.dumps(value).encode()
         process.stdin.write(struct.pack("!I", len(payload)) + payload)
@@ -472,9 +455,13 @@ def test_lifecycle_reads_never_queue_behind_a_hung_worker(worker):
 
 BAD_REPLY_SCRIPT = r'''
 import json, struct, sys, time
+
+
 def read():
     n, = struct.unpack('!I', sys.stdin.buffer.read(4))
     return json.loads(sys.stdin.buffer.read(n))
+
+
 def send(value):
     data = json.dumps(value).encode()
     sys.stdout.buffer.write(struct.pack('!I', len(data)) + data)
@@ -502,6 +489,8 @@ time.sleep(30)
     {"version": 1, "kind": "reply", "success": True, "value": 1, "state": {"connected": "yes"}},
     {"version": 1, "kind": "reply", "success": True, "value": True, "_unmatched_io": True},
 ])
+
+
 def test_malformed_response_retires_and_reaps_process(tmp_path, bad):
     import json
     proxy = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, log_dir=tmp_path, stop_grace_s=.1,

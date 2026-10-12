@@ -7,15 +7,15 @@ import types
 
 import pytest
 
-from test_psu_plugin_behavior import _load_module
+from support.psu import load_plugin
 
 
-from psu_fakes import StatefulPSU
+from support.psu_fakes import StatefulPSU
 
 
 @pytest.fixture
 def setup(tmp_path):
-    module = _load_module()
+    module = load_plugin()
     parent = types.SimpleNamespace(
         name="PSU_A", isOn=lambda: True, getChannels=lambda: [],
         startup_timeout_s=1.0, poll_timeout_s=0.1, connect_timeout_s=0.1,
@@ -167,7 +167,7 @@ def test_off_before_initialization_worker_prevents_open_and_late_init_complete(s
 
 
 def test_startup_cancelled_after_standby_does_not_load_operating_config():
-    module = _load_module()
+    module = load_plugin()
     cls = module._get_psu_driver_class()._PROCESS_CONTROLLER_CLASS
     driver = cls.__new__(cls)
     driver.connected = True
@@ -250,7 +250,7 @@ def test_missing_discharge_readback_refuses_range_switch(setup):
 @pytest.mark.parametrize("quantity", ["voltage", "current"])
 @pytest.mark.parametrize("limit", [None, float("nan"), float("inf"), -1.0])
 def test_positive_commands_require_valid_hardware_limits(quantity, limit):
-    module = _load_module()
+    module = load_plugin()
     cls = module._get_psu_driver_class()._PROCESS_CONTROLLER_CLASS
     base = importlib.import_module(cls.__module__).PSUBase
     driver = cls.__new__(cls)

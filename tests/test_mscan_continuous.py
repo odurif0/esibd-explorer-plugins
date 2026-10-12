@@ -4,49 +4,12 @@ from types import SimpleNamespace as NS
 import h5py
 import numpy as np
 import pytest
-
-from test_mscan import module, rig  # noqa: F401 -- shared protocol fixtures
-
-
-@pytest.fixture
-def continuous(rig, monkeypatch):
-    s = rig.scan
-    clock = NS(now=0., epoch=rig.detector_device.time.data[-1], jump=0.)
-    rig.detector_device.interval = 2
-    rig.detector_device.time.data = [clock.epoch - .004, clock.epoch - .002, clock.epoch]
-    rig.detector.values.data = [40., 40., 40.]
-    clock.wall = lambda: clock.epoch + clock.now + clock.jump
-    monkeypatch.setattr(rig.module, 'time', NS(time=clock.wall, monotonic=lambda: clock.now))
-    s.scan_mode, s.time_step_s, s.sweep_rate = s.CONTINUOUS, .04, 250.
-    s._plan = s._preflight()
-    r = NS(rig=rig, scan=s, clock=clock, busy=lambda: False, record=lambda: True,
-           sample=lambda: rig.current(), tick=lambda: None)
-    def pause(seconds=None):
-        r.tick()
-        if s._cancel.is_set():
-            raise rig.module.ScanStopped('Scan stopped.')
-        clock.now += s.POLL_S if seconds is None else max(seconds, 1e-8)
-        if not r.busy():
-            for p in rig.psus:
-                p.controller._manual_apply_worker_running = False
-                for c in p.channels:
-                    c.monitor = c.value
-                    c.voltage_setpoint_readback = c.value
-        if r.record():
-            rig.detector_device.time.data.append(clock.wall())
-            rig.detector.values.data.append(r.sample())
-    s._pause = pause
-    return r
-
-
-def run(r):
-    r.scan.runScan(lambda: True)
-    return r.scan._validation
+from support.mscan import run
 
 
 @pytest.mark.parametrize('descending', [False, True])
-def test_continuous_uses_fixed_cadence_and_only_initial_final_settling(continuous, descending):
-    r, s = continuous, continuous.scan
+def test_continuous_uses_fixed_cadence_and_only_initial_final_settling(mscan_continuous, descending):
+    r, s = mscan_continuous, mscan_continuous.scan
     if descending:
         s.start, s.stop = s.stop, s.start
         s.inputChannels[0].recordingData = s.inputChannels[0].recordingData[::-1].copy()
@@ -70,16 +33,16 @@ def test_continuous_uses_fixed_cadence_and_only_initial_final_settling(continuou
     assert r.rig.psus[1].writes == []
 
 
-def test_measurement_duration_does_not_silently_control_continuous_cadence(continuous):
-    r = continuous
+def test_measurement_duration_does_not_silently_control_continuous_cadence(mscan_continuous):
+    r = mscan_continuous
     r.scan.integration_s = -10  # unused, hidden stepped-only field
     r.scan._plan = r.scan._preflight()
     assert run(r)['status'] == 'completed'
     assert r.scan._plan['average'] == .04
 
 
-def test_transition_samples_are_kept_not_discarded_or_called_settled(continuous):
-    r, s = continuous, continuous.scan
+def test_transition_samples_are_kept_not_discarded_or_called_settled(mscan_continuous):
+    r, s = mscan_continuous, mscan_continuous.scan
     command = s._continuous_command
     def moving(amplitude, latest=None, **kwargs):
         result = command(amplitude, latest, **kwargs)
@@ -96,8 +59,8 @@ def test_transition_samples_are_kept_not_discarded_or_called_settled(continuous)
     assert v['point_status'] == ['acquired during sweep'] * 3
 
 
-def test_detector_slower_than_time_step_aborts_instead_of_advancing_blindly(continuous):
-    r = continuous
+def test_detector_slower_than_time_step_aborts_instead_of_advancing_blindly(mscan_continuous):
+    r = mscan_continuous
     last = [0.]
     def occasional():
         if r.clock.now - last[0] >= .06:
@@ -112,8 +75,8 @@ def test_detector_slower_than_time_step_aborts_instead_of_advancing_blindly(cont
     assert np.isnan(r.scan.outputChannels[0].recordingData).all()
 
 
-def test_rolling_history_is_safe_once_older_samples_have_been_copied(continuous):
-    r = continuous
+def test_rolling_history_is_safe_once_older_samples_have_been_copied(mscan_continuous):
+    r = mscan_continuous
     def roll():
         if r.rig.current() == 20:
             r.rig.detector_device.time.data = r.rig.detector_device.time.data[-3:]
@@ -125,8 +88,8 @@ def test_rolling_history_is_safe_once_older_samples_have_been_copied(continuous)
     assert len(v['continuous']['detector_time']) > 3
 
 
-def test_loss_of_not_yet_copied_detector_history_still_aborts(continuous):
-    r = continuous
+def test_loss_of_not_yet_copied_detector_history_still_aborts(mscan_continuous):
+    r = mscan_continuous
     def lose():
         if r.rig.current() == 20:
             r.rig.detector_device.time.data.clear()
@@ -138,8 +101,8 @@ def test_loss_of_not_yet_copied_detector_history_still_aborts(continuous):
     assert np.isnan(r.scan.outputChannels[0].recordingData[1:]).all()
 
 
-def test_missing_detector_aborts_without_zero_or_restoration(continuous):
-    r = continuous
+def test_missing_detector_aborts_without_zero_or_restoration(mscan_continuous):
+    r = mscan_continuous
     r.record = lambda: False
     v = run(r)
     assert v['status'] == 'error' and 'no new valid DMMR sample' in v['error']
@@ -147,8 +110,8 @@ def test_missing_detector_aborts_without_zero_or_restoration(continuous):
     assert r.rig.psus[0].writes == [(0, 10), (1, 10)]
 
 
-def test_stop_retains_raw_partial_window_but_not_a_fictitious_point(continuous):
-    r, s = continuous, continuous.scan
+def test_stop_retains_raw_partial_window_but_not_a_fictitious_point(mscan_continuous):
+    r, s = mscan_continuous, mscan_continuous.scan
     def stop():
         if r.rig.current() == 20 and r.clock.now > .07:
             s._cancel.set()
@@ -163,8 +126,8 @@ def test_stop_retains_raw_partial_window_but_not_a_fictitious_point(continuous):
 
 
 @pytest.mark.parametrize('failure', ['off', 'ilim', 'amx', 'module', 'setpoint', 'clock'])
-def test_continuous_preserves_live_scan_guards(continuous, failure):
-    r, s = continuous, continuous.scan
+def test_continuous_preserves_live_scan_guards(mscan_continuous, failure):
+    r, s = mscan_continuous, mscan_continuous.scan
     def fail():
         if r.rig.current() != 20:
             return
@@ -184,8 +147,8 @@ def test_continuous_preserves_live_scan_guards(continuous, failure):
 
 
 @pytest.mark.parametrize('failure', ['busy', 'not-regulated'])
-def test_psu_must_reach_target_before_next_command(continuous, failure):
-    r, s = continuous, continuous.scan
+def test_psu_must_reach_target_before_next_command(mscan_continuous, failure):
+    r, s = mscan_continuous, mscan_continuous.scan
     if failure == 'busy':
         r.busy = lambda: r.rig.current() == 20
     else:
@@ -201,8 +164,8 @@ def test_psu_must_reach_target_before_next_command(continuous, failure):
     assert np.isnan(s.outputChannels[0].recordingData[1:]).all()
 
 
-def test_missed_deadline_never_skips_or_catches_up(continuous):
-    r = continuous
+def test_missed_deadline_never_skips_or_catches_up(mscan_continuous):
+    r = mscan_continuous
     fired = [False]
     def delay():
         if not fired[0] and r.clock.now > .02:
@@ -215,8 +178,8 @@ def test_missed_deadline_never_skips_or_catches_up(continuous):
     assert np.isnan(r.scan.outputChannels[0].recordingData).all()
 
 
-def test_small_lateness_does_not_create_a_short_catchup_interval(continuous):
-    r = continuous
+def test_small_lateness_does_not_create_a_short_catchup_interval(mscan_continuous):
+    r = mscan_continuous
     fired = [False]
     def delay():
         if not fired[0] and r.clock.now > .02:
@@ -229,8 +192,8 @@ def test_small_lateness_does_not_create_a_short_catchup_interval(continuous):
     assert commands[2] - commands[1] >= r.scan.time_step_s - 1e-6
 
 
-def test_ready_only_after_deadline_does_not_excuse_slow_transition(continuous):
-    r = continuous
+def test_ready_only_after_deadline_does_not_excuse_slow_transition(mscan_continuous):
+    r = mscan_continuous
     fired = [False]
     def late_completion():
         if not fired[0] and r.rig.psus[0].channels[0].value == 20:
@@ -244,8 +207,8 @@ def test_ready_only_after_deadline_does_not_excuse_slow_transition(continuous):
     assert np.isnan(r.scan.outputChannels[0].recordingData[1:]).all()
 
 
-def test_deadline_is_checked_after_validation_before_any_channel_write(continuous):
-    r, s = continuous, continuous.scan
+def test_deadline_is_checked_after_validation_before_any_channel_write(mscan_continuous):
+    r, s = mscan_continuous, mscan_continuous.scan
     observed = s._observation
     def slow_validation():
         r.clock.now += .1
@@ -256,15 +219,15 @@ def test_deadline_is_checked_after_validation_before_any_channel_write(continuou
     assert r.rig.psus[0].writes == []
 
 
-def test_late_qt_callback_cannot_send_command(continuous):
-    r = continuous
+def test_late_qt_callback_cannot_send_command(mscan_continuous):
+    r = mscan_continuous
     with pytest.raises(r.rig.module.ScanError, match='time step missed'):
         r.scan._continuous_command(20, latest=r.clock.now)
     assert r.rig.psus[0].writes == []
 
 
-def test_nan_remains_in_raw_data_and_invalidates_its_window(continuous):
-    r = continuous
+def test_nan_remains_in_raw_data_and_invalidates_its_window(mscan_continuous):
+    r = mscan_continuous
     r.sample = lambda: np.nan if r.rig.current() == 20 else r.rig.current()
     v = run(r)
     assert v['status'] == 'error' and 'no new valid DMMR sample' in v['error']
@@ -275,8 +238,8 @@ def test_nan_remains_in_raw_data_and_invalidates_its_window(continuous):
 
 
 @pytest.mark.parametrize('mode,duration', [('Continuous', 0.), ('Continuous', np.nan), ('Unknown', .1)])
-def test_invalid_mode_or_time_step_is_rejected_without_commands(continuous, mode, duration):
-    r = continuous
+def test_invalid_mode_or_time_step_is_rejected_without_commands(mscan_continuous, mode, duration):
+    r = mscan_continuous
     r.scan.scan_mode, r.scan.time_step_s = mode, duration
     with pytest.raises(r.rig.module.ScanError):
         r.scan._preflight()
@@ -294,8 +257,8 @@ def set_cadence(r, times, values, interval_ms=1):
 
 
 @pytest.mark.parametrize('duration,allowed', [(.099, False), (.1, True), (.2, True)])
-def test_time_step_must_cover_valid_module_interval_not_recorder_ticks(continuous, duration, allowed):
-    r = continuous
+def test_time_step_must_cover_valid_module_interval_not_recorder_ticks(mscan_continuous, duration, allowed):
+    r = mscan_continuous
     # Recording runs at 20 Hz, but only every other slot contains a new result.
     # Equal currents from distinct polling cycles remain separate samples.
     set_cadence(r, [-.2, -.15, -.1, -.05, 0.], [7., np.nan, 7., np.nan, 7.])
@@ -309,8 +272,8 @@ def test_time_step_must_cover_valid_module_interval_not_recorder_ticks(continuou
     assert r.rig.psus[0].writes == []
 
 
-def test_time_step_uses_longest_recent_interval_not_median(continuous):
-    r = continuous
+def test_time_step_uses_longest_recent_interval_not_median(mscan_continuous):
+    r = mscan_continuous
     set_cadence(r, [-.45, -.35, -.25, 0.], [7.] * 4)
     r.scan.time_step_s = .1
     with pytest.raises(r.rig.module.ScanError, match='Time step.*at least 0.25 s'):
@@ -318,8 +281,8 @@ def test_time_step_uses_longest_recent_interval_not_median(continuous):
     assert r.rig.psus[0].writes == []
 
 
-def test_slower_configured_polling_cannot_use_old_fast_history(continuous):
-    r = continuous
+def test_slower_configured_polling_cannot_use_old_fast_history(mscan_continuous):
+    r = mscan_continuous
     set_cadence(r, [-.02, -.01, 0.], [1., 2., 3.], interval_ms=500)
     with pytest.raises(r.rig.module.ScanError, match='Time step.*at least 0.5 s'):
         r.scan._preflight()
@@ -328,8 +291,10 @@ def test_slower_configured_polling_cannot_use_old_fast_history(continuous):
 
 @pytest.mark.parametrize('problem', ['no-history', 'one-value', 'nan', 'infinity', 'misaligned',
                                     'timestamps', 'stale', 'no-interval'])
-def test_unavailable_module_cadence_blocks_continuous_before_commands(continuous, problem):
-    r = continuous
+
+
+def test_unavailable_module_cadence_blocks_continuous_before_commands(mscan_continuous, problem):
+    r = mscan_continuous
     if problem == 'no-history': set_cadence(r, [], [])
     if problem == 'one-value': set_cadence(r, [-.02, -.01, 0.], [np.nan, np.nan, 1.])
     if problem == 'nan': r.rig.detector.values.data = [np.nan] * 3
@@ -343,8 +308,8 @@ def test_unavailable_module_cadence_blocks_continuous_before_commands(continuous
     assert r.rig.psus[0].writes == []
 
 
-def test_cadence_is_specific_to_selected_module(continuous):
-    r = continuous
+def test_cadence_is_specific_to_selected_module(mscan_continuous):
+    r = mscan_continuous
     set_cadence(r, [-.2, -.15, -.1, -.05, 0.], [7.] * 5)
     slow = NS(**vars(r.rig.detector))
     slow.name, slow.module_address = 'Detector5', lambda: 5
@@ -360,8 +325,8 @@ def test_cadence_is_specific_to_selected_module(continuous):
 
 @pytest.mark.parametrize('mode', ['Continuous', 'Step by step'])
 @pytest.mark.parametrize('interval_ms', [1, 100])
-def test_live_polling_change_aborts_before_next_voltage_command(continuous, mode, interval_ms):
-    r = continuous
+def test_live_polling_change_aborts_before_next_voltage_command(mscan_continuous, mode, interval_ms):
+    r = mscan_continuous
     r.scan.scan_mode = mode
     r.scan._plan = r.scan._preflight()
     def change_interval():
@@ -376,8 +341,8 @@ def test_live_polling_change_aborts_before_next_voltage_command(continuous, mode
         assert len(v['continuous']['detector_time']) > 0
 
 
-def test_continuous_archive_roundtrip_preserves_raw_data_and_axis(continuous, tmp_path):
-    r, s = continuous, continuous.scan
+def test_continuous_archive_roundtrip_preserves_raw_data_and_axis(mscan_continuous, tmp_path):
+    r, s = mscan_continuous, mscan_continuous.scan
     v = run(r)
     assert v['status'] == 'completed', v['error']
     s.file = tmp_path / 'continuous.mscan.h5'

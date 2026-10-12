@@ -11,12 +11,12 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
+from support.dmmr import load_plugin
 
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
-    module = _load_module()
+    module = load_plugin()
     const = ModuleType("esibd.const")
     const.infoDict = lambda name: {"Name": name}
     monkeypatch.setitem(sys.modules, "esibd.const", const)

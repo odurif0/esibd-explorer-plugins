@@ -1,23 +1,21 @@
 """Prevent redundant range writes; recover a necessary write without replaying it."""
 import pytest
 
-from test_dmmr_command_recovery import rig, startup  # noqa: F401
-from test_dmmr_zero_notebook import ns  # noqa: F401
 
 
 @pytest.fixture(params=['notebook', 'plugin'])
-def setup_case(request, startup, ns):
-    hw = startup.hardware
+def setup_case(request, dmmr_startup, dmmr_notebook_ns):
+    hw = dmmr_startup.hardware
     hw.enabled, hw.automatic = True, False
-    for channel in startup.channels:
+    for channel in dmmr_startup.channels:
         channel._requested_range_mode = '0'
 
     def configure():
         if request.param == 'notebook':
-            ns['configure_range'](hw, list(range(8)), 0, .1, [], set())
+            dmmr_notebook_ns['configure_range'](hw, list(range(8)), 0, .1, [], set())
         else:
-            recovery = startup.controller._new_command_recovery(hw, .1, 'startup')
-            startup.controller._configure_module_ranges(hw, list(range(8)), .1, recovery=recovery)
+            recovery = dmmr_startup.controller._new_command_recovery(hw, .1, 'startup')
+            dmmr_startup.controller._configure_module_ranges(hw, list(range(8)), .1, recovery=recovery)
     return hw, configure
 
 
@@ -139,10 +137,10 @@ def test_recovery_does_not_reenable_a_disabled_controller(setup_case):
     assert not any(c[0] in ('enable', 'purge', 'disconnect') for c in hw.calls)
 
 
-def test_matching_autorange_is_not_rewritten(startup):
-    hw = startup.hardware
+def test_matching_autorange_is_not_rewritten(dmmr_startup):
+    hw = dmmr_startup.hardware
     hw.enabled, hw.automatic = True, False
     hw.modes = dict.fromkeys(range(8), True)
-    startup.controller._configure_module_ranges(hw, list(range(8)), .1,
-        recovery=startup.controller._new_command_recovery(hw, .1, 'startup'))
+    dmmr_startup.controller._configure_module_ranges(hw, list(range(8)), .1,
+        recovery=dmmr_startup.controller._new_command_recovery(hw, .1, 'startup'))
     assert not any(c[0] in ('auto_range', 'fixed_range') for c in hw.calls)

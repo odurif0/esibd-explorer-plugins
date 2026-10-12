@@ -1,10 +1,10 @@
 """A missing authoritative config list must never authorize an NVM write."""
 
-import runpy
 import types
 from pathlib import Path
 
 import pytest
+from support.psu import load_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -12,10 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("folder", ["psu_a", "psu_b", "psu_c", "psu_d", "psu_e"])
 @pytest.mark.parametrize("scenario", ["initial_read_error", "locked_read_error", "occupied", "empty"])
 def test_save_requires_successful_locked_config_check(folder, scenario):
-    helpers = runpy.run_path(str(ROOT / "tests/test_psu_plugin_behavior.py"))
-    loader = helpers["_load_module"]
-    loader.__globals__["PLUGIN_PATH"] = ROOT / folder / "psu_plugin.py"
-    module = loader()
+    module = load_plugin(folder)
     writes = []
     reads = []
 

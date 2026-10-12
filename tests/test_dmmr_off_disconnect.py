@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_dmmr_toggle_failures import rig as toggle_rig, start
-from test_shutdown_confirmation_regressions import runtime_for
+from support.dmmr import dmmr_toggle_rig as toggle_rig, start
+from support.shutdown import runtime_for
 
 
 @pytest.fixture(name="rig")

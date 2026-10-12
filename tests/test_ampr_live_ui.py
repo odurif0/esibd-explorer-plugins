@@ -1,23 +1,15 @@
 """Real Explorer table/Qt signals: readbacks persist from ramp-up through OFF."""
 from pathlib import Path
-import os
-import subprocess
 import sys
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize("folder", ["ampr_a", "ampr_b"])
 @pytest.mark.parametrize("scale", ["1", "1.5"])
 def test_live_status_and_monitor_during_on_and_off(folder, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, __file__, folder, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-        capture_output=True, text=True, timeout=35,
-    )
-    if result.returncode == 77:
-        pytest.skip("Installed Explorer and Qt are required")
-    assert result.returncode == 0, result.stdout + result.stderr
+    run_probe(__file__, folder, tmp_path, timeout=35, scale=scale, allow_traceback=True)
 
 
 def exercise(module, parent, app, window, output):
@@ -247,5 +239,5 @@ def exercise(module, parent, app, window, output):
 
 
 if __name__ == "__main__":
-    from test_ampr_startup_ui import probe
+    from support.ampr_ui import probe
     raise SystemExit(probe(sys.argv[1], False, Path(sys.argv[2]), exercise=exercise))

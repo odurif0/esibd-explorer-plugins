@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections import deque
 import json
 import math
-import os
 from pathlib import Path
-import subprocess
 import sys
 from threading import Event, Lock, Thread
 import time
@@ -15,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_amx_config_load import load_module
-from test_native_worker import binary  # noqa: F401
+from support.amx import load_module
+from support.qt import run_probe
 
 FOLDERS = ("amx_a", "amx_hd")
 
@@ -469,12 +467,12 @@ def test_queued_on_callback_cannot_reactivate_after_native_retirement(case, monk
     assert_lost(case)
 
 
-def test_real_native_process_crash_does_not_retain_on_and_leaves_other_worker_alive(case, binary, tmp_path):
-    from test_native_device_recovery import NativeDevice, proxy
+def test_real_native_process_crash_does_not_retain_on_and_leaves_other_worker_alive(case, worker_binary, tmp_path):
+    from support.native import NativeDevice, proxy
 
     controller = case.controller
     family = "amx_hd" if case.parent.name == "AMX_HD" else "amx"
-    worker, other = proxy(binary, tmp_path, family), proxy(binary, tmp_path, family)
+    worker, other = proxy(worker_binary, tmp_path, family), proxy(worker_binary, tmp_path, family)
     try:
         controller.device = NativeDevice(worker)
         controller.initialized = controller.acquiring = True
@@ -487,7 +485,7 @@ def test_real_native_process_crash_does_not_retain_on_and_leaves_other_worker_al
         assert not case.parent.onAction.state
         assert controller.shutdownCommunication() is False
         assert other.call("echo", "independent") == "independent"
-        fresh = proxy(binary, tmp_path, family)
+        fresh = proxy(worker_binary, tmp_path, family)
         try:
             assert fresh.call("echo", "reconnected") == "reconnected"
             assert controller._dispose_device() is True
@@ -499,12 +497,12 @@ def test_real_native_process_crash_does_not_retain_on_and_leaves_other_worker_al
 
 
 @pytest.mark.parametrize("opening", [True, False])
-def test_explicit_native_disconnect_reaps_blocked_process_without_controller_lock(case, binary, tmp_path, opening):
-    from test_native_device_recovery import NativeDevice, proxy
+def test_explicit_native_disconnect_reaps_blocked_process_without_controller_lock(case, worker_binary, tmp_path, opening):
+    from support.native import NativeDevice, proxy
 
     controller = case.controller
     family = "amx_hd" if case.parent.name == "AMX_HD" else "amx"
-    worker = proxy(binary, tmp_path, family)
+    worker = proxy(worker_binary, tmp_path, family)
     controller.device = NativeDevice(worker, opening=opening)
     controller.initialized = controller.acquiring = not opening
     failures = []
@@ -537,7 +535,7 @@ def test_explicit_native_disconnect_reaps_blocked_process_without_controller_loc
 
 
 def test_transport_consumes_local_event_before_serializing_rpc(case, monkeypatch):
-    from test_native_worker import TRANSPORT
+    from support.native import TRANSPORT
 
     start(case)
     proxy = TRANSPORT.NativeWorkerProxy.__new__(TRANSPORT.NativeWorkerProxy)
@@ -567,15 +565,7 @@ def test_transport_consumes_local_event_before_serializing_rpc(case, monkeypatch
 @pytest.mark.parametrize("folder", FOLDERS)
 @pytest.mark.parametrize("scenario", ["connect_cancel", "poll_crash"])
 def test_native_buttons_and_reconnect_through_real_qt(folder, scenario, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), folder, scenario, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=20,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, folder, scenario, tmp_path, timeout=20)
 
 
 def qt_probe(folder, scenario, output):

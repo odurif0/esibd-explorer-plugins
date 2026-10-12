@@ -1,27 +1,18 @@
 """Real Qt Vset entry, production PSU controller/worker, simulated hardware."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 from threading import Lock
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize("folder", [f"psu_{suffix}" for suffix in "abcde"])
 def test_vset_edit_keeps_both_channels_on_in_real_qt(folder, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), folder, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        text=True, capture_output=True, timeout=35,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, folder, tmp_path, timeout=35)
 
 
 def probe(folder, output):
@@ -31,8 +22,8 @@ def probe(folder, output):
         from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel
     except ImportError:
         return 77
-    from test_psu_channels import make_psu
-    from psu_fakes import StatefulPSU
+    from support.psu import make_psu
+    from support.psu_fakes import StatefulPSU
 
     app = QApplication([])
     module, parent, controller = make_psu(folder)

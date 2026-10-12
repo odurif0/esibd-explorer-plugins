@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import ast
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import MethodType
 
 import pytest
 
 from conftest import PLUGIN_SPECS
+from support.qt import run_probe
+from support.ui import explorer_state_action
 
 ROOT = Path(__file__).resolve().parents[1]
 # A scan has recording controls, not a device ON/OFF action.
@@ -19,32 +19,7 @@ ENTRYPOINTS = [ROOT / spec.folder / spec.entrypoint for spec in PLUGIN_SPECS if 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.parent.name)
 def test_on_off_state_icon_tooltip_and_next_click(entrypoint, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), str(entrypoint), str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real PyQt6 or Explorer source unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
-
-
-def explorer_state_action():
-    """Load the installed Action/StateAction code without starting Explorer."""
-    from importlib.metadata import distribution
-    from PyQt6.QtCore import QObject, pyqtSignal
-    from PyQt6.QtGui import QAction, QIcon
-
-    path = Path(distribution("esibd-explorer").locate_file("esibd/core.py"))
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)
-               and node.name in ("Action", "StateAction")]
-    assert len(classes) == 2
-    ns = dict(QObject=QObject, QAction=QAction, pyqtSignal=pyqtSignal, Icon=QIcon)
-    source = "from __future__ import annotations\n" + "\n".join(ast.unparse(node) for node in classes)
-    exec(compile(source, str(path), "exec"), ns)
-    return ns["StateAction"]
+    run_probe(__file__, entrypoint, tmp_path, timeout=30)
 
 
 def probe(path, output):

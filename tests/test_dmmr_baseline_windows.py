@@ -9,14 +9,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from test_dmmr_zero_notebook import Clock, DMMR, ns, rig  # noqa: F401
+from support.dmmr_notebook import Clock, DMMR
 
 
-def test_diagnostic_schedule_has_no_accumulated_delay_or_catchup_burst(ns):
+def test_diagnostic_schedule_has_no_accumulated_delay_or_catchup_burst(dmmr_notebook_ns):
     clock = Clock()
-    device = DMMR(clock, ns['CERTIFICATE'])
+    device = DMMR(clock, dmmr_notebook_ns['CERTIFICATE'])
     report = {}
-    recorder = ns['DiagnosticRecorder'](device, device.modules, ns['PROTOCOL'],
+    recorder = dmmr_notebook_ns['DiagnosticRecorder'](device, device.modules, dmmr_notebook_ns['PROTOCOL'],
                                          io.StringIO(), report, 0., clock)
     recorder.commands = [('controller', None, 'get_state', ['state_hex', 'state_name'])]
     for minute in range(360):
@@ -61,10 +61,10 @@ def synthetic_run(ns, rig, *, elapsed=3660., complete=False, offset_fA=0., legac
 
 
 @pytest.mark.parametrize('legacy', [False, True])
-def test_raw_means_device_clock_slopes_and_unfinished_window(ns, rig, legacy):
-    output, original = synthetic_run(ns, rig, legacy=legacy)
+def test_raw_means_device_clock_slopes_and_unfinished_window(dmmr_notebook_ns, dmmr_notebook_rig, legacy):
+    output, original = synthetic_run(dmmr_notebook_ns, dmmr_notebook_rig, legacy=legacy)
     before = (output / 'raw.csv').read_bytes()
-    _, _, report = ns['analyse_run'](output)
+    _, _, report = dmmr_notebook_ns['analyse_run'](output)
     assert report['status'] == 'failed' and not report['acquisition']['complete']
     assert (output / 'raw.csv').read_bytes() == before
     windows = pd.DataFrame(report['baseline_windows'])
@@ -82,14 +82,14 @@ def test_raw_means_device_clock_slopes_and_unfinished_window(ns, rig, legacy):
     assert not report['tail_summary']  # No final-window claim for an incomplete run.
 
 
-def test_no_baseline_window_is_invented_for_short_old_runs(ns, rig):
-    _, _, _, report = rig[-1]()
+def test_no_baseline_window_is_invented_for_short_old_runs(dmmr_notebook_ns, dmmr_notebook_rig):
+    _, _, _, report = dmmr_notebook_rig[-1]()
     assert not report['baseline_windows']
     assert len(report['summary']) == 8 and len(report['time_bins']) == 32
 
 
-def test_campaign_keeps_restart_step_and_five_minute_gap(ns, rig, tmp_path):
-    source, frame = synthetic_run(ns, rig, elapsed=3600., complete=True)
+def test_campaign_keeps_restart_step_and_five_minute_gap(dmmr_notebook_ns, dmmr_notebook_rig, tmp_path):
+    source, frame = synthetic_run(dmmr_notebook_ns, dmmr_notebook_rig, elapsed=3600., complete=True)
     campaign = tmp_path / 'two_series'
     campaign.mkdir()
     child = json.loads((source / 'report.json').read_text())
@@ -104,9 +104,9 @@ def test_campaign_keeps_restart_step_and_five_minute_gap(ns, rig, tmp_path):
         entries.append(dict(number=number, directory=target.name, status='complete',
                             started_elapsed_s=origin, stream_start_elapsed_s=origin,
                             stream_end_elapsed_s=origin+3600., cleanup=child['cleanup']))
-    ns['save_report'](campaign, dict(kind='campaign', protocol=child['protocol'], status='complete',
+    dmmr_notebook_ns['save_report'](campaign, dict(kind='campaign', protocol=child['protocol'], status='complete',
                                     elapsed_s=7500., completed_series=2, series=entries))
-    _, _, report = ns['analyse_campaign'](campaign)
+    _, _, report = dmmr_notebook_ns['analyse_campaign'](campaign)
     csv = pd.read_csv(campaign / 'baseline_windows.csv')
     assert len(report['baseline_windows']) == len(csv) == 32
     assert set(csv.start_min) == {0., 30., 65., 95.}
@@ -118,9 +118,9 @@ def test_campaign_keeps_restart_step_and_five_minute_gap(ns, rig, tmp_path):
 
 
 @pytest.mark.parametrize('value', [0., -1., float('nan'), float('inf'), True])
-def test_invalid_window_never_opens_the_port(ns, rig, value):
-    device, cfg, output, _ = rig
+def test_invalid_window_never_opens_the_port(dmmr_notebook_ns, dmmr_notebook_rig, value):
+    device, cfg, output, _ = dmmr_notebook_rig
     cfg['baseline_window_s'] = value
     with pytest.raises(ValueError, match='baseline_window_s'):
-        ns['run_zero_check'](device, output, cfg)
+        dmmr_notebook_ns['run_zero_check'](device, output, cfg)
     assert not device.calls and not output.exists()

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_esi_driver_behavior import RUNTIME_NAME, _controller, _load_runtime
+from support.esi_driver import RUNTIME_NAME, make_controller, load_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,7 +39,7 @@ class PowerApi:
 
 @pytest.fixture
 def runtime(monkeypatch):
-    _load_runtime()
+    load_runtime()
     common = sys.modules[f"{RUNTIME_NAME}._driver_common"]
     module = sys.modules[f"{RUNTIME_NAME}.esi.esi"]
     api = PowerApi()
@@ -66,7 +66,7 @@ def test_refused_or_failing_request_never_raises(runtime, monkeypatch):
 
 
 def test_without_windows_the_request_is_inert():
-    _load_runtime()
+    load_runtime()
     common = sys.modules[f"{RUNTIME_NAME}._driver_common"]
     if sys.platform != "win32":
         assert common.SystemAwakeRequest("inert").hold(True) is False
@@ -80,7 +80,7 @@ def test_reason_context_has_the_windows_x64_layout(runtime):
 
 
 def test_controller_holds_exactly_while_its_port_is_claimed(runtime):
-    driver = _controller(runtime.module)
+    driver = make_controller(runtime.module)
     driver._set_port_claimed(True)
     assert driver._system_awake.held
     assert runtime.api.calls[0] == ("create", "ESIBD Explorer: ESI test_esi on COM14 is connected")
@@ -91,7 +91,7 @@ def test_controller_holds_exactly_while_its_port_is_claimed(runtime):
 
 
 def test_reserving_a_port_holds_and_a_poisoned_claim_keeps_holding(runtime):
-    driver = _controller(runtime.module)
+    driver = make_controller(runtime.module)
     driver._reserve_open_port(1.)
     assert driver._dll_port_claimed and driver._system_awake.held
     driver._transport_poisoned = True
@@ -100,7 +100,7 @@ def test_reserving_a_port_holds_and_a_poisoned_claim_keeps_holding(runtime):
 
 
 def test_two_instruments_hold_independent_requests(runtime):
-    first, second = _controller(runtime.module), _controller(runtime.module)
+    first, second = make_controller(runtime.module), make_controller(runtime.module)
     second.device_id, second.com, second.port_num = "second", 15, 1
     first._set_port_claimed(True)
     second._set_port_claimed(True)
@@ -112,7 +112,7 @@ def test_two_instruments_hold_independent_requests(runtime):
 
 def test_refusal_is_logged_on_windows_only(runtime, monkeypatch, caplog):
     runtime.api.refuse = True
-    driver = _controller(runtime.module)
+    driver = make_controller(runtime.module)
     with caplog.at_level(logging.WARNING, logger="test_esi_driver"):
         driver._set_port_claimed(True)
         assert "keep-awake" not in caplog.text or sys.platform == "win32"

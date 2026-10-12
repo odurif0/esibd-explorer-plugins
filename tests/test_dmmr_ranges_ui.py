@@ -1,25 +1,17 @@
 """Real Qt selectors, settings widgets, worker delivery and compact layout."""
-import importlib.util
-import os
 from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("scale", ["1", "1.5"])
 def test_ranges_with_real_qt(scale, tmp_path):
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(tmp_path)],
-                            env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-                            capture_output=True, text=True, timeout=45)
-    if result.returncode == 77:
-        pytest.skip("PyQt6 unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, tmp_path, timeout=45, scale=scale)
 
 
 def probe(output):
@@ -32,15 +24,10 @@ def probe(output):
         return 77
     import threading
     import numpy as np
-    from test_dmmr_plugin_behavior import _install_esibd_stubs
-    from test_dmmr_cards import use_real_label_parameters
-    from test_dmmr_ranges import RangeDevice
+    from support.dmmr import RangeDevice, load_plugin, use_real_label_parameters
 
     app = QApplication([])
-    _install_esibd_stubs()
-    spec = importlib.util.spec_from_file_location("dmmr_range_ui", ROOT / "dmmr/dmmr_plugin.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_plugin(module_name="dmmr_range_ui")
     parent = module.DMMRDevice.__new__(module.DMMRDevice)
     parent.loading = False
     parent.onAction = SimpleNamespace(state=False)

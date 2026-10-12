@@ -1,198 +1,87 @@
 """Range/current/time alignment through Explorer's real buffers and HDF exporter."""
-from importlib.metadata import distribution
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
-import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
-from test_plugin_history import _host_code
-
-
-@pytest.fixture
-def rig(tmp_path, monkeypatch):
-    h5py = pytest.importorskip("h5py")
-    host = Path(distribution("esibd-explorer").locate_file("esibd"))
-    clock = SimpleNamespace(now=0.0)
-    ns = dict(np=np, Path=Path, h5py=h5py, cast=lambda kind, value: value,
-              time=SimpleNamespace(time=lambda: clock.now),
-              INOUT=SimpleNamespace(IN=1, OUT=2), INPUTCHANNELS="Input Channels",
-              OUTPUTCHANNELS="Output Channels", UNIT="Unit")
-
-    def extract(file, name, parent=None):
-        exec(_host_code(host / file, name, parent), ns)
-        return ns[name]
-
-    buffer = extract("core.py", "DynamicNp")
-    host_append = extract("core.py", "appendValue", "Channel")
-    host_clear = extract("core.py", "clearHistory", "Channel")
-    append_data = extract("plugins.py", "appendData", "Device")
-    exporter = extract("plugins.py", "appendOutputData", "Device")
-    restore = extract("plugins.py", "restoreOutputData", "Device")
-    estimate = extract("plugins.py", "estimateStorage", "Device")
-    module = _load_module()
-    ns["PRINT"] = module.PRINT
-    monkeypatch.setattr(module.Channel, "appendValue", host_append, raising=False)
-    monkeypatch.setattr(module.Channel, "clearHistory", host_clear, raising=False)
-    if "def clearHistoryInternal" in (host / "core.py").read_text():  # Explorer 1.0.1
-        monkeypatch.setattr(module.Channel, "clearHistoryInternal",
-                            extract("core.py", "clearHistoryInternal", "Channel"), raising=False)
-    monkeypatch.setattr(module.Channel, "getRecordedParameters", lambda self: [], raising=False)
-    monkeypatch.setattr(module.Device, "appendOutputData", exporter, raising=False)
-    monkeypatch.setattr(module.Device, "restoreOutputData", restore, raising=False)
-    monkeypatch.setattr(module.Device, "estimateStorage", estimate, raising=False)
-    monkeypatch.setattr(sys.modules["esibd.core"], "DynamicNp", buffer, raising=False)
-    const = ModuleType("esibd.const")
-    const.INPUTCHANNELS, const.OUTPUTCHANNELS = ns["INPUTCHANNELS"], ns["OUTPUTCHANNELS"]
-    monkeypatch.setitem(sys.modules, "esibd.const", const)
-    device = module.DMMRDevice.__new__(module.DMMRDevice)
-    device.channels = []
-    device.time = buffer(dtype=np.float64, max_size=1000)
-    device.defaultChannel = SimpleNamespace(getRecordedParameters=lambda: [])  # Explorer 1.0.1
-    device.maxDataPoints = 1000
-    device.MAXDATAPOINTS = "Max data points"
-    device.maxStorage = 50
-    device.interval = 1000
-    device.TIME = "Time"
-    device.confh5 = "_DMMR.h5"
-    device.useBackgrounds = False
-    device.pluginManager = SimpleNamespace(Settings=SimpleNamespace(configPath=tmp_path, loading=False),
-                                           Device=module.DMMRDevice, DeviceManager=True)
-    device.pluginManager.Settings.settings = {
-        "DMMR/Max data points": SimpleNamespace(getWidget=lambda: None),
-    }
-    device.getChannels = device.getDataChannels = lambda: device.channels
-    device.getChannelByName = lambda name: next((ch for ch in device.channels if ch.name == name), None)
-    device.liveDisplay = SimpleNamespace(livePlotWidgets=[])
-    device.requireGroup = lambda owner, name: owner.require_group(name)
-    device.plotableChannels = True
-    device.updateValues = lambda: None
-    device.liveDisplayActive = lambda: False
-    device.measureInterval = lambda: None
-    messages = []
-    device.print = lambda msg, **kw: messages.append(msg)
-
-    def add_channel():
-        ch = module.DMMRChannel.__new__(module.DMMRChannel)
-        ch.channelParent = device
-        ch.pluginManager = device.pluginManager
-        ch.module = len(device.channels)
-        ch.name = f"DMMR_M{ch.module:02}"
-        ch.real = ch.enabled = ch.useMonitors = True
-        ch.useBackgrounds = False
-        ch.inout = 1
-        ch.value = 999.0  # Never record the unused reference when Read is muted.
-        ch.monitor = np.nan
-        ch.clearPlotCurve = lambda: None
-        ch.values = buffer(max_size=device.maxDataPoints)
-        device.channels.append(ch)
-        return ch
-
-    def record(count, *, missing=(), gap=False):
-        for _ in range(count):
-            clock.now += 1
-            token = object()
-            for i, ch in enumerate(device.channels):
-                ch.monitor = np.nan if clock.now in missing else (clock.now + i * 1000) * 1e-12
-                ch.measurement_range = int(clock.now + i) % 5
-                ch._measurement_token = token
-            append_data(device, nan=gap)
-
-    def small_limit(limit):
-        device.maxDataPoints = device.time.max_size = limit
-        for ch in device.channels:
-            ch.values.max_size = ch._range_buffer().max_size = limit
-
-    def save(name="DMMR.h5", default=True):
-        file = tmp_path / name
-        with h5py.File(file, "w") as data:
-            device.appendOutputData(data, useDefaultFile=default)
-        return file
-
-    return SimpleNamespace(module=module, device=device, clock=clock, buffer=buffer,
-                           record=record, add=add_channel, small_limit=small_limit,
-                           append=append_data, host_append=host_append, save=save,
-                           h5py=h5py, tmp=tmp_path, messages=messages)
 
 
 @pytest.mark.parametrize("limit", [20, 21, 100])
-def test_alignment_through_thinning_missing_samples_and_late_channels(rig, limit):
-    rig.add()
-    rig.small_limit(limit)
-    rig.record(17)
-    late = rig.add()
+def test_alignment_through_thinning_missing_samples_and_late_channels(dmmr_history_rig, limit):
+    dmmr_history_rig.add()
+    dmmr_history_rig.small_limit(limit)
+    dmmr_history_rig.record(17)
+    late = dmmr_history_rig.add()
     missing = tuple(range(20, 501, 7))
     for step in range(40):
-        rig.record(10, missing=missing)
-        times = rig.device.time.get()
-        for i, ch in enumerate(rig.device.channels):
+        dmmr_history_rig.record(10, missing=missing)
+        times = dmmr_history_rig.device.time.get()
+        for i, ch in enumerate(dmmr_history_rig.device.channels):
             valid = ~np.isin(times, missing)
             if ch is late:
                 valid &= times > 17
             expected = np.where(valid, (times + i * 1000) * 1e-12, np.nan)
             np.testing.assert_allclose(ch.values.get(), expected, rtol=1e-6)
             np.testing.assert_array_equal(ch.range_history.get(), np.where(valid, (times + i) % 5, np.nan))
-            assert ch.range_history.size == ch.values.size == rig.device.time.size <= limit
+            assert ch.range_history.size == ch.values.size == dmmr_history_rig.device.time.size <= limit
 
 
-def test_recording_timer_does_not_repeat_a_poll_or_replace_muted_current_with_reference(rig):
-    ch = rig.add()
-    rig.record(1)
+def test_recording_timer_does_not_repeat_a_poll_or_replace_muted_current_with_reference(dmmr_history_rig):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.record(1)
     # The host appends the same monitor on a second timer tick (no new polling).
     previous = ch.values
-    ch.values = rig.buffer()
-    rig.host_append(ch, lenT=0)
-    rig.host_append(ch, lenT=1)
+    ch.values = dmmr_history_rig.buffer()
+    dmmr_history_rig.host_append(ch, lenT=0)
+    dmmr_history_rig.host_append(ch, lenT=1)
     np.testing.assert_array_equal(ch.values.get(), np.array([ch.monitor, ch.monitor], dtype=np.float32))
     ch.values = previous
-    rig.clock.now += 1
-    rig.append(rig.device)
+    dmmr_history_rig.clock.now += 1
+    dmmr_history_rig.append(dmmr_history_rig.device)
     assert np.isnan(ch.values.get()[-1]) and np.isnan(ch.range_history.get()[-1])
     assert ch.monitor == 1e-12, "Do not erase the live monitor just because the recorder ran first"
     # Identical numeric values from a new polling cycle remain valid.
     ch._measurement_token = object()
-    rig.clock.now += 1
-    rig.append(rig.device)
+    dmmr_history_rig.clock.now += 1
+    dmmr_history_rig.append(dmmr_history_rig.device)
     assert ch.values.get()[-1] == pytest.approx(1e-12)
     assert ch.range_history.get()[-1] == 1
     ch.enabled = False
-    rig.record(1)
+    dmmr_history_rig.record(1)
     assert np.isnan(ch.values.get()[-1]) and np.isnan(ch.range_history.get()[-1])
-    assert ch.values.size == ch.range_history.size == rig.device.time.size
+    assert ch.values.size == ch.range_history.size == dmmr_history_rig.device.time.size
 
 
-def test_no_recorded_current_before_the_controller_publishes_a_sample(rig):
-    ch = rig.add()
+def test_no_recorded_current_before_the_controller_publishes_a_sample(dmmr_history_rig):
+    ch = dmmr_history_rig.add()
     ch.monitor = 0.0  # A freshly constructed widget is not a hardware reading.
-    rig.clock.now = 1
-    rig.append(rig.device)
+    dmmr_history_rig.clock.now = 1
+    dmmr_history_rig.append(dmmr_history_rig.device)
     assert np.isnan(ch.values.get()[0])
     assert np.isnan(ch.range_history.get()[0])
 
 
-def test_pause_and_clear_history_keep_ranges_aligned(rig):
-    ch = rig.add()
-    rig.record(8)
-    rig.record(1, gap=True)
-    rig.record(2)
+def test_pause_and_clear_history_keep_ranges_aligned(dmmr_history_rig):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.record(8)
+    dmmr_history_rig.record(1, gap=True)
+    dmmr_history_rig.record(2)
     assert np.isnan(ch.values.get()[8]) and np.isnan(ch.range_history.get()[8])
     ch.clearHistory()
-    rig.device.time = rig.buffer(dtype=np.float64, max_size=rig.device.maxDataPoints)
+    dmmr_history_rig.device.time = dmmr_history_rig.buffer(dtype=np.float64, max_size=dmmr_history_rig.device.maxDataPoints)
     assert ch.values.size == ch.range_history.size == 0
-    rig.record(3)
-    np.testing.assert_array_equal(ch.range_history.get(), rig.device.time.get() % 5)
+    dmmr_history_rig.record(3)
+    np.testing.assert_array_equal(ch.range_history.get(), dmmr_history_rig.device.time.get() % 5)
 
 
 @pytest.mark.parametrize("window", [None, (11., 34.), (1., 20.)])
-def test_hdf_pairs_have_the_exact_same_export_window_as_currents(rig, window):
-    ch = rig.add()
-    rig.record(50, missing=(15, 22))
+def test_hdf_pairs_have_the_exact_same_export_window_as_currents(dmmr_history_rig, window):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.record(50, missing=(15, 22))
     if window:
-        rig.device.liveDisplay.livePlotWidgets = [SimpleNamespace(getAxis=lambda _: SimpleNamespace(range=window))]
-    file = rig.save(default=window is None)
-    with rig.h5py.File(file) as data:
+        dmmr_history_rig.device.liveDisplay.livePlotWidgets = [SimpleNamespace(getAxis=lambda _: SimpleNamespace(range=window))]
+    file = dmmr_history_rig.save(default=window is None)
+    with dmmr_history_rig.h5py.File(file) as data:
         values = data["DMMR/Output Channels/DMMR_M00"]
         ranges = data[values.attrs["Measurement range dataset"]]
         times = data["DMMR/Input Channels/Time"][:]
@@ -205,92 +94,92 @@ def test_hdf_pairs_have_the_exact_same_export_window_as_currents(rig, window):
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_restore_preserves_known_ranges_and_leaves_legacy_ranges_unknown(rig, legacy):
-    ch = rig.add()
-    rig.record(15)
-    file = rig.save()
+def test_restore_preserves_known_ranges_and_leaves_legacy_ranges_unknown(dmmr_history_rig, legacy):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.record(15)
+    file = dmmr_history_rig.save()
     expected_values = ch.values.get().copy()
     expected_ranges = ch.range_history.get().copy()
     if legacy:
-        with rig.h5py.File(file, "a") as data:
+        with dmmr_history_rig.h5py.File(file, "a") as data:
             del data["DMMR/Measurement ranges"]
     ch.clearHistory()
-    rig.device.restoreOutputData()
+    dmmr_history_rig.device.restoreOutputData()
     np.testing.assert_array_equal(ch.values.get(), expected_values)
     np.testing.assert_array_equal(ch.range_history.get(), np.full(15, np.nan) if legacy else expected_ranges)
-    rig.record(2)
-    assert ch.values.size == ch.range_history.size == rig.device.time.size == 17
+    dmmr_history_rig.record(2)
+    assert ch.values.size == ch.range_history.size == dmmr_history_rig.device.time.size == 17
 
 
 @pytest.mark.parametrize("corruption", ["length", "invalid"])
-def test_invalid_range_history_is_not_attached_to_restored_current(rig, corruption):
-    ch = rig.add()
-    rig.record(10)
-    file = rig.save()
-    with rig.h5py.File(file, "a") as data:
+def test_invalid_range_history_is_not_attached_to_restored_current(dmmr_history_rig, corruption):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.record(10)
+    file = dmmr_history_rig.save()
+    with dmmr_history_rig.h5py.File(file, "a") as data:
         path = "DMMR/Measurement ranges/DMMR_M00"
         if corruption == "length":
             del data[path]
             data.create_dataset(path, data=np.arange(3.))
         else:
             data[path][0] = 5
-    rig.device.restoreOutputData()
+    dmmr_history_rig.device.restoreOutputData()
     assert ch.values.size == ch.range_history.size == 10
     assert np.isnan(ch.range_history.get()).all()
-    assert any("Ignoring invalid range history" in message for message in rig.messages)
+    assert any("Ignoring invalid range history" in message for message in dmmr_history_rig.messages)
 
 
-def test_duplicate_export_does_not_relabel_existing_measurements(rig):
-    ch = rig.add()
-    rig.record(10)
-    file = rig.save()
+def test_duplicate_export_does_not_relabel_existing_measurements(dmmr_history_rig):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.record(10)
+    file = dmmr_history_rig.save()
     original = ch.range_history.get().copy()
-    rig.record(10)
-    with rig.h5py.File(file, "a") as data:
-        rig.device.appendOutputData(data, useDefaultFile=True)
+    dmmr_history_rig.record(10)
+    with dmmr_history_rig.h5py.File(file, "a") as data:
+        dmmr_history_rig.device.appendOutputData(data, useDefaultFile=True)
         np.testing.assert_array_equal(data["DMMR/Measurement ranges/DMMR_M00"][:], original)
         assert data["DMMR/Output Channels/DMMR_M00"].shape == (10,)
 
 
 @pytest.mark.parametrize("count", [1, 8])
 @pytest.mark.parametrize("backgrounds", [False, True])
-def test_storage_estimate_budgets_the_range_series_and_synchronizes_all_buffers(rig, count, backgrounds):
-    rig.device.useBackgrounds = backgrounds
+def test_storage_estimate_budgets_the_range_series_and_synchronizes_all_buffers(dmmr_history_rig, count, backgrounds):
+    dmmr_history_rig.device.useBackgrounds = backgrounds
     for _ in range(count):
-        ch = rig.add()
+        ch = dmmr_history_rig.add()
         ch._range_buffer()
-    rig.device.estimateStorage()
+    dmmr_history_rig.device.estimateStorage()
     # Payload: one float64 timestamp, plus current/range and optional BG float32.
     bytes_per_point = 8 + count * (12 if backgrounds else 8)
-    payload = rig.device.maxDataPoints * bytes_per_point
+    payload = dmmr_history_rig.device.maxDataPoints * bytes_per_point
     assert 0 < 50 * 1024**2 - payload <= 2 * bytes_per_point
-    for ch in rig.device.channels:
-        assert ch.values.max_size == ch.range_history.max_size == rig.device.time.max_size == rig.device.maxDataPoints
+    for ch in dmmr_history_rig.device.channels:
+        assert ch.values.max_size == ch.range_history.max_size == dmmr_history_rig.device.time.max_size == dmmr_history_rig.device.maxDataPoints
 
 
-def test_storage_changes_do_not_rethin_or_reset_current_range_pairs(rig):
-    ch = rig.add()
-    rig.small_limit(100)
-    rig.record(60)
+def test_storage_changes_do_not_rethin_or_reset_current_range_pairs(dmmr_history_rig):
+    ch = dmmr_history_rig.add()
+    dmmr_history_rig.small_limit(100)
+    dmmr_history_rig.record(60)
     old = ch.range_history.get().copy()
     identity = ch.range_history
-    rig.device.maxStorage = 10
-    rig.device.estimateStorage()
+    dmmr_history_rig.device.maxStorage = 10
+    dmmr_history_rig.device.estimateStorage()
     assert ch.range_history is identity
     np.testing.assert_array_equal(ch.range_history.get(), old)
-    assert ch.values.max_size == ch.range_history.max_size == rig.device.time.max_size == 100
-    rig.record(20)
-    assert ch.values.size == ch.range_history.size == rig.device.time.size == 80
-    np.testing.assert_array_equal(ch.range_history.get(), rig.device.time.get() % 5)
+    assert ch.values.max_size == ch.range_history.max_size == dmmr_history_rig.device.time.max_size == 100
+    dmmr_history_rig.record(20)
+    assert ch.values.size == ch.range_history.size == dmmr_history_rig.device.time.size == 80
+    np.testing.assert_array_equal(ch.range_history.get(), dmmr_history_rig.device.time.get() % 5)
 
 
 @pytest.mark.parametrize("remap", [False, True])
-def test_channel_rebuild_preserves_ranges_only_for_the_same_channel_and_module(rig, remap):
-    old = rig.add()
-    rig.record(20)
+def test_channel_rebuild_preserves_ranges_only_for_the_same_channel_and_module(dmmr_history_rig, remap):
+    old = dmmr_history_rig.add()
+    dmmr_history_rig.record(20)
     values = old.values.get().copy()
     history = old.range_history
-    device = rig.device
+    device = dmmr_history_rig.device
     device.tree = None
     device.inout = 1
     device.pluginManager.DeviceManager = SimpleNamespace(globalUpdate=lambda **kw: None)
@@ -301,11 +190,11 @@ def test_channel_rebuild_preserves_ranges_only_for_the_same_channel_and_module(r
     def rebuild(items, file, append=False):
         # Explorer rebuilds Channel objects but retains histories by name.
         device.channels = []
-        ch = rig.add()
-        ch.values = rig.buffer(initialData=values, max_size=1000)
+        ch = dmmr_history_rig.add()
+        ch.values = dmmr_history_rig.buffer(initialData=values, max_size=1000)
         ch.module = 3 if remap else 0
     device.updateChannelConfig = rebuild
-    device._apply_channel_items([], file=rig.tmp / "channels.ini")
+    device._apply_channel_items([], file=dmmr_history_rig.tmp / "channels.ini")
     new = device.channels[0]
     assert new is not old
     if remap:

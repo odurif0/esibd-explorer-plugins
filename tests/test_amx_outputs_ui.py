@@ -1,26 +1,17 @@
 """Real Qt output view: live routing, Advanced, stale data and dock resizing."""
-import os
 from pathlib import Path
-import subprocess
 import sys
 from threading import Thread
 from types import SimpleNamespace
 
 import pytest
+from support.qt import run_probe
 
 
 @pytest.mark.parametrize("folder", ("amx_a", "amx_b", "amx_hd"))
 @pytest.mark.parametrize("scale", ("1", "1.5"))
 def test_output_view_in_real_qt(folder, scale, tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), folder, str(tmp_path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_SCALE_FACTOR": scale},
-        text=True, capture_output=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("Real Qt unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr, result.stderr
+    run_probe(__file__, folder, tmp_path, timeout=30, scale=scale)
 
 
 def probe(folder, output):
@@ -32,9 +23,9 @@ def probe(folder, output):
             QLabel, QMainWindow, QPushButton, QScrollArea, QTreeWidget, QVBoxLayout, QWidget)
     except ImportError:
         return 77
-    from test_amx_config_load import make_case
-    from test_amx_outputs import config79_snapshot
-    from test_amx_hd_outputs import config273
+    from support.amx import make_case
+    from support.amx import config79_snapshot
+    from support.amx import config273
     hd = folder == "amx_hd"
     # Both references drive all four outputs from one timer: 500 kHz (AMX 4ED
     # Config 80) or 10 kHz (CGC 4EDH Configuration273 "10kHz->SwitchSym").
@@ -128,8 +119,8 @@ def probe(folder, output):
 
     # Real PSU controller publication -> public plugin API -> actual AMX widgets.
     # Only the device transport is simulated. Refresh must not need AMX polling.
-    from test_psu_channels import make_psu, snapshot
-    from test_amx_psu_links import register_sources
+    from support.psu import make_psu, snapshot
+    from support.amx import register_sources
     psu_module, psu, psu_controller = make_psu("psu_a")
     other_module, other, other_controller = make_psu("psu_e")
     clock = SimpleNamespace(now=100.)
@@ -138,7 +129,7 @@ def probe(folder, output):
     psu_controller._apply_snapshot(snapshot(123.4, 120.5), refreshed_at=clock.now)
     other_controller._apply_snapshot(snapshot(50., 45.), refreshed_at=clock.now)
     register_sources(parent, parent, psu, other)
-    from test_amx_psu_links import install_real_settings
+    from support.amx import install_real_settings
     settings_window = QWidget()
     settings_window.setWindowTitle("AMX PSU settings")
     settings = install_real_settings(module, parent, QVBoxLayout(settings_window))

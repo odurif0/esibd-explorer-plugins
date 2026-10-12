@@ -1,19 +1,16 @@
 """Output-sequence regressions: use events, not timing-dependent races."""
 
 import logging
-import runpy
 import sys
 import threading
 import types
 from pathlib import Path
 
 import pytest
+from support.esi import load_plugin
+from support.esi_driver import RUNTIME_NAME, make_controller, load_runtime
 
 TESTS = Path(__file__).parent
-
-
-def load_plugin():
-    return runpy.run_path(str(TESTS / "test_esi_plugin_behavior.py"))["_load_plugin"]()
 
 
 @pytest.mark.parametrize("command", ["ramp", "hv", "heat"])
@@ -143,10 +140,9 @@ def test_off_cancels_inflight_output_command(monkeypatch, command, shutdown):
 
 
 def test_poisoned_esi_disconnect_and_plugin_shutdown_remain_unconfirmed():
-    helpers = runpy.run_path(str(TESTS / "test_esi_driver_behavior.py"))
-    helpers["_load_runtime"]()
-    driver_module = sys.modules[helpers["RUNTIME_NAME"] + ".esi.esi"]
-    device = helpers["_controller"](driver_module)
+    load_runtime()
+    driver_module = sys.modules[RUNTIME_NAME + ".esi.esi"]
+    device = make_controller(driver_module)
     device.logger = logging.getLogger("esi_shutdown_regression")
     device.connected = True
     device._poison_transport("blocked read")

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import ast
 import logging
-import os
-import subprocess
 import sys
 import threading
 import time
@@ -21,6 +19,7 @@ from typing import Any
 import pytest
 
 from conftest import PLUGIN_SPECS
+from support.qt import run_probe
 
 ROOT = Path(__file__).resolve().parents[1]
 # Device dispatchers only; MScan's separate Qt bridge is covered in test_mscan_ui.
@@ -29,14 +28,7 @@ ENTRYPOINTS = [ROOT / spec.folder / spec.entrypoint for spec in PLUGIN_SPECS if 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda p: p.parent.name)
 def test_real_qt_dispatch_and_widget_backed_settings(entrypoint):
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--probe", str(entrypoint)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 77:
-        pytest.skip("PyQt6 is not installed; real Qt event-loop checks unavailable")
-    assert result.returncode == 0, result.stdout + result.stderr
+    run_probe(__file__, '--probe', entrypoint, timeout=30, allow_traceback=True)
 
 
 def probe(path):

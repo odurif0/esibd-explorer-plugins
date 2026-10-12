@@ -14,7 +14,7 @@ import zipfile
 import pytest
 
 from conftest import PLUGIN_SPECS
-from test_release_archive_integrity import assert_archive_native_assets, validate_member_names
+from support.release import assert_archive_native_assets, validate_member_names
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -139,6 +139,8 @@ def test_missing_native_assets_fail_before_archive_creation(tmp_path, release_to
 
 @pytest.mark.parametrize("member", ("mscan/native/esibd-mscan-worker.exe", "mscan/native/source.zip",
                                     "mscan/native/THIRD_PARTY_NOTICES.txt"))
+
+
 def test_tampered_native_assets_fail_before_archive_creation(tmp_path, release_tool, member):
     path = release_tool.ROOT / member
     path.write_bytes(path.read_bytes() + b"corrupt")
@@ -149,6 +151,8 @@ def test_tampered_native_assets_fail_before_archive_creation(tmp_path, release_t
 
 @pytest.mark.parametrize("member,mode", [("mscan/native/esibd-mscan-worker", 0o644),
                                        ("mscan/native/esibd-mscan-worker.exe", 0o755)])
+
+
 def test_worker_executable_modes_are_enforced_from_git_index(tmp_path, release_tool, member, mode):
     (release_tool.ROOT / member).chmod(mode)
     _git(release_tool.ROOT, "add", "--", member)

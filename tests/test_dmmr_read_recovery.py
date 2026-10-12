@@ -1,15 +1,14 @@
 """Real runtime diagnostics and common bounded receive-error recovery."""
 from __future__ import annotations
 
-import ctypes
 import json
 import threading
 from types import SimpleNamespace
 
 import pytest
 
-from test_dmmr_plugin_behavior import _load_module
-from test_dmmr_startup_diagnostics import NativeFunction, native  # noqa: F401
+from support.dmmr import load_plugin
+from support.dmmr import NativeFunction
 
 
 class Device:
@@ -77,7 +76,7 @@ class Device:
 def rig():
     device = Device()
     clock = SimpleNamespace(now=0.)
-    recovery = _load_module()._get_dmmr_driver_class().ReadRecovery(
+    recovery = load_plugin()._get_dmmr_driver_class().ReadRecovery(
         device, dict(device.ranges), automatic=False, timeout_s=.5, clock=lambda: clock.now)
     return device, recovery, clock
 
@@ -267,14 +266,14 @@ def configure_faulty_native(native, *, blocked=None):
     return driver
 
 
-def test_real_runtime_captures_clear_on_read_diagnostics_under_original_lock(native):
-    driver = configure_faulty_native(native)
+def test_real_runtime_captures_clear_on_read_diagnostics_under_original_lock(dmmr_native):
+    driver = configure_faulty_native(dmmr_native)
     assert driver.get_module_current(3, timeout_s=.5)[0] == -12
-    assert [x[0] for x in native.calls] == ['current', 'io', 'comm']
-    assert len({x[1] for x in native.calls}) == 1
-    assert native.calls[0][1] != threading.get_ident()
+    assert [x[0] for x in dmmr_native.calls] == ['current', 'io', 'comm']
+    assert len({x[1] for x in dmmr_native.calls}) == 1
+    assert dmmr_native.calls[0][1] != threading.get_ident()
     report = driver.protocol_diagnostics()
-    rows = [json.loads(line) for line in native.directory.joinpath('dmmr_protocol_com13.jsonl').read_text().splitlines()]
+    rows = [json.loads(line) for line in dmmr_native.directory.joinpath('dmmr_protocol_com13.jsonl').read_text().splitlines()]
     assert rows == report['events']
     assert rows[0]['status'] == -12
     assert rows[0]['get_io_state'] == [0, -12]
@@ -282,9 +281,9 @@ def test_real_runtime_captures_clear_on_read_diagnostics_under_original_lock(nat
     assert 'module_current' in rows[0]['action']
 
 
-def test_late_dll_return_never_starts_a_diagnostic_or_recovery_call(native):
+def test_late_dll_return_never_starts_a_diagnostic_or_recovery_call(dmmr_native):
     release = threading.Event()
-    driver = configure_faulty_native(native, blocked=release)
+    driver = configure_faulty_native(dmmr_native, blocked=release)
     finished = threading.Event()
     original = driver._protocol_call_unlocked
     def observed(*args, **kwargs):
@@ -304,11 +303,11 @@ def test_late_dll_return_never_starts_a_diagnostic_or_recovery_call(native):
         release.set()
         assert finished.wait(2)
     assert driver.thread_lock.locked()  # Poisoning deliberately retains the lock.
-    assert [x[0] for x in native.calls] == ['current']
+    assert [x[0] for x in dmmr_native.calls] == ['current']
 
 
-def test_unavailable_port_diagnostics_do_not_replace_original_error(native):
-    driver = configure_faulty_native(native)
+def test_unavailable_port_diagnostics_do_not_replace_original_error(dmmr_native):
+    driver = configure_faulty_native(dmmr_native)
     del driver.dll.COM_DMMR_8_GetCommError
     assert driver.get_module_current(0, timeout_s=.5)[0] == -12
     event = driver.protocol_diagnostics()['events'][0]
@@ -317,10 +316,10 @@ def test_unavailable_port_diagnostics_do_not_replace_original_error(native):
 
 
 @pytest.mark.parametrize('failure', ['open', 'write'])
-def test_unavailable_protocol_log_keeps_diagnostics_without_poisoning_transport(native, monkeypatch, failure):
-    driver = configure_faulty_native(native)
+def test_unavailable_protocol_log_keeps_diagnostics_without_poisoning_transport(dmmr_native, monkeypatch, failure):
+    driver = configure_faulty_native(dmmr_native)
     if failure == 'open':
-        target = native.directory / 'not_a_directory'
+        target = dmmr_native.directory / 'not_a_directory'
         target.write_text('occupied')
         driver.configure_protocol_log(target)
     else:
@@ -340,26 +339,26 @@ def test_unavailable_protocol_log_keeps_diagnostics_without_poisoning_transport(
     assert not driver._transport_poisoned
 
 
-def test_protocol_event_memory_and_log_files_are_bounded(native):
-    driver = native.driver
+def test_protocol_event_memory_and_log_files_are_bounded(dmmr_native):
+    driver = dmmr_native.driver
     driver.configure_protocol_log()
     driver._protocol_handler.maxBytes = 1000
     for _ in range(180):
         driver.record_protocol_event({'kind': 'test', 'message': 'x' * 100})
     report = driver.protocol_diagnostics()
     assert report['event_count'] == 180 and len(report['events']) == 128
-    files = list(native.directory.glob('dmmr_protocol_com13.jsonl*'))
+    files = list(dmmr_native.directory.glob('dmmr_protocol_com13.jsonl*'))
     assert len(files) == 4 and all(path.stat().st_size < 1300 for path in files)
 
 
-def test_each_series_has_separate_protocol_events_without_overwriting_old_log(native):
-    driver = configure_faulty_native(native)
-    driver.configure_protocol_log(native.directory / 'first')
+def test_each_series_has_separate_protocol_events_without_overwriting_old_log(dmmr_native):
+    driver = configure_faulty_native(dmmr_native)
+    driver.configure_protocol_log(dmmr_native.directory / 'first')
     driver.get_module_current(0, timeout_s=.5)
     previous = driver.protocol_diagnostics()
     from pathlib import Path
     original = Path(previous['file']).read_bytes()
-    driver.configure_protocol_log(native.directory / 'second')
+    driver.configure_protocol_log(dmmr_native.directory / 'second')
     assert driver.protocol_diagnostics()['event_count'] == 0
     driver.get_module_current(0, timeout_s=.5)
     assert driver.protocol_diagnostics()['event_count'] == 1
@@ -382,11 +381,11 @@ def test_slow_nonempty_fifo_is_bounded_by_time_not_1024_timeouts(rig):
     assert recovery.failed
 
 
-def test_blocking_io_diagnostic_does_not_start_comm_diagnostic_after_timeout(native):
-    driver = configure_faulty_native(native)
+def test_blocking_io_diagnostic_does_not_start_comm_diagnostic_after_timeout(dmmr_native):
+    driver = configure_faulty_native(dmmr_native)
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     def io(value):
-        native.calls.append(('io', threading.get_ident()))
+        dmmr_native.calls.append(('io', threading.get_ident()))
         entered.set()
         release.wait(2)
         value._obj.value = -12
@@ -407,5 +406,5 @@ def test_blocking_io_diagnostic_does_not_start_comm_diagnostic_after_timeout(nat
     finally:
         release.set()
         assert finished.wait(2)
-    assert [c[0] for c in native.calls] == ['current', 'io']
+    assert [c[0] for c in dmmr_native.calls] == ['current', 'io']
     assert driver.protocol_diagnostics()['events'][-1]['transport_poisoned'] is True

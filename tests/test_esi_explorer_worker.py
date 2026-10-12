@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_esi_plugin_behavior import _load_plugin
-from test_esi_process_recovery import FAKE_CONTROLLER, WORKER
+from support.esi import load_plugin as _load_plugin
+from support.esi_process import FAKE_CONTROLLER, WORKER
 
 
 def load_worker():
@@ -157,6 +157,8 @@ def test_real_explorer_launcher_keeps_other_device_alive_and_allows_restart(expl
 @pytest.mark.slow
 @pytest.mark.skipif(not sys.platform.startswith("win") and not os.environ.get("ESIBD_ESI_TEST_WINE"),
                     reason="requires Windows or explicit ESIBD_ESI_TEST_WINE=1")
+
+
 @pytest.mark.parametrize("operation", ["roundtrip", "crash", "block", "vendor_bootstrap"])
 def test_shared_official_python_worker_without_hardware(explorer_runtime, tmp_path, monkeypatch, operation):
     module = load_worker()
@@ -209,6 +211,8 @@ def test_shared_official_python_worker_without_hardware(explorer_runtime, tmp_pa
 @pytest.mark.slow
 @pytest.mark.skipif(sys.platform.startswith("win") or not os.environ.get("ESIBD_ESI_TEST_WINE"),
                     reason="explicit Wine probe of the real Win32 host launcher")
+
+
 def test_windows_launcher_resets_and_restores_real_dll_directory_under_wine(explorer_runtime, tmp_path):
     wine = shutil.which("wine")
     if not wine:
@@ -225,6 +229,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -240,6 +245,7 @@ sys._MEIPASS = str(directory / "_internal")
 kernel = runtime._windows_kernel()
 assert kernel.SetDllDirectoryW(sys._MEIPASS)
 
+
 def current_dll_directory():
     import ctypes
     buffer = ctypes.create_unicode_buffer(32768)
@@ -248,6 +254,8 @@ def current_dll_directory():
 
 assert current_dll_directory() == sys._MEIPASS
 created = []
+
+
 def create():
     proxy = worker.ESIProcessProxy({}, controller_file=sys.argv[4],
                                   worker_launcher=runtime.launch_worker_process)
