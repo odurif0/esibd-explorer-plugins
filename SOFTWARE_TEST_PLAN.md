@@ -70,6 +70,9 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   three consecutive failures must still stop acquisition.
 - **AMPR:** at a safe low voltage and slow ramp, press OFF, then click ON/OFF again
   during the descent: outputs must go to 0 V at once and the PSU be disabled.
+- **PSU worker (fixed 2026-10-12):** connect each PSU with outputs OFF and leave it
+  polling for several minutes: no "native worker released" message and no exit
+  `3221226356` (`0xC0000374`) in `<Data path>/logs/psu_x/native/psu/`.
 - **PSU:** check the `Ramp step (V)` / `Ramp step interval (s)` defaults against
   the measured output slew before relying on them. Last values: with outputs OFF and
   `Operating config` `-1`, set Vset/Ilim, disconnect, power-cycle the PSU and

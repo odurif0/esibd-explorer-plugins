@@ -119,8 +119,8 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let mut a2 = pointer::<i32>(&args[2], 3, true)?;
             let mut a3 = pointer::<u16>(&args[3], 3, false)?;
             let mut a4 = pointer::<u16>(&args[4], 3, false)?;
-            let mut a5 = pointer::<u16>(&args[5], 3, false)?;
-            let function = unsafe { lib.get::<unsafe extern "system" fn(u16, *mut i32, *mut i32, *mut u16, *mut u16, *mut u16) -> i32>(b"COM_HVPSU2D_GetFanData\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
+            let mut a5 = pointer::<f64>(&args[5], 3, false)?;
+            let function = unsafe { lib.get::<unsafe extern "system" fn(u16, *mut i32, *mut i32, *mut u16, *mut u16, *mut f64) -> i32>(b"COM_HVPSU2D_GetFanData\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function(a0, a1.as_mut_ptr(), a2.as_mut_ptr(), a3.as_mut_ptr(), a4.as_mut_ptr(), a5.as_mut_ptr()) };
             Ok(NativeReply { status: i64::from(status), values: vec![pointer_output(&a1, &args[1], true), pointer_output(&a2, &args[2], true), pointer_output(&a3, &args[3], false), pointer_output(&a4, &args[4], false), pointer_output(&a5, &args[5], false)] })
         }

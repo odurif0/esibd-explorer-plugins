@@ -906,14 +906,10 @@ impl Controller {
         let h = self.doubles("GetHousekeeping", &[], 4, io)?;
         let sensors = self.read("GetSensorData", &[json!(vec![0.0; SENSOR_COUNT])], 1, io)?;
         let sensors = normalize_array(&sensors[0], SENSOR_COUNT, float(f64::NAN), telemetry)?;
-        let fans = self.read(
-            "GetFanData",
-            &(0..5)
-                .map(|_| json!(vec![0; FAN_COUNT]))
-                .collect::<Vec<_>>(),
-            5,
-            io,
-        )?;
+        // The DLL writes PWM as doubles (duty 0-1), not the header's WORD array.
+        let mut fan_args: Vec<Value> = (0..4).map(|_| json!(vec![0; FAN_COUNT])).collect();
+        fan_args.push(json!(vec![0.0; FAN_COUNT]));
+        let fans = self.read("GetFanData", &fan_args, 5, io)?;
         let fan_enabled = normalize_array(&fans[0], FAN_COUNT, json!(false), |v| {
             Ok(json!(win_bool(v)?))
         })?;
@@ -926,9 +922,7 @@ impl Controller {
         let fan_measured = normalize_array(&fans[3], FAN_COUNT, json!(0), |v| {
             Ok(json!(word(v, u16::MAX as u64)?))
         })?;
-        let fan_pwm = normalize_array(&fans[4], FAN_COUNT, json!(0), |v| {
-            Ok(json!(word(v, u16::MAX as u64)?))
-        })?;
+        let fan_pwm = normalize_array(&fans[4], FAN_COUNT, float(f64::NAN), telemetry)?;
         let led = self.read("GetLEDData", &[json!(0), json!(0), json!(0)], 3, io)?;
         let cpu = self.doubles("GetCPUData", &[], 2, io)?;
         let uptime = self.read("GetUptime", &[json!(0), json!(0), json!(0)], 3, io)?;

@@ -1121,11 +1121,11 @@ class _PSUController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, PSUBase):
             )
         ]
         fan_pwm = [
-            int(value)
+            float(value)
             for value in self._normalize_fixed_length_values(
                 fan_pwm,
                 expected_len=self.FAN_NUM,
-                fill_value=0,
+                fill_value=float("nan"),
                 label="fan PWM values",
             )
         ]

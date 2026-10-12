@@ -7383,7 +7383,7 @@
     "header_sha256": "4e46e5da2a089ead79ca0ba4eddd6ebf3b10a12ee37454c976fa0b815d0934c6"
   },
   "psu": {
-    "base_sha256": "c440330516f41f7598d59a2dc0b5b446a66d42d6019c75e6c22cee7743ba4fcb",
+    "base_sha256": "9bda3c59b340b4b570155f847715a194dd6cdf98dc99e5f890b9f30e5bde00e4",
     "exports": {
       "COM_HVPSU2D_Close": {
         "args": [
@@ -7685,10 +7685,11 @@
             "length": 3,
             "name": "PWM",
             "pointer": true,
-            "type": "WORD"
+            "type": "double"
           }
         ],
-        "result": "int"
+        "result": "int",
+        "verified_dll_sha256": "2c951f461702fa2898ae69d5e229a5f5dab41a9e30acdcaba43b4e0f49bd9e75"
       },
       "COM_HVPSU2D_GetHWType": {
         "args": [
