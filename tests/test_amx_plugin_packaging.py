@@ -689,9 +689,10 @@ def test_status_widgets_summarize_global_amx_state():
     assert device.statusBadgeLabel.text == "Disconnected"
     assert (
         device.statusSummaryLabel.text
-        == "Device: OFF | Faults: OK | Loaded: n/a"
+        == "Device: OFF | Faults: OK"
     )
     tooltip = device.statusBadgeLabel.tooltips[-1]
+    assert "Loaded: n/a" in tooltip
     assert "State: Disconnected" in tooltip
     assert "Device enabled: OFF" in tooltip
     assert "Faults: OK" in tooltip
@@ -749,9 +750,10 @@ def test_status_widgets_relabel_fpga_disabled_off_state_as_standby():
     assert device.statusBadgeLabel.text == "Standby"
     assert (
         device.statusSummaryLabel.text
-        == "Device: OFF | Faults: Standby / FPGA off | Loaded: 0:Standby [memory]"
+        == "Device: OFF | Faults: Standby / FPGA off"
     )
     tooltip = device.statusBadgeLabel.tooltips[-1]
+    assert "Loaded: 0:Standby [memory]" in tooltip
     assert "State: Standby" in tooltip
     assert "Hardware state: STATE_ERR_FPGA_DIS" in tooltip
     assert "Device enabled: OFF" in tooltip
@@ -994,6 +996,7 @@ def test_config_controls_show_available_slots_loaded_status_and_load_now_action(
             self.text = text
             self.enabled = None
             self.tooltips = []
+            self.style = None
             self.clicked = FakeSignal()
 
         def setMinimumWidth(self, _width):
@@ -1004,6 +1007,9 @@ def test_config_controls_show_available_slots_loaded_status_and_load_now_action(
 
         def setToolTip(self, tooltip):
             self.tooltips.append(tooltip)
+
+        def setStyleSheet(self, style):
+            self.style = style
 
         def click(self):
             self.clicked.emit()
@@ -1074,22 +1080,33 @@ def test_config_controls_show_available_slots_loaded_status_and_load_now_action(
 
     module.AMXDevice._ensure_config_controls(device)
 
-    assert len(device.titleBar.inserted) == 7
+    # The loaded config is shown once, in the panel and in the selector tooltip.
+    assert len(device.titleBar.inserted) == 5
+    assert not hasattr(device, "loadedConfigValueLabel")
     assert device.operatingConfigLabel.text == "Signal:"
-    assert device.loadedConfigValueLabel.text == "9:Static:Out0-3=Hi-Z [memory]"
     assert device.operatingConfigCombo.items == [
-        ("Skip (-1)", -1),
+        ("None: connect only (-1)", -1),
         ("0:Standby", 0),
         ("9:Static:Out0-3=Hi-Z", 9),
     ]
     assert device.operatingConfigCombo.currentIndex() == 2
     assert "Available AMX configs:" in device.operatingConfigCombo.tooltips[-1]
     assert "frequency and pulse widths" in device.operatingConfigCombo.tooltips[-1]
-    assert "Loaded: 9:Static:Out0-3=Hi-Z [memory]" in device.loadedConfigValueLabel.tooltips[-1]
+    assert "Loaded: 9:Static:Out0-3=Hi-Z [memory]" in device.operatingConfigCombo.tooltips[-1]
     assert device.frequencyLabel.text == "Osc:"
     assert device.frequencyWidget.value == 2.0
     assert device.loadOperatingConfigButton.enabled is True
+    assert not device.loadOperatingConfigButton.style
     assert not hasattr(device, "standbyConfigCombo")
+
+    # A selection that differs from the config in controller memory flags Load now.
+    device.controller._loaded_config_index = 0
+    module.AMXDevice._update_config_controls(device)
+    assert device.loadOperatingConfigButton.style == module._AMX_LOAD_PENDING_STYLE
+    assert "not the loaded one" in device.loadOperatingConfigButton.tooltips[-1]
+    device.controller._loaded_config_index = 9
+    module.AMXDevice._update_config_controls(device)
+    assert not device.loadOperatingConfigButton.style
 
     device.loadOperatingConfigButton.click()
     device.frequencyWidget.valueChanged.emit(4.0)

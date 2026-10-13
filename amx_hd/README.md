@@ -72,9 +72,14 @@ routine experimental use. These checks do not certify physical shutdown.
 Toolbar notes:
 
 - `Signal`: saved AMX HD configuration selector (routing and timing).
-- `Load now`: immediately loads the selected signal while the device is ON.
+  `None: connect only (-1)` connects without enabling the device. The tooltip
+  lists the loaded config and the available slots.
+- `Load now`: immediately loads the selected signal while the device is ON. It
+  turns amber while the selected config is not the one in controller memory.
 - `Freq`: oscillator frequency in kHz. Validate typed changes with Enter, Tab,
   or a click outside the field. They apply while ON, until the next config load.
+  As in Explorer's own fields there are no step buttons: type the value or use
+  the ↑/↓ keys.
 - channel rows: choose which timers are ON and set their pulse width in us.
   Typed widths use the same validation; intermediate digits are not sent.
 
@@ -95,17 +100,26 @@ Runtime timing notes:
 
 ## Operator Panel
 
-The default view shows the four outputs CH0–CH3, decoded from the live
-controller registers, never from a config name or slot number:
+The default view shows the config in controller memory and the four outputs
+CH0–CH3, decoded from the live controller registers, never from a config name
+or slot number:
 
 | Column | Meaning |
 | --- | --- |
-| Signal | `Periodic`, `Static`, `Hi-Z`, `Burst`, `External`, `Software`, `Gated`, `Unknown` or `Not enabled` |
+| Signal | `Periodic`, `Static`, `Hi-Z`, `Burst`, `External`, `Software`, `Gated`, `Unknown` or `Not enabled`; amber when not inferred |
 | Frequency | Output frequency computed from the oscillator period and its clock |
 | Levels | `Vneg ↔ Vpos`, `Vpos`, `Vneg` or `Hi-Z`; measured PSU voltages replace the rail names when a PSU is associated |
-| Time (µs) Vpos / Vneg | Exact dwell, only when all switch edge delays are zero |
-| Relative timing | Same / opposite / delay in µs relative to the first decoded output |
 | PSU | Associated PSU plugin |
+| Vpos / Vneg (µs) | Exact dwell, only when all switch edge delays are zero |
+| Relative timing | Same / opposite / delay in µs relative to the first decoded output |
+
+Below the table, a sketch shows the expected switching over two periods of the
+first decoded output (time 0 is its switch to Vpos). It draws a square wave only
+where the table has the exact timing, a flat line for a constant rail and a
+dashed line for Hi-Z; every other output stays an empty, labelled row, and an
+output on another period or clock is marked as not phase-related. It is not a
+measurement: edge delays, rise times, loads and external offsets are not shown.
+The panel follows Explorer's light or dark theme.
 
 Decoding uses CGC's 4EDH signal table (64 sources: logic 0, two software
 triggers, `Enb`, the 16 timer outputs, the 16 timer running states, four
@@ -124,7 +138,9 @@ right after each ON/config load and then every 5 s; timing edits invalidate the
 table until the next readback. **Advanced** shows the timer cards (requested
 enable and width, register readbacks, trigger and clock, `REGISTERS APPLIED`
 when the width and oscillator-0 registers match the request) and the channel
-table. Viewing the panel never writes to the controller.
+table; the four cards share one row when the dock is wide enough. The
+oscillator-0 line turns amber, `(not applied)`, when the requested frequency and
+the period register differ. Viewing the panel never writes to the controller.
 
 The table states the expected signal from registers; it is not a waveform
 measurement. Check it once with an oscilloscope on each output before relying on

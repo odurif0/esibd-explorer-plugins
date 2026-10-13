@@ -8,6 +8,9 @@ from support.amx import config79_snapshot
 from support.amx import register_sources
 
 
+PSU_COLUMN = 4  # _AMX_OUTPUT_COLUMNS: PSU sits next to the levels it explains.
+
+
 class Item:
     def setText(self, value):
         self.text = value
@@ -19,7 +22,8 @@ class Item:
 @pytest.fixture(params=("amx_a", "amx_b", "amx_hd"))
 def rig(request):
     module, parent, controller = make_case(request.param)
-    items = [[Item() for _ in range(7)] for _ in range(4)]
+    assert module._AMX_OUTPUT_COLUMNS[PSU_COLUMN][0] == "psu"
+    items = [[Item() for _ in range(len(module._AMX_OUTPUT_COLUMNS))] for _ in range(4)]
     parent.amxOutputTable = SimpleNamespace(item=lambda row, col: items[row][col])
     apply_reference_routing(request.param, controller)
     parent.psu_ch01, parent.psu_ch23 = "PSU_A", "None"
@@ -74,7 +78,7 @@ def test_unavailable_provider_keeps_symbolic_rails(rig, case):
     parent._update_output_table()
     assert items[0][3].text == "Vneg ↔ Vpos"
     assert "0 V" not in items[0][3].text
-    assert items[0][6].text == ("—" if case == "none" else "PSU_A")
+    assert items[0][PSU_COLUMN].text == ("—" if case == "none" else "PSU_A")
 
 
 @pytest.mark.parametrize("invalid", (None, float("nan"), float("inf"), -3.))
@@ -99,7 +103,7 @@ def test_each_real_psu_publishes_channels_for_either_pair(rig, psu_folder):
     before = [dict(row) for row in controller.output_rows]
     parent._update_output_table()
     assert all(row[3].text == "-102 V ↔ +101 V" for row in items)
-    assert all(row[6].text == psu.name for row in items)
+    assert all(row[PSU_COLUMN].text == psu.name for row in items)
     assert controller.output_rows == before
     assert controller.device.timing_writes == []
 

@@ -60,14 +60,54 @@ _AMX_NUMERIC_DEBOUNCE_MS = 250
 _AMX_MAX_CONSECUTIVE_POLL_ERRORS = 10
 _AMX_SLOW_OPERATION_LOG_THRESHOLD_S = 1.0
 _AMX_STARTUP_PROGRESS_LOG_INTERVAL_S = 1.0
-_AMX_PANEL_GRID_COLUMNS = 2
+_AMX_PANEL_GRID_COLUMNS = 4
 _AMX_PANEL_CARD_MIN_WIDTH = 280
 _AMX_PANEL_CARD_MAX_WIDTH = 340
-_AMX_PANEL_TITLE_STYLE = "color: #f8fafc; font-size: 14px; font-weight: 700;"
-_AMX_PANEL_NAME_STYLE = "color: #94a3b8; font-weight: 600;"
-_AMX_PANEL_VALUE_STYLE = "color: #e2e8f0; font-weight: 600;"
-_AMX_PANEL_NOTICE_STYLE = "color: #94a3b8; font-style: italic;"
-_AMX_PANEL_WARNING_STYLE = "color: #f6ad55; font-weight: 600;"
+# Text colors per Explorer theme, (dark, light). Explorer switches the application
+# palette; fixed light text vanished on its light theme (2026-10-13).
+_AMX_PANEL_COLORS = {
+    "title": ("#f8fafc", "#1a202c"),
+    "name": ("#94a3b8", "#4a5568"),
+    "value": ("#e2e8f0", "#1a202c"),
+    "notice": ("#94a3b8", "#4a5568"),
+    "warning": ("#f6ad55", "#b7791f"),
+    "error": ("#fc8181", "#c53030"),
+    "muted": ("#718096", "#718096"),
+    "trace": ("#68d391", "#2f855a"),
+    "grid": ("#3f4a5a", "#d5dbe3"),
+}
+# Signal column colors: inferred waveforms stay plain, anything not inferred is flagged.
+_AMX_SIGNAL_ROLES = {
+    "Periodic": None, "Static": None, "Hi-Z": "muted",
+    "Disconnected": "muted", "OFF": "muted", "Standby": "muted", "Updating": "muted",
+    "Awaiting readback": "muted", "Not enabled": "muted",
+    _AMX_SHUTDOWN_UNCONFIRMED_STATE: "error", "Error": "error",
+}
+_AMX_OUTPUT_COLUMNS = (
+    ("channel", "Output"), ("state", "Signal"), ("frequency", "Frequency"), ("levels", "Levels"),
+    ("psu", "PSU"), ("dwell", "Vpos / Vneg\n(µs)"), ("relation", "Relative timing"),
+)
+_AMX_OUTPUT_COLUMN_TIPS = {
+    "channel": "Controller switch channel.",
+    "state": "Signal inferred from the live routing registers, never from the config name. "
+             "Amber: not inferred (external, burst, mapping, software trigger...).",
+    "frequency": "Output frequency from the source period register.",
+    "levels": "Rails the output switches between; with a linked PSU, its measured voltages "
+              "relative to the PSU reference.",
+    "psu": "PSU linked to this output pair in Settings. Describes the wiring only; never controls the PSU.",
+    "dwell": "Time at Vpos / Vneg in each period, only when the switch edge delays are zero.",
+    "relation": "Same, opposite or delayed relative to the first periodic output.",
+}
+_AMX_WAVEFORM_PERIODS = 2
+_AMX_PANEL_NOTICE = (
+    "Expected signals, not waveform measurements. Voltages from linked PSUs, "
+    "relative to their reference (external offset not included)."
+)
+_AMX_LOAD_PENDING_STYLE = (
+    "QPushButton { background-color: #b7791f; color: white; border: 1px solid #f6ad55; "
+    "border-radius: 3px; padding: 2px 8px; font-weight: 700; }"
+)
+_AMX_WAVEFORM_MAX_EDGES = 400
 _AMX_PANEL_ENABLE_ACTIVE_STYLE = (
     "QPushButton { background-color: #2f855a; color: white; border: 1px solid #68d391; "
     "border-radius: 4px; padding: 4px 8px; font-weight: 700; }"
@@ -144,26 +184,6 @@ def _amx_poisoned_port_guidance(
     ):
         return _AMX_POISONED_PORT_RETRY
     return ""
-_AMX_FREQUENCY_SPINBOX_STYLE = (
-    "QDoubleSpinBox {"
-    " background-color: #0f172a;"
-    " color: #f8fafc;"
-    " border: 1px solid #64748b;"
-    " border-radius: 4px;"
-    " padding: 2px 20px 2px 6px;"
-    " selection-background-color: #2563eb;"
-    "}"
-    "QDoubleSpinBox:disabled {"
-    " background-color: #1f2937;"
-    " color: #94a3b8;"
-    " border-color: #475569;"
-    "}"
-    "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
-    " background-color: #475569;"
-    " border: 1px solid #94a3b8;"
-    " width: 18px;"
-    "}"
-)
 
 
 def _is_nan(value: Any) -> bool:
@@ -539,15 +559,15 @@ def _amx_panel_badge_style(kind: str) -> str:
     )
 
 
-def _amx_panel_card_style(kind: str) -> str:
+def _amx_panel_card_style(kind: str, dark: bool = True) -> str:
     colors = {
-        "active": ("#102a24", "#38a169", 2),
-        "warning": ("#302616", "#d69e2e", 2),
-        "error": ("#321b1b", "#e53e3e", 2),
-        "off": ("#172033", "#64748b", 1),
-        "disconnected": ("#111827", "#475569", 1),
+        "active": (("#102a24", "#38a169", 2), ("#f0fff4", "#38a169", 2)),
+        "warning": (("#302616", "#d69e2e", 2), ("#fffaf0", "#d69e2e", 2)),
+        "error": (("#321b1b", "#e53e3e", 2), ("#fff5f5", "#e53e3e", 2)),
+        "off": (("#172033", "#64748b", 1), ("#f7fafc", "#a0aec0", 1)),
+        "disconnected": (("#111827", "#475569", 1), ("#f7fafc", "#cbd5e0", 1)),
     }
-    background, border, width = colors.get(kind, colors["disconnected"])
+    background, border, width = colors.get(kind, colors["disconnected"])[0 if dark else 1]
     return (
         "QFrame#AMXPulserCard {"
         f" background-color: {background};"
@@ -555,6 +575,90 @@ def _amx_panel_card_style(kind: str) -> str:
         " border-radius: 8px;"
         " }"
     )
+
+
+def _amx_panel_color(role: str, dark: bool) -> str:
+    return _AMX_PANEL_COLORS[role][0 if dark else 1]
+
+
+def _amx_panel_stylesheet(dark: bool) -> str:
+    """Text styles of the whole operator panel, selected by each label's ``amxRole``."""
+    color = lambda role: _amx_panel_color(role, dark)
+    return (
+        f'QLabel[amxRole="title"] {{ color: {color("title")}; font-size: 14px; font-weight: 700; }}'
+        f'QLabel[amxRole="name"] {{ color: {color("name")}; font-weight: 600; }}'
+        f'QLabel[amxRole="value"] {{ color: {color("value")}; font-weight: 600; }}'
+        f'QLabel[amxRole="notice"] {{ color: {color("notice")}; font-style: italic; }}'
+        f'QLabel[amxRole="warning"] {{ color: {color("warning")}; font-weight: 600; }}'
+        f'QFrame#AMXPulserCard QCheckBox {{ color: {color("value")}; }}'
+    )
+
+
+def _amx_dark_theme() -> bool:
+    """Follow the application palette, which Explorer switches with its theme."""
+    try:
+        from PyQt6.QtGui import QGuiApplication, QPalette
+    except ImportError:
+        return True
+    if QGuiApplication.instance() is None:
+        return True
+    return QGuiApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def _amx_set_role(widget: Any, role: str) -> None:
+    """Restyle a panel label; a changed dynamic property needs a re-polish."""
+    if widget is None or not hasattr(widget, "setProperty") or widget.property("amxRole") == role:
+        return
+    widget.setProperty("amxRole", role)
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+
+
+def _amx_waveform_traces(rows: list[dict[str, Any]] | None, clock_hz: float = 100e6) -> dict[str, Any]:
+    """Expected CH0–3 levels over two periods of the reference output.
+
+    Built from the routing summary only. Square waves need exact inferred timing;
+    constant rails are flat, Hi-Z is marked, and every other row stays a labelled
+    gap rather than a guessed waveform. Time 0 is the reference's switch to Vpos.
+    """
+    rows = list(rows or [])
+    clock_of = lambda timing: _coerce_float(timing.get("clock_hz", clock_hz), clock_hz)
+    reference = next((row["timing"] for row in rows if isinstance(row.get("timing"), dict)), None)
+    window_us = origin_us = None
+    if reference is not None:
+        scale = 1e6 / clock_of(reference)
+        window_us = _AMX_WAVEFORM_PERIODS * reference["period"] * scale
+        origin_us = reference["phase"] * scale
+    traces = []
+    for row in rows:
+        timing = row.get("timing")
+        state = str(row.get("state", "Unknown"))
+        trace: dict[str, Any] = {"channel": str(row.get("channel", "")), "kind": "none", "label": state}
+        if state == "Static" and row.get("levels") in ("Vpos", "Vneg"):
+            trace.update(kind="level", high=row["levels"] == "Vpos", label=f"{row['levels']} (constant)")
+        elif state == "Hi-Z":
+            trace.update(kind="hiz", label="Hi-Z (not 0 V)")
+        elif isinstance(timing, dict) and window_us:
+            scale = 1e6 / clock_of(timing)
+            period, high = timing["period"] * scale, timing["high"] * scale
+            aligned = timing["period"] == reference["period"] and clock_of(timing) == clock_of(reference)
+            if 2 * window_us / period > _AMX_WAVEFORM_MAX_EDGES:
+                trace.update(kind="dense", label=f"{row.get('frequency', '')}: too fast to draw at this scale")
+            else:
+                start = timing["phase"] * scale - origin_us
+                first = int(np.floor(-(start + high) / period))
+                segments = []
+                for cycle in range(first, int(np.ceil((window_us - start) / period)) + 1):
+                    begin, end = start + cycle * period, start + cycle * period + high
+                    begin, end = max(begin, 0.0), min(end, window_us)
+                    if end > begin:
+                        segments.append((begin, end))
+                trace.update(kind="wave", segments=segments, label="" if aligned else "own period: phase not related")
+        elif state == "Periodic":
+            trace["label"] = "Periodic: edge delays adjusted, not drawn"
+        traces.append(trace)
+    return {"window_us": window_us, "traces": traces}
 
 
 def _safe_device_attr(device: Any, name: str, default: Any) -> Any:
@@ -792,7 +896,7 @@ def _format_config_option(
 ) -> str:
     """Return one human-readable AMX config entry."""
     if index < 0:
-        return "Skip (-1)"
+        return "None: connect only (-1)"
 
     label = f"{index}:{str(name or '').strip() or '<unnamed>'}"
     suffixes: list[str] = []
@@ -1356,6 +1460,107 @@ def _scrollable_panel(panel: Any) -> Any:
     return scroll
 
 
+def _create_waveform_view() -> Any:
+    """Paint the model of ``_amx_waveform_traces``: expected levels, never a measurement."""
+    from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
+    from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
+    from PyQt6.QtWidgets import QSizePolicy, QWidget
+
+    class WaveformView(QWidget):
+        ROW_HEIGHT = 34
+        LEFT, RIGHT, TOP, AXIS = 58, 14, 4, 22
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.model: dict[str, Any] = {"window_us": None, "traces": []}
+            self.message = ""
+            self.dark = True
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.setFixedHeight(4 * self.ROW_HEIGHT + self.TOP + self.AXIS)
+
+        def sizeHint(self) -> QSize:
+            return QSize(480, self.height())
+
+        def minimumSizeHint(self) -> QSize:
+            return QSize(160, self.height())
+
+        def set_model(self, model: dict[str, Any], message: str, dark: bool) -> None:
+            if (model, message, dark) != (self.model, self.message, self.dark):
+                self.model, self.message, self.dark = model, message, dark
+                self.update()
+
+        def paintEvent(self, _event) -> None:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            color = lambda role: QColor(_amx_panel_color(role, self.dark))
+            plot = QRectF(self.LEFT, self.TOP, max(self.width() - self.LEFT - self.RIGHT, 1),
+                          4 * self.ROW_HEIGHT)
+            window = self.model.get("window_us")
+            traces = self.model.get("traces") or []
+            if self.message or not traces:
+                painter.setPen(color("muted"))
+                painter.drawText(plot, Qt.AlignmentFlag.AlignCenter, self.message or "No expected waveform.")
+                painter.end()
+                return
+            x = lambda t: plot.left() + plot.width() * t / window
+            if window:
+                painter.setPen(QPen(color("grid"), 1, Qt.PenStyle.DotLine))
+                for tick in range(2 * _AMX_WAVEFORM_PERIODS + 1):
+                    t = window * tick / (2 * _AMX_WAVEFORM_PERIODS)
+                    painter.drawLine(QPointF(x(t), plot.top()), QPointF(x(t), plot.bottom()))
+                    painter.setPen(color("name"))
+                    # Keep the end labels inside the widget, flush with their tick.
+                    left = min(max(x(t) - 40, 0.0), self.width() - 80.0)
+                    align = (Qt.AlignmentFlag.AlignHCenter if left == x(t) - 40
+                             else Qt.AlignmentFlag.AlignRight if left < x(t) - 40 else Qt.AlignmentFlag.AlignLeft)
+                    painter.drawText(QRectF(left, plot.bottom() + 3, 80, self.AXIS - 3),
+                                     align | Qt.AlignmentFlag.AlignTop, f"{t:.3g} µs")
+                    painter.setPen(QPen(color("grid"), 1, Qt.PenStyle.DotLine))
+            for index, trace in enumerate(traces[:4]):
+                top = plot.top() + index * self.ROW_HEIGHT
+                high, low = top + 7, top + self.ROW_HEIGHT - 9
+                painter.setPen(color("value"))
+                painter.drawText(QRectF(0, top, self.LEFT - 22, self.ROW_HEIGHT),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, trace["channel"])
+                painter.setPen(color("name"))
+                for y, sign in ((high, "+"), (low, "−")):
+                    painter.drawText(QRectF(self.LEFT - 18, y - 8, 12, 16), Qt.AlignmentFlag.AlignCenter, sign)
+                kind = trace["kind"]
+                pen = QPen(color("trace"), 2)
+                if kind == "wave" and window:
+                    level = bool(trace["segments"]) and trace["segments"][0][0] <= 0.0
+                    path = QPainterPath(QPointF(x(0.0), high if level else low))
+                    for begin, end in trace["segments"]:
+                        if begin > 0.0:
+                            path.lineTo(x(begin), low)
+                            path.lineTo(x(begin), high)
+                        path.lineTo(x(end), high)
+                        if end < window:
+                            path.lineTo(x(end), low)
+                    path.lineTo(x(window), low if not trace["segments"] or trace["segments"][-1][1] < window else high)
+                    painter.setPen(pen)
+                    painter.drawPath(path)
+                elif kind == "level":
+                    painter.setPen(pen)
+                    y = high if trace["high"] else low
+                    painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+                elif kind == "hiz":
+                    painter.setPen(QPen(color("muted"), 2, Qt.PenStyle.DashLine))
+                    middle = (high + low) / 2
+                    painter.drawLine(QPointF(plot.left(), middle), QPointF(plot.right(), middle))
+                elif kind == "dense":
+                    fill = color("trace")
+                    fill.setAlpha(70)
+                    painter.fillRect(QRectF(plot.left(), high, plot.width(), low - high), fill)
+                if trace["label"]:
+                    painter.setPen(color("warning") if kind in ("none", "wave") else color("name"))
+                    painter.drawText(QRectF(plot.left() + 6, top, plot.width() - 12, self.ROW_HEIGHT),
+                                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, trace["label"])
+            painter.end()
+
+    return WaveformView()
+
+
 class AMXHDDevice(Device):
     """Drive AMX HD oscillator and timer timing from ESIBD Explorer."""
 
@@ -1548,6 +1753,7 @@ class AMXHDDevice(Device):
         tooltip = str(getattr(setting, "toolTip", "") or "").strip() if setting is not None else ""
         lines = [tooltip] if tooltip else []
         lines.append("Load a saved AMX configuration, including its frequency and pulse widths.")
+        lines.append(f"Loaded: {getattr(self, 'loaded_config_text', '') or 'n/a'}")
         lines.append("Available AMX configs:")
         available = str(getattr(self, "available_configs_text", "") or "n/a")
         for entry in available.split(";"):
@@ -1594,8 +1800,7 @@ class AMXHDDevice(Device):
         widget.setSuffix(" kHz")
         widget.setMinimumWidth(112)
         widget.setAccelerated(True)
-        widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.PlusMinus)
-        widget.setStyleSheet(_AMX_FREQUENCY_SPINBOX_STYLE)
+        widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)  # Like Explorer's own fields; ↑/↓ keys still step.
         _disable_spinbox_wheel(widget)
         return widget
 
@@ -1669,8 +1874,6 @@ class AMXHDDevice(Device):
         label_type = type(self.titleBarLabel)
         insert_before = getattr(self, "stretchAction", None)
 
-        self.loadedConfigLabel = label_type("Loaded:")
-        self.loadedConfigValueLabel = label_type("")
         self.operatingConfigLabel = label_type("Signal:")
         self.operatingConfigCombo = self._create_config_selector_widget()
         self.loadOperatingConfigButton = self._create_config_button_widget("Load now")
@@ -1682,8 +1885,6 @@ class AMXHDDevice(Device):
         self._connect_frequency_widget(self.frequencyWidget)
 
         widgets = (
-            self.loadedConfigLabel,
-            self.loadedConfigValueLabel,
             self.operatingConfigLabel,
             self.operatingConfigCombo,
             self.loadOperatingConfigButton,
@@ -1740,6 +1941,12 @@ class AMXHDDevice(Device):
             return False, "select a config first"
         return True, ""
 
+    def _config_load_pending(self) -> bool:
+        """True while ON with a selected config that differs from the one in controller memory."""
+        selected = self._config_setting_value("operating_config")
+        loaded = _coerce_int(getattr(getattr(self, "controller", None), "_loaded_config_index", -1), -1)
+        return self._load_operating_now_ready()[0] and 0 <= loaded != selected
+
     def _update_config_controls(self) -> None:
         setting = self._setting(self.FREQUENCY_KHZ)
         spin = getattr(setting, "spin", None)
@@ -1752,19 +1959,9 @@ class AMXHDDevice(Device):
         if signal_label is not None and hasattr(signal_label, "setToolTip"):
             signal_label.setToolTip(signal_tooltip)
 
-        loaded_text = str(getattr(self, "loaded_config_text", "") or "n/a")
-        loaded_tooltip = self._loaded_config_tooltip_text()
-        loaded_value = getattr(self, "loadedConfigValueLabel", None)
-        if loaded_value is not None and hasattr(loaded_value, "setText"):
-            loaded_value.setText(loaded_text)
-        if loaded_value is not None and hasattr(loaded_value, "setToolTip"):
-            loaded_value.setToolTip(loaded_tooltip)
-        loaded_label = getattr(self, "loadedConfigLabel", None)
-        if loaded_label is not None and hasattr(loaded_label, "setToolTip"):
-            loaded_label.setToolTip(loaded_tooltip)
-
         button = getattr(self, "loadOperatingConfigButton", None)
         ready, reason = self._load_operating_now_ready()
+        pending = self._config_load_pending()
         self._set_action_enabled(button, ready)
         if button is not None and hasattr(button, "setToolTip"):
             tooltip = (
@@ -1773,7 +1970,11 @@ class AMXHDDevice(Device):
             )
             if not ready and reason:
                 tooltip = f"{tooltip}\nCurrently unavailable: {reason}."
+            if pending:
+                tooltip = f"{tooltip}\nThe selected config is not the loaded one: {self.loaded_config_text}."
             button.setToolTip(tooltip)
+        if button is not None and hasattr(button, "setStyleSheet"):
+            button.setStyleSheet(_AMX_LOAD_PENDING_STYLE if pending else "")
 
         frequency_widget = getattr(self, "frequencyWidget", None)
         if frequency_widget is not None:
@@ -2011,11 +2212,7 @@ class AMXHDDevice(Device):
             self._display_device_state_summary(),
             default="n/a",
         )
-        loaded = _compact_status_text(
-            getattr(self, "loaded_config_text", None),
-            default="n/a",
-        )
-        return f"Device: {device_enabled} | Faults: {faults} | Loaded: {loaded}"
+        return f"Device: {device_enabled} | Faults: {faults}"
 
     def _status_tooltip_text(self) -> str:
         """Return the full AMX status tooltip for the toolbar widgets."""
@@ -2230,7 +2427,7 @@ class AMXHDDevice(Device):
             and str(getattr(controller, "device_enabled_state", "")).upper() == "ON"
         )
         display_state = self._display_main_state()
-        if channel is None:
+        if channel is None and connected:
             status_text = "UNAVAILABLE"
             status_kind = "error"
         elif not connected:
@@ -2295,7 +2492,7 @@ class AMXHDDevice(Device):
                 clock_hz=clock_hz,
                 width_offset=width_offset,
             )
-            width_register_text = f"{observed_width_us:.3f} us ({observed_width} ticks)"
+            width_register_text = f"{observed_width_us:.3f} µs ({observed_width} ticks)"
             duty_register_text = (
                 f"{observed_duty:.3f} %"
                 if np.isfinite(observed_duty)
@@ -2317,7 +2514,7 @@ class AMXHDDevice(Device):
             else f"Clock {clock_index} = n/a"
         )
         delay = str(delay_values.get(pulser, "n/a") or "n/a") if connected else "n/a"
-        delay_text = f"{delay} us" if delay != "n/a" else delay
+        delay_text = f"{delay} µs" if delay != "n/a" else delay
         burst_text = str(burst_values.get(pulser, "n/a") or "n/a") if connected else "n/a"
         expected_period_text = "n/a" if expected_period is None else str(expected_period)
         observed_period_text = "n/a" if observed_period is None else str(observed_period)
@@ -2327,7 +2524,7 @@ class AMXHDDevice(Device):
             (
                 f"{channel_name} register verification",
                 f"Requested: {'enabled' if requested_enabled else 'disabled'}, "
-                f"width {requested_width_us:.3f} us",
+                f"width {requested_width_us:.3f} µs",
                 f"Expected / observed width register: {expected_width} / {observed_width_text}",
                 f"Expected / observed oscillator period: {expected_period_text} / {observed_period_text}",
                 f"Trigger / clock: {trigger_register_text}; {clock_register_text}",
@@ -2339,6 +2536,7 @@ class AMXHDDevice(Device):
         return {
             "title": f"Timer {pulser}",
             "status_text": status_text,
+            "status_kind": status_kind,
             "status_style": _amx_panel_badge_style(status_kind),
             "card_style": _amx_panel_card_style(status_kind),
             "requested_enabled": requested_enabled,
@@ -2399,40 +2597,32 @@ class AMXHDDevice(Device):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(12)
-        title = QLabel("AMX HD outputs · CH0–CH3")
-        title.setStyleSheet(_AMX_PANEL_TITLE_STYLE)
-        self.amxPanelSignalValue = QLabel("Signal: n/a")
-        self.amxPanelSignalValue.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
-        self.amxPanelFrequencyValue = QLabel("Oscillator 0 request / register: n/a")
-        self.amxPanelFrequencyValue.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
-        header.addWidget(title)
-        header.addStretch(1)
-        header.addWidget(self.amxPanelSignalValue)
-        for label in (title, self.amxPanelSignalValue, self.amxPanelFrequencyValue):
-            label.setWordWrap(True)
-        layout.addLayout(header)
+        def role_label(text: str, role: str, *, wrap: bool = True) -> QLabel:
+            widget = QLabel(text)
+            widget.setProperty("amxRole", role)
+            widget.setWordWrap(wrap)
+            return widget
 
-        notice = QLabel(
-            "Expected signals, not waveform measurements. Voltages from linked PSUs, "
-            "relative to their reference (external offset not included). "
-            "Assign each pair's PSU in Settings."
-        )
-        notice.setWordWrap(True)
-        notice.setStyleSheet(_AMX_PANEL_NOTICE_STYLE)
-        layout.addWidget(notice)
-        self.amxPanelClockNotice = QLabel("")
-        self.amxPanelClockNotice.setWordWrap(True)
-        self.amxPanelClockNotice.setStyleSheet(_AMX_PANEL_WARNING_STYLE)
+        title = role_label("AMX HD outputs · CH0–CH3", "title", wrap=False)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(title)
+        self.amxPanelSignalValue = role_label("Loaded config: n/a", "value")
+        self.amxPanelPendingValue = role_label("", "warning")
+        self.amxPanelPendingValue.setVisible(False)
+        self.amxPanelFrequencyValue = role_label("Oscillator 0: n/a", "value")
+        layout.addWidget(self.amxPanelSignalValue)
+        layout.addWidget(self.amxPanelPendingValue)
+
+        self.amxPanelNotice = role_label(_AMX_PANEL_NOTICE, "notice")
+        layout.addWidget(self.amxPanelNotice)
+        self.amxPanelClockNotice = role_label("", "warning")
         self.amxPanelClockNotice.setVisible(False)
         layout.addWidget(self.amxPanelClockNotice)
 
-        table = QTableWidget(4, 7)
-        table.setHorizontalHeaderLabels([
-            "Output", "Signal", "Frequency", "Levels", "Time (µs)\nVpos / Vneg", "Relative timing", "PSU",
-        ])
+        table = QTableWidget(4, len(_AMX_OUTPUT_COLUMNS))
+        table.setHorizontalHeaderLabels([header for _, header in _AMX_OUTPUT_COLUMNS])
+        for column, (key, _header) in enumerate(_AMX_OUTPUT_COLUMNS):
+            table.horizontalHeaderItem(column).setToolTip(_AMX_OUTPUT_COLUMN_TIPS[key])
         table.verticalHeader().hide()
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -2441,10 +2631,9 @@ class AMXHDDevice(Device):
         table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         table.setMinimumWidth(0)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(False)
-        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setStretchLastSection(True)
         for row in range(4):
-            for column in range(7):
+            for column in range(len(_AMX_OUTPUT_COLUMNS)):
                 table.setItem(row, column, QTableWidgetItem(f"CH{row}" if column == 0 else "—"))
         table.resizeRowsToContents()
         table.setFixedHeight(
@@ -2459,6 +2648,13 @@ class AMXHDDevice(Device):
         )
         self.amxOutputTable = table
         layout.addWidget(table)
+        layout.addWidget(role_label("Expected switching over two periods (from controller registers)", "name"))
+        self.amxWaveformView = _create_waveform_view()
+        self.amxWaveformView.setToolTip(
+            "Expected levels from the controller registers, not a measurement: edge delays, "
+            "rise times, loads and external offsets are not shown. + is Vpos, − is Vneg."
+        )
+        layout.addWidget(self.amxWaveformView)
         # PSU changes and stale readings must reach the view even if AMX polling
         # has stopped. This only reads cached data; the panel owns the Qt timer.
         self.amxOutputRefreshTimer = QTimer(panel)
@@ -2492,7 +2688,7 @@ class AMXHDDevice(Device):
             card_header = QHBoxLayout()
             card_header.setContentsMargins(0, 0, 0, 0)
             card_title = QLabel(f"Timer {pulser}")
-            card_title.setStyleSheet(_AMX_PANEL_TITLE_STYLE)
+            card_title.setProperty("amxRole", "title")
             status_badge = QLabel("n/a")
             card_header.addWidget(card_title)
             card_header.addStretch(1)
@@ -2500,7 +2696,7 @@ class AMXHDDevice(Device):
             card_layout.addLayout(card_header)
 
             requested_header = QLabel("REQUESTED")
-            requested_header.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            requested_header.setProperty("amxRole", "name")
             card_layout.addWidget(requested_header)
             requested_grid = QGridLayout()
             requested_grid.setContentsMargins(0, 0, 0, 0)
@@ -2508,31 +2704,30 @@ class AMXHDDevice(Device):
             requested_grid.setVerticalSpacing(6)
 
             enable_name = QLabel("On when AMX active")
-            enable_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            enable_name.setProperty("amxRole", "name")
             enable_button = QPushButton("DISABLED")
             enable_button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             enable_button.setCheckable(True)
             enable_button.setMinimumWidth(90)
             width_name = QLabel("Width")
-            width_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            width_name.setProperty("amxRole", "name")
             width_widget = QDoubleSpinBox()
             width_widget.setKeyboardTracking(False)
             width_widget.setRange(0.0, 1_000_000.0)
             width_widget.setDecimals(3)
             width_widget.setSingleStep(0.01)
-            width_widget.setSuffix(" us")
+            width_widget.setSuffix(" µs")
             width_widget.setAccelerated(True)
-            width_widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.PlusMinus)
-            width_widget.setStyleSheet(_AMX_FREQUENCY_SPINBOX_STYLE)
+            width_widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)  # Like Explorer's own fields; ↑/↓ keys still step.
             _disable_spinbox_wheel(width_widget)
             duty_name = QLabel("Duty request")
-            duty_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            duty_name.setProperty("amxRole", "name")
             duty_value = QLabel("n/a")
-            duty_value.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+            duty_value.setProperty("amxRole", "value")
             mode_name = QLabel("Width source")
-            mode_name.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            mode_name.setProperty("amxRole", "name")
             mode_value = QLabel("n/a")
-            mode_value.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+            mode_value.setProperty("amxRole", "value")
             display_box = QCheckBox("Display in plots")
 
             requested_grid.addWidget(enable_name, 0, 0)
@@ -2547,7 +2742,7 @@ class AMXHDDevice(Device):
             card_layout.addLayout(requested_grid)
 
             register_header = QLabel("CONTROLLER REGISTERS")
-            register_header.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+            register_header.setProperty("amxRole", "name")
             card_layout.addWidget(register_header)
             register_grid = QGridLayout()
             register_grid.setContentsMargins(0, 0, 0, 0)
@@ -2565,9 +2760,9 @@ class AMXHDDevice(Device):
                 )
             ):
                 name_label = QLabel(label)
-                name_label.setStyleSheet(_AMX_PANEL_NAME_STYLE)
+                name_label.setProperty("amxRole", "name")
                 value_label = QLabel("n/a")
-                value_label.setStyleSheet(_AMX_PANEL_VALUE_STYLE)
+                value_label.setProperty("amxRole", "value")
                 register_grid.addWidget(name_label, row, 0)
                 register_grid.addWidget(value_label, row, 1)
                 register_values[key] = value_label
@@ -2607,7 +2802,23 @@ class AMXHDDevice(Device):
         self.amxPanel = panel
         self.addContentWidget(_scrollable_panel(panel))
         self._update_channel_table_visibility()
+        self._apply_panel_theme()
+
+    def _apply_panel_theme(self) -> None:
+        """Restyle the panel for Explorer's current light or dark palette."""
+        panel = getattr(self, "amxPanel", None)
+        if panel is None:
+            return
+        self._amx_panel_dark = _amx_dark_theme()
+        panel.setStyleSheet(_amx_panel_stylesheet(self._amx_panel_dark))
         self._update_operator_panel()
+
+    def updateTheme(self) -> None:
+        """Extend Explorer's theme switch to the operator panel's own colors."""
+        update_theme = getattr(super(), "updateTheme", None)
+        if callable(update_theme):
+            update_theme()
+        self._apply_panel_theme()
 
     def _panel_enabled_toggled(self, pulser: int, checked: bool) -> None:
         if getattr(self, "loading", False):
@@ -2781,6 +2992,7 @@ class AMXHDDevice(Device):
         busy = bool(getattr(controller, "initializing", False) or getattr(controller, "transitioning", False))
         state = self._display_main_state()
         rows = getattr(controller, "output_rows", None)
+        waveform_message = ""
         if not connected or busy or state != "STATE_ON" or not rows:
             if busy:
                 text = "Updating"
@@ -2792,7 +3004,18 @@ class AMXHDDevice(Device):
                 text = state if state != "STATE_ON" else "Awaiting readback"
             rows = [dict(channel=f"CH{i}", state=text, frequency="—", levels="Unknown", dwell="—", relation="—",
                          detail="No current output waveform inferred. This is not confirmation of zero voltage.") for i in range(4)]
+            waveform_message = f"No expected waveform: {text}. This does not mean 0 V."
+        dark = getattr(self, "_amx_panel_dark", True)
+        view = getattr(self, "amxWaveformView", None)
+        if view is not None:
+            device = getattr(controller, "device", None)
+            clock_hz = _coerce_float(_safe_device_attr(device, "CLOCK", 100e6), 100e6)
+            view.set_model(_amx_waveform_traces(rows, clock_hz), waveform_message, dark)
         sources = [str(getattr(self, attr, "None") or "None") for attr in ("psu_ch01", "psu_ch23")]
+        notice = getattr(self, "amxPanelNotice", None)
+        if notice is not None:
+            hint = " Assign each pair's PSU in Settings to show its voltages." if "None" in sources else ""
+            notice.setText(_AMX_PANEL_NOTICE + hint)
         readbacks = {name: self._linked_psu_readback(name) for name in set(sources)}
         for index, original in enumerate(rows):
             row = dict(original)  # Never alter the controller's routing summary.
@@ -2809,10 +3032,22 @@ class AMXHDDevice(Device):
                 detail += (f"\n{name}: Vpos = {levels['Vpos']}, Vneg = {levels['Vneg']}. "
                            "Measured at the PSU, relative to its reference; external offset not included. "
                            "The association describes wiring only: it never controls the PSU.")
-            for column, key in enumerate(("channel", "state", "frequency", "levels", "dwell", "relation", "psu")):
+            for column, (key, _header) in enumerate(_AMX_OUTPUT_COLUMNS):
                 item = table.item(index, column)
                 item.setText(row[key])
                 item.setToolTip(detail)
+            self._color_signal_item(table.item(index, 1), row["state"], dark)
+
+    @staticmethod
+    def _color_signal_item(item: Any, state: str, dark: bool) -> None:
+        """Flag a signal the panel could not infer; plain text means an inferred waveform or level."""
+        if not hasattr(item, "setData"):
+            return
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor
+
+        role = _AMX_SIGNAL_ROLES.get(state, "warning")
+        item.setData(Qt.ItemDataRole.ForegroundRole, None if role is None else QColor(_amx_panel_color(role, dark)))
 
     def _update_operator_panel(self) -> None:
         self._update_output_table()
@@ -2825,11 +3060,22 @@ class AMXHDDevice(Device):
             and getattr(controller, "device", None) is not None
             and getattr(controller, "initialized", False)
         )
+        dark = getattr(self, "_amx_panel_dark", True)
         loaded_config = str(getattr(self, "loaded_config_text", "") or "n/a")
         signal_label = getattr(self, "amxPanelSignalValue", None)
         if signal_label is not None:
-            signal_label.setText(f"Signal: {_compact_status_text(loaded_config)}")
-            signal_label.setToolTip(f"Controller config: {loaded_config}")
+            signal_label.setText(f"Loaded config: {loaded_config}")
+            signal_label.setToolTip(self._loaded_config_tooltip_text())
+        pending_label = getattr(self, "amxPanelPendingValue", None)
+        if pending_label is not None:
+            pending = self._config_load_pending()
+            if pending:
+                selected = self._config_setting_value("operating_config")
+                names = dict(self._config_selector_entries("operating_config"))
+                pending_label.setText(
+                    f"Selected {names.get(selected, selected)} is not loaded: press Load now to apply it."
+                )
+            pending_label.setVisible(pending)
 
         frequency_request = _coerce_float(getattr(self, "frequency_khz", 2.0), 2.0)
         frequency_readback = _coerce_float(
@@ -2838,14 +3084,21 @@ class AMXHDDevice(Device):
         )
         frequency_label = getattr(self, "amxPanelFrequencyValue", None)
         if frequency_label is not None:
-            frequency_label.setText(
-                f"Oscillator 0 request / register: {frequency_request:.3f} / "
-                + (
-                    f"{frequency_readback:.3f} kHz"
-                    if connected and np.isfinite(frequency_readback)
-                    else "n/a"
-                )
+            known = connected and np.isfinite(frequency_readback)
+            device = getattr(controller, "device", None)
+            expected_period = _expected_oscillator_period(
+                frequency_request,
+                clock_hz=_coerce_float(_safe_device_attr(device, "CLOCK", 100e6), 100e6),
+                oscillator_offset=_coerce_int(_safe_device_attr(device, "OSC_OFFSET", 2), 2),
             )
+            observed_period = _optional_nonnegative_int(getattr(controller, "oscillator_period", None))
+            differs = known and observed_period is not None and expected_period != observed_period
+            frequency_label.setText(
+                f"Oscillator 0: requested {frequency_request:.3f} kHz · register "
+                + (f"{frequency_readback:.3f} kHz" if known else "n/a")
+                + (" (not applied)" if differs else "")
+            )
+            _amx_set_role(frequency_label, "warning" if differs else "value")
             frequency_label.setToolTip(
                 "Requested oscillator-0 frequency and frequency calculated from the "
                 "controller period register, assuming Clock 0 = 100 MHz."
@@ -2882,7 +3135,7 @@ class AMXHDDevice(Device):
                     widget.setText(str(text))
             card = widgets.get("card")
             if card is not None:
-                card.setStyleSheet(snapshot["card_style"])
+                card.setStyleSheet(_amx_panel_card_style(snapshot["status_kind"], dark))
                 card.setToolTip(snapshot["tooltip"])
             status = widgets.get("status")
             if status is not None:
