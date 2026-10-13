@@ -53,9 +53,18 @@ The panel has three steps, then **▶ Optimize**.
    voltage; funnel RF amplitude, DC gradient and exit; offset and RF amplitude of
    Q1–Q4), which picoammeter channel measures each aperture (funnel → Q1, Q1 → Q2,
    Q2 → Q3, Q3 → Q4) and the collector after Q4, and optionally which gauges to
-   watch with their pressure range. An RF amplitude set by two PSU rails, as in
-   MScan (Vpos = Vneg = A, unsigned magnitudes), uses both channels with gain +1.
-   Unmapped settings and apertures are simply skipped.
+   watch with their pressure range. **Each RF amplitude is an AMX output**: an AMX
+   has two outputs, `CH0-CH1` and `CH2-CH3`, each feeding one quadrupole. Its two
+   lines (CH0 and CH1) drive the two rod pairs and switch between the two outputs of
+   one PSU (PSU CH0 = Vpos, CH1 = Vneg) in opposite phase; that PSU is the one linked
+   to the AMX output in the AMX Settings. You choose the AMX output only; its PSU
+   follows, and both PSU outputs move together (Vpos = Vneg = A, unsigned magnitudes,
+   as in MScan).
+   These PSU outputs (the rails) are not offered as separate settings, and an AMX
+   output serves one element only. A beamline saved with the two rails of an output
+   is shown as that output; any other mapping of an RF amplitude, or a rail used as a
+   DC setting, is reported under the beamline summary and never driven. Unmapped
+   settings and apertures are simply skipped.
 2. **Target** — **Total ion current**, or **Selected mass**: choose the quadrupole
    used as the filter (usually Q2 or Q4; any quadrupole can be used), then
    **Pick on spectrum…** and click the peak, either on a saved MScan file (the
@@ -211,6 +220,11 @@ not promised to be bitwise identical to SciPy, even for the same seed.
   applying the previous one (PSU apply worker), at most `settle_timeout_s`.
 - Windows are clipped to each channel's Min/Max and, for a PSU, to its hardware voltage
   limit and to 0 V (unsigned magnitudes).
+- **The two rails of an AMX output move as one**, in every configuration, advanced ones
+  included: a setting that moves one moves both with the same gain and nothing else,
+  and AMX pulser channels are never driven. The AMX switching a driven output must be
+  ON and idle: without it the rails reach no electrode. It appears in the device list
+  ("switches the RF of CH0-CH1").
 - **ESI channels are never driven**: their HV discharge is not confirmed and a
   temperature setpoint starts the heater. They are not offered in Configure… and the
   advanced configuration refuses them; they can still be measured.
@@ -241,7 +255,7 @@ P_funnel = [2.0, 6.0]
 
 [target]                  # optional: a mass selected by a quadrupole
 filter = "Q2"
-channels = { "PSU_B Vpos" = 1.0, "PSU_B Vneg" = 1.0 }  # MScan rails: Vpos = Vneg = A
+channels = { "PSU_B CH0" = 1.0, "PSU_B CH1" = 1.0 }  # both rails of the AMX output: Vpos = Vneg = A
 center = 520.0            # peak amplitude A (V)
 width = 30.0              # half-width (V): the peak sweep spans ± width
 measure = ["DMMR A3", "DMMR A4", "DMMR Collector"]  # currents behind the filter
@@ -257,14 +271,15 @@ peak = true                                  # criterion = height of the [target
 
 [[stage.knob]]
 name = "Funnel exit"
-channels = { "PSU_A CH0" = 1.0 }  # channel = start + gain * delta
+channels = { "AMPR_A CH1" = 1.0 }  # channel = start + gain * delta
 window = [-20.0, 20.0]            # delta range around the start
 max_step = 2.0                    # largest change per move
 # relative = true                 # window and max_step as fractions of the start value
 ```
 
-A knob may drive several channels: symmetric rails use gains `+1` and `-1` (or `+1`
-and `+1` for unsigned magnitudes), a common offset uses gain `1` on each channel. A
+A knob may drive several channels: an RF amplitude drives the two rails of its AMX
+output with gain `1` each (the template lists the AMX outputs and their rails), a
+common offset uses gain `1` on each channel. A
 channel may appear again in a later stage (for example a final global refinement); a
 stage never drives the filter channels. Other settings: `settle_timeout_s`,
 `min_current`, `lost_fraction`, `verify_pairs`, `significance`, `reference_every`,
