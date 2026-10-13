@@ -323,9 +323,9 @@ def test_operator_panel_snapshot_separates_request_from_register_readback():
     assert snapshot["requested_enabled"] is True
     assert snapshot["requested_width_us"] == 500.0
     assert snapshot["requested_duty_text"] == "50.000 %"
-    assert snapshot["width_register_text"] == "500.000 us (49998 ticks)"
+    assert snapshot["width_register_text"] == "500.000 µs (49998 ticks)"
     assert snapshot["duty_register_text"] == "50.000 %"
-    assert snapshot["delay_register_text"] == "0.03 us"
+    assert snapshot["delay_register_text"] == "0.03 µs"
     assert snapshot["burst_register_text"] == "3"
     assert "do not prove the physical waveform" in snapshot["tooltip"]
 
@@ -343,7 +343,7 @@ def test_operator_panel_snapshot_does_not_claim_active_while_standby_or_disconne
 
     assert standby_snapshot["status_text"] == "STANDBY"
     assert standby_snapshot["requested_enabled"] is True
-    assert standby_snapshot["width_register_text"] == "500.000 us (49998 ticks)"
+    assert standby_snapshot["width_register_text"] == "500.000 µs (49998 ticks)"
 
     disconnected, _channel, _parameters = _operator_panel_fixture(
         module,
@@ -357,6 +357,15 @@ def test_operator_panel_snapshot_does_not_claim_active_while_standby_or_disconne
     assert disconnected_snapshot["requested_enabled"] is True
     assert disconnected_snapshot["width_register_text"] == "n/a"
     assert disconnected_snapshot["controls_enabled"] is True
+
+    # Before the first connection the pulser channels do not exist yet: not a fault.
+    disconnected._channel_by_pulser = lambda _pulser: None
+    no_channel = module.AMXDevice._pulser_panel_snapshot(disconnected, 0)
+    assert (no_channel["status_text"], no_channel["status_kind"]) == ("DISCONNECTED", "disconnected")
+    connected, _channel, _parameters = _operator_panel_fixture(module)
+    connected._channel_by_pulser = lambda _pulser: None
+    missing = module.AMXDevice._pulser_panel_snapshot(connected, 0)
+    assert (missing["status_text"], missing["status_kind"]) == ("UNAVAILABLE", "error")
 
 
 def test_operator_panel_snapshot_reports_zero_width_off_and_register_mismatch():
@@ -526,6 +535,7 @@ def test_operator_panel_refresh_blocks_control_signals():
     snapshot = {
         "title": "Pulser P0",
         "status_text": "REGISTERS APPLIED",
+        "status_kind": "active",
         "status_style": "status",
         "card_style": "card",
         "requested_enabled": True,
@@ -539,9 +549,9 @@ def test_operator_panel_refresh_blocks_control_signals():
         "controls_enabled": True,
         "width_enabled": True,
         "display_enabled": True,
-        "width_register_text": "500.000 us (49998 ticks)",
+        "width_register_text": "500.000 µs (49998 ticks)",
         "duty_register_text": "50.000 %",
-        "delay_register_text": "0.03 us",
+        "delay_register_text": "0.03 µs",
         "burst_register_text": "3",
         "tooltip": "register tooltip",
     }

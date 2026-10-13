@@ -94,16 +94,19 @@ def probe(folder, output):
     window.resizeDocks([dock, graph], [880, 380], Qt.Orientation.Horizontal)
     QTest.qWait(50)
     table = parent.amxOutputTable
-    text = lambda row, col: table.item(row, col).text()
+    column = {key: index for index, (key, _) in enumerate(module._AMX_OUTPUT_COLUMNS)}
+    text = lambda row, key: table.item(row, column[key]).text()
+    cell = lambda row, key: table.item(row, column[key])
     assert table.isVisible() and table.rowCount() == 4
     assert not parent.amxPulserControls.isVisible()
     assert not parent.tree.isVisible()
     assert table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
-    assert all(text(i, 2) == frequency and text(i, 4) == dwell for i in range(4))
-    assert [text(i, 5) for i in range(4)] == ["Reference", "Opposite to CH0", "Same as CH0", "Opposite to CH0"]
+    assert all(text(i, "frequency") == frequency and text(i, "dwell") == dwell for i in range(4))
+    assert [text(i, "relation") for i in range(4)] == ["Reference", "Opposite to CH0", "Same as CH0", "Opposite to CH0"]
     assert "Voltages from linked PSUs" in " ".join(label.text() for label in host.findChildren(QLabel) if label.isVisible())
-    assert all(text(i, 6) == "—" and text(i, 3) == "Vneg ↔ Vpos" for i in range(4))
+    assert all(text(i, "psu") == "—" and text(i, "levels") == "Vneg ↔ Vpos" for i in range(4))
     assert "Hi-Z never implies a discharged output" in table.toolTip()
+    assert all(table.horizontalHeaderItem(c).toolTip() for c in range(table.columnCount()))
     if hd:
         notice = parent.amxPanelClockNotice
         assert not notice.isVisible()
@@ -115,7 +118,48 @@ def probe(folder, output):
         assert not notice.isVisible()
     assert table.verticalScrollBar().maximum() == 0
     assert table.horizontalScrollBar().maximum() == 0
+    # Inferred outputs keep plain text; the sketch draws the same four square waves.
+    assert all(cell(i, "state").data(Qt.ItemDataRole.ForegroundRole) is None for i in range(4))
+    view = parent.amxWaveformView
+    assert view.isVisible() and view.message == ""
+    assert [trace["kind"] for trace in view.model["traces"]] == ["wave"] * 4
+    trace_color = QColor(module._amx_panel_color("trace", True))
+    image = view.grab().toImage()
+    drawn = sum(image.pixelColor(x, y) == trace_color
+                for x in range(0, image.width(), 2) for y in range(image.height()))
+    assert drawn > 200, drawn
+    # A selected config that is not in controller memory asks for Load now.
+    pending = parent.amxPanelPendingValue
+    assert not pending.isVisible()
+    controller._loaded_config_index = 0
+    parent._update_operator_panel()
+    assert pending.isVisible() and "press Load now" in pending.text()
+    controller._loaded_config_index = parent.operating_config
+    parent._update_operator_panel()
+    assert not pending.isVisible()
+    QTest.qWait(50)  # Let the layout close the hidden notice before the screenshot.
     window.grab().save(str(output / f"{folder}-outputs.png"))
+
+    # Explorer's light theme: the panel follows the application palette, text stays dark.
+    def luminance_range(widget):
+        image = widget.grab().toImage()
+        values = [image.pixelColor(x, y).lightness() for x in range(image.width()) for y in range(image.height())]
+        return min(values), max(values)
+    dark_palette = app.palette()
+    light = QPalette(dark_palette)
+    for role, color in ((QPalette.ColorRole.Window, "#ffffff"), (QPalette.ColorRole.Base, "#ffffff"),
+                        (QPalette.ColorRole.WindowText, "#000000"), (QPalette.ColorRole.Text, "#000000")):
+        light.setColor(role, QColor(color))
+    app.setPalette(light)
+    parent.updateTheme()
+    title = next(label for label in host.findChildren(QLabel) if label.property("amxRole") == "title")
+    darkest, lightest = luminance_range(title)
+    assert lightest > 200 and darkest < 80, (darkest, lightest)
+    assert view.dark is False
+    window.grab().save(str(output / f"{folder}-outputs-light.png"))
+    app.setPalette(dark_palette)
+    parent.updateTheme()
+    assert view.dark is True
 
     # Real PSU controller publication -> public plugin API -> actual AMX widgets.
     # Only the device transport is simulated. Refresh must not need AMX polling.
@@ -138,36 +182,36 @@ def probe(folder, output):
     positive_pair.combo.setCurrentText(psu.name)
     negative_pair.combo.setCurrentText(other.name)
     assert parent.psu_ch01 == psu.name and parent.psu_ch23 == other.name
-    assert text(0, 3) == "-120.5 V ↔ +123.4 V", "Settings change was not immediate"
+    assert text(0, "levels") == "-120.5 V ↔ +123.4 V", "Settings change was not immediate"
     saved = {key: parameter.value for key, parameter in settings.settings.items()}
     parent.psu_ch01 = parent.psu_ch23 = "None"
     for key, value in saved.items():
         settings.settings[key].value = value
     assert parent.psu_ch01 == psu.name and parent.psu_ch23 == other.name
     QTest.qWait(650)
-    assert [text(i, 6) for i in range(4)] == ["PSU_A", "PSU_A", "PSU_E", "PSU_E"]
-    assert [text(i, 3) for i in range(4)] == ["-120.5 V ↔ +123.4 V"] * 2 + ["-45 V ↔ +50 V"] * 2
-    assert "relative to its reference" in table.item(0, 3).toolTip()
-    assert "external offset not included" in table.item(0, 3).toolTip()
+    assert [text(i, "psu") for i in range(4)] == ["PSU_A", "PSU_A", "PSU_E", "PSU_E"]
+    assert [text(i, "levels") for i in range(4)] == ["-120.5 V ↔ +123.4 V"] * 2 + ["-45 V ↔ +50 V"] * 2
+    assert "relative to its reference" in cell(0, "levels").toolTip()
+    assert "external offset not included" in cell(0, "levels").toolTip()
     assert all(row["levels"] == "Vneg ↔ Vpos" for row in controller.output_rows)
     window.grab().save(str(output / f"{folder}-linked-psu.png"))
     clock.now += 2.1
     psu_controller.updateValues()
     other_controller.updateValues()
     QTest.qWait(650)
-    assert all(text(i, 3) == "Vneg ↔ Vpos" for i in range(4)), "Old PSU readings remained visible"
-    assert "expired" in table.item(0, 3).toolTip()
+    assert all(text(i, "levels") == "Vneg ↔ Vpos" for i in range(4)), "Old PSU readings remained visible"
+    assert "expired" in cell(0, "levels").toolTip()
     psu_controller._apply_snapshot(snapshot(0., 120.5, (True, False)), refreshed_at=clock.now)
     other_controller._apply_snapshot(snapshot(50., 45.), refreshed_at=clock.now)
     QTest.qWait(650)
-    assert text(0, 3) == "Vneg ↔ 0 V", "Disabled rail became zero or used its previous value"
-    assert text(2, 3) == "-45 V ↔ +50 V"
+    assert text(0, "levels") == "Vneg ↔ 0 V", "Disabled rail became zero or used its previous value"
+    assert text(2, "levels") == "-45 V ↔ +50 V"
     parent.psu_ch01 = other.name  # Remapping does not reconnect or control a PSU.
     QTest.qWait(650)
-    assert text(0, 3) == text(2, 3) == "-45 V ↔ +50 V"
+    assert text(0, "levels") == text(2, "levels") == "-45 V ↔ +50 V"
     other_controller._cancel_output_commands()
     QTest.qWait(650)
-    assert all(text(i, 3) == "Vneg ↔ Vpos" for i in range(4))
+    assert all(text(i, "levels") == "Vneg ↔ Vpos" for i in range(4))
     parent.psu_ch01, parent.psu_ch23 = "None", "None"
     parent._update_output_table()
 
@@ -176,10 +220,13 @@ def probe(folder, output):
     thread = Thread(target=controller._apply_snapshot, args=(external,))
     thread.start(); thread.join()
     QTest.qWait(50)
-    assert all(text(i, 1) == "External" and text(i, 2) == "Unknown" for i in range(4))
+    assert all(text(i, "state") == "External" and text(i, "frequency") == "Unknown" for i in range(4))
+    warning = QColor(module._amx_panel_color("warning", True))
+    assert all(cell(i, "state").data(Qt.ItemDataRole.ForegroundRole) == warning for i in range(4))
+    assert [trace["kind"] for trace in parent.amxWaveformView.model["traces"]] == ["none"] * 4
     parent.frequency_khz = 123.
     parent._update_operator_panel()
-    assert text(0, 2) == "Unknown", "GUI oscillator setpoint was substituted for output frequency"
+    assert text(0, "frequency") == "Unknown", "GUI oscillator setpoint was substituted for output frequency"
     controller._apply_snapshot(reference())
 
     # Merely viewing outputs / Advanced must never cause hardware writes.
@@ -210,18 +257,19 @@ def probe(folder, output):
     for state in ("OFF", "Standby", "Shutdown unconfirmed"):
         parent.main_state = state
         parent._update_operator_panel()
-        assert text(0, 1) == state and text(0, 2) == "—" and text(0, 3) == "Unknown"
+        assert text(0, "state") == state and text(0, "frequency") == "—" and text(0, "levels") == "Unknown"
     parent.main_state = "STATE_ON"
     controller.transitioning = True
     parent._update_operator_panel()
-    assert text(0, 1) == "Updating" and text(0, 2) == "—"
+    assert text(0, "state") == "Updating" and text(0, "frequency") == "—"
     controller.transitioning = False
     controller.output_rows = None
     parent._update_operator_panel()
-    assert text(0, 1) == "Awaiting readback"
+    assert text(0, "state") == "Awaiting readback"
     controller.initialized = False
     parent._update_operator_panel()
-    assert text(0, 1) == "Disconnected"
+    assert text(0, "state") == "Disconnected"
+    assert parent.amxWaveformView.message.startswith("No expected waveform: Disconnected")
     assert controller.device.timing_writes == []
     settings_window.close()
     window.close()

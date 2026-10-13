@@ -13,6 +13,18 @@ from support.qt import dispose_windows, run_probe
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_running_refresh_tolerates_a_plan_restored_from_file(mscan_module):
+    # loadDataInternal keeps only the saved metadata; the refresh timer could fire while the
+    # scan was still marked running (KeyError: 'rails' in the readiness probe, 2026-10-13).
+    calls = []
+    scan = NS(loading=False, settingsMgr=NS(loading=False), pluginManager=NS(loading=False, closing=False),
+              finished=False, recording=True, _plan={'metadata': {}}, _sync_dmmr_interval=lambda: None,
+              _refresh_completion=lambda rails, running: calls.append((rails, running)),
+              _refresh_offset_readback=lambda running: None, _layout_readonly_fields=lambda: None)
+    mscan_module.MScan._refresh_interface(scan)
+    assert calls == [([], True)]
+
+
 @pytest.mark.parametrize('outcome', ['error', 'raised-error', 'transport-error', 'stopped', 'raised-stopped', 'completed'])
 def test_native_terminal_status_logs_once_and_closes_worker(mscan_module, monkeypatch, tmp_path, outcome):
     from threading import Event

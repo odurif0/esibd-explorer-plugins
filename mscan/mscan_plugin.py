@@ -1061,7 +1061,8 @@ class MScan(Scan):
         if not self.finished or self.recording:
             # Keep setup/readiness frozen during acquisition. Only observe Iget;
             # the return voltage must stay the initial target captured by the plan.
-            self._refresh_completion(self._plan['rails'] if self._plan else [], running=True)
+            # A plan restored from a saved file holds only its metadata (loadDataInternal).
+            self._refresh_completion((self._plan or {}).get('rails', []), running=True)
             self._refresh_offset_readback(running=True)
             self._layout_readonly_fields()
             return

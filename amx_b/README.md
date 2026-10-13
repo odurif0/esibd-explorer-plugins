@@ -60,10 +60,15 @@ routine experimental use. These checks do not certify physical shutdown.
 Toolbar notes:
 
 - `Signal`: saved AMX configuration selector (routing and timing).
-- `Load now`: immediately loads the selected signal while the AMX is ON.
+  `None: connect only (-1)` connects without enabling the AMX. The tooltip
+  lists the loaded config and the available slots.
+- `Load now`: immediately loads the selected signal while the AMX is ON. It
+  turns amber while the selected config is not the one in controller memory.
 - `Osc`: internal oscillator frequency in kHz, not necessarily each output's
   frequency. Validate typed changes with Enter, Tab,
   or a click outside the field. They apply while ON, until the next config load.
+  As in Explorer's own fields there are no step buttons: type the value or use
+  the ↑/↓ keys.
 - `Advanced`: pulser enable/width controls, equations and channel metadata.
 
 ON and `Load now` load the selected configuration's saved timing and update
@@ -73,11 +78,23 @@ Channels return to manual mode; equation text is retained for explicit reuse.
 
 ## Operator Panel
 
-The default view is a compact CH0–CH3 table: signal type, frequency, rail
-selection, time at Vpos/Vneg, and timing relative to the first periodic output.
+The default view shows the config in controller memory, a compact CH0–CH3
+table and a sketch of the expected switching. The table gives the signal type,
+frequency, rail levels, linked PSU, time at Vpos/Vneg, and timing relative to
+the first periodic output. A signal the panel could not infer is shown in amber.
 For the original config 79, all four outputs switch at 500 kHz with 1 µs at
 each level: CH0/CH2 together, CH1/CH3 opposite. P1–P3 being stopped does not
 mean that CH1–CH3 are disabled. Stopping P0 can leave outputs at a fixed rail.
+
+The sketch spans two periods of the first periodic output; time 0 is its switch
+to Vpos. It draws a square wave only where the table inferred the exact timing,
+a flat line for a constant rail and a dashed line for Hi-Z. Every other output
+stays an empty, labelled row; an output with its own period is marked as not
+phase-related. Like the table, it is **not a measurement**: edge delays, rise
+times, loads and external offsets are not shown. Disconnected, OFF or busy
+states show no waveform, which does not mean 0 V.
+
+The panel follows Explorer's light or dark theme.
 
 These are **expected dual-level switch signals**, not measured waveforms.
 The AMX itself does not report the external HV voltages. With a linked PSU,
@@ -109,8 +126,11 @@ claims. Failed reads, writes awaiting readback, transitions and disconnection
 invalidate the displayed signal. Hi-Z does not mean 0 V or a discharged output.
 
 `Advanced` contains P0–P3 controls and the channel table within the same
-scrollable panel. Cards separate requests from register readbacks; a green
+scrollable panel. The four cards share one row when the dock is wide enough.
+Cards separate requests from register readbacks; a green
 `REGISTERS APPLIED` confirms matching registers, not a physical waveform.
+The oscillator line compares the requested frequency with the period register
+and turns amber, `(not applied)`, when they differ.
 Typed widths wait for Enter, Tab or focus-out; scrolling never edits them.
 Equation-controlled widths are read-only in the cards. The switch delay
 register range remains `0..15`; values outside it are rejected.

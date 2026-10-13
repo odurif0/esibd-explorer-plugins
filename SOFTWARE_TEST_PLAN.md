@@ -112,6 +112,12 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   config; then a PLL-tuned config, which must show Unknown and the Clock 0 notice.
   Associate PSU_x in Settings and check the displayed rail voltages against the
   PSU panel. Only afterwards select `AMX_HD` in MScan, at zero amplitude first.
+- **AMX panel sketch (2026-10-13):** with the same scope set-up, on AMX HD and on
+  AMX A/B (config 79: 500 kHz, 1 µs per level, CH0/CH2 together), compare the
+  expected-switching sketch under the CH0–CH3 table with the scope (edge order,
+  Vpos/Vneg dwell); a static or Hi-Z config must give a flat or dashed row. Select another config while ON: `Load now` must turn amber until
+  it is loaded. Switch Explorer to the light theme once: all panel text must stay
+  readable.
 - **MScan quadrupole offset (2026-10-08):** select the AMPR offset channel and a
   small coefficient; in a short stepped scan, check on an independent meter that
   the offset follows U = U/V × A at each point and returns to its initial value.
