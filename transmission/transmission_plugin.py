@@ -136,6 +136,52 @@ def device_busy(device):
     return next((what for flag, what in DEVICE_BUSY.items() if _flag(controller, flag)), "")
 
 
+AMX_PAIR_LINKS = (("CH0-CH1", "psu_ch01"), ("CH2-CH3", "psu_ch23"))
+
+
+def is_amx(device):
+    """AMX and AMX HD plugins: each output pair is fed by the PSU linked in their Settings."""
+    try:
+        return all(hasattr(device, attr) for _, attr in AMX_PAIR_LINKS)
+    except Exception:  # noqa: BLE001 - a plugin whose Settings are not loaded yet
+        return False
+
+
+def amx_pairs(plugins):
+    """Every AMX output (channel pair CH0-CH1 or CH2-CH3) with its PSU rails, from Settings and channels only.
+
+    The two lines of an AMX output drive the two rod pairs of one quadrupole, switching in opposite phase
+    between the two outputs of the PSU linked to it (PSU CH0 = Vpos, CH1 = Vneg): one RF amplitude, whose
+    two rails move together; moving one alone would make the RF asymmetric."""
+    plugins = list(plugins)
+    result = []
+    for amx in plugins:
+        if not is_amx(amx):
+            continue
+        for pair, attr in AMX_PAIR_LINKS:
+            psu_name = str(getattr(amx, attr, "None") or "None")
+            entry = dict(amx=amx.name, device=amx, pair=pair, psu=None, rails=None, problem="")
+            matches = [p for p in plugins if getattr(p, "name", None) == psu_name]
+            if psu_name in ("", "None"):
+                entry["problem"] = f"no PSU linked to {amx.name} {pair} (AMX Settings)"
+            elif len(matches) != 1:
+                entry["problem"] = f"{psu_name}, linked to {amx.name} {pair}, is not loaded"
+            else:
+                entry["psu"] = psu_name
+                rails = []
+                for number in (0, 1):
+                    found = [c for c in matches[0].getChannels() if getattr(c, "real", True)
+                             and callable(getattr(c, "channel_number", None)) and c.channel_number() == number]
+                    if len(found) != 1:
+                        entry["problem"] = f"{psu_name} CH{number} is missing or ambiguous"
+                        break
+                    rails.append(found[0].name)
+                else:
+                    entry["rails"] = tuple(rails)
+            result.append(entry)
+    return result
+
+
 def is_esi_channel(channel):
     """ESI source channels: HV with unconfirmed discharge, and heater temperatures that start heating."""
     try:
@@ -244,10 +290,37 @@ class ExplorerInstrument(_engine.Instrument):
                 raise _engine.ConfigError(f"{name}: ESI channels are not driven by Transmission (HV discharge not "
                                           "confirmed; a temperature setpoint starts the heater). They can be measured.")
         self.measured = {name: self._resolve(manager, name) for name in (*config.current_channels, *config.pressure_channels)}
+        self.switches = self._amx_switches(plugin, config)
         self.expected = {}
         self.log = None
         self._latency = []
         self._window_details = {}
+
+    def _amx_switches(self, plugin, config):
+        """The AMX of every driven output. An AMX output is one RF drive: a setting moves both of its rails,
+        with the same gain, and nothing else; an AMX pulser channel is never driven."""
+        for name, channel in self.driven.items():
+            if is_amx(channel.getDevice()):
+                raise _engine.ConfigError(f"{name}: AMX pulser channels are not driven; an RF amplitude is the PSU rails "
+                                          "of an AMX output")
+        settings = [(knob.name, knob.channels) for stage in config.stages for knob in stage.knobs]
+        if config.target is not None:
+            settings.append((f"{config.target.filter_name or 'Mass filter'} RF amplitude", config.target.channels))
+        switches = {}
+        for entry in amx_pairs(getattr(plugin.pluginManager, "plugins", None) or []):
+            if not entry["rails"]:
+                continue
+            rails = [rail.strip().lower() for rail in entry["rails"]]
+            for name, channels in settings:
+                gains = {channel.strip().lower(): gain for channel, gain in channels.items()}
+                if not set(rails) & set(gains):
+                    continue
+                if set(gains) != set(rails) or gains[rails[0]] != gains[rails[1]]:
+                    raise _engine.ConfigError(
+                        f"{name}: {entry['amx']} {entry['pair']} is one RF drive; move both rails "
+                        f"{' and '.join(entry['rails'])} together, with the same gain, and nothing else")
+                switches[entry["amx"]] = entry["device"]
+        return switches
 
     def _record(self, event, **data):
         if self.log is not None:
@@ -467,6 +540,13 @@ class ExplorerInstrument(_engine.Instrument):
             expected = self.expected.get(name)
             if expected is not None and not math.isclose(float(channel.value), expected, rel_tol=1e-9, abs_tol=1e-9):
                 raise _engine.InstrumentError(f"{name}: setpoint changed outside the optimizer ({expected:g} -> {float(channel.value):g})")
+        for name, device in self.switches.items():
+            # Without its AMX switching, the rails reach no electrode: the RF amplitude would not exist.
+            if not device_on(device):
+                raise _engine.InstrumentError(f"{name} is OFF (it switches the RF rails); turn it ON in the {name} panel")
+            busy = device_busy(device)
+            if busy:
+                raise _engine.InstrumentError(f"{name}: {busy} in progress (it switches the RF rails)")
         for name, channel in self.measured.items():
             device = channel.getDevice()
             if not device_on(device):
@@ -560,7 +640,9 @@ class _BeamlineDialog(QDialog):
         self.plugin = plugin
         self.setWindowTitle("Transmission — beamline")
         self.resize(900, 760)
-        beamline = _beamline.normalize(beamline)
+        self.pairs = plugin.amx_pairs()
+        known = {(entry["amx"], entry["pair"]): entry["rails"] for entry in self.pairs if entry["rails"]}
+        beamline = _beamline.migrate(beamline, known)  # An RF saved as the two rails of a pair shows that pair.
         driven, currents, pressures = plugin.channel_lists()
         self.device_of = dict(beamline["devices"])
         for channel in plugin.pluginManager.DeviceManager.channels():
@@ -569,12 +651,28 @@ class _BeamlineDialog(QDialog):
             except Exception:  # noqa: BLE001 - a channel without a device: nothing to remember
                 pass
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<b>Settings</b> — the channel(s) of each element. An RF amplitude driven by two rails "
-                                "(MScan's Vpos and Vneg) uses both, with the same amplitude A."))
+        intro = QLabel("<b>Settings</b> — the channel(s) of each element. Each RF amplitude is an AMX output "
+                       "(CH0-CH1 or CH2-CH3): its two lines drive the rod pairs of the quadrupole, switching in "
+                       "opposite phase between the two outputs of the PSU linked to it in the AMX Settings, which "
+                       "move together (Vpos = Vneg = A, as in MScan). Choose the AMX output only.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         self.knobs = QTableWidget(len(_beamline.KNOBS), 5)
-        self.knobs.setHorizontalHeaderLabels(["Element", "Setting", "Channel", "Second channel", "Gain"])
+        self.knobs.setHorizontalHeaderLabels(["Element", "Setting", "Channel or AMX output", "Second channel", "Gain"])
         self.knob_widgets = {}
-        for row, (key, element, label, _) in enumerate(_beamline.KNOBS):
+        self.pair_widgets = {}
+        for row, (key, element, label, kind) in enumerate(_beamline.KNOBS):
+            if kind == "rf":
+                for column, text in enumerate((element, label)):
+                    self.knobs.setCellWidget(row, column, QLabel(text))
+                combo, rails = self._pair_combo(beamline["rf"].get(key)), QLabel()
+                combo.currentIndexChanged.connect(lambda _index, combo=combo, rails=rails: self._show_rails(combo, rails))
+                self._show_rails(combo, rails)
+                self.knobs.setCellWidget(row, 2, combo)
+                self.knobs.setSpan(row, 3, 1, 2)
+                self.knobs.setCellWidget(row, 3, rails)
+                self.pair_widgets[key] = combo
+                continue
             mapped = list(beamline["knobs"].get(key, {}).items())
             first = self._combo(driven, mapped[0][0] if mapped else None)
             second = self._combo(driven, mapped[1][0] if len(mapped) > 1 else None)
@@ -636,6 +734,38 @@ class _BeamlineDialog(QDialog):
         layout.addWidget(buttons)
         self.result_beamline = beamline
 
+    @staticmethod
+    def pair_key(amx, pair):
+        """Item data of a pair choice (Qt finds strings, not Python tuples)."""
+        return f"{amx}\t{pair}"
+
+    def _pair_combo(self, current):
+        combo = QComboBox()
+        combo.addItem(self.NONE, "")
+        for entry in self.pairs:  # AMX outputs only: the PSU of each follows from the AMX Settings.
+            combo.addItem(_beamline.pair_label(entry["amx"], entry["pair"]), self.pair_key(entry["amx"], entry["pair"]))
+        if current:
+            wanted = self.pair_key(current["amx"], current["pair"])
+            index = combo.findData(wanted)
+            if index < 0:  # Keep a mapped pair even if its AMX is not loaded now.
+                combo.addItem(f"{_beamline.pair_label(current['amx'], current['pair'])} · not loaded", wanted)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+        return combo
+
+    def _show_rails(self, combo, label):
+        data = combo.currentData() or ""
+        entry = next((e for e in self.pairs if self.pair_key(e["amx"], e["pair"]) == data), None)
+        if not data:
+            label.setText("")
+        elif entry is None:
+            label.setText(f"⚠ {data.split(chr(9))[0]} is not loaded")
+        elif entry["rails"] is None:
+            label.setText(f"⚠ {entry['problem']}")
+        else:
+            label.setText(f"{entry['psu']} (from the {entry['amx']} Settings): Vpos {entry['rails'][0]}, "
+                          f"Vneg {entry['rails'][1]}, both = A")
+
     def _combo(self, names, current):
         combo = QComboBox()
         items = [self.NONE, *names]
@@ -655,6 +785,11 @@ class _BeamlineDialog(QDialog):
                 channels[second.currentText()] = -1.0 if gain.currentIndex() == 1 else 1.0
             if channels:
                 knobs[key] = channels
+        rf = {}
+        for key, combo in self.pair_widgets.items():
+            if combo.currentData():
+                amx, pair = combo.currentData().split("\t")
+                rf[key] = {"amx": amx, "pair": pair}
         collectors = {key: combo.currentText() for key, combo in self.collector_widgets.items() if combo.currentText() != self.NONE}
         gauges = {}
         for name, (watch, low, high) in self.gauge_widgets.items():
@@ -664,14 +799,21 @@ class _BeamlineDialog(QDialog):
                 except ValueError:
                     raise ValueError(f"Gauge {name}: enter the minimum and maximum in mbar") from None
         return _beamline.normalize(dict(polarity=1 if self.polarity.currentIndex() == 0 else -1,
-                                        knobs=knobs, collectors=collectors, gauges=gauges, devices=self.device_of))
+                                        knobs=knobs, rf=rf, collectors=collectors, gauges=gauges, devices=self.device_of))
 
     def accept(self):
         try:
-            self.result_beamline = self.beamline()
+            beamline = self.beamline()
+            rails = {c for entry in self.pairs if entry["rails"] for c in entry["rails"]}
+            for key, channels in beamline["knobs"].items():
+                used = sorted(set(channels) & rails)
+                if used:
+                    raise ValueError(f"{_beamline.LABEL[key]}: {', '.join(used)} is a rail of an AMX output; "
+                                     "it moves with that output and cannot be a separate setting")
         except ValueError as exc:
             self.message.setText(f"<b>{exc}</b>")
             return
+        self.result_beamline = beamline
         super().accept()
 
 
@@ -1351,8 +1493,31 @@ class Transmission(Scan):
         self._save_state()
         self.refresh_panel()
 
+    def amx_pairs(self):
+        return amx_pairs(getattr(self.pluginManager, "plugins", None) or [])
+
+    @staticmethod
+    def _rail_lookup(pairs):
+        index = {(entry["amx"], entry["pair"]): entry for entry in pairs}
+
+        def rails(amx, pair):
+            entry = index.get((amx, pair))
+            if entry is None:
+                raise ValueError(f"{amx} is not loaded (enable it in the Plugin Manager, then restart Explorer)")
+            if entry["rails"] is None:
+                raise ValueError(entry["problem"])
+            return entry["rails"]
+        return rails
+
+    def resolved_beamline(self):
+        """(beamline with each RF pair turned into its two rails, problems); see _beamline.resolve."""
+        pairs = self.amx_pairs()
+        known = {(entry["amx"], entry["pair"]): entry["rails"] for entry in pairs if entry["rails"]}
+        rails = {channel for entry in pairs if entry["rails"] for channel in entry["rails"]}
+        return _beamline.resolve(_beamline.migrate(self.beamline_map, known), self._rail_lookup(pairs), rails)
+
     def active_beamline(self):
-        return _beamline.normalize(_simulator.BEAMLINE) if self._simulated() else self.beamline_map
+        return _beamline.normalize(_simulator.BEAMLINE) if self._simulated() else self.resolved_beamline()[0]
 
     def refresh_panel(self):
         if self._closing:
@@ -1363,12 +1528,15 @@ class Transmission(Scan):
         updating, self._updating = self._updating, True
         try:
             beamline = self.active_beamline()
+            problems = [] if self._simulated() else self.resolved_beamline()[1]
             if self._simulated():
                 panel.beamline_label.setText(f"Simulation: built-in beamline ({_beamline.summary(beamline)}).")
             elif beamline["knobs"] and beamline["collectors"]:
-                panel.beamline_label.setText(f"✓ {_beamline.summary(beamline)}")
+                panel.beamline_label.setText(f"✓ {_beamline.summary(beamline)}"
+                                             + "".join(f"\n⚠ {problem}" for problem in problems))
             else:
-                panel.beamline_label.setText("Not configured yet: choose which channels drive the elements and measure the apertures.")
+                panel.beamline_label.setText("Not configured yet: choose which channels drive the elements and measure the apertures."
+                                             + "".join(f"\n⚠ {problem}" for problem in problems))
             filters = _beamline.filters(beamline)
             panel.filter.clear()
             for key, label in filters:
@@ -1442,8 +1610,16 @@ class Transmission(Scan):
             self.panel.progress.setText(text)
 
     def channel_lists(self):
+        """(driven, currents, pressures) channel names. AMX pulser channels and the rails of AMX outputs are
+        not offered as settings: an RF amplitude is chosen as an AMX output."""
         driven, currents, pressures = [], [], []
+        rails = {c for entry in self.amx_pairs() if entry["rails"] for c in entry["rails"]}
         for channel in self.pluginManager.DeviceManager.channels():
+            try:
+                if channel.name in rails or is_amx(channel.getDevice()):
+                    continue
+            except Exception:  # noqa: BLE001, S110 - a channel without a device is judged by its unit below
+                pass
             try:
                 unit = str(channel.unit or "")
             except Exception:  # noqa: BLE001 - a channel without a device unit
@@ -1458,7 +1634,16 @@ class Transmission(Scan):
         return driven, currents, pressures
 
     def template_text(self):
-        return _engine.template(*self.channel_lists())
+        lines = [_engine.template(*self.channel_lists()).rstrip("\n"), "",
+                 "# An RF amplitude is an AMX output: one knob moves both rails (PSU outputs) of that AMX output, each with gain 1.0",
+                 "# (Vpos = Vneg = A, as in MScan), and nothing else."]
+        for entry in self.amx_pairs():
+            if entry["rails"]:
+                rails = ", ".join(f'"{rail}" = 1.0' for rail in entry["rails"])
+                lines.append(f"#   {_beamline.pair_label(entry['amx'], entry['pair'])}: channels = {{ {rails} }}")
+            else:
+                lines.append(f"#   {_beamline.pair_label(entry['amx'], entry['pair'])}: {entry['problem']}")
+        return "\n".join(lines) + "\n"
 
     def generated_text(self):
         try:
@@ -1615,7 +1800,7 @@ class Transmission(Scan):
             _, config = self._configuration()
             return list(config.driven_channels), [*config.current_channels, *config.pressure_channels]
         except (_engine.ConfigError, OSError):
-            beamline = self.beamline_map
+            beamline = self.active_beamline()
             driven = [c for channels in beamline["knobs"].values() for c in channels]
             return driven, [*beamline["collectors"].values(), *beamline["gauges"]]
 
@@ -1642,6 +1827,13 @@ class Transmission(Scan):
                 entry = entries.setdefault(device.name, dict(name=device.name, device=device, driven=[], measured=[],
                                                              esi=device.name == "ESI" or is_esi_channel(channel)))
                 entry[role].append(name)
+        wanted = {name.strip().lower() for name in driven}
+        for pair in self.amx_pairs():
+            switched = [rail for rail in pair["rails"] or () if rail.strip().lower() in wanted]
+            if switched:
+                entry = entries.setdefault(pair["amx"], dict(name=pair["amx"], device=pair["device"], driven=[], measured=[],
+                                                              esi=False))
+                entry.setdefault("switches", []).append(pair["pair"])
         for entry in entries.values():
             device = entry["device"]
             if device is None:
@@ -1673,6 +1865,8 @@ class Transmission(Scan):
             roles.append("drives " + ", ".join(entry["driven"]))
         if entry["measured"]:
             roles.append("measures " + ", ".join(entry["measured"]))
+        if entry.get("switches"):
+            roles.append("switches the RF of " + ", ".join(entry["switches"]))
         return "; ".join(roles)
 
     def _describe(self, entry):

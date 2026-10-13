@@ -463,6 +463,52 @@ def test_beamline_description_round_trips_and_rejects_conflicts(rt, bl):
             bl.normalize(broken)
 
 
+def test_an_rf_amplitude_is_one_amx_pair_moving_both_rails(rt, bl):
+    # An AMX output (CH0-CH1 or CH2-CH3): its two lines drive the rod pairs of one quadrupole, switching in
+    # opposite phase between the two outputs of one PSU. One RF drive.
+    pairs = {("AMX_A", "CH0-CH1"): ("PSU_A CH0", "PSU_A CH1"), ("AMX_A", "CH2-CH3"): ("PSU_B CH0", "PSU_B CH1"),
+             ("AMX_B", "CH0-CH1"): ("PSU_A CH0", "PSU_A CH1")}  # AMX_B is linked to the same PSU as AMX_A CH0-CH1.
+
+    def rails(amx, pair):
+        if (amx, pair) not in pairs:
+            raise ValueError(f"no PSU linked to {amx} {pair} (AMX Settings)")
+        return pairs[(amx, pair)]
+    all_rails = {c for r in pairs.values() for c in r}
+    description = dict(knobs={"q2_offset": {"AMPR Q2": 1.0}}, rf={"q2_rf": {"amx": "AMX_A", "pair": "CH0-CH1"},
+                                                                    "q4_rf": {"amx": "AMX_A", "pair": "CH2-CH3"}},
+                       collectors={"collector": "DMMR 5"})
+    assert bl.summary(description) == "3 settings · 1 current · 0 gauges"
+    assert bl.loads(bl.dumps(description)) == bl.normalize(description)
+    resolved, problems = bl.resolve(description, rails, all_rails)
+    assert problems == [] and resolved["rf"] == {}
+    assert resolved["knobs"] == {"q2_offset": {"AMPR Q2": 1.0}, "q2_rf": {"PSU_A CH0": 1.0, "PSU_A CH1": 1.0},
+                                 "q4_rf": {"PSU_B CH0": 1.0, "PSU_B CH1": 1.0}}
+    assert bl.filters(resolved) == [("q2", "Q2"), ("q4", "Q4")]
+    # Refused mappings are reported and never driven.
+    broken = dict(knobs={"inlet": {"PSU_B CH1": 1.0}, "q1_rf": {"Free RF": 1.0}},
+                  rf={"q2_rf": {"amx": "AMX_A", "pair": "CH0-CH1"}, "q3_rf": {"amx": "AMX_B", "pair": "CH0-CH1"},
+                      "q4_rf": {"amx": "AMX_B", "pair": "CH2-CH3"}})
+    resolved, problems = bl.resolve(broken, rails, all_rails)
+    assert list(resolved["knobs"]) == ["q2_rf"]
+    assert problems == ["Inlet voltage: PSU_B CH1 is an AMX rail and moves with its AMX output; it is not driven",
+                        "Q1 RF amplitude: choose its AMX output (Configure…); it is not driven",
+                        "Q3 RF amplitude: same rails as Q2 RF amplitude (one PSU feeds both AMX outputs); it is not driven",
+                        "Q4 RF amplitude: no PSU linked to AMX_B CH2-CH3 (AMX Settings)"], problems
+    # A beamline saved as two rails becomes the pair; anything else is left for resolve to refuse.
+    legacy = dict(knobs={"q2_rf": {"PSU_A CH1": 1.0, "PSU_A CH0": 1.0}, "q4_rf": {"PSU_B CH0": 1.0}})
+    migrated = bl.migrate(legacy, {k: v for k, v in pairs.items() if k[0] == "AMX_A"})
+    assert migrated["rf"] == {"q2_rf": {"amx": "AMX_A", "pair": "CH0-CH1"}} and list(migrated["knobs"]) == ["q4_rf"]
+    for broken, message in (
+        (dict(rf={"q2_offset": {"amx": "AMX_A", "pair": "CH0-CH1"}}), "not an RF amplitude"),
+        (dict(rf={"q2_rf": {"amx": "AMX_A", "pair": "CH1-CH2"}}), "choose an AMX output"),
+        (dict(rf={"q2_rf": {"amx": "AMX_A", "pair": "CH0-CH1"}}, knobs={"q2_rf": {"X": 1.0}}), "both to an AMX output"),
+        (dict(rf={"q2_rf": {"amx": "AMX_A", "pair": "CH0-CH1"}, "q3_rf": {"amx": "AMX_A", "pair": "CH0-CH1"}}),
+         "assigned to two elements"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            bl.normalize(broken)
+
+
 def test_partial_beamline_runs_only_what_is_measured(rt, bl):
     engine, _ = rt
     beamline = dict(knobs={"funnel_exit": {"PSU Exit": 1.0}, "q2_offset": {"PSU Q2": 1.0},

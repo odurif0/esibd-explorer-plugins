@@ -53,7 +53,7 @@ reference_every = 4
 strategy = "coordinate"
 [target]
 filter = "Q2"
-channels = { Q2_RF = 1.0 }
+channels = { Q2_RF = 1.0, "Q2_RF neg" = 1.0 }  # Both rails of the AMX output, as in MScan.
 center = 520.0
 width = 30.0
 measure = ["A3", "A4", "Collector"]
@@ -379,7 +379,7 @@ def scenario_body(env):
         assert picked["source"] == str(target / "S001_mscan.h5") and picked["filter"] == "q2"
         assert abs(panel.center.value() - 520.0) < 5.0 and panel.width.value() > 20.0 and panel.optimize.isEnabled()
         assert [key for key in panel.stage_boxes] == ["funnel", "q1", "q2", "q3", "q4", "final"]
-        assert "Q2 rf amplitude" not in scan.generated_text() and 'filter = "Q2"' in scan.generated_text()
+        assert "Q2 RF amplitude" not in scan.generated_text() and 'filter = "Q2"' in scan.generated_text()
         assert not exports and not errors, errors
         return 0
 
@@ -560,10 +560,33 @@ def explorer_scenario(env):
                         _manual_apply_worker_running=False, _hv_config_loading=False)
     dmmr = FakeDevice("DMMR_SIM", "A", True)
     tpg = FakeDevice("TPG_SIM", "mbar", False)
-    knobs = {name: FakeChannel(psu, name, spec[2], spec[:2]) for name, spec in simulator.KNOBS.items()}
+    # Every RF amplitude is an AMX output: a PSU per output, CH0 = Vpos (named like the simulator knob, whose
+    # physics reads it) and CH1 = Vneg, linked in the Settings of the AMX that switches them.
+    rf_names = [name for name in simulator.KNOBS if name.endswith("_RF")]
+    rf_psus = {name: FakeDevice(f"PSU_{name}", "V", True) for name in rf_names}
+    knobs = {}
+    for name, spec in simulator.KNOBS.items():
+        knobs[name] = FakeChannel(rf_psus.get(name, psu), name, spec[2], spec[:2])
+        if name in rf_psus:
+            knobs[f"{name} neg"] = FakeChannel(rf_psus[name], f"{name} neg", spec[2], spec[:2])
+            for number, channel in enumerate((knobs[name], knobs[f"{name} neg"])):
+                channel.channel_number = lambda number=number: number
+    amxs, rf_pairs = [], {}
+    for index in range(0, len(rf_names), 2):
+        amx = FakeDevice(f"AMX_SIM_{index // 2}", "V", False)
+        amx_pulser = FakeChannel(amx, f"{amx.name} P0", 1.0)  # A pulse width: never a Transmission setting.
+        amx_pulser.inout = core.INOUT.IN
+        for (pair, attr), name in zip((("CH0-CH1", "psu_ch01"), ("CH2-CH3", "psu_ch23")), [*rf_names[index:index + 2], None]):
+            setattr(amx, attr, rf_psus[name].name if name else "None")
+            if name:
+                rf_pairs[name.lower()] = {"amx": amx.name, "pair": pair}
+        amxs.append(amx)
+    paired = dict(simulator.BEAMLINE, knobs={k: v for k, v in simulator.BEAMLINE["knobs"].items() if not k.endswith("_rf")},
+                  rf=rf_pairs)
     currents = {name: FakeChannel(dmmr, name) for name in simulator.CURRENTS}
     pressures = {name: FakeChannel(tpg, name, value) for name, value in simulator.PRESSURES.items()}
-    devices.extend([psu, dmmr, tpg])
+    devices.extend([psu, dmmr, tpg, *rf_psus.values(), *amxs])
+    scan.pluginManager.plugins.extend([*rf_psus.values(), *amxs])
     rng = np.random.default_rng(0)
     state = dict(pressure_factor=1.0)
 
@@ -620,18 +643,47 @@ def explorer_scenario(env):
         esi_hv = FakeChannel(esi, "ESI HV1", 0.0, (0.0, 3000.0))
         devices.append(esi)
         driven, measured, gauges = scan.channel_lists()
-        assert driven == list(simulator.KNOBS) and measured == list(simulator.CURRENTS)  # No ESI channel offered.
-        assert gauges == list(simulator.PRESSURES)
+        # No ESI channel, no AMX pulser channel and no rail of an AMX output is offered as a setting.
+        assert driven == [name for name in simulator.KNOBS if not name.endswith("_RF")], driven
+        assert measured == list(simulator.CURRENTS) and gauges == list(simulator.PRESSURES)
         config = module._engine.parse_config('[[stage]]\nname="s"\ndownstream=["A1"]\n[[stage.knob]]\n'
                                              'channels={"ESI HV1"=1.0}\nwindow=[-1.0, 1.0]\nmax_step=1.0\n')
         with pytest.raises(module._engine.ConfigError, match="ESI channels are not driven"):
             module.ExplorerInstrument(scan, config, threading.Event())
         devices.remove(esi)
         assert esi_hv.value == 0.0 and not sets
+        # Any configuration, advanced ones included: an AMX output's rails move as one, a pulser never moves.
+        for channels, message in (('{Q2_RF=1.0}', "one RF drive"), ('{Q2_RF=1.0, "Q2_RF neg"=-1.0}', "same gain"),
+                                  ('{Q2_RF=1.0, "Q2_RF neg"=1.0, Inlet=1.0}', "nothing else"),
+                                  ('{"AMX_SIM_1 P0"=1.0}', "AMX pulser channels are not driven")):
+            config = module._engine.parse_config('[[stage]]\nname="s"\ndownstream=["A1"]\n[[stage.knob]]\n'
+                                                 f'channels={channels}\nwindow=[-1.0, 1.0]\nmax_step=1.0\n')
+            with pytest.raises(module._engine.ConfigError, match=message):
+                module.ExplorerInstrument(scan, config, threading.Event())
+        config = module._engine.parse_config('[[stage]]\nname="s"\ndownstream=["A1"]\n[[stage.knob]]\n'
+                                             'channels={Q2_RF=1.0, "Q2_RF neg"=1.0}\nwindow=[-1.0, 1.0]\nmax_step=1.0\n')
+        instrument = module.ExplorerInstrument(scan, config, threading.Event())
+        assert list(instrument.switches) == ["AMX_SIM_1"]
+        amxs[1].on = False  # Without its switch the rails reach no electrode: the run is refused.
+        with pytest.raises(module._engine.InstrumentError, match="AMX_SIM_1 is OFF"):
+            instrument._check()
+        report = {e["name"]: e for e in scan.device_report(["Q2_RF", "Q2_RF neg"], [])}
+        assert report["AMX_SIM_1"]["state"] == "off" and report["AMX_SIM_1"]["switches"] == ["CH0-CH1"]
+        assert "switches the RF of CH0-CH1" in scan._describe(report["AMX_SIM_1"])
+        amxs[1].on = True
+        assert not sets
         dialog = module._BeamlineDialog(scan, scan.beamline_map)
-        for key, channels in simulator.BEAMLINE["knobs"].items():
+        for key, channels in paired["knobs"].items():
             dialog.knob_widgets[key][0].setCurrentText(next(iter(channels)))
-        dialog.knob_widgets["q2_rf"][1].setCurrentText("Q3_RF")  # A second rail, then removed again.
+        for key, entry in paired["rf"].items():
+            combo = dialog.pair_widgets[key]
+            combo.setCurrentIndex(combo.findData(dialog.pair_key(entry["amx"], entry["pair"])))
+        dialog.show()
+        QTest.qWait(50)
+        dialog.grab().save(str(target / "beamline.png"))
+        q2 = dialog.knobs.cellWidget(next(i for i, k in enumerate(beamline_module.KNOBS) if k[0] == "q2_rf"), 3)
+        assert q2.text() == "PSU_Q2_RF (from the AMX_SIM_1 Settings): Vpos Q2_RF, Vneg Q2_RF neg, both = A", q2.text()
+        assert dialog.pair_widgets["q2_rf"].currentText() == "AMX_SIM_1 CH0-CH1"  # An AMX output, not a PSU.
         for key, channel in simulator.BEAMLINE["collectors"].items():
             dialog.collector_widgets[key].setCurrentText(channel)
         watch, low, high = dialog.gauge_widgets["P_funnel"]
@@ -642,18 +694,37 @@ def explorer_scenario(env):
         dialog.accept()
         assert "two apertures" in dialog.message.text() and dialog.result() == 0
         dialog.collector_widgets["A2"].setCurrentText("A2")
-        dialog.knob_widgets["q2_rf"][1].setCurrentText(dialog.NONE)
+        q3 = dialog.pair_widgets["q3_rf"]
+        q3.setCurrentIndex(dialog.pair_widgets["q2_rf"].currentIndex())  # One pair, two quadrupoles: refused.
+        dialog.accept()
+        assert "assigned to two elements" in dialog.message.text() and dialog.result() == 0
+        q3.setCurrentIndex(q3.findData(dialog.pair_key(paired["rf"]["q3_rf"]["amx"], paired["rf"]["q3_rf"]["pair"])))
         dialog.accept()
         owners = {c.name: d.name for d in devices for c in d.channels}
-        expected = dict(simulator.BEAMLINE, gauges={"P_funnel": [2.0, 6.0]}, devices=owners)
+        expected = dict(paired, gauges={"P_funnel": [2.0, 6.0]}, devices=owners)
         assert dialog.result_beamline == beamline_module.normalize(expected), dialog.result_beamline
         assert dialog.result_beamline["devices"]["Inlet"] == "PSU_SIM" and "P_Q4" not in dialog.result_beamline["devices"]
+        # A beamline saved before the pairs: two rails of a pair become the pair, a rail as a DC setting is refused.
+        legacy = dict(knobs={"q2_rf": {"Q2_RF": 1.0, "Q2_RF neg": 1.0}, "inlet": {"Q4_RF": 1.0}})
+        old = module._BeamlineDialog(scan, legacy)
+        assert old.pair_widgets["q2_rf"].currentData() == old.pair_key("AMX_SIM_1", "CH0-CH1")
+        old.accept()
+        assert "Q4_RF is a rail of an AMX output" in old.message.text() and old.result() == 0
+        scan.save_beamline(legacy)
+        resolved, problems = scan.resolved_beamline()
+        assert resolved["knobs"] == {"q2_rf": {"Q2_RF": 1.0, "Q2_RF neg": 1.0}}
+        assert problems == ["Inlet voltage: Q4_RF is an AMX rail and moves with its AMX output; it is not driven"], problems
         scan.save_beamline(dialog.result_beamline)
         module._BeamlineDialog.exec = lambda self: (self.accept(), True)[1]
         scan.configure_beamline()  # Reopened unchanged, the dialog gives back the saved mapping.
         saved = beamline_module.loads((target / "config" / "Transmission.beamline.json").read_text(encoding="utf-8"))
         assert saved == beamline_module.normalize(expected) == scan.beamline_map
         assert panel.beamline_label.text() == "✓ 12 settings · 5 currents · 1 gauge", panel.beamline_label.text()
+        assert scan.active_beamline()["knobs"]["q2_rf"] == {"Q2_RF": 1.0, "Q2_RF neg": 1.0}
+        template = scan.template_text()
+        assert '#   AMX_SIM_1 CH0-CH1: channels = { "Q2_RF" = 1.0, "Q2_RF neg" = 1.0 }' in template, template
+        assert "#   AMX_SIM_2 CH2-CH3: no PSU linked to AMX_SIM_2 CH2-CH3 (AMX Settings)" in template
+        module._engine.parse_config(template)  # Still a valid starting configuration.
         assert panel.optimize.isEnabled() and len(panel.stage_boxes) == 6
         config = module._engine.parse_config(scan.generated_text())
         assert scan.missing_channels(config) == [] and config.pressure == {"P_funnel": (2.0, 6.0)}
@@ -690,7 +761,7 @@ def explorer_scenario(env):
         return psu_scenario(env, locals())
     if scenario == "explorer-devices":
         return devices_scenario(env, locals())
-    scan.save_beamline(simulator.BEAMLINE)  # The fake channels carry the simulator's names.
+    scan.save_beamline(paired)  # The fake channels carry the simulator's names; each RF is an AMX output.
     path = scan.default_config_path()
     path.write_text(EXPLORER_MASS_CONFIG if scenario == "explorer-mass" else EXPLORER_CONFIG, encoding="utf-8")
     scan.state.update(advanced=True, simulation=False)
@@ -720,7 +791,7 @@ def explorer_scenario(env):
         (sweep,) = run_logs("sweep")
         assert module._log.read(sweep)[0]["channels"]["driven"]["Q2_RF"]["value"] == start["Q2_RF"]
         assert knobs["Q2_RF"].value == start["Q2_RF"]
-        check_steps({"Q2_RF": 20.0})
+        check_steps({"Q2_RF": 20.0, "Q2_RF neg": 20.0})
         sets.clear()
     scan.start_optimization()
     if scenario not in ("explorer-run", "explorer-mass"):
@@ -738,7 +809,8 @@ def explorer_scenario(env):
     wait_finished(150)
     result = scan._result
     print("RESULT", json.dumps(module._jsonable(result))[:1500])
-    limits = {"Q2_RF": 15.0, "Q1_offset": 1.0} if scenario == "explorer-mass" else {"Inlet": 10.0, "Funnel_exit": 1.5}
+    limits = ({"Q2_RF": 15.0, "Q2_RF neg": 15.0, "Q1_offset": 1.0} if scenario == "explorer-mass"
+              else {"Inlet": 10.0, "Funnel_exit": 1.5})
     check_steps(limits, 3.0 if scenario == "explorer-external-change" else None)
     (run_log,) = run_logs("run")
     events = module._log.read(run_log)
@@ -767,6 +839,7 @@ def explorer_scenario(env):
     elif scenario == "explorer-mass":
         assert result["status"] == "completed", result
         assert abs(result["target"]["final_center"] - 520.0) <= 60.0 and knobs["Q2_RF"].value == result["target"]["final_center"]
+        assert knobs["Q2_RF neg"].value == knobs["Q2_RF"].value  # The pair moved as one.
         assert len(result["spectra"]["before"]["amplitude"]) == 7 and "after" in result["spectra"]
         assert panel.result.text().startswith("Selected mass (Q2 at "), panel.result.text()
     elif scenario in ("explorer-external-change", "explorer-device-off"):

@@ -5,6 +5,13 @@ channels, each aperture to a current channel and optional gauges to soft
 pressure limits. Windows and steps come from defaults per kind of setting,
 scaled by the exploration level. Amplitudes are in volts, like MScan; the m/z
 calibration belongs to MScan.
+
+Every RF amplitude is an AMX output, never free channels. An AMX has two
+outputs, CH0-CH1 and CH2-CH3, each feeding one quadrupole: its two lines drive
+the two rod pairs and switch, in opposite phase, between the two outputs (rails)
+of the PSU linked to it in the AMX Settings: PSU CH0 = Vpos, CH1 = Vneg. Both
+rails move together (Vpos = Vneg = A as magnitudes, as in MScan). The stored description keeps the AMX output
+(``rf``, named by its channel pair); ``resolve`` turns it into its two rails.
 SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
@@ -50,12 +57,20 @@ LEVELS = {"fine": 0.4, "normal": 1.0, "wide": 2.5}
 KIND_DEFAULTS = {"inlet": (20.0, 2.0, False), "dc": (10.0, 1.0, False), "offset": (10.0, 1.0, False),
                  "rf": (0.15, 0.02, True)}
 KIND = {key: kind for key, _, _, kind in KNOBS}
-LABEL = {key: f"{element} {label.lower()}" for key, element, label, _ in KNOBS}
+LABEL = {key: f"{element} {label if label.isupper() or label.split()[0].isupper() else label.lower()}"
+         for key, element, label, _ in KNOBS}  # "Q2 RF amplitude", "Funnel DC gradient", "Inlet voltage".
+RF_KEYS = tuple(key for key, _, _, kind in KNOBS if kind == "rf")
+PAIRS = ("CH0-CH1", "CH2-CH3")  # AMX output pairs, each fed by one PSU: CH0 = Vpos, CH1 = Vneg.
 
 
 def empty():
-    # devices: the device (plugin) of each mapped channel when it was configured, to name a missing plugin.
-    return {"polarity": 1, "knobs": {}, "collectors": {}, "gauges": {}, "devices": {}}
+    # rf: the AMX output (channel pair) of each RF amplitude. devices: the device (plugin) of each mapped channel when it
+    # was configured, to name a missing plugin.
+    return {"polarity": 1, "knobs": {}, "rf": {}, "collectors": {}, "gauges": {}, "devices": {}}
+
+
+def pair_label(amx, pair):
+    return f"{amx} {pair}"
 
 
 def normalize(beamline):
@@ -74,6 +89,21 @@ def normalize(beamline):
             raise ValueError(f"{LABEL[key]}: gains must be finite and nonzero")
         if channels:
             result["knobs"][key] = channels
+    for key, entry in (data.get("rf") or {}).items():
+        if key not in RF_KEYS:
+            raise ValueError(f"{LABEL.get(key, key)} is not an RF amplitude")
+        amx, pair = str((entry or {}).get("amx", "")).strip(), str((entry or {}).get("pair", "")).strip()
+        if not amx and not pair:
+            continue
+        if not amx or pair not in PAIRS:
+            raise ValueError(f"{LABEL[key]}: choose an AMX output ({' or '.join(PAIRS)})")
+        if key in result["knobs"]:
+            raise ValueError(f"{LABEL[key]}: mapped both to an AMX output and to channels")
+        result["rf"][key] = {"amx": amx, "pair": pair}
+    pairs = [pair_label(e["amx"], e["pair"]) for e in result["rf"].values()]
+    for label in dict.fromkeys(pairs):
+        if pairs.count(label) > 1:
+            raise ValueError(f"{label} drives one RF amplitude only; it is assigned to two elements")
     for key, channel in (data.get("collectors") or {}).items():
         if key not in dict(COLLECTORS):
             raise ValueError(f"Unknown collector {key!r}")
@@ -87,6 +117,7 @@ def normalize(beamline):
     used = [c for channels in result["knobs"].values() for c in channels]
     measured = list(result["collectors"].values())
     mapped = {*used, *measured, *result["gauges"]}
+    mapped |= {e["amx"] for e in result["rf"].values()}
     result["devices"] = {str(c): str(d) for c, d in (data.get("devices") or {}).items() if str(c) in mapped and d}
     if len(set(measured)) != len(measured):
         raise ValueError("A current channel is assigned to two apertures")
@@ -105,10 +136,66 @@ def loads(text):
 
 def summary(beamline):
     beamline = normalize(beamline)
-    knobs = len(beamline["knobs"])
+    knobs = len(beamline["knobs"]) + len(beamline["rf"])
     return (f"{knobs} setting{'s' * (knobs != 1)} · {len(beamline['collectors'])} current"
             f"{'s' * (len(beamline['collectors']) != 1)} · {len(beamline['gauges'])} gauge"
             f"{'s' * (len(beamline['gauges']) != 1)}")
+
+
+def migrate(beamline, pairs):
+    """An RF amplitude saved as the two rails of a known pair becomes that pair.
+
+    ``pairs``: {(amx, pair): (vpos, vneg)} rail channel names. Other channel mappings of an RF
+    amplitude are left for ``resolve`` to refuse; nothing changes if a pair would serve twice."""
+    original = normalize(beamline)
+    migrated = normalize(beamline)
+    owner = {frozenset(rails): key for key, rails in pairs.items()}
+    for key in [k for k in RF_KEYS if k in migrated["knobs"]]:
+        channels = migrated["knobs"][key]
+        found = owner.get(frozenset(channels))
+        if found is not None and len(channels) == 2 and all(g == 1.0 for g in channels.values()):
+            del migrated["knobs"][key]
+            migrated["rf"][key] = {"amx": found[0], "pair": found[1]}
+    try:
+        return normalize(migrated)
+    except ValueError:
+        return original
+
+
+def resolve(beamline, rails, amx_rails=()):
+    """(beamline with each RF pair replaced by its rail channels, problems).
+
+    ``rails(amx, pair)`` returns the (Vpos, Vneg) channel names or raises ValueError with the reason.
+    ``amx_rails``: every channel that is a rail of an AMX output; such a channel is never a DC setting and
+    an RF amplitude never drives free channels. A refused mapping is dropped, never driven."""
+    beamline = normalize(beamline)
+    problems = []
+    knobs = {}
+    rail_set = set(amx_rails)
+    for key, channels in beamline["knobs"].items():
+        if KIND[key] == "rf":
+            problems.append(f"{LABEL[key]}: choose its AMX output (Configure…); it is not driven")
+            continue
+        used = sorted(set(channels) & rail_set)
+        if used:
+            problems.append(f"{LABEL[key]}: {', '.join(used)} is an AMX rail and moves with its AMX output; it is not driven")
+            continue
+        knobs[key] = channels
+    owners = {}
+    for key, entry in beamline["rf"].items():
+        try:
+            vpos, vneg = rails(entry["amx"], entry["pair"])
+        except ValueError as exc:
+            problems.append(f"{LABEL[key]}: {exc}")
+            continue
+        shared = [owners[c] for c in (vpos, vneg) if c in owners]
+        if shared:
+            problems.append(f"{LABEL[key]}: same rails as {LABEL[shared[0]]} (one PSU feeds both AMX outputs); it is not driven")
+            continue
+        owners.update({vpos: key, vneg: key})
+        knobs[key] = {vpos: 1.0, vneg: 1.0}
+    resolved = dict(beamline, knobs={k: knobs[k] for k in KIND if k in knobs}, rf={})
+    return normalize(resolved), problems
 
 
 def _collector_keys():
