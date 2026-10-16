@@ -109,6 +109,39 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                 self._communication_error = f"{action}: {self.format_status(status)}"
             raise RuntimeError(f"ESI {action} failed: {self.format_status(status)}")
 
+    def _capture_serial_diagnostics(self, step_name, status):
+        """Log the vendor serial-error latches after a negative DLL return.
+
+        Same pattern as the DMMR runtime: raw base getters under the
+        already-held transport lock, before the CGC Purge clears the latches
+        (COM-ESI-CTRL.h: GetIOState/GetCommError read *and clear* them).
+        Log-only: never raises, never touches outputs or transport state.
+        The initial-open path (_call_initial_open) is not covered.
+        """
+        parts = []
+        for getter, decoder in (("get_io_state", ESIBase.get_io_state_message),
+                                ("get_comm_error", ESIBase.get_comm_error_message)):
+            if self._transport_poisoned:
+                parts.append(f"{getter}: skipped (transport poisoned)")
+                break
+            try:
+                _, value = getattr(ESIBase, getter)(self)
+                try:
+                    text = decoder(self, value)
+                except Exception as exc:
+                    text = f"message unavailable ({type(exc).__name__})"
+                formatted = f"0x{value:08X}" if getter == "get_comm_error" else str(value)
+                parts.append(f"{getter}={formatted} ({text})" if text else f"{getter}={formatted}")
+            except Exception as exc:
+                parts.append(f"{getter}=unavailable ({type(exc).__name__}: {exc})")
+        try:
+            self.logger.warning(
+                "DLL %s returned %s; vendor serial diagnostics: %s",
+                step_name, self.format_status(status), "; ".join(parts),
+            )
+        except Exception:
+            pass
+
     def _call_locked_with_timeout(self, method, timeout_s, step_name, *args, **kwargs):
         def call():
             error = getattr(self, "_communication_error", None)
@@ -117,9 +150,17 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                 # all native I/O and never replay the failed output command.
                 self.logger.warning(f"Restoring ESI communication with CGC Purge after {error}")
                 status = ESIBase.purge(self)
+                if isinstance(status, int) and status < 0:
+                    self._capture_serial_diagnostics("purge", status)
                 self._raise_on_status(status, "purge")
                 self._communication_error = None
-            return method(*args, **kwargs)
+            result = method(*args, **kwargs)
+            status = result[0] if isinstance(result, tuple) and result else result
+            if isinstance(status, int) and status < 0:
+                # Capture the vendor latches while the lock is still held, before
+                # the next-call purge clears them.
+                self._capture_serial_diagnostics(step_name, status)
+            return result
 
         return super()._call_locked_with_timeout(call, timeout_s, step_name)
 

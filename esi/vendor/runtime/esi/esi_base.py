@@ -1110,3 +1110,17 @@ class ESIBase:
         err = ctypes.c_uint32()
         status = self.esi_dll.COM_ESI_CTRL_GetCommError(ctypes.byref(err))
         return status, err.value
+
+    def get_io_state_message(self, io_state):
+        """Get error message for the given serial port interface state."""
+        self.esi_dll.COM_ESI_CTRL_GetIOStateMessage.restype = ctypes.c_char_p
+        self.esi_dll.COM_ESI_CTRL_GetIOStateMessage.argtypes = [ctypes.c_int]
+        msg = self.esi_dll.COM_ESI_CTRL_GetIOStateMessage(int(io_state))
+        return msg.decode(errors="replace") if msg else ""
+
+    def get_comm_error_message(self, comm_error):
+        """Get error message for the given communication-port error code."""
+        self.esi_dll.COM_ESI_CTRL_GetCommErrorMessage.restype = ctypes.c_char_p
+        self.esi_dll.COM_ESI_CTRL_GetCommErrorMessage.argtypes = [ctypes.c_uint32]
+        msg = self.esi_dll.COM_ESI_CTRL_GetCommErrorMessage(int(comm_error) & 0xFFFFFFFF)
+        return msg.decode(errors="replace") if msg else ""
