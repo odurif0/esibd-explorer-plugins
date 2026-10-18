@@ -289,7 +289,9 @@ class ESIBase:
             "COM_ESI_CTRL_GetErrorMessage": ([], ctypes.c_char_p),
             "COM_ESI_CTRL_GetIOErrorMessage": ([], ctypes.c_char_p),
             "COM_ESI_CTRL_GetIOState": ([ptr(ctypes.c_int)], ctypes.c_int),
+            "COM_ESI_CTRL_GetIOStateMessage": ([ctypes.c_int], ctypes.c_char_p),
             "COM_ESI_CTRL_GetCommError": ([ptr(dword)], ctypes.c_int),
+            "COM_ESI_CTRL_GetCommErrorMessage": ([dword], ctypes.c_char_p),
         }
         for name, (argtypes, restype) in signatures.items():
             function = getattr(self.esi_dll, name, None)

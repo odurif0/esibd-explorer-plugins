@@ -50,6 +50,14 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let status = unsafe { function(a0.as_mut_ptr()) };
             Ok(NativeReply { status: i64::from(status), values: vec![pointer_output(&a0, &args[0], false)] })
         }
+        "COM_ESI_CTRL_GetCommErrorMessage" => {
+            arity(args, 1, symbol)?;
+            let a0 = scalar::<u32>(&args[0], false)?;
+            let function = unsafe { lib.get::<unsafe extern "system" fn(u32) -> *const std::ffi::c_char>(b"COM_ESI_CTRL_GetCommErrorMessage\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
+            let status = unsafe { function(a0) };
+            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };
+            Ok(NativeReply { status: 0, values: vec![Value::String(text)] })
+        }
         "COM_ESI_CTRL_GetCompleteState" => {
             arity(args, 9, symbol)?;
             let mut a0 = pointer::<u8>(&args[0], 1, false)?;
@@ -385,6 +393,14 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let function = unsafe { lib.get::<unsafe extern "system" fn(*mut i32) -> i32>(b"COM_ESI_CTRL_GetIOState\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function(a0.as_mut_ptr()) };
             Ok(NativeReply { status: i64::from(status), values: vec![pointer_output(&a0, &args[0], false)] })
+        }
+        "COM_ESI_CTRL_GetIOStateMessage" => {
+            arity(args, 1, symbol)?;
+            let a0 = scalar::<i32>(&args[0], false)?;
+            let function = unsafe { lib.get::<unsafe extern "system" fn(i32) -> *const std::ffi::c_char>(b"COM_ESI_CTRL_GetIOStateMessage\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
+            let status = unsafe { function(a0) };
+            let text = if status.is_null() { String::new() } else { decode_text(unsafe { std::ffi::CStr::from_ptr(status) }.to_bytes()) };
+            Ok(NativeReply { status: 0, values: vec![Value::String(text)] })
         }
         "COM_ESI_CTRL_GetInputs" => {
             arity(args, 3, symbol)?;

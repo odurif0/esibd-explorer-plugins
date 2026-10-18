@@ -5829,7 +5829,7 @@
     "header_sha256": "4079408adb4d865ea11a255a63cf662deeb235ea6a5ac54168253d31732e3f34"
   },
   "esi": {
-    "base_sha256": "fa14ebbafde79c12ba6aeb5b91137e9d2f7c479ec4404a38f10f4837aa72f0e5",
+    "base_sha256": "4ca6d327a91a157de24ae02013ed1c2a4e8c81ce49462c9ac69be20ed4485990",
     "exports": {
       "COM_ESI_CTRL_Close": {
         "args": [],
@@ -5907,6 +5907,17 @@
           }
         ],
         "result": "int"
+      },
+      "COM_ESI_CTRL_GetCommErrorMessage": {
+        "args": [
+          {
+            "length": 1,
+            "name": "CommError",
+            "pointer": false,
+            "type": "DWORD"
+          }
+        ],
+        "result": "constchar*"
       },
       "COM_ESI_CTRL_GetCompleteState": {
         "args": [
@@ -6700,6 +6711,17 @@
           }
         ],
         "result": "int"
+      },
+      "COM_ESI_CTRL_GetIOStateMessage": {
+        "args": [
+          {
+            "length": 1,
+            "name": "IOState",
+            "pointer": false,
+            "type": "int"
+          }
+        ],
+        "result": "constchar*"
       },
       "COM_ESI_CTRL_GetInputs": {
         "args": [
