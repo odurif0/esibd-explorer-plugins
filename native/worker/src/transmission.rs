@@ -280,6 +280,64 @@ impl Target {
     }
 }
 
+/// The electrospray current, measured in every averaging window and never driven.
+/// A window counts only if its |mean| lies within `range` (A) and its relative
+/// standard deviation is at most `max_spread`; otherwise it is measured again,
+/// and a spray unstable for `wait_s` stops the run as a soft interlock.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spray {
+    pub channel: String,
+    pub range: [f64; 2],
+    #[serde(default = "default_max_spread")]
+    pub max_spread: f64,
+    #[serde(default = "default_spray_wait")]
+    pub wait_s: f64,
+}
+fn default_max_spread() -> f64 {
+    0.2
+}
+fn default_spray_wait() -> f64 {
+    120.0
+}
+/// Fixed-point text without trailing zeros (the reference engine writes the same).
+fn short(value: f64, digits: usize) -> String {
+    let text = format!("{value:.digits$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    }
+}
+impl Spray {
+    /// Why a window's spray current (mean, SEM, samples) is not stable; empty when it is.
+    fn problem(&self, mean: f64, sem: f64, count: f64) -> String {
+        let value = mean.abs();
+        let [lo, hi] = self.range;
+        if !(lo <= value && value <= hi) {
+            return format!(
+                "spray current {:.1} nA outside {}–{} nA",
+                value * 1e9,
+                short(lo * 1e9, 2),
+                short(hi * 1e9, 2)
+            );
+        }
+        let spread = if count > 1.0 && sem.is_finite() && value > 0.0 {
+            sem * count.sqrt() / value
+        } else {
+            0.0
+        };
+        if spread > self.max_spread {
+            return format!(
+                "spray current unstable ({:.0} % spread, at most {} %)",
+                100.0 * spread,
+                short(100.0 * self.max_spread, 1)
+            );
+        }
+        String::new()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -289,6 +347,8 @@ pub struct Config {
     pub pressure: BTreeMap<String, [f64; 2]>,
     #[serde(default)]
     pub target: Option<Target>,
+    #[serde(default)]
+    pub spray: Option<Spray>,
     #[serde(default)]
     pub options: Options,
     #[serde(default)]
@@ -302,6 +362,9 @@ impl Config {
                 .flat_map(Stage::currents)
                 .chain(self.target.iter().flat_map(|t| t.measure.clone())),
         )
+    }
+    fn spray_channels(&self) -> Vec<String> {
+        self.spray.iter().map(|s| s.channel.clone()).collect()
     }
     fn driven(&self) -> Vec<String> {
         names_union(
@@ -456,16 +519,38 @@ impl Config {
                 return Err(config_error("Pressure needs 0 <= minimum < maximum"));
             }
         }
+        if let Some(spray) = &self.spray {
+            if !valid_name(&spray.channel)
+                || spray.range.iter().any(|v| !v.is_finite())
+                || spray.range[0] < 0.0
+                || spray.range[0] >= spray.range[1]
+            {
+                return Err(config_error(
+                    "Spray needs a channel and 0 <= minimum < maximum",
+                ));
+            }
+            finite_positive(spray.max_spread, "spray max_spread", false)?;
+            finite_positive(spray.wait_s, "spray wait_s", true)?;
+        }
         let currents = self.currents();
         let driven = self.driven();
+        let spray = self.spray_channels();
         if currents.iter().any(|n| self.pressure.contains_key(n)) {
             return Err(config_error(
                 "A channel cannot be both current and pressure",
             ));
         }
-        if driven
+        if spray
             .iter()
             .any(|n| currents.contains(n) || self.pressure.contains_key(n))
+        {
+            return Err(config_error(
+                "The spray channel is already a current or a pressure",
+            ));
+        }
+        if driven
+            .iter()
+            .any(|n| currents.contains(n) || self.pressure.contains_key(n) || spray.contains(n))
         {
             return Err(config_error("A channel cannot be both driven and measured"));
         }
@@ -473,7 +558,8 @@ impl Config {
             driven
                 .into_iter()
                 .chain(currents)
-                .chain(self.pressure.keys().cloned()),
+                .chain(self.pressure.keys().cloned())
+                .chain(spray),
         )
         .len()
             > MAX_CHANNELS
@@ -1339,7 +1425,8 @@ pub struct Controller {
     sweep: Option<Sweep>,
     spectra: BTreeMap<String, Value>,
     checks: BTreeMap<String, Value>,
-    counts: [u64; 3],
+    counts: [u64; 4],
+    spray_since: Option<f64>,
     result: Option<Value>,
     measuring_active: bool,
     spectrum_amplitudes: Vec<f64>,
@@ -1388,7 +1475,8 @@ impl Controller {
             sweep: None,
             spectra: BTreeMap::new(),
             checks: BTreeMap::new(),
-            counts: [0; 3],
+            counts: [0; 4],
+            spray_since: None,
             result: None,
             measuring_active: false,
             spectrum_amplitudes: Vec::new(),
@@ -1405,7 +1493,7 @@ impl Controller {
         self.events.push(json!({"kind":kind,"data":data}));
     }
     fn count_json(&self) -> Value {
-        json!({"steps":self.counts[0],"measures":self.counts[1],"empty_windows":self.counts[2]})
+        json!({"steps":self.counts[0],"measures":self.counts[1],"empty_windows":self.counts[2],"spray_windows":self.counts[3]})
     }
     fn state(&self) -> Value {
         json!({"status":self.status,"reason":self.reason,"initial":values_json(&self.initial),
@@ -1955,7 +2043,8 @@ impl Controller {
                     criterion
                         .iter()
                         .cloned()
-                        .chain(self.config.pressure.keys().cloned()),
+                        .chain(self.config.pressure.keys().cloned())
+                        .chain(self.config.spray_channels()),
                 );
                 let end = self.now + self.config.options.average_s;
                 if !end.is_finite() || end <= self.now {
@@ -2040,15 +2129,37 @@ impl Controller {
                 thin.push(n.clone());
             }
         }
+        let unstable = match &self.config.spray {
+            Some(spray) if empty.is_empty() && thin.is_empty() => {
+                let [mean, sem, count] = data[&spray.channel];
+                spray.problem(mean, sem, count)
+            }
+            _ => String::new(),
+        };
         self.counts[1] += 1;
         self.log("measure",json!({"begin":window.begin,"end":window.end,"closed_after_s":self.now-window.end,"attempt":window.attempt,
-            "data":samples_json(&data),"empty":empty,"thin":thin,"instrument":value.get("diagnostics").cloned().unwrap_or(json!({}))}));
-        if empty.is_empty() && thin.is_empty() {
+            "data":samples_json(&data),"empty":empty,"thin":thin,"spray":unstable,"instrument":value.get("diagnostics").cloned().unwrap_or(json!({}))}));
+        if empty.is_empty() && thin.is_empty() && unstable.is_empty() {
+            self.spray_since = None;
             self.last_measurement = Some(Measurement {
                 begin: window.begin,
                 end: window.end,
                 data,
             });
+        } else if !unstable.is_empty() {
+            // The spray decides how many ions arrive: never compare settings across an unstable spray.
+            self.counts[3] += 1;
+            let since = *self.spray_since.get_or_insert(window.begin);
+            let waited = window.end - since;
+            let wait_s = self.config.spray.as_ref().map_or(0.0, |s| s.wait_s);
+            if waited >= wait_s {
+                return Err(Error::new(
+                    "SoftInterlock",
+                    format!("No stable spray for {waited:.0} s: {unstable}"),
+                ));
+            }
+            self.emit("status",json!({"text":format!("Waiting for a stable spray: {unstable} ({waited:.0} of {} s)", short(wait_s, 1))}));
+            self.tasks.push(Task::Measure(window.criterion, 1));
         } else {
             self.counts[2] += 1;
             let missing = empty
@@ -2370,6 +2481,7 @@ impl Controller {
                 self.issue(op, args, reply)?;
             }
             Task::Begin => {
+                self.spray_since = None;
                 let o = &self.config.options;
                 if self.operation == "revert" {
                     self.stage_start = self.initial.clone();
@@ -2383,7 +2495,7 @@ impl Controller {
                     } else {
                         "sweep_start"
                     };
-                    self.log(event,json!({"strategy":o.strategy,"options":o,"stages":stages,"pressure":self.config.pressure,"target":target}));
+                    self.log(event,json!({"strategy":o.strategy,"options":o,"stages":stages,"pressure":self.config.pressure,"spray":self.config.spray,"target":target}));
                     if self.operation == "spectrum" {
                         self.schedule(vec![
                             Task::PrepareTarget,

@@ -30,7 +30,7 @@ hardware checks; qualify the devices before routine experimental use.
 | `amx_b`  | Controls AMX_B timing and displays expected CH0–CH3 signals |
 | `amx_hd` | Controls AMX_HD timing and displays expected CH0–CH3 signals |
 | `mscan`  | Scans quadrupole amplitude through AMX-linked PSU channels |
-| `transmission` | Optimizes ion transmission through the beamline apertures, stage by stage |
+| `transmission` | Optimizes ion transmission through the beamline, stage by stage, on the detector current |
 | `tpg366` | Reads six Pfeiffer TPG 366 pressure inputs over USB |
 
 ## Quick Start
@@ -72,7 +72,8 @@ To optimize the transmission through the inlet, funnel and quadrupoles, see
 [Transmission](transmission/README.md): describe the beamline once, choose the total
 ion current or a mass selected by a quadrupole (peak picked on an MScan spectrum or a
 quick sweep, in volts), choose the stages, then Optimize. It drives only the mapped
-channels, in small verified steps, and can run on a built-in simulated beamline.
+channels, in small verified steps, measures only while the spray current is stable
+(typically 10–30 nA), and can run on a built-in simulated beamline.
 
 ## Host fixes and hardware validation
 

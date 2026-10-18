@@ -109,6 +109,8 @@ def test_simulator_configuration_and_template_parse(rt):
     config = engine.parse_config(simulator.CONFIG)
     assert [s.name for s in config.stages][0] == "Inlet and funnel" and len(config.stages) == 6
     assert config.pressure["P_funnel"] == (2.0, 6.0)
+    assert config.spray.export() == dict(channel="ESI_I", range=[1e-8, 3e-8], max_spread=0.2, wait_s=120.0)
+    assert config.measured_channels[-1] == "ESI_I"
     assert set(config.knob_channels) == set(simulator.KNOBS)
     template = engine.template(["PSU_A Ch1", "PSU_A Ch2"], ["DMMR A1", "DMMR A2"], ["P funnel"])
     parsed = engine.parse_config(template)
@@ -126,6 +128,10 @@ def test_simulator_configuration_and_template_parse(rt):
     ("[pressure]\nP = [5.0, 1.0]\n[[stage]]\nname='a'\ndownstream=['B']\n[[stage.knob]]\nchannels={X=1.0}\nwindow=[-1.0, 2.0]\nmax_step=1.0", "minimum < maximum"),
     ("[[stage]]\nname='a'\naperture='B'\ndownstream=['B']\n[[stage.knob]]\nchannels={X=1.0}\nwindow=[-1.0, 2.0]\nmax_step=1.0", "aperture cannot also"),
     ("[[stage]]\nname='a'\ndownstream=['B']", "at least one [[stage.knob]]"),
+    ("[spray]\nchannel='S'\nrange=[3e-8, 1e-8]\n[[stage]]\nname='a'\ndownstream=['B']\n[[stage.knob]]\nchannels={X=1.0}\nwindow=[-1.0, 2.0]\nmax_step=1.0", "minimum < maximum"),
+    ("[spray]\nchannel='B'\nrange=[1e-8, 3e-8]\n[[stage]]\nname='a'\ndownstream=['B']\n[[stage.knob]]\nchannels={X=1.0}\nwindow=[-1.0, 2.0]\nmax_step=1.0", "already a current"),
+    ("[spray]\nchannel='X'\nrange=[1e-8, 3e-8]\n[[stage]]\nname='a'\ndownstream=['B']\n[[stage.knob]]\nchannels={X=1.0}\nwindow=[-1.0, 2.0]\nmax_step=1.0", "both driven and measured"),
+    ("[spray]\nchannel='S'\nrange=[1e-8, 3e-8]\nwait=5\n[[stage]]\nname='a'\ndownstream=['B']\n[[stage.knob]]\nchannels={X=1.0}\nwindow=[-1.0, 2.0]\nmax_step=1.0", "unknown key"),
     ("x = ", "TOML syntax"),
     ("", "at least one [[stage]]"),
 ])
@@ -287,6 +293,68 @@ def test_stop_restores_the_stage_start_even_though_waits_are_cancelled(rt):
     assert_step_limited(rt, beamline, FUNNEL)
 
 
+SPRAYED = FUNNEL.replace("[[stage]]", "[spray]\nchannel = \"ESI_I\"\nrange = [1e-8, 3e-8]\nwait_s = 30.0\n\n[[stage]]")
+
+
+def test_an_unstable_spray_is_waited_for_and_never_compared(rt):
+    # The spray decides how many ions arrive: windows during a spray dropout are measured again, with no move.
+    _, simulator = rt
+    beamline = simulator.SimulatedBeamline()
+    window, wait, windows, dropout = beamline.window, beamline.wait, [], []
+
+    def watched(channels, start, end):
+        data = window(channels, start, end)
+        if data is not None:
+            windows.append((start, end, len(beamline.commands), data["ESI_I"][0]))
+        return data
+
+    def timed(seconds, cancellable=True):
+        wait(seconds, cancellable)
+        if dropout and beamline.spray < 1.0 and beamline.now() >= dropout[0] + 8.0:
+            beamline.spray = 1.0  # The spray recovers after 8 s.
+            dropout.append(beamline.now())
+    beamline.window, beamline.wait = watched, timed
+
+    def drop(b):
+        b.spray = 0.2  # 4 nA: below 10 nA.
+        dropout.append(b.now())
+    optimizer, beamline, result, events = run(rt, SPRAYED, strategy="coordinate", beamline=beamline, hook=_after(5, drop))
+    assert result["status"] == "completed", result["reason"]
+    assert len(dropout) == 2 and optimizer.counts["spray_windows"] >= 4
+    waiting = [d["text"] for k, d in events if k == "status" and d["text"].startswith("Waiting for a stable spray")]
+    assert waiting[0].startswith("Waiting for a stable spray: spray current 4.0 nA outside 10–30 nA (")
+    assert any("unstable" in text for text in waiting), waiting  # The window straddling the recovery.
+    lost, back = dropout
+    for record in optimizer.history:
+        assert record["time"] <= lost or record["begin"] >= back, "no evaluation measured across the dropout"
+    rejected = [w for w in windows if w[0] < back and w[1] > lost]
+    assert len({commands for *_, commands, _ in rejected}) == 1, "no command while waiting for the spray"
+    assert_step_limited(rt, beamline, SPRAYED)
+
+
+def test_a_spray_that_stays_unstable_stops_and_restores_the_stage_start(rt):
+    _, simulator = rt
+    optimizer, beamline, result, events = run(rt, SPRAYED, strategy="coordinate",
+                                              hook=_after(5, lambda b: setattr(b, "spray", 0.2)))
+    assert result["status"] == "interlock", result
+    assert result["reason"].startswith("No stable spray for 30 s: spray current 4.0 nA outside 10–30 nA"), result["reason"]
+    start = {c: simulator.KNOBS[c][2] for c in ("Inlet", "Funnel_exit")}
+    assert {c: beamline.setpoint[c] for c in start} == start
+    assert ("status", {"text": "Restoring the settings of the stage start"}) in events
+    assert_step_limited(rt, beamline, SPRAYED)
+
+    # A fluctuating spray never gives a first measurement: nothing moves.
+    optimizer, beamline, result, _ = run(rt, SPRAYED.replace("wait_s = 30.0", "wait_s = 5.0"), strategy="coordinate",
+                                         beamline=simulator.SimulatedBeamline())
+    assert result["status"] == "completed"
+    beamline = simulator.SimulatedBeamline()
+    beamline.spray_noise = 0.5
+    optimizer, beamline, result, _ = run(rt, SPRAYED.replace("wait_s = 30.0", "wait_s = 5.0"), strategy="coordinate",
+                                         beamline=beamline)
+    assert result["status"] == "interlock" and "spray current unstable (" in result["reason"], result["reason"]
+    assert "% spread, at most 20 %)" in result["reason"] and beamline.commands == [] and optimizer.history == []
+
+
 def test_readback_that_never_settles_is_an_instrument_error(rt):
     optimizer, beamline, result, _ = run(rt, FUNNEL.replace("settle_s = 0.5", "settle_s = 0.5\nsettle_timeout_s = 3.0"),
                                          strategy="coordinate", slew_v_per_s=0.01)
@@ -398,10 +466,9 @@ def test_builder_turns_the_simple_settings_into_a_valid_configuration(rt, bl):
     text = bl.build(simulator.BEAMLINE, settings=SIM_SETTINGS)
     config = engine.parse_config(text)
     assert [s.name for s in config.stages] == ["Inlet + funnel", "Q1", "Q2", "Q3", "Q4", "Final refinement"]
-    funnel, q1, *_, q4, final = config.stages
-    assert funnel.aperture == "A1" and funnel.downstream == ("A2", "A3", "A4", "Collector") and funnel.normalize_by == ()
-    assert q1.aperture == "A2" and q1.normalize_by == ("A1", "A2", "A3", "A4", "Collector")
-    assert q4.aperture is None and q4.downstream == ("Collector",)
+    _, q1, *_, final = config.stages
+    # One detector: every stage maximizes its current; the apertures are not measured, nothing is normalized.
+    assert all(s.aperture is None and s.downstream == ("Collector",) and s.normalize_by == () for s in config.stages)
     assert final.downstream == ("Collector",) and {c for k in final.knobs for c in k.channels} == {
         "Funnel_exit", "Q1_offset", "Q2_offset", "Q3_offset", "Q4_offset"}
     rf = next(k for k in q1.knobs if "Q1_RF" in k.channels)
@@ -410,6 +477,7 @@ def test_builder_turns_the_simple_settings_into_a_valid_configuration(rt, bl):
     offset = next(k for k in final.knobs if "Q1_offset" in k.channels)
     assert offset.window == (-4.0, 4.0) and offset.max_step == pytest.approx(0.4)  # final stage: at most "fine"
     assert config.pressure == {"P_funnel": (2.0, 6.0), "P_Q4": (0.0, 1e-5)} and config.target is None
+    assert config.spray.export() == dict(channel="ESI_I", range=[1e-8, 3e-8], max_spread=0.2, wait_s=120.0)
     assert (config.settle_s, config.average_s, config.seed) == (0.5, 1.0, 1)
     wide = engine.parse_config(bl.build(simulator.BEAMLINE, selected=["funnel"], level="wide"))
     inlet = wide.stages[0].knobs[0]
@@ -424,7 +492,7 @@ def test_builder_mass_mode_keeps_the_filter_off_the_knobs_and_marks_peak_stages(
         assert config.target.channels == {rf: 1.0} and config.target.filter_name == f"Q{key[1]}"
         assert rf not in config.knob_channels and rf in config.driven_channels
         position = int(key[1])
-        assert config.target.measure == tuple(["A1", "A2", "A3", "A4", "Collector"][position:])
+        assert config.target.measure == ("Collector",)
         peaks = {s.name: s.peak for s in config.stages}
         assert peaks["Inlet + funnel"] and peaks["Final refinement"]
         assert all(peaks[f"Q{i}"] == (i <= position) for i in range(1, 5) if f"Q{i}" in peaks)
@@ -450,13 +518,19 @@ def test_builder_refuses_incomplete_choices(rt, bl, kwargs, message):
 def test_beamline_description_round_trips_and_rejects_conflicts(rt, bl):
     _, simulator = rt
     assert bl.loads(bl.dumps(simulator.BEAMLINE)) == bl.normalize(simulator.BEAMLINE)
-    assert bl.summary(simulator.BEAMLINE) == "12 settings · 5 currents · 2 gauges"
+    assert bl.summary(simulator.BEAMLINE) == "12 settings · detector after Q4 · spray 10–30 nA · 2 gauges"
+    # Saved with a current per aperture: the collector after Q4 becomes the detector.
+    legacy = bl.normalize(dict(collectors={"A1": "DMMR 1", "collector": "DMMR 5"}))
+    assert legacy["detector"] == {"channel": "DMMR 5", "position": "after_q4"}
     for broken, message in (
-        (dict(knobs={"q1_rf": {"A1": 1.0}}, collectors={"A1": "A1"}), "both driven and measured"),
-        (dict(collectors={"A1": "X", "A2": "X"}), "two apertures"),
+        (dict(knobs={"q1_rf": {"A1": 1.0}}, detector={"channel": "A1"}), "both driven and measured"),
+        (dict(detector={"channel": "X", "position": "A5"}), "Unknown detector position"),
         (dict(knobs={"q1_rf": {"X": 0.0}}), "nonzero"),
         (dict(knobs={"q9_rf": {"X": 1.0}}), "Unknown setting"),
         (dict(gauges={"P": [5.0, 1.0]}), "minimum < maximum"),
+        (dict(spray={"channel": "ESI", "range_na": [30.0, 10.0]}), "Spray current: need 0 <= minimum < maximum"),
+        (dict(detector={"channel": "DMMR 5"}, spray={"channel": "DMMR 5"}), "spray current needs its own channel"),
+        (dict(knobs={"inlet": {"ESI": 1.0}}, spray={"channel": "ESI"}), "both driven and measured"),
         (dict(polarity=0), "polarity"),
     ):
         with pytest.raises(ValueError, match=message):
@@ -476,8 +550,8 @@ def test_an_rf_amplitude_is_one_amx_pair_moving_both_rails(rt, bl):
     all_rails = {c for r in pairs.values() for c in r}
     description = dict(knobs={"q2_offset": {"AMPR Q2": 1.0}}, rf={"q2_rf": {"amx": "AMX_A", "pair": "CH0-CH1"},
                                                                     "q4_rf": {"amx": "AMX_A", "pair": "CH2-CH3"}},
-                       collectors={"collector": "DMMR 5"})
-    assert bl.summary(description) == "3 settings · 1 current · 0 gauges"
+                       detector={"channel": "DMMR 5"})
+    assert bl.summary(description) == "3 settings · detector after Q4 · spray not watched · 0 gauges"
     assert bl.loads(bl.dumps(description)) == bl.normalize(description)
     resolved, problems = bl.resolve(description, rails, all_rails)
     assert problems == [] and resolved["rf"] == {}
@@ -513,13 +587,33 @@ def test_partial_beamline_runs_only_what_is_measured(rt, bl):
     engine, _ = rt
     beamline = dict(knobs={"funnel_exit": {"PSU Exit": 1.0}, "q2_offset": {"PSU Q2": 1.0},
                            "q2_rf": {"AMX Vpos": 1.0, "AMX Vneg": 1.0}},
-                    collectors={"A1": "DMMR 1", "collector": "DMMR 5"})
+                    detector={"channel": "DMMR 5", "position": "after_q4"})
     assert bl.filters(beamline) == [("q2", "Q2")] and bl.filter_measure(beamline, "q2") == ["DMMR 5"]
     config = engine.parse_config(bl.build(beamline, mode="mass", filter_key="q2", center=250.0, width=15.0))
     assert [s.name for s in config.stages] == ["Inlet + funnel", "Q2", "Final refinement"]
-    assert config.stages[0].aperture == "DMMR 1" and config.stages[0].downstream == ("DMMR 5",)
+    assert config.stages[0].aperture is None and config.stages[0].downstream == ("DMMR 5",)
     assert config.target.channels == {"AMX Vpos": 1.0, "AMX Vneg": 1.0}  # MScan rails: Vpos = Vneg = A.
-    assert bl.stages(dict(knobs={"q4_rf": {"X": 1.0}}, collectors={})) == []
+    assert bl.stages(dict(knobs={"q4_rf": {"X": 1.0}})) == []  # No detector: nothing to maximize.
+
+
+def test_a_detector_behind_an_aperture_optimizes_only_the_elements_before_it(rt, bl):
+    engine, simulator = rt
+    for position, stages, filters in (
+            ("A1", ["Inlet + funnel", "Final refinement"], []),
+            ("A2", ["Inlet + funnel", "Q1", "Final refinement"], ["q1"]),
+            ("A4", ["Inlet + funnel", "Q1", "Q2", "Q3", "Final refinement"], ["q1", "q2", "q3"]),
+            ("after_q4", ["Inlet + funnel", "Q1", "Q2", "Q3", "Q4", "Final refinement"], ["q1", "q2", "q3", "q4"])):
+        beamline = dict(simulator.BEAMLINE, detector={"channel": "Collector", "position": position})
+        config = engine.parse_config(bl.build(beamline))
+        assert [s.name for s in config.stages] == stages, position
+        assert all(s.downstream == ("Collector",) for s in config.stages)
+        assert [key for key, _ in bl.filters(beamline)] == filters
+    beamline = dict(simulator.BEAMLINE, detector={"channel": "Collector", "position": "A2"})
+    final = engine.parse_config(bl.build(beamline)).stages[-1]
+    assert {c for k in final.knobs for c in k.channels} == {"Funnel_exit", "Q1_offset"}  # Offsets before it only.
+    assert "behind aperture 2" in bl.summary(beamline)
+    with pytest.raises(ValueError, match="before the detector"):
+        bl.build(beamline, mode="mass", filter_key="q2", center=300.0, width=20.0)
 
 
 # ---------------------------------------------------------------- peaks
@@ -632,9 +726,9 @@ def test_mass_mode_tracks_the_selected_peak_and_raises_it_at_the_end_of_the_beam
     spectra = result["spectra"]
     assert len(spectra["before"]["amplitude"]) == 21 and max(spectra["after"]["current"]) > max(spectra["before"]["current"])
     assert [kind for kind, _ in events if kind == "spectrum"] == ["spectrum", "spectrum"]
-    # The filter stage's criterion excludes its own exit aperture.
-    assert optimizer.peak_measure(optimizer.config.stage("Q2")) == ["A4", "Collector"]
-    assert optimizer.peak_measure(optimizer.config.stage("Q1")) == ["A3", "A4", "Collector"]
+    # Every peak is measured on the single detector after Q4.
+    assert optimizer.peak_measure(optimizer.config.stage("Q2")) == ["Collector"]
+    assert optimizer.peak_measure(optimizer.config.stage("Q1")) == ["Collector"]
     assert_step_limited(rt, beamline, text)
 
 
@@ -775,7 +869,7 @@ def test_engine_log_of_a_selected_mass_records_sweeps_and_peaks(rt, bl):
     assert [s["label"] for s in sweeps] == ["before", "after"] and len(sweeps[0]["amplitude"]) == 21
     peaks = [data["peak"] for kind, data in events if kind == "evaluation"]
     assert all(p is not None and {"fitted_center", "height", "measure"} <= set(p) for p in peaks)
-    assert next(data for kind, data in events if kind == "stage_start")["peak_measure"] == ["A3", "A4", "Collector"]
+    assert next(data for kind, data in events if kind == "stage_start")["peak_measure"] == ["Collector"]
     events.clear()
     optimizer.restore_initial()
     assert [kind for kind, _ in events][0] == "revert_start" and events[-1][0] == "revert_end"

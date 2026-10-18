@@ -289,7 +289,7 @@ class ExplorerInstrument(_engine.Instrument):
             if is_esi_channel(channel):
                 raise _engine.ConfigError(f"{name}: ESI channels are not driven by Transmission (HV discharge not "
                                           "confirmed; a temperature setpoint starts the heater). They can be measured.")
-        self.measured = {name: self._resolve(manager, name) for name in (*config.current_channels, *config.pressure_channels)}
+        self.measured = {name: self._resolve(manager, name) for name in config.measured_channels}
         self.switches = self._amx_switches(plugin, config)
         self.expected = {}
         self.log = None
@@ -631,7 +631,7 @@ class _ConfigEditor(QDialog):
 
 
 class _BeamlineDialog(QDialog):
-    """Map each element setting, aperture current and gauge to Explorer channels."""
+    """Map each element setting, the detector, the spray current and the gauges to Explorer channels."""
 
     NONE = "—"
 
@@ -687,18 +687,43 @@ class _BeamlineDialog(QDialog):
             self.knob_widgets[key] = (first, second, gain)
         self.knobs.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.knobs, 3)
-        layout.addWidget(QLabel("<b>Currents</b> — the picoammeter channel of each aperture. "
-                                "Missing apertures are skipped; the last one measured ends the beamline."))
-        self.collectors = QTableWidget(len(_beamline.COLLECTORS), 2)
-        self.collectors.setHorizontalHeaderLabels(["Aperture", "Current channel"])
-        self.collector_widgets = {}
-        for row, (key, label) in enumerate(_beamline.COLLECTORS):
-            self.collectors.setCellWidget(row, 0, QLabel(label))
-            combo = self._combo(currents, beamline["collectors"].get(key))
-            self.collectors.setCellWidget(row, 1, combo)
-            self.collector_widgets[key] = combo
-        self.collectors.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.collectors, 2)
+        detector_intro = QLabel("<b>Detector</b> — the one current measured and maximized. Standard: after Q4. "
+                                "Placed right behind an aperture, it optimizes what passes through it: only the "
+                                "elements before it are then optimized.")
+        detector_intro.setWordWrap(True)
+        layout.addWidget(detector_intro)
+        row = QHBoxLayout()
+        detector = beamline["detector"]
+        row.addWidget(QLabel("Current channel"))
+        self.detector_channel = self._combo(currents, detector.get("channel"))
+        row.addWidget(self.detector_channel, 1)
+        row.addWidget(QLabel("Position"))
+        self.detector_position = QComboBox()
+        for key, label in _beamline.DETECTOR_POSITIONS:
+            self.detector_position.addItem(label, key)
+        self.detector_position.setCurrentIndex(self.detector_position.findData(detector.get("position", "after_q4")))
+        row.addWidget(self.detector_position, 1)
+        layout.addLayout(row)
+        spray_intro = QLabel("<b>Spray current</b> — the electrospray current must be stable while optimizing "
+                             "(typically 10–30 nA). Every averaging window is measured again until the spray lies in "
+                             "this range and fluctuates by at most 20 %; after 2 min without a stable spray the "
+                             "optimization stops and returns to the stage start.")
+        spray_intro.setWordWrap(True)
+        layout.addWidget(spray_intro)
+        row = QHBoxLayout()
+        spray = beamline["spray"]
+        low, high = spray.get("range_na", _beamline.SPRAY_RANGE_NA)
+        row.addWidget(QLabel("Current channel"))
+        self.spray_channel = self._combo(currents, spray.get("channel"))
+        self.spray_channel.setToolTip("The ESI HV current of the emitter (ESI plugin), read at 1 Hz or faster.")
+        row.addWidget(self.spray_channel, 1)
+        row.addWidget(QLabel("Minimum (nA)"))
+        self.spray_low = QLineEdit(f"{low:g}")
+        row.addWidget(self.spray_low)
+        row.addWidget(QLabel("Maximum (nA)"))
+        self.spray_high = QLineEdit(f"{high:g}")
+        row.addWidget(self.spray_high)
+        layout.addLayout(row)
         layout.addWidget(QLabel("<b>Pressure limits</b> (optional soft interlock: the optimization stops and returns to "
                                 "the stage start; the protective interlock belongs in the hardware)."))
         names = list(dict.fromkeys([*pressures, *beamline["gauges"]]))
@@ -765,6 +790,7 @@ class _BeamlineDialog(QDialog):
         else:
             label.setText(f"{entry['psu']} (from the {entry['amx']} Settings): Vpos {entry['rails'][0]}, "
                           f"Vneg {entry['rails'][1]}, both = A")
+        label.setToolTip(label.text())
 
     def _combo(self, names, current):
         combo = QComboBox()
@@ -790,7 +816,15 @@ class _BeamlineDialog(QDialog):
             if combo.currentData():
                 amx, pair = combo.currentData().split("\t")
                 rf[key] = {"amx": amx, "pair": pair}
-        collectors = {key: combo.currentText() for key, combo in self.collector_widgets.items() if combo.currentText() != self.NONE}
+        detector = ({"channel": self.detector_channel.currentText(), "position": self.detector_position.currentData()}
+                    if self.detector_channel.currentText() != self.NONE else {})
+        spray = {}
+        if self.spray_channel.currentText() != self.NONE:
+            try:
+                spray = {"channel": self.spray_channel.currentText(),
+                         "range_na": [float(self.spray_low.text()), float(self.spray_high.text())]}
+            except ValueError:
+                raise ValueError("Spray current: enter the minimum and maximum in nA") from None
         gauges = {}
         for name, (watch, low, high) in self.gauge_widgets.items():
             if watch.isChecked():
@@ -799,7 +833,8 @@ class _BeamlineDialog(QDialog):
                 except ValueError:
                     raise ValueError(f"Gauge {name}: enter the minimum and maximum in mbar") from None
         return _beamline.normalize(dict(polarity=1 if self.polarity.currentIndex() == 0 else -1,
-                                        knobs=knobs, rf=rf, collectors=collectors, gauges=gauges, devices=self.device_of))
+                                        knobs=knobs, rf=rf, detector=detector, spray=spray, gauges=gauges,
+                                        devices=self.device_of))
 
     def accept(self):
         try:
@@ -1139,16 +1174,15 @@ class _Panel(QWidget):
 class Transmission(Scan):
     """Optimize the ion transmission through the beamline, stage by stage.
 
-    Each stage maximizes the current measured after its aperture (or, for a
-    selected mass, the height of its peak behind the filter). A point counts only
-    if the flux reaching the aperture is still present, so a low aperture current
-    caused by a lost beam is never taken for transmission. Moves are split into
+    Each stage maximizes the current of the single detector (or, for a selected
+    mass, the height of its peak). The detector normally sits after Q4; behind an
+    aperture, only the elements before it are optimized. Moves are split into
     small steps that wait for the readbacks; the best point is adopted only after
     paired A/B measurements show a significant gain.
     """
 
     documentation = """Optimizes the ion transmission through the beamline apertures, stage by stage.
-    1. Configure the beamline once (which channel drives each element, which picoammeter measures each aperture).
+    1. Configure the beamline once (which channel drives each element, the detector channel and its position).
     2. Choose the target: the total ion current, or a mass selected by a quadrupole (pick its peak on an MScan
        spectrum or a quick sweep; amplitudes in volts, m/z calibration in MScan).
     3. Choose the stages and the exploration, then Optimize. Keep or Revert at the end.
@@ -1531,11 +1565,11 @@ class Transmission(Scan):
             problems = [] if self._simulated() else self.resolved_beamline()[1]
             if self._simulated():
                 panel.beamline_label.setText(f"Simulation: built-in beamline ({_beamline.summary(beamline)}).")
-            elif beamline["knobs"] and beamline["collectors"]:
+            elif beamline["knobs"] and beamline["detector"]:
                 panel.beamline_label.setText(f"✓ {_beamline.summary(beamline)}"
                                              + "".join(f"\n⚠ {problem}" for problem in problems))
             else:
-                panel.beamline_label.setText("Not configured yet: choose which channels drive the elements and measure the apertures."
+                panel.beamline_label.setText("Not configured yet: choose which channels drive the elements, and the detector."
                                              + "".join(f"\n⚠ {problem}" for problem in problems))
             filters = _beamline.filters(beamline)
             panel.filter.clear()
@@ -1584,7 +1618,7 @@ class Transmission(Scan):
         if self.state["advanced"]:
             return (self.default_config_path().is_file(), "Uses the advanced configuration.")
         beamline = self.active_beamline()
-        if not beamline["knobs"] or not beamline["collectors"]:
+        if not beamline["knobs"] or not beamline["detector"]:
             return False, "Configure the beamline first."
         if self.state["mode"] == "mass" and not _beamline.filters(beamline):
             return False, "Map a quadrupole RF amplitude and a current after it (Configure…) to select a mass."
@@ -1660,7 +1694,7 @@ class Transmission(Scan):
 
     def missing_channels(self, config):
         names = {c.name.strip().lower() for c in self.pluginManager.DeviceManager.channels()}
-        wanted = (*config.driven_channels, *config.current_channels, *config.pressure_channels)
+        wanted = (*config.driven_channels, *config.measured_channels)
         return [name for name in wanted if name.strip().lower() not in names]
 
     def configure_beamline(self):
@@ -1737,7 +1771,9 @@ class Transmission(Scan):
             target = _engine.Target(beamline["knobs"][f"{filter_key}_rf"], float(amplitudes[0]), step, measure,
                                     max_step=step, spectrum_points=0)
             options = dict(SIMULATION_SETTINGS) if self._simulated() else {}
-            config = _engine.Config([], {k: tuple(v) for k, v in beamline["gauges"].items()}, target,
+            spray = beamline["spray"]
+            spray = (_engine.Spray(spray["channel"], *(v / 1e9 for v in spray["range_na"])) if spray else None)
+            config = _engine.Config([], {k: tuple(v) for k, v in beamline["gauges"].items()}, target, spray,
                                     polarity=beamline["polarity"], **options)
             instrument = self._gui_call(lambda: self._instrument(config, cancel))
         except (_engine.ConfigError, _engine.InstrumentError, KeyError, ValueError) as exc:
@@ -1791,6 +1827,11 @@ class Transmission(Scan):
 
     # ---------------------------------------------------------------- devices
     BRINGUP_S = 300.0  # Initialization and the ramp at ON of a supply can take minutes.
+    # The detector is best read at 5-10 Hz while optimizing: 10-20 samples per 2 s averaging window
+    # (the DMMR default of 1 s gives two). Only a hint: its interval belongs to the DMMR plugin.
+    DETECTOR_INTERVAL_MS = 200.0
+    # The spray current (ESI) needs a sample in every averaging window and two to judge its spread.
+    SPRAY_INTERVAL_MS = 1000.0
 
     def _needed(self):
         """(driven, measured) channels of what Optimize would run; the whole beamline when it cannot be built yet."""
@@ -1798,11 +1839,13 @@ class Transmission(Scan):
             return [], []
         try:
             _, config = self._configuration()
-            return list(config.driven_channels), [*config.current_channels, *config.pressure_channels]
+            return list(config.driven_channels), list(config.measured_channels)
         except (_engine.ConfigError, OSError):
             beamline = self.active_beamline()
             driven = [c for channels in beamline["knobs"].values() for c in channels]
-            return driven, [*beamline["collectors"].values(), *beamline["gauges"]]
+            detector = [beamline["detector"]["channel"]] if beamline["detector"] else []
+            spray = [beamline["spray"]["channel"]] if beamline["spray"] else []
+            return driven, [*detector, *spray, *beamline["gauges"]]
 
     def device_report(self, driven, measured):
         """One entry per device (or missing channel) the measurement needs, with its state and the fix."""
@@ -1852,6 +1895,13 @@ class Transmission(Scan):
                 entry.update(state="ready", fix="")
             if entry["esi"] and entry["state"] in ("off", "not recording"):
                 entry["fix"] = "turn it ON in the ESI plugin (never from Transmission)"
+            interval = getattr(device, "interval", None)
+            currents = [name for name in entry["measured"] if getattr(channels[name.strip().lower()], "unit", "") == "A"]
+            slowest = self.SPRAY_INTERVAL_MS if entry["esi"] else self.DETECTOR_INTERVAL_MS  # ESI: the spray current.
+            if currents and _finite(interval) and float(interval) > slowest:
+                need = ("at least 1 Hz (interval 1000 ms) is needed to judge the spray" if entry["esi"]
+                        else "5–10 Hz (interval 100–200 ms) is recommended while optimizing")
+                entry["hint"] = f"reads {', '.join(currents)} at {1000.0 / float(interval):.3g} Hz; {need}"
         return list(entries.values())
 
     @staticmethod
@@ -1895,11 +1945,13 @@ class Transmission(Scan):
         parts = []
         for entry in report:
             if entry["state"] == "ready":
-                parts.append(f"✓ {entry['name']}")
+                slow = " (⚠ slow: at least 1 Hz needed)" if entry["esi"] else " (⚠ slow: 5–10 Hz recommended)"
+                parts.append(f"✓ {entry['name']}" + (slow if entry.get("hint") else ""))
             else:
                 parts.append(f"<b>✗ {entry['name']}: {entry['state'] if entry['state'] != 'missing' else 'not available'}</b>")
         panel.devices_label.setText("Devices: " + " · ".join(parts))
-        panel.devices_label.setToolTip("\n".join(self._describe(e) + (f": {e['fix']}" if e["fix"] else "") for e in report))
+        panel.devices_label.setToolTip("\n".join(self._describe(e) + (f": {e['fix']}" if e["fix"] else "")
+                                                 + (f" ({e['hint']})" if e.get("hint") else "") for e in report))
         panel.start_devices.setVisible(any(self._startable(e) for e in report))
         panel.start_devices.setEnabled(not self._busy())
 
@@ -2378,7 +2430,7 @@ class Transmission(Scan):
             current = (meta, rows, index)
             down = np.array([sum(polarity * r["currents"][c][0] for c in meta["downstream"]) for r in rows])
             ax_currents.semilogy(index, np.where(down > 0, down, np.nan), color="tab:green", linewidth=1,
-                                 label="after the aperture" if s == 0 else None)
+                                 label=("after the aperture" if meta["aperture"] else "detector") if s == 0 else None)
             if meta["aperture"]:
                 hit = np.array([polarity * r["currents"][meta["aperture"]][0] for r in rows])
                 ax_currents.semilogy(index, np.where(hit > 0, hit, np.nan), color="tab:red", linewidth=1,

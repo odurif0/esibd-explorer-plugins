@@ -4,7 +4,9 @@ Inlet, ion funnel and four quadrupoles, with an aperture between chambers and a
 collector after Q4. Three species (amplitude scale ~ m/z 300, 520 and 780) share
 the beam; Q2 is a narrow mass filter (its amplitude selects one species, as in
 MScan) and the RF optima of the funnel and guides depend on the species. Voltages follow their setpoints at a finite slew rate;
-currents follow the transmission with a short lag, source drift and noise. A
+currents follow the transmission with a short lag, source drift and noise. The
+electrospray current (``ESI_I``, 20 nA) carries the same drift and scales the ion
+flux; ``spray`` and ``spray_noise`` let tests make it drop or fluctuate. A
 large voltage difference at the funnel exit simulates a discharge (current
 spike and pressure rise) to exercise the soft interlocks. This is a test bench,
 not a physical model of the instrument.
@@ -36,6 +38,7 @@ KNOBS = {
 }
 CURRENTS = ("A1", "A2", "A3", "A4", "Collector")
 PRESSURES = {"P_inlet": 4.0, "P_funnel": 4.0, "P_Q1": 5e-2, "P_Q2": 1e-4, "P_Q3": 5e-4, "P_Q4": 1e-6}
+SPRAY_A = 20e-9  # Electrospray current at the nominal source.
 HIT_FRACTION = 0.8  # Blocked ions landing on the aperture; the rest are lost on rods and walls.
 DISCHARGE_V = 60.0  # |Funnel_exit - Q1_offset| above this discharges at funnel pressure.
 
@@ -97,7 +100,9 @@ class SimulatedBeamline(Instrument):
         self.actual = dict(self.setpoint)
         self.current = transport(self.actual, source)
         self.log_source = 0.0
-        self.samples = {name: ([], []) for name in (*CURRENTS, *PRESSURES)}
+        self.samples = {name: ([], []) for name in (*CURRENTS, *PRESSURES, "ESI_I")}
+        self.spray, self.spray_noise = 1.0, 0.02  # Test hooks: relative spray current and its relative noise.
+        self.spray_rng = np.random.default_rng(None if seed is None else [seed, 1])  # Leaves the beam noise unchanged.
         self.devices_on = True
         self.fault = None  # Test hook: "discharge" forces a discharge from now on.
         self.commands = []
@@ -170,7 +175,7 @@ class SimulatedBeamline(Instrument):
             actual = self.actual[name]
             self.actual[name] = target if abs(target - actual) <= step else actual + math.copysign(step, target - actual)
         self.log_source += self.drift * math.sqrt(dt / 3600.0) * self.rng.normal()
-        target = transport(self.actual, self.source * math.exp(self.log_source))
+        target = transport(self.actual, self.source * math.exp(self.log_source) * self.spray)
         alpha = 1.0 - math.exp(-dt / self.tau)
         for name in CURRENTS:
             self.current[name] += alpha * (target[name] - self.current[name])
@@ -183,6 +188,8 @@ class SimulatedBeamline(Instrument):
         for name, base in PRESSURES.items():
             factor = 3.0 if spark and name == "P_funnel" else 1.0
             self._record(name, base * factor * (1.0 + 0.005 * self.rng.normal()))
+        spray = SPRAY_A * math.exp(self.log_source) * self.spray
+        self._record("ESI_I", spray * (1.0 + self.spray_noise * self.spray_rng.normal()))
 
 
 CONFIG = """\
@@ -198,6 +205,10 @@ seed = 1
 [pressure]
 P_funnel = [2.0, 6.0]
 P_Q4 = [0.0, 1e-5]
+
+[spray]
+channel = "ESI_I"
+range = [1e-8, 3e-8]
 
 [[stage]]
 name = "Inlet and funnel"
@@ -331,7 +342,7 @@ max_step = 0.5
 """
 
 
-# The same beamline for the simple GUI: element knobs, aperture collectors and gauges.
+# The same beamline for the simple GUI: element knobs, the detector, the spray current and gauges.
 BEAMLINE = {
     "polarity": 1,
     "knobs": {
@@ -342,6 +353,7 @@ BEAMLINE = {
         "q3_offset": {"Q3_offset": 1.0}, "q3_rf": {"Q3_RF": 1.0},
         "q4_offset": {"Q4_offset": 1.0}, "q4_rf": {"Q4_RF": 1.0},
     },
-    "collectors": {"A1": "A1", "A2": "A2", "A3": "A3", "A4": "A4", "collector": "Collector"},
+    "detector": {"channel": "Collector", "position": "after_q4"},
+    "spray": {"channel": "ESI_I", "range_na": [10.0, 30.0]},
     "gauges": {"P_funnel": [2.0, 6.0], "P_Q4": [0.0, 1e-5]},
 }

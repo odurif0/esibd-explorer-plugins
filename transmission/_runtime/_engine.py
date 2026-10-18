@@ -5,6 +5,9 @@ readbacks and timestamped averages; the plugin provides one backed by Explorer
 channels and ``_simulator.py`` a simulated beamline. The pressure interlock that
 protects people and hardware belongs in the hardware (TPG366 relays wired to the
 CGC interlock inputs); the soft interlocks here only stop the optimization.
+An optional spray guard (``[spray]``) keeps every averaging window to a stable
+electrospray current: an unstable window is measured again, and a spray that
+stays unstable stops the run like a soft interlock.
 SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
@@ -29,7 +32,7 @@ class Stopped(RuntimeError):
 
 
 class SoftInterlock(RuntimeError):
-    """A pressure or current left its configured range."""
+    """A pressure, a current or the spray current left its configured range."""
 
 
 class InstrumentError(RuntimeError):
@@ -118,12 +121,46 @@ class Target:
         return {channel: gain * amplitude for channel, gain in self.channels.items()}
 
 
+def _short(value, digits=2):
+    """Fixed-point text without trailing zeros (the native engine writes the same)."""
+    text = f"{value:.{digits}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+class Spray:
+    """The electrospray current, measured in every averaging window and never driven.
+
+    A window counts only if the magnitude of its mean lies within ``[minimum, maximum]``
+    (A; 10-30 nA is typical) and its relative standard deviation within the window is at
+    most ``max_spread``. Otherwise the window is measured again; after ``wait_s`` without
+    a stable spray the run stops as a soft interlock (the stage start is restored).
+    """
+
+    def __init__(self, channel, minimum, maximum, max_spread=0.2, wait_s=120.0):
+        self.channel = channel
+        self.minimum, self.maximum = float(minimum), float(maximum)
+        self.max_spread, self.wait_s = float(max_spread), float(wait_s)
+
+    def export(self):
+        return dict(channel=self.channel, range=[self.minimum, self.maximum], max_spread=self.max_spread, wait_s=self.wait_s)
+
+    def problem(self, mean, sem, count):
+        """Why a window's spray current (mean, standard error, samples) is not stable; "" when it is."""
+        value = abs(mean)
+        if not self.minimum <= value <= self.maximum:
+            return f"spray current {value * 1e9:.1f} nA outside {_short(self.minimum * 1e9)}–{_short(self.maximum * 1e9)} nA"
+        spread = sem * math.sqrt(count) / value if count > 1 and math.isfinite(sem) and value > 0 else 0.0
+        if spread > self.max_spread:
+            return f"spray current unstable ({100 * spread:.0f} % spread, at most {_short(100 * self.max_spread, 1)} %)"
+        return ""
+
+
 class Config:
     DEFAULTS = dict(polarity=1, strategy="bayesian", settle_s=1.0, average_s=2.0, readback_tolerance=0.5,
                     settle_timeout_s=20.0, min_current=1e-13, lost_fraction=0.2, verify_pairs=3,
                     significance=2.0, max_current=1e-6, reference_every=8, poll_s=0.1, seed=None)
 
-    def __init__(self, stages, pressure=None, target=None, **options):
+    def __init__(self, stages, pressure=None, target=None, spray=None, **options):
         for key, value in self.DEFAULTS.items():
             setattr(self, key, options.pop(key, value))
         if options:
@@ -131,6 +168,7 @@ class Config:
         self.stages = tuple(stages)
         self.pressure = {name: (float(lo), float(hi)) for name, (lo, hi) in (pressure or {}).items()}
         self.target = target
+        self.spray = spray
 
     @property
     def knob_channels(self):
@@ -149,6 +187,14 @@ class Config:
     @property
     def pressure_channels(self):
         return tuple(self.pressure)
+
+    @property
+    def spray_channels(self):
+        return (self.spray.channel,) if self.spray is not None else ()
+
+    @property
+    def measured_channels(self):
+        return tuple(dict.fromkeys([*self.current_channels, *self.pressure_channels, *self.spray_channels]))
 
     def stage(self, name):
         for stage in self.stages:
@@ -189,6 +235,7 @@ def parse_config(text):
     if not isinstance(stages_data, list) or not stages_data:
         raise ConfigError("Define at least one [[stage]]")
     target_data = data.pop("target", None)
+    spray_data = data.pop("spray", None)
     pressure_data = data.pop("pressure", {})
     if not isinstance(pressure_data, dict):
         raise ConfigError("[pressure] must map pressure channels to [minimum, maximum]")
@@ -307,14 +354,37 @@ def parse_config(text):
             if overlap:
                 raise ConfigError(f"stage {stage.name!r} drives the mass filter {', '.join(sorted(overlap))}; "
                                   "the target tracks it by itself")
-    config = Config(stages, pressure, target, **options)
-    measured = set(config.current_channels) | set(config.pressure_channels)
-    driven = set(config.knob_channels) & measured
+    spray = _parse_spray(spray_data) if spray_data is not None else None
+    config = Config(stages, pressure, target, spray, **options)
+    measured = set(config.measured_channels)
+    driven = set(config.driven_channels) & measured
     if driven:
         raise ConfigError(f"{', '.join(sorted(driven))} cannot be both driven and measured")
     if set(config.current_channels) & set(config.pressure_channels):
         raise ConfigError("A channel cannot be both a current and a pressure")
+    if spray is not None and spray.channel in {*config.current_channels, *config.pressure_channels}:
+        raise ConfigError(f"[spray] {spray.channel} is already a current or a pressure of the optimization")
     return config
+
+
+def _parse_spray(data):
+    if not isinstance(data, dict):
+        raise ConfigError("[spray] must be a table")
+    unknown = set(data) - {"channel", "range", "max_spread", "wait_s"}
+    if unknown:
+        raise ConfigError(f"[spray]: unknown key(s) {', '.join(sorted(unknown))}")
+    channel = _names(data.get("channel"), "[spray] channel")
+    if len(channel) != 1:
+        raise ConfigError("[spray] channel must be one channel name")
+    limits = data.get("range")
+    if not isinstance(limits, list) or len(limits) != 2:
+        raise ConfigError("[spray] range must be [minimum, maximum] in A, e.g. [1e-8, 3e-8]")
+    lo, hi = (_finite(v, "[spray] range") for v in limits)
+    if not 0 <= lo < hi:
+        raise ConfigError("[spray] range: need 0 <= minimum < maximum")
+    spread = _finite(data.get("max_spread", 0.2), "[spray] max_spread", positive=True)
+    wait_s = _finite(data.get("wait_s", 120.0), "[spray] wait_s", minimum=0)
+    return Spray(channel[0], lo, hi, spread, wait_s)
 
 
 def _parse_target(data):
@@ -360,6 +430,7 @@ def template(knob_channels=(), current_channels=(), pressure_channels=()):
     knobs = list(knob_channels) or ["Funnel_exit"]
     currents = list(current_channels) or ["A1", "A2", "A3", "A4", "Collector"]
     pressures = list(pressure_channels)
+    sprays = [c for c in currents if c.upper().startswith("ESI")] or ["ESI_HV1_I"]
     lines = [
         "# Transmission optimizer configuration (TOML). Lines starting with # are comments.",
         "# Driven channels follow: start + gain * delta, delta limited to the knob window.",
@@ -383,6 +454,13 @@ def template(knob_channels=(), current_channels=(), pressure_channels=()):
     else:
         lines += ["# P_funnel = [1.0, 6.0]   # mbar"]
     lines += [
+        "",
+        "# Optional: measure every window again until the spray current is stable; stop after wait_s.",
+        "# [spray]",
+        f'# channel = "{sprays[0]}"',
+        "# range = [1e-8, 3e-8]     # A: accepted |spray current| (10-30 nA)",
+        "# max_spread = 0.2         # largest relative standard deviation within an averaging window",
+        "# wait_s = 120.0           # then stop and restore the stage start",
         "",
         "[[stage]]",
         'name = "Funnel to Q1"',
@@ -778,7 +856,7 @@ class Optimizer:
         self.checks = {}
         # log(event, data): detailed JSON-safe trace for troubleshooting and tuning (see _log.py).
         self.log = log
-        self.counts = dict(steps=0, measures=0, empty_windows=0)
+        self.counts = dict(steps=0, measures=0, empty_windows=0, spray_windows=0)
 
     # ---- events and checks
     def _emit(self, kind, **data):
@@ -875,12 +953,15 @@ class Optimizer:
 
         A window is measured again (no command in between, never filled) when a channel has
         no valid sample, or when a criterion current has fewer than two: one sample gives no
-        noise estimate. Three such windows in a row stop the run.
+        noise estimate. Three such windows in a row stop the run. A window without a stable
+        spray (``[spray]``) is measured again too, until the spray has been unstable for
+        ``wait_s``: then the run stops as a soft interlock.
         """
-        config, instrument = self.config, self.instrument
+        config, instrument, spray = self.config, self.instrument, self.config.spray
         criterion = list(dict.fromkeys(channels))
-        channels = list(dict.fromkeys([*criterion, *config.pressure_channels]))
-        for attempt in range(1, self.MEASURE_ATTEMPTS + 1):
+        channels = list(dict.fromkeys([*criterion, *config.pressure_channels, *config.spray_channels]))
+        attempt, unstable_since = 1, None
+        while True:
             instrument.measuring(True)
             try:
                 begin = instrument.now()
@@ -899,19 +980,33 @@ class Optimizer:
                 instrument.measuring(False)
             empty = [c for c in channels if data[c][2] == 0 or not math.isfinite(data[c][0])]
             thin = [c for c in criterion if c not in empty and data[c][2] < 2]
+            unstable = spray.problem(*data[spray.channel]) if spray is not None and not empty and not thin else ""
             self.counts["measures"] += 1
             self._log("measure", begin=begin, end=end, closed_after_s=instrument.now() - end, attempt=attempt,
-                      data=data, empty=empty, thin=thin, instrument=self._diagnostics())
-            if not empty and not thin:
+                      data=data, empty=empty, thin=thin, spray=unstable, instrument=self._diagnostics())
+            if not empty and not thin and not unstable:
                 return begin, end, data
+            if unstable:
+                # The spray decides how many ions arrive: never compare settings across an unstable spray.
+                self.counts["spray_windows"] += 1
+                unstable_since = begin if unstable_since is None else unstable_since
+                waited = end - unstable_since
+                if waited >= spray.wait_s:
+                    raise SoftInterlock(f"No stable spray for {waited:.0f} s: {unstable}")
+                self._emit("status", text=f"Waiting for a stable spray: {unstable} ({waited:.0f} of {_short(spray.wait_s, 1)} s)")
+                attempt = 1
+                continue
             # A gap in the histories (acquisition or GUI stall) leaves no value: measure again, never invent one.
             self.counts["empty_windows"] += 1
             missing = ", ".join([*empty, *thin])
             self._emit("status", text=f"Too few samples for {missing} in the averaging window; measuring again")
-        if empty:
-            raise InstrumentError(f"No valid samples in {self.MEASURE_ATTEMPTS} averaging windows in a row for {', '.join(empty)}")
-        raise InstrumentError(f"Fewer than 2 samples in {self.MEASURE_ATTEMPTS} averaging windows in a row for "
-                              f"{', '.join(thin)}: lengthen average_s or shorten the device interval")
+            if attempt >= self.MEASURE_ATTEMPTS:
+                if empty:
+                    raise InstrumentError(f"No valid samples in {self.MEASURE_ATTEMPTS} averaging windows in a row for "
+                                          f"{', '.join(empty)}")
+                raise InstrumentError(f"Fewer than 2 samples in {self.MEASURE_ATTEMPTS} averaging windows in a row for "
+                                      f"{', '.join(thin)}: lengthen average_s or shorten the device interval")
+            attempt += 1
 
     def _diagnostics(self):
         try:
@@ -1222,7 +1317,7 @@ class Optimizer:
         target = self.config.target
         self._log(f"{kind}_start", strategy=self.strategy_name, options=self._options(),
                   stages=[dict(name=s.name, budget=s.budget, peak=s.peak, knobs=[k.name for k in s.knobs]) for s in self.stages],
-                  pressure=self.config.pressure,
+                  pressure=self.config.pressure, spray=None if self.config.spray is None else self.config.spray.export(),
                   target=None if target is None else dict(channels=target.channels, center=target.center, width=target.width,
                                                           measure=target.measure, points=target.points, track=target.track,
                                                           max_step=target.max_step, filter=target.filter_name))

@@ -209,10 +209,13 @@ HV measurement of both outputs.
 - **Simulation first:** tick **Simulation**, run the total ion current, then a selected
   mass (Pick on spectrum… → quick sweep of Q2 → click the 520 V peak); check the
   display, the saved `…_transmission.h5`, **Keep** and **Revert**. No device is touched.
-- **Beamline:** in **Configure…**, map each setting, aperture current and gauge; the
-  panel must show "✓ n settings · n currents · n gauges". Give each driven channel
-  realistic Min/Max in its device plugin: the windows are clipped to them. For an RF
-  amplitude set by MScan's PSU rails, map both rails with gain +1.
+- **Beamline:** in **Configure…**, map each setting, the detector (its current
+  channel and position), the spray current and the gauges; the panel must show
+  "✓ n settings · detector after Q4 · spray 10–30 nA · n gauges". Give each driven
+  channel realistic Min/Max in its device plugin: the windows are clipped to them.
+  For each RF amplitude choose its AMX output only: the two PSU rails linked to it
+  must move together (Vpos = Vneg = A) and are never offered as separate settings.
+  With the detector behind aperture 1–4, only the stages before it are offered.
 - **Selected mass:** open a real MScan file in Pick on spectrum…; the filter must be
   recognised from the rails. Then make a short quick sweep around the peak at a safe
   amplitude: the filter must move in steps of the sweep spacing and return to its
@@ -222,6 +225,8 @@ HV measurement of both outputs.
   line must list them; Optimize must propose to turn them ON, do nothing on Cancel, and
   on confirmation turn them ON through their own plugins, start the DMMR/TPG366
   recording, then start the run. Check the ramps and setpoints in each device plugin.
+  With the DMMR interval at 1 s the Devices line must recommend 5–10 Hz; an ESI read
+  slower than 1 Hz must be flagged too. The ESI is only read, never switched.
 - **Dry run on hardware:** one stage, **Fine**, devices ON and current/pressure
   channels **recording**. Verify that each request appears as a small step on the
   device, that the readbacks settle before each measurement, and that Stop returns to
@@ -232,10 +237,15 @@ HV measurement of both outputs.
   current at a safe low voltage: the run must stop with "reached Ilim" (HV stays as is). Set a watched gauge maximum below the actual pressure: the soft
   interlock must stop and restore the stage start. The hardware interlock remains the
   protective one.
-- **Criterion:** on one stage, compare the aperture current, the downstream current
-  and their sum (current panel) with the DMMR readings; a beam pushed off the aperture
-  must appear as "beam lost", never as an improvement. In mass mode, check on the
-  before/after spectra that the peak stays at the picked amplitude.
+- **Spray:** during a run, let the spray leave its range (or fluctuate by more than
+  20 %) for a few seconds: the status must show "Waiting for a stable spray", no
+  setting may move, and the run must resume once the spray is back. Keep it unstable
+  for more than 2 min: the run must stop with "No stable spray" and restore the stage
+  start.
+- **Criterion:** on one stage, compare the detector current (current panel) with the
+  DMMR readings; a beam pushed off the detector must appear as "beam lost", never as
+  an improvement. In mass mode, check on the before/after spectra that the peak stays
+  at the picked amplitude.
 - **Full run:** widen the windows progressively (Normal, then Wide); keep the HDF5
   files of each run and the logs (**Logs…**: `<Data path>/logs/transmission/`), one
   file per run, quick sweep and revert, with every step, window and decision. Check
