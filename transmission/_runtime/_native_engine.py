@@ -27,9 +27,10 @@ def export_config(config, *, stages=None, strategy=None):
     selected = [config.stage(name).name for name in stages] if stages else None
     options = {name: getattr(config, name) for name in config.DEFAULTS}
     options["strategy"] = strategy or config.strategy
-    target = config.target
+    target, spray = config.target, config.spray
     return dict(
         options=options, pressure={name: list(pair) for name, pair in config.pressure.items()},
+        spray=None if spray is None else spray.export(),
         stages=[dict(name=s.name, aperture=s.aperture, downstream=list(s.downstream),
                      normalize_by=list(s.normalize_by), budget=s.budget, peak=s.peak,
                      knobs=[dict(name=k.name, channels=dict(k.channels), window=list(k.window),
@@ -86,7 +87,7 @@ class Optimizer:
         self.status, self.reason = "ready", ""
         self.peak_center = config.target.center if config.target is not None else None
         self.spectra, self.checks = {}, {}
-        self.counts = dict(steps=0, measures=0, empty_windows=0)
+        self.counts = dict(steps=0, measures=0, empty_windows=0, spray_windows=0)
         self._stop = Event()
         self._lock = Lock()
         self._failed = self._closed = False
@@ -193,7 +194,7 @@ class Optimizer:
         if action["cancellable"] and self._cancelled() and not (op == "measuring" and args.get("active") is False):
             raise Stopped("Stopped by the operator")
         driven = set(self.config.driven_channels)
-        measured = set(self.config.current_channels) | set(self.config.pressure_channels)
+        measured = set(self.config.measured_channels)
         if op == "now":
             return None
         if op == "inspect":

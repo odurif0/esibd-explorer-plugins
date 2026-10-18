@@ -1,10 +1,16 @@
 """Simple beamline description -> optimizer configuration (TOML) for the Transmission GUI.
 
 The description maps each element setting (inlet, funnel, Q1-Q4) to Explorer
-channels, each aperture to a current channel and optional gauges to soft
-pressure limits. Windows and steps come from defaults per kind of setting,
-scaled by the exploration level. Amplitudes are in volts, like MScan; the m/z
-calibration belongs to MScan.
+channels, names the single detector (its current channel and where it sits),
+the electrospray current that must stay stable (typically 10-30 nA) and
+optional gauges with soft pressure limits. Windows and steps come from
+defaults per kind of setting, scaled by the exploration level. Amplitudes are
+in volts, like MScan; the m/z calibration belongs to MScan.
+
+The criterion is always the detector current. The detector normally sits after
+Q4; it can also be placed right behind one of the four apertures (funnel/Q1,
+Q1/Q2, Q2/Q3, Q3/Q4) to optimize what passes through it, and then only the
+elements before it are optimized. The apertures themselves are not measured.
 
 Every RF amplitude is an AMX output, never free channels. An AMX has two
 outputs, CH0-CH1 and CH2-CH3, each feeding one quadrupole: its two lines drive
@@ -34,15 +40,17 @@ KNOBS = (
     ("q4_offset", "Q4", "Offset", "offset"),
     ("q4_rf", "Q4", "RF amplitude", "rf"),
 )
-# The aperture closing stage p is COLLECTORS[p]; the collector after Q4 ends the beamline.
-COLLECTORS = (
-    ("A1", "Aperture funnel → Q1"),
-    ("A2", "Aperture Q1 → Q2"),
-    ("A3", "Aperture Q2 → Q3"),
-    ("A4", "Aperture Q3 → Q4"),
-    ("collector", "Collector after Q4"),
+# Where the single detector sits, in beam order: behind aperture k (k = 1..4) or after Q4.
+DETECTOR_POSITIONS = (
+    ("A1", "Behind aperture 1 (funnel → Q1)"),
+    ("A2", "Behind aperture 2 (Q1 → Q2)"),
+    ("A3", "Behind aperture 3 (Q2 → Q3)"),
+    ("A4", "Behind aperture 4 (Q3 → Q4)"),
+    ("after_q4", "After Q4 (standard)"),
 )
-# key, label, knobs, position (index of the aperture closing it)
+DETECTOR_PLACES = {"A1": "behind aperture 1", "A2": "behind aperture 2", "A3": "behind aperture 3",
+                   "A4": "behind aperture 4", "after_q4": "after Q4"}
+# key, label, knobs, position (index of the aperture closing it; 4 = Q4, before the standard detector)
 STAGES = (
     ("funnel", "Inlet + funnel", ("inlet", "funnel_rf", "funnel_dc", "funnel_exit"), 0),
     ("q1", "Q1", ("q1_offset", "q1_rf"), 1),
@@ -52,6 +60,8 @@ STAGES = (
     ("final", "Final refinement", ("funnel_exit", "q1_offset", "q2_offset", "q3_offset", "q4_offset"), None),
 )
 FILTERS = (("q1", "Q1"), ("q2", "Q2"), ("q3", "Q3"), ("q4", "Q4"))
+FILTER_POSITION = {key: index + 1 for index, (key, _) in enumerate(FILTERS)}
+KNOB_POSITION = {knob: position for _, _, knobs, position in STAGES if position is not None for knob in knobs}
 LEVELS = {"fine": 0.4, "normal": 1.0, "wide": 2.5}
 # kind: (window half-width, max_step, relative). Relative values are fractions of the start amplitude.
 KIND_DEFAULTS = {"inlet": (20.0, 2.0, False), "dc": (10.0, 1.0, False), "offset": (10.0, 1.0, False),
@@ -61,12 +71,22 @@ LABEL = {key: f"{element} {label if label.isupper() or label.split()[0].isupper(
          for key, element, label, _ in KNOBS}  # "Q2 RF amplitude", "Funnel DC gradient", "Inlet voltage".
 RF_KEYS = tuple(key for key, _, _, kind in KNOBS if kind == "rf")
 PAIRS = ("CH0-CH1", "CH2-CH3")  # AMX output pairs, each fed by one PSU: CH0 = Vpos, CH1 = Vneg.
+SPRAY_RANGE_NA = (10.0, 30.0)  # A stable electrospray for the optimization (nA, magnitude).
 
 
 def empty():
     # rf: the AMX output (channel pair) of each RF amplitude. devices: the device (plugin) of each mapped channel when it
     # was configured, to name a missing plugin.
-    return {"polarity": 1, "knobs": {}, "rf": {}, "collectors": {}, "gauges": {}, "devices": {}}
+    # detector: {"channel", "position"}, the one current measured and maximized.
+    # spray: {"channel", "range_na"}, the electrospray current every averaging window waits for.
+    return {"polarity": 1, "knobs": {}, "rf": {}, "detector": {}, "spray": {}, "gauges": {}, "devices": {}}
+
+
+def reach(beamline):
+    """Number of stage positions upstream of the detector (5 after Q4, k behind aperture k)."""
+    detector = beamline.get("detector") or {}
+    keys = [key for key, _ in DETECTOR_POSITIONS]
+    return keys.index(detector["position"]) + 1 if detector else 0
 
 
 def pair_label(amx, pair):
@@ -104,25 +124,39 @@ def normalize(beamline):
     for label in dict.fromkeys(pairs):
         if pairs.count(label) > 1:
             raise ValueError(f"{label} drives one RF amplitude only; it is assigned to two elements")
-    for key, channel in (data.get("collectors") or {}).items():
-        if key not in dict(COLLECTORS):
-            raise ValueError(f"Unknown collector {key!r}")
-        if channel and str(channel).strip():
-            result["collectors"][key] = str(channel)
+    detector = data.get("detector")
+    if detector is None and (data.get("collectors") or {}).get("collector"):
+        # Saved before the single detector: the collector after Q4 was the end of the beamline.
+        detector = {"channel": data["collectors"]["collector"], "position": "after_q4"}
+    detector = detector or {}
+    channel = str(detector.get("channel") or "").strip()
+    position = str(detector.get("position") or "after_q4")
+    if position not in DETECTOR_PLACES:
+        raise ValueError(f"Unknown detector position {position!r}")
+    if channel:
+        result["detector"] = {"channel": channel, "position": position}
+    spray = data.get("spray") or {}
+    channel = str(spray.get("channel") or "").strip()
+    if channel:
+        lo, hi = (float(v) for v in spray.get("range_na", SPRAY_RANGE_NA))
+        if not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo < hi):
+            raise ValueError("Spray current: need 0 <= minimum < maximum (nA)")
+        result["spray"] = {"channel": channel, "range_na": [lo, hi]}
     for channel, limits in (data.get("gauges") or {}).items():
         lo, hi = (float(v) for v in limits)
         if not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo < hi):
             raise ValueError(f"Gauge {channel}: need 0 <= minimum < maximum")
         result["gauges"][str(channel)] = [lo, hi]
     used = [c for channels in result["knobs"].values() for c in channels]
-    measured = list(result["collectors"].values())
-    mapped = {*used, *measured, *result["gauges"]}
+    measured = [result["detector"]["channel"]] if result["detector"] else []
+    sprayed = [result["spray"]["channel"]] if result["spray"] else []
+    mapped = {*used, *measured, *sprayed, *result["gauges"]}
     mapped |= {e["amx"] for e in result["rf"].values()}
     result["devices"] = {str(c): str(d) for c, d in (data.get("devices") or {}).items() if str(c) in mapped and d}
-    if len(set(measured)) != len(measured):
-        raise ValueError("A current channel is assigned to two apertures")
-    if set(used) & set(measured):
+    if set(used) & {*measured, *sprayed, *result["gauges"]}:
         raise ValueError("A channel cannot be both driven and measured")
+    if set(sprayed) & {*measured, *result["gauges"]}:
+        raise ValueError("The spray current needs its own channel, not the detector or a gauge")
     return result
 
 
@@ -137,8 +171,11 @@ def loads(text):
 def summary(beamline):
     beamline = normalize(beamline)
     knobs = len(beamline["knobs"]) + len(beamline["rf"])
-    return (f"{knobs} setting{'s' * (knobs != 1)} · {len(beamline['collectors'])} current"
-            f"{'s' * (len(beamline['collectors']) != 1)} · {len(beamline['gauges'])} gauge"
+    detector = beamline["detector"]
+    where = f"detector {DETECTOR_PLACES[detector['position']]}" if detector else "no detector"
+    spray = beamline["spray"]
+    watched = f"spray {spray['range_na'][0]:g}–{spray['range_na'][1]:g} nA" if spray else "spray not watched"
+    return (f"{knobs} setting{'s' * (knobs != 1)} · {where} · {watched} · {len(beamline['gauges'])} gauge"
             f"{'s' * (len(beamline['gauges']) != 1)}")
 
 
@@ -198,51 +235,43 @@ def resolve(beamline, rails, amx_rails=()):
     return normalize(resolved), problems
 
 
-def _collector_keys():
-    return [key for key, _ in COLLECTORS]
-
-
-def _stage_currents(beamline, position):
-    mapped = beamline["collectors"]
-    keys = _collector_keys()
-    if position is None:  # Final refinement: the last collector of the beamline.
-        last = [k for k in keys if k in mapped]
-        return None, [mapped[last[-1]]] if last else []
-    if position >= len(keys) - 1:
-        return None, [mapped["collector"]] if "collector" in mapped else []
-    aperture = mapped.get(keys[position])
-    downstream = [mapped[k] for k in keys[position + 1:] if k in mapped]
-    return aperture, downstream
-
-
 def stages(beamline, *, mode="total", filter_key=None):
-    """[(key, label, knob keys, aperture, downstream, peak)] that can run with this mapping."""
+    """[(key, label, knob keys, aperture, downstream, peak)] before the detector, which they all maximize.
+
+    Only the elements upstream of the detector act on its current: with the detector behind aperture k,
+    the stages up to that aperture, and the final refinement of their offsets."""
     beamline = normalize(beamline)
+    detector = beamline["detector"]
+    if not detector:
+        return []
+    upstream = reach(beamline)
+    position_of_filter = FILTER_POSITION.get(filter_key)
     available = []
-    position_of_filter = dict((k, i + 1) for i, (k, _) in enumerate(FILTERS)).get(filter_key)
     for key, label, knobs, position in STAGES:
-        knobs = [k for k in knobs if k in beamline["knobs"]]
+        if position is not None and position >= upstream:
+            continue
+        knobs = [k for k in knobs if k in beamline["knobs"] and KNOB_POSITION[k] < upstream]
         if mode == "mass" and filter_key:
             knobs = [k for k in knobs if k != f"{filter_key}_rf"]
-        aperture, downstream = _stage_currents(beamline, position)
-        if not knobs or not downstream:
+        if not knobs:
             continue
         peak = mode == "mass" and position_of_filter is not None and (position is None or position <= position_of_filter)
-        available.append((key, label, knobs, aperture, downstream, peak))
+        available.append((key, label, knobs, None, [detector["channel"]], peak))
     return available
 
 
 def filters(beamline):
-    """Quadrupoles whose RF amplitude is mapped and whose filtered beam is measured."""
+    """Quadrupoles whose RF amplitude is mapped and that sit before the detector."""
     beamline = normalize(beamline)
     return [(key, label) for key, label in FILTERS if f"{key}_rf" in beamline["knobs"] and filter_measure(beamline, key)]
 
 
 def filter_measure(beamline, filter_key):
-    """Current channels behind the filter: from its exit aperture to the end of the beamline."""
+    """The detector, when it sits behind the filter quadrupole."""
     beamline = normalize(beamline)
-    position = dict((k, i + 1) for i, (k, _) in enumerate(FILTERS))[filter_key]
-    return [beamline["collectors"][k] for k in _collector_keys()[position:] if k in beamline["collectors"]]
+    if not beamline["detector"] or FILTER_POSITION[filter_key] >= reach(beamline):
+        return []
+    return [beamline["detector"]["channel"]]
 
 
 def _toml_string(text):
@@ -264,13 +293,15 @@ def build(beamline, *, selected=None, level="normal", mode="total", filter_key=N
     if mode == "mass":
         if filter_key not in dict(FILTERS) or f"{filter_key}_rf" not in beamline["knobs"]:
             raise ValueError("Choose a quadrupole whose RF amplitude is mapped as the mass filter")
+        if not filter_measure(beamline, filter_key):
+            raise ValueError("The mass filter must sit before the detector")
         if center is None or width is None or not (center >= 0 and width > 0):
             raise ValueError("Choose the peak: its amplitude and half-width in volts")
     plan = stages(beamline, mode=mode, filter_key=filter_key)
     if selected is not None:
         plan = [stage for stage in plan if stage[0] in selected]
     if not plan:
-        raise ValueError("No stage can run: map at least one setting and a current after it")
+        raise ValueError("No stage can run: map the detector and at least one setting before it")
     scale = LEVELS[level]
     lines = ["# Generated by the Transmission GUI. Edit freely in Advanced mode.",
              f"polarity = {beamline['polarity']}"]
@@ -280,21 +311,23 @@ def build(beamline, *, selected=None, level="normal", mode="total", filter_key=N
         lines.append("")
         lines.append("[pressure]")
         lines += [f"{_toml_string(channel)} = [{lo!r}, {hi!r}]" for channel, (lo, hi) in beamline["gauges"].items()]
+    if beamline["spray"]:
+        lo, hi = beamline["spray"]["range_na"]
+        lines += ["", "# Each averaging window is measured again until the spray is stable (max_spread, default 0.2);",
+                  "# after wait_s (default 120 s) without a stable spray the run stops.", "[spray]",
+                  f"channel = {_toml_string(beamline['spray']['channel'])}",
+                  f"range = [{lo / 1e9!r}, {hi / 1e9!r}]  # A: {lo:g}–{hi:g} nA"]
     if mode == "mass":
         measure = filter_measure(beamline, filter_key)
         lines += ["", "[target]", 'mode = "mass"', f"filter = {_toml_string(dict(FILTERS)[filter_key])}",
                   f"channels = {_toml_table(beamline['knobs'][f'{filter_key}_rf'])}",
                   f"center = {float(center)!r}", f"width = {float(width)!r}",
                   f"measure = [{', '.join(_toml_string(c) for c in measure)}]"]
-    all_collectors = [beamline["collectors"][k] for k in _collector_keys() if k in beamline["collectors"]]
     for key, label, knobs, aperture, downstream, peak in plan:
         lines += ["", "[[stage]]", f"name = {_toml_string(label)}"]
         if aperture:
             lines.append(f"aperture = {_toml_string(aperture)}")
-        lines.append(f"downstream = [{', '.join(_toml_string(c) for c in downstream)}]")
-        first = STAGES[0][0] == key
-        if not peak and not first and len(all_collectors) >= 2:
-            lines.append(f"normalize_by = [{', '.join(_toml_string(c) for c in all_collectors)}]")
+        lines.append(f"downstream = [{', '.join(_toml_string(c) for c in downstream)}]  # the detector")
         if peak:
             lines.append("peak = true")
         stage_scale = min(scale, LEVELS["fine"]) if key == "final" else scale

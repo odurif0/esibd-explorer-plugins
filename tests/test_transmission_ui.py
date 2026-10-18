@@ -585,10 +585,13 @@ def explorer_scenario(env):
                   rf=rf_pairs)
     currents = {name: FakeChannel(dmmr, name) for name in simulator.CURRENTS}
     pressures = {name: FakeChannel(tpg, name, value) for name, value in simulator.PRESSURES.items()}
-    devices.extend([psu, dmmr, tpg, *rf_psus.values(), *amxs])
+    sprayer = FakeDevice("ESI", "A", False)  # Its HV current: the spray current, measured only.
+    spray = FakeChannel(sprayer, "ESI_I", simulator.SPRAY_A)
+    devices.extend([psu, dmmr, tpg, *rf_psus.values(), *amxs, sprayer])
     scan.pluginManager.plugins.extend([*rf_psus.values(), *amxs])
-    rng = np.random.default_rng(0)
-    state = dict(pressure_factor=1.0)
+    rng, spray_rng = np.random.default_rng(0), np.random.default_rng(1)
+    state = dict(pressure_factor=1.0, spray=1.0)
+    low_spray = []  # Times of the spray samples taken during a dropout.
 
     def physics():
         # Readbacks follow the setpoints at 200 V/s; DMMR and TPG append timestamped samples.
@@ -596,8 +599,14 @@ def explorer_scenario(env):
             step = 200.0 * 0.05
             delta = channel.value - channel.monitor
             channel.monitor = channel.value if abs(delta) <= step else channel.monitor + math.copysign(step, delta)
-        true = simulator.transport({name: c.monitor for name, c in knobs.items()})
+        true = simulator.transport({name: c.monitor for name, c in knobs.items()}, source=2e-9 * state["spray"])
         now = time.time()
+        if sprayer.recording:
+            spray._value = simulator.SPRAY_A * state["spray"] * (1 + 0.02 * spray_rng.normal())
+            spray.values.add(spray._value)
+            sprayer.time.add(now)
+            if state["spray"] < 1.0:
+                low_spray.append(now)
         for name, channel in currents.items():
             if dmmr.recording:
                 channel.monitor = true[name] * (1 + 0.01 * rng.normal()) + 2e-14 * rng.normal()
@@ -645,7 +654,7 @@ def explorer_scenario(env):
         driven, measured, gauges = scan.channel_lists()
         # No ESI channel, no AMX pulser channel and no rail of an AMX output is offered as a setting.
         assert driven == [name for name in simulator.KNOBS if not name.endswith("_RF")], driven
-        assert measured == list(simulator.CURRENTS) and gauges == list(simulator.PRESSURES)
+        assert measured == [*simulator.CURRENTS, "ESI_I"] and gauges == list(simulator.PRESSURES)
         config = module._engine.parse_config('[[stage]]\nname="s"\ndownstream=["A1"]\n[[stage.knob]]\n'
                                              'channels={"ESI HV1"=1.0}\nwindow=[-1.0, 1.0]\nmax_step=1.0\n')
         with pytest.raises(module._engine.ConfigError, match="ESI channels are not driven"):
@@ -671,6 +680,26 @@ def explorer_scenario(env):
         assert report["AMX_SIM_1"]["state"] == "off" and report["AMX_SIM_1"]["switches"] == ["CH0-CH1"]
         assert "switches the RF of CH0-CH1" in scan._describe(report["AMX_SIM_1"])
         amxs[1].on = True
+        # The detector read at 1 Hz (the DMMR default) is ready but flagged: 5-10 Hz is recommended.
+        dmmr.interval = 1000
+        (entry,) = scan.device_report([], ["Collector"])
+        assert entry["state"] == "ready" and "5–10 Hz" in entry["hint"] and "at 1 Hz" in entry["hint"]
+        scan._needed = lambda: ([], ["Collector"])  # What a run on the detector alone needs.
+        scan.refresh_devices()
+        del scan._needed
+        assert panel.devices_label.text() == "Devices: ✓ DMMR_SIM (⚠ slow: 5–10 Hz recommended)", panel.devices_label.text()
+        assert "5–10 Hz (interval 100–200 ms)" in panel.devices_label.toolTip()
+        dmmr.interval = 100
+        (entry,) = scan.device_report([], ["Collector"])
+        assert "hint" not in entry
+        # The spray current (ESI) only needs 1 Hz; it is measured, never turned ON from here.
+        sprayer.interval = 1000
+        report = {e["name"]: e for e in scan.device_report([], ["Collector", "ESI_I"])}
+        assert report["ESI"]["esi"] and report["ESI"]["state"] == "ready" and "hint" not in report["ESI"]
+        sprayer.interval = 2000
+        report = {e["name"]: e for e in scan.device_report([], ["Collector", "ESI_I"])}
+        assert "at least 1 Hz" in report["ESI"]["hint"] and "hint" not in report["DMMR_SIM"]
+        del sprayer.interval
         assert not sets
         dialog = module._BeamlineDialog(scan, scan.beamline_map)
         for key, channels in paired["knobs"].items():
@@ -684,16 +713,16 @@ def explorer_scenario(env):
         q2 = dialog.knobs.cellWidget(next(i for i, k in enumerate(beamline_module.KNOBS) if k[0] == "q2_rf"), 3)
         assert q2.text() == "PSU_Q2_RF (from the AMX_SIM_1 Settings): Vpos Q2_RF, Vneg Q2_RF neg, both = A", q2.text()
         assert dialog.pair_widgets["q2_rf"].currentText() == "AMX_SIM_1 CH0-CH1"  # An AMX output, not a PSU.
-        for key, channel in simulator.BEAMLINE["collectors"].items():
-            dialog.collector_widgets[key].setCurrentText(channel)
+        # One detector: its current channel and where it sits (after Q4 by default).
+        assert dialog.detector_position.currentData() == "after_q4"
+        dialog.detector_channel.setCurrentText("Collector")
+        # The spray current must stay stable while optimizing: 10-30 nA by default.
+        assert (dialog.spray_low.text(), dialog.spray_high.text()) == ("10", "30")
+        dialog.spray_channel.setCurrentText("ESI_I")
         watch, low, high = dialog.gauge_widgets["P_funnel"]
         watch.setChecked(True)
         low.setText("2")
         high.setText("6")
-        dialog.collector_widgets["A2"].setCurrentText("A1")
-        dialog.accept()
-        assert "two apertures" in dialog.message.text() and dialog.result() == 0
-        dialog.collector_widgets["A2"].setCurrentText("A2")
         q3 = dialog.pair_widgets["q3_rf"]
         q3.setCurrentIndex(dialog.pair_widgets["q2_rf"].currentIndex())  # One pair, two quadrupoles: refused.
         dialog.accept()
@@ -719,7 +748,15 @@ def explorer_scenario(env):
         scan.configure_beamline()  # Reopened unchanged, the dialog gives back the saved mapping.
         saved = beamline_module.loads((target / "config" / "Transmission.beamline.json").read_text(encoding="utf-8"))
         assert saved == beamline_module.normalize(expected) == scan.beamline_map
-        assert panel.beamline_label.text() == "✓ 12 settings · 5 currents · 1 gauge", panel.beamline_label.text()
+        assert panel.beamline_label.text() == "✓ 12 settings · detector after Q4 · spray 10–30 nA · 1 gauge", \
+            panel.beamline_label.text()
+        moved = module._BeamlineDialog(scan, scan.beamline_map)  # The detector right behind aperture 2 (Q1 → Q2).
+        moved.detector_position.setCurrentIndex(moved.detector_position.findData("A2"))
+        moved.accept()
+        assert moved.result_beamline["detector"] == {"channel": "Collector", "position": "A2"}
+        resolved, _ = beamline_module.resolve(moved.result_beamline, lambda amx, pair: next(
+            e["rails"] for e in scan.amx_pairs() if (e["amx"], e["pair"]) == (amx, pair)))
+        assert [key for key, *_ in beamline_module.stages(resolved)] == ["funnel", "q1", "final"]
         assert scan.active_beamline()["knobs"]["q2_rf"] == {"Q2_RF": 1.0, "Q2_RF neg": 1.0}
         template = scan.template_text()
         assert '#   AMX_SIM_1 CH0-CH1: channels = { "Q2_RF" = 1.0, "Q2_RF neg" = 1.0 }' in template, template
@@ -728,6 +765,8 @@ def explorer_scenario(env):
         assert panel.optimize.isEnabled() and len(panel.stage_boxes) == 6
         config = module._engine.parse_config(scan.generated_text())
         assert scan.missing_channels(config) == [] and config.pressure == {"P_funnel": (2.0, 6.0)}
+        assert config.spray.export() == dict(channel="ESI_I", range=[1e-8, 3e-8], max_spread=0.2, wait_s=120.0)
+        assert "ESI_I" in scan._needed()[1]
         assert (config.settle_s, config.average_s) == (1.0, 2.0)  # Real devices: the default timings.
         # A freeze of Explorer's Qt thread records queued samples in a burst: one observation, not several.
         burst_device = FakeDevice("BURST_SIM", "A", True)
@@ -763,7 +802,10 @@ def explorer_scenario(env):
         return devices_scenario(env, locals())
     scan.save_beamline(paired)  # The fake channels carry the simulator's names; each RF is an AMX output.
     path = scan.default_config_path()
-    path.write_text(EXPLORER_MASS_CONFIG if scenario == "explorer-mass" else EXPLORER_CONFIG, encoding="utf-8")
+    text = EXPLORER_MASS_CONFIG if scenario == "explorer-mass" else EXPLORER_CONFIG
+    if scenario == "explorer-run":
+        text += '[spray]\nchannel = "ESI_I"\nrange = [1e-8, 3e-8]\n'
+    path.write_text(text, encoding="utf-8")
     scan.state.update(advanced=True, simulation=False)
     scan.refresh_panel()
     assert "✓" in panel.beamline_label.text() and panel.optimize.isEnabled(), progress()
@@ -794,7 +836,18 @@ def explorer_scenario(env):
         check_steps({"Q2_RF": 20.0, "Q2_RF neg": 20.0})
         sets.clear()
     scan.start_optimization()
-    if scenario not in ("explorer-run", "explorer-mass"):
+    if scenario == "explorer-run":
+        deadline = time.monotonic() + 60
+        while len(scan._records) < 5 and time.monotonic() < deadline:
+            QTest.qWait(20)
+        state["spray"] = 0.2  # A 3 s spray dropout (4 nA): the run waits for the spray, then goes on.
+        QTimer.singleShot(3000, lambda: state.update(spray=1.0))
+        waited = []
+        while state["spray"] < 1.0:
+            QTest.qWait(20)
+            waited += [progress()] if progress().startswith("Waiting for a stable spray") else []
+        assert waited and "outside 10–30 nA" in waited[0], waited
+    elif scenario != "explorer-mass":
         deadline = time.monotonic() + 60
         while len(scan._records) < 5 and time.monotonic() < deadline:
             QTest.qWait(20)
@@ -828,6 +881,10 @@ def explorer_scenario(env):
     assert sum(b - a < 2.9 for a, b in zip(live, live[1:])) <= 3, live
     if scenario == "explorer-run":
         assert result["status"] == "completed", result
+        end = next(e for e in events if e["event"] == "run_end")
+        assert any(m["spray"] for m in measures) and end["counts"]["spray_windows"] >= 2, end["counts"]
+        assert low_spray and not any(r["begin"] < t <= r["time"] for r in scan._records for t in low_spray), \
+            "no point measured with a spray sample of the dropout"
         stage = result["stages"][0]
         assert stage["adopted"] and stage["relative_gain"] > 0.05, stage
         assert all(abs(knobs[c].value - v) < 1e-9 for c, v in stage["final"].items())

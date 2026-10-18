@@ -1,9 +1,9 @@
 # Transmission Plugin
 
 Optimizes the ion transmission through the beamline (inlet, ion funnel, quadrupoles
-Q1–Q4 and the apertures between their chambers), stage by stage, with a
-noise-tolerant surrogate model and verified A/B decisions. It optimizes either the
-total ion current or one mass selected by a quadrupole.
+Q1–Q4 and the four apertures between their chambers), stage by stage, with a
+noise-tolerant surrogate model and verified A/B decisions. It maximizes the current
+of the single detector, for all ions or for one mass selected by a quadrupole.
 
 Enable the `Transmission` plugin in Explorer's Plugin Manager. When installing or
 updating, keep the whole `transmission/` directory, including `_runtime/` and
@@ -51,9 +51,13 @@ The panel has three steps, then **▶ Optimize**.
 
 1. **Beamline** — **Configure…** once: which channel drives each setting (inlet
    voltage; funnel RF amplitude, DC gradient and exit; offset and RF amplitude of
-   Q1–Q4), which picoammeter channel measures each aperture (funnel → Q1, Q1 → Q2,
-   Q2 → Q3, Q3 → Q4) and the collector after Q4, and optionally which gauges to
-   watch with their pressure range. **Each RF amplitude is an AMX output**: an AMX
+   Q1–Q4), the **detector** (its current channel and its position), the **spray
+   current** (the ESI HV current of the emitter, and its accepted range, 10–30 nA by
+   default) and optionally which gauges to watch with their pressure range. The detector normally sits
+   **after Q4**; it can also be placed right behind one of the four apertures
+   (1 funnel → Q1, 2 Q1 → Q2, 3 Q2 → Q3, 4 Q3 → Q4) to optimize what passes through
+   that aperture, and then only the elements before it are optimized (and offered
+   as mass filters). The apertures themselves are not measured. **Each RF amplitude is an AMX output**: an AMX
    has two outputs, `CH0-CH1` and `CH2-CH3`, each feeding one quadrupole. Its two
    lines (CH0 and CH1) drive the two rod pairs and switch between the two outputs of
    one PSU (PSU CH0 = Vpos, CH1 = Vneg) in opposite phase; that PSU is the one linked
@@ -64,7 +68,7 @@ The panel has three steps, then **▶ Optimize**.
    output serves one element only. A beamline saved with the two rails of an output
    is shown as that output; any other mapping of an RF amplitude, or a rail used as a
    DC setting, is reported under the beamline summary and never driven. Unmapped
-   settings and apertures are simply skipped.
+   settings are simply skipped.
 2. **Target** — **Total ion current**, or **Selected mass**: choose the quadrupole
    used as the filter (usually Q2 or Q4; any quadrupole can be used), then
    **Pick on spectrum…** and click the peak, either on a saved MScan file (the
@@ -75,7 +79,15 @@ The panel has three steps, then **▶ Optimize**.
    refinement) and the exploration: **Fine**, **Normal** or **Wide** windows.
 
 The devices driving the settings must be ON, and those measuring the currents and
-pressures ON **and recording**. The **Devices** line of step 1 shows each device the
+pressures ON **and recording**. Read the detector at **5–10 Hz** while optimizing (DMMR
+interval 100–200 ms, set in the DMMR plugin): each 2 s averaging window then holds
+10–20 samples, against two at the DMMR default of 1 s. A slower detector is flagged
+on the Devices line. The spray current must be **stable** during the optimization
+(typically 10–30 nA): every averaging window is measured again, without any move,
+until the spray lies in its range and fluctuates by at most 20 % within the window
+(`max_spread`); after 2 min (`wait_s`) without a stable spray the optimization stops
+and returns to the stage start. The ESI is read at 1 Hz or faster; it stays ON and
+recording, and Transmission never switches it. The **Devices** line of step 1 shows each device the
 optimization needs (✓ ready, or OFF, not recording, transition in progress, not
 available). When one is not ready, **Optimize** (panel or toolbar), **Turn ON…** or a
 quick sweep lists what is missing and proposes to turn the devices ON and start their
@@ -121,19 +133,16 @@ start value. The final refinement uses at most the Fine windows.
 
 ## Criterion
 
-For each stage, the criterion is the **transmitted current**: the sum of the currents
-measured *after* the stage aperture (following apertures and the final collector).
-From the second stage on it is **normalized by the incoming flux** (the sum of all
-collectors), which compensates spray fluctuations. Ions lost on the quadrupole rods are
-never measured, so a better ratio could hide fewer ions: a normalized gain is adopted
-only if the A/B pairs also show more ions after the aperture.
+For every stage, the criterion is the **detector current**: the ions that cross the
+whole beamline up to the detector. Each stage moves its own elements and keeps what
+raises that current. With a single detector there is no incoming flux to normalize
+by: no point is measured while the spray is unstable (see Use), and slow drift is
+handled by the alternating A/B verification and by the drift term of the model. A point whose current falls below `lost_fraction`
+(20 %) of the stage start, or below the noise (`min_current`), is **beam lost**:
+invalid, and counted as zero by the model.
 
-A low current on an aperture is ambiguous: ions may pass through it, or no ions may
-arrive at all. The **charge bookkeeping** resolves it: the flux reaching the aperture
-is the aperture current plus the downstream current. When it drops below
-`lost_fraction` (20 %) of its value at the stage start, or below the noise
-(`min_current`), the point is **beam lost**: invalid, and counted as zero by the
-model. It can never be taken for good transmission.
+The advanced configuration can still describe other set-ups (a current measured on an
+aperture, several collectors, normalization); the simple settings use the detector.
 
 ### Selected mass
 
@@ -141,9 +150,8 @@ The filter quadrupole is set to the picked peak and its RF amplitude is not opti
 (it selects the mass). For the stages up to the filter and for the final refinement,
 the criterion is the **height of the peak**: a short sweep of the filter amplitude
 (5 points over ± the half-width) around the tracked peak centre, fitted by a
-parabola. The peak is measured only on the currents both behind the filter and after
-the stage aperture: ions of the selected mass landing on the stage's own exit
-aperture are not transmitted by it. A peak that moves in amplitude when an upstream
+parabola and measured on the detector, which must sit behind the filter. A peak that
+moves in amplitude when an upstream
 setting changes is therefore never mistaken for a change of transmission; its centre
 is tracked within ± twice the half-width of the picked position. The stages after the
 filter maximize the (already filtered) current. A spectrum around the peak is recorded
@@ -207,8 +215,8 @@ not promised to be bitwise identical to SciPy, even for the same seed.
 ## Safety
 
 - The **soft interlocks** only stop the optimization: a watched pressure outside its
-  range, or any monitored current above `max_current` (a discharge), returns step by
-  step to the stage start. **The protective interlock belongs in the hardware** (for
+  range, any monitored current above `max_current` (a discharge), or a spray current
+  unstable for `wait_s`, returns step by step to the stage start. **The protective interlock belongs in the hardware** (for
   example TPG366 relays wired to the CGC interlock inputs).
 - A device switched OFF, a channel disabled, a setpoint changed outside the optimizer,
   a readback that never settles or missing data stop the run **without any further
@@ -253,19 +261,25 @@ max_current = 1e-6        # A: larger |current| = discharge (soft interlock)
 [pressure]                # soft interlock only, [minimum, maximum] in mbar
 P_funnel = [2.0, 6.0]
 
+[spray]                   # optional: every averaging window waits for a stable spray
+channel = "ESI_HV1_I"     # the ESI HV current of the emitter (measured, never driven)
+range = [1e-8, 3e-8]      # A: accepted |spray current| (10–30 nA)
+# max_spread = 0.2        # largest relative standard deviation within a window
+# wait_s = 120.0          # then stop and return to the stage start
+
 [target]                  # optional: a mass selected by a quadrupole
 filter = "Q2"
 channels = { "PSU_B CH0" = 1.0, "PSU_B CH1" = 1.0 }  # both rails of the AMX output: Vpos = Vneg = A
 center = 520.0            # peak amplitude A (V)
 width = 30.0              # half-width (V): the peak sweep spans ± width
-measure = ["DMMR A3", "DMMR A4", "DMMR Collector"]  # currents behind the filter
+measure = ["DMMR Detector"]  # the detector, behind the filter
 # points = 5, track = 2 * width, max_step = width / 2, spectrum_points = 21, spectrum_span = 3.0
 
 [[stage]]
 name = "Funnel to Q1"
-aperture = "DMMR A1"                         # aperture closing this stage
-downstream = ["DMMR A2", "DMMR Collector"]   # their sum is maximized
-normalize_by = []                            # optional incoming-flux channels
+downstream = ["DMMR Detector"]   # the current maximized (a sum if several are listed)
+# aperture = "DMMR A1"          # optional: a current measured on the aperture closing this stage
+# normalize_by = []             # optional incoming-flux channels
 peak = true                                  # criterion = height of the [target] peak
 # budget = 40                                # measurements
 
@@ -289,8 +303,8 @@ stage never drives the filter channels. Other settings: `settle_timeout_s`,
 
 The display shows the criterion relative to each stage start (lost-beam points as grey
 crosses, verification points as stars), the selected peak before/after (or the setting
-positions of the current stage), the current balance (on the aperture, after it, and
-reaching it) and the pressures.
+positions of the current stage), the detector current (and, in an advanced
+configuration measuring an aperture, the current on it) and the pressures.
 
 Each run is saved in the session folder (`…_transmission.h5`): the configuration, the
 beamline description and the result (JSON, with the spectra and the before/after
@@ -326,10 +340,10 @@ the adapter run/session logs. Each adapter line has `t` (Unix time), `seq` and
 | Event | Content |
 | --- | --- |
 | `header` | plugin and Explorer versions, Python, platform, SHA-256 of the plugin code (provenance), panel state, beamline, full configuration, notes, HDF5 file, and every channel used (device, ON, recording, value, readback, Min/Max, unit, flags) |
-| `run_start` / `run_end` | strategy, options, stages, target; status, reason, duration, counters, final setpoints and the traceback of an error |
+| `run_start` / `run_end` | strategy, options, stages, spray guard, target; status, reason, duration, counters, final setpoints and the traceback of an error |
 | `stage_start` / `stage_done` | windows, start, steps, budget, currents used; verdict, gains, duration, final strategy state |
 | `step` | every setpoint step sent, with the settling time, polls and readbacks |
-| `measure` | every averaging window: mean, standard error and samples per channel, attempt, channels with too few samples, delay before the closing sample, and per channel the samples recorded, valid, collapsed from a burst and repeated, the device interval, the largest gap without a sample; Qt-thread latency |
+| `measure` | every averaging window: mean, standard error and samples per channel, attempt, channels with too few samples, why the spray was not stable, delay before the closing sample, and per channel the samples recorded, valid, collapsed from a burst and repeated, the device interval, the largest gap without a sample; Qt-thread latency |
 | `evaluation` | every measured point: displacements, setpoints, currents, pressures, criterion, incident and transmitted flux, validity and reason, peak sweep and fit |
 | `ask` / `tell` | the strategy state: Gaussian-process length scales, noise, prediction and uncertainty of the chosen point, trust-region radius, fit time (or the coordinate-search axis and scale) |
 | `verify` | the A/B pairs, gains, verdict and the "fewer ions" guard |

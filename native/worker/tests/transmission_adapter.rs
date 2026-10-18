@@ -186,6 +186,35 @@ assert outcome[2]['status'] == 'completed', outcome[2]
 assert commands[2] == commands[3] == commands[4]
 assert outcome[0].counts['empty_windows'] == 2
 
+# A spray dropout: both engines wait without moving, then go on; a spray that never recovers stops and restores.
+sprayed = engine.parse_config(text.replace('[pressure]', '[spray]\nchannel = "ESI_I"\nrange = [1e-8, 3e-8]\nwait_s = 20.0\n[pressure]'))
+for recovers in (True, False):
+    for is_native in (False, True):
+        instrument = sim.SimulatedBeamline(seed=0, cancel=threading.Event())
+        wait = instrument.wait
+        dropout = []
+        def timed(seconds, cancellable=True):
+            wait(seconds, cancellable)
+            if recovers and dropout and instrument.spray < 1.0 and instrument.now() >= dropout[0] + 6.0:
+                instrument.spray = 1.0
+                dropout.append(instrument.now())
+        instrument.wait = timed
+        def drop(kind, data, instrument, transport):
+            if kind == 'evaluation' and data['record']['index'] == 4 and not dropout:
+                instrument.spray = 0.2
+                dropout.append(instrument.now())
+        optimizer, instrument, result, events, logs = run('coordinate', is_native, drop, config=sprayed, simulation=instrument)
+        waiting = [d['text'] for k, d in events if k == 'status' and d['text'].startswith('Waiting for a stable spray: spray current 4.0 nA outside 10–30 nA (')]
+        assert waiting and optimizer.counts['spray_windows'] >= 3, (is_native, optimizer.counts)
+        assert next(d for k, d in logs if k == 'run_start')['spray'] == dict(channel='ESI_I', range=[1e-8, 3e-8], max_spread=0.2, wait_s=20.0)
+        if recovers:
+            assert result['status'] == 'completed', (is_native, result)
+            lost, back = dropout
+            assert all(r['time'] <= lost or r['begin'] >= back for r in optimizer.history), is_native
+        else:
+            assert result['status'] == 'interlock' and result['reason'].startswith('No stable spray for 20 s: spray current 4.0 nA'), result
+            assert all(instrument.setpoint[c] == sim.KNOBS[c][2] for c in result['initial'])
+
 # Spectra, numerical facade and paired mass-stage recovery use the same process.
 with tempfile.TemporaryDirectory() as directory:
     with closing(worker()) as transport:
@@ -224,7 +253,7 @@ with closing(worker()) as transport:
     assert all(s['adopted'] for s in result['stages']), result
     assert result['checks']['after']['currents']['Collector'] > result['checks']['before']['currents']['Collector']
     assert len(result['spectra']['before']['amplitude']) == len(result['spectra']['after']['amplitude']) == 21
-    assert all(r['peak']['measure'] == ['A3','A4','Collector'] for r in optimizer.history)
+    assert all(r['peak']['measure'] == ['Collector'] for r in optimizer.history)  # The single detector.
     assert optimizer.restore_initial() == dict(status='restored', reason='')
     assert all(instrument.setpoint[c] == sim.KNOBS[c][2] for c in optimizer.initial)
     bounded(config, instrument)
@@ -262,7 +291,7 @@ with closing(worker()) as transport:
     assert optimizer.run()['status'] == 'completed'
 
 print('Transmission: real subprocess, coordinate/reference tolerance, Bayesian improvement, stop/interlock/off, '
-      'missing/thin/late/stuck data, gap retry, strict JSONL, spectrum/peak/undo and lost-worker checks passed')
+      'missing/thin/late/stuck data, gap retry, spray dropout, strict JSONL, spectrum/peak/undo and lost-worker checks passed')
 "#;
     let mut child = Command::new("python3")
         .arg("-c")
