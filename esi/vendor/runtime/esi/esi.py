@@ -44,7 +44,7 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
     # hash): limits/temperature validated before ON, direct activation readback,
     # cancellable heater reads. Keep it in later versions; bump it if the
     # contract changes incompatibly.
-    HEATER_SAFETY_CONTRACT = 1
+    HEATER_SAFETY_CONTRACT = 2  # Includes diagnostics without unused HV analog measurements.
     _active_connections_lock = threading.Lock()
     _active_connections: dict[int, dict[str, object]] = {}
 
@@ -1248,8 +1248,13 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
             set_temperature, timeout * 9.0, "set_heater_temperature"
         )
 
-    def collect_diagnostics(self, timeout_s: Optional[float] = None, *, cancel_event=None) -> dict:
-        """Collect controller, HV, and heater state without changing outputs."""
+    def collect_diagnostics(self, timeout_s: Optional[float] = None, *, cancel_event=None,
+                            include_hv_measurements: bool = True) -> dict:
+        """Collect state; heater-only callers can omit unused HV analog measurements.
+
+        HV targets and activation gates remain checked in either case. Omitted
+        measurements are absent, never reported as measured zeros.
+        """
         self._require_connected()
         timeout = self._resolve_timeout(timeout_s)
 
@@ -1311,6 +1316,25 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
             modules = {}
             for address in self.HV_MODULE_ADDRESSES:
                 module_state = int(module_states[address])
+                if not include_hv_measurements:
+                    target, = checked(
+                        ESIBase.get_hv_supply_target_output_voltage(self, address),
+                        f"get_target({address})",
+                    )
+                    module_active, = checked(
+                        ESIBase.get_module_activation_state(self, address),
+                        f"get_module_active({address})",
+                    )
+                    modules[address] = {
+                        "active": bool(enabled and module_active and float(target) != 0.0),
+                        "module_active": bool(module_active),
+                        "module_state": module_state,
+                        "control_active": bool(module_state & self.MS_CTRL_ACT),
+                        "module_gate_active": bool(module_state & self.MS_MOD_ACT),
+                        "device_gate_active": bool(module_state & self.MS_DEV_ACT),
+                        "target_v": float(target),
+                    }
+                    continue
                 voltage_negative, current_high = checked(
                     ESIBase.get_hv_supply_meas_ranges(self, address),
                     f"get_measurement_ranges({address})",
@@ -1432,6 +1456,7 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
                     "temp_psu_c": housekeeping[4],
                 },
                 "modules": modules,
+                "hv_measurements_included": bool(include_hv_measurements),
                 "heat": {
                     "active": heat_active,
                     "module_active": bool(heat_module_active),

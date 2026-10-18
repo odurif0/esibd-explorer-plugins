@@ -151,8 +151,19 @@ below this stop; the notebook refuses any other program. A 175 °C stage stopped
 that run at 175.001 °C, which is why the last stage is now 170 °C. This is a sampled
 software check, not a hardware thermal cutout.
 Pressure is recorded continuously; thermal qualification does not prove pressure
-equilibrium. Normal completion includes 900 s temperature/pressure observation
-after verified heater OFF, not a declaration that the assembly is cold.
+equilibrium. After verified heater OFF, temperature and all six pressures are
+recorded until a valid measured temperature is ≤30 °C (`COOLING_TARGET_C`),
+without a fixed cooling duration. The threshold-crossing sample must be saved;
+a temperature above 30 °C after 900 s must not end recording. Stop, invalid
+sensor readings and pressure faults must still preempt cooling and trigger
+verified shutdown. Reaching the threshold does not declare the assembly safe to touch.
+For this heater-only experiment, do not query HV voltage/current ADCs or require
+HV discharge verification. Check HV gates disabled and targets zero throughout;
+verify heater OFF and output disable before closing the ESI port. Record the
+shutdown scope and `hv_discharge_verified=null`, never a fabricated HV discharge
+confirmation. Simulated failing HV ADC calls must not affect acquisition or
+closure. The driver's default disconnect must retain its HV discharge checks
+for other callers; existing historical uncertainty markers remain authoritative.
 
 **ESI start (fixed after 2026-10-07):** with HV1 selected at a nonzero target, close
 Explorer, restart it and press ON: the panel must show every output OFF with the
