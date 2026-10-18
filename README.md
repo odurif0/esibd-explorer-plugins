@@ -5,7 +5,9 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 13 device plugins and two standalone scan plugins (15 folders).
 
 Version v0.5 introduces isolated native workers for all 15 plugins; v0.5.1 adds
-the AMX HD output panel (also usable by MScan) and fixes ESI config loading.
+the AMX HD output panel (also usable by MScan) and fixes ESI config loading;
+v0.5.2 optimizes Transmission on a single detector while the spray is stable,
+with each RF amplitude set as an AMX output, and logs the ESI serial errors.
 Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
 no Explorer fork, external Python, private interpreter or shared device process
 is needed. **Real-hardware qualification is pending.** Local software, simulated
@@ -35,7 +37,7 @@ hardware checks; qualify the devices before routine experimental use.
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.1.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.2.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -204,9 +206,9 @@ python3 -m pytest -q --all-siblings      # release validation: every sibling cop
 ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
 
-Use the v0.5.1 native archive for release checks, selected explicitly with
+Use the v0.5.2 native archive for release checks, selected explicitly with
 `ESIBD_RELEASE_ZIP`. The historical v0.4.2 ZIP is intentionally unchanged and
-cannot validate the native bundle. The v0.5.1 release provides the archive's
+cannot validate the native bundle. The v0.5.2 release provides the archive's
 SHA-256; earlier packaging-test evidence is recorded in
 [RUST_MIGRATION.md](RUST_MIGRATION.md).
 

@@ -32,8 +32,40 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`ae13fc269125a38b790e5843aceb087a9382890e8359604a5850023482dc902c`
-(Transmission stop fix below).
+`c68c32555393b4e1d12dc10e14ed8cf51c53a900980fd14998377d354a2a4c4f`
+(v0.5.2 below).
+
+## v0.5.2 Update (2026-10-18)
+
+Transmission now optimizes the current of a single detector, after Q4 or right
+behind one of the four apertures (only the stages before it run), and each RF
+amplitude is an AMX output whose two PSU rails move together. A `[spray]` guard
+measures every averaging window again, without any move, until the ESI current
+is in range (10–30 nA by default) and fluctuates by at most 20 %; after 120 s
+the run stops as a soft interlock and restores the stage start. The guard is
+implemented in the Python reference engine and in the Rust worker, with a
+parity scenario.
+
+The ESI runtime now logs the vendor serial latches (`GetIOState`,
+`GetCommError` and their messages) after a failed DLL call, before the
+recovery Purge clears them. The first version of that change declared the two
+message exports neither in the ctypes signature table nor in the generated
+native ABI; both are now declared and the ESI worker accepts the calls.
+
+Because the shared worker source changed, all 15 deployed workers were rebuilt
+with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux for TPG366, MScan and
+Transmission). The Rust suite passes 307 tests; Clippy (`-D warnings`),
+formatting and the ABI/source/family/worker checks pass. The release
+validation (`ESIBD_REQUIRE_TARGET_HOST=1 pytest -q --all-siblings` on Explorer
+1.0.2, with `ESIBD_RELEASE_ZIP` set to the v0.5.2 archive) passes **5598 tests,
+8 skips, no failures** (1766.53 s). A first attempt failed 3 tests and errored
+19 because the `/tmp` tmpfs was full; it is not counted. All nine Windows
+workers pass the constructor-only Wine checks (all six vendor DLLs load) and
+the three Linux workers the Linux ones; no instrument is opened. The archive
+`esibd-explorer-plugins-v0.5.2.zip` holds 285 files and rebuilds
+bit-identically from the release commit (entries carry the commit time); the
+GitHub release gives its SHA-256. Hardware validation is still pending,
+including Transmission and its spray guard.
 
 ## Transmission Stop Fix (2026-10-12)
 
