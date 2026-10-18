@@ -61,6 +61,8 @@ class FakeESI:
         self.active = self.enabled = False
         self.target = 0.
         self.temperature = 21.
+        self.cooling = False
+        self.cooling_step_c = 50.  # Accelerated cooling; tests can replace it with a measured trajectory.
         self.sensor_valid = True
         self.limits = dict(voltage_limit_v=12., current_limit_a=1., power_limit_w=10.)
         self.maxima = dict(max_voltage_v=24., max_current_a=10., max_power_w=200., max_temperature_c=175.)
@@ -68,7 +70,7 @@ class FakeESI:
         self.hv_active, self.hv_target = False, 0.
         self.main_state, self.device_state = "STATE_ON", "0x0"
         self.diag_hook = None
-        self.disconnect_hook = None
+        self.close_hook = None
         self.quantum = 0.
         self.calls_after_poison = []
         self.thread_ids = []
@@ -98,9 +100,12 @@ class FakeESI:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Heater operation cancelled")
 
-    def collect_diagnostics(self, *, cancel_event=None):
+    def collect_diagnostics(self, *, cancel_event=None, include_hv_measurements=True):
+        assert include_hv_measurements is False, "PT must not query HV analog measurements"
         self.check_cancel(cancel_event)
         self.call("diagnostics")
+        if self.cooling and not self.active:
+            self.temperature = max(21., self.temperature - self.cooling_step_c)
         if self.diag_hook:
             self.diag_hook(self)
         self.check_cancel(cancel_event)
@@ -138,15 +143,23 @@ class FakeESI:
         self.call("heater_on" if active else "heater_off")
         if active:
             self.check_cancel(cancel_event)
+        if self.active and not active:
+            self.cooling = True
         self.active = self.enabled = active
         if not active:
             self.target = 0.
         return active
 
-    def disconnect(self, *, on_discharge=None):
-        self.call("disconnect")
-        if self.disconnect_hook:
-            self.disconnect_hook()
+    def force_safe_off(self):
+        self.call("force_safe_off")
+        self.active = self.enabled = self.hv_active = False
+        self.target = self.hv_target = 0.
+        return True
+
+    def force_close_transport(self):
+        self.call("force_close_transport")
+        if self.close_hook:
+            self.close_hook()
         self.active = self.enabled = False
         self.target = 0.
         return True
@@ -273,7 +286,7 @@ def rig(ns, tmp_path):
     calls, clock = [], Clock()
     esi, pressure = FakeESI(calls), FakePressure(calls, clock)
     run = ns["Experiment"](tmp_path / "runs", lambda directory: esi, lambda: pressure, limit_preparer=ns["bounded_limit"],
-                           guard=SimulatedGuard(tmp_path / "runs"), baseline_s=3., hold_s=3., cooling_s=3.,
+                           guard=SimulatedGuard(tmp_path / "runs"), baseline_s=3., hold_s=3.,
                            stability_factory=lambda: ns["TemperatureStability"](window_s=2.),
                            clock=clock, sleep=clock.sleep, plots_factory=NoPlots)
     pressure.is_shutdown = lambda: run.phase == "shutdown"
@@ -316,7 +329,10 @@ def test_defaults_and_notebook_prose():
     assert constants["BASELINE_S"] == 60 and constants["HOLD_S"] == 300 and constants["SAMPLE_S"] == 1
     assert constants["TARGETS_C"] == tuple(range(30, 171, 10)) and constants["SAFETY_STOP_C"] == 175
     assert constants["QUALIFICATION_DEADLINE_S"] == 600 and constants["STAGE_DEADLINE_S"] == 900
-    assert constants["COOLING_S"] == 900
+    assert constants["COOLING_TARGET_C"] == 30
+    assert "COOLING_S" not in constants
+    cooling_text = next(line for line in text.splitlines() if line.startswith("- **Cooling observation:**"))
+    assert "**≤30 °C**" in cooling_text and "900 s" not in cooling_text
     assert tuple(constants[key] for key in ("HEATER_VOLTAGE_V", "HEATER_CURRENT_A", "HEATER_POWER_W")) == (22, 10, 50)
 
 
@@ -327,7 +343,7 @@ def test_complete_program_uses_real_temperature_six_pressures_and_verified_stop(
     assert metadata["program_c"] == list(range(30, 171, 10))
     assert [c[1] for c in rig.calls if c[0] == "target"] == metadata["program_c"]
     assert rig.calls.count(("heater_on",)) == 1
-    assert rig.calls.index(("heater_off",)) < rig.calls.index(("disconnect",)) < rig.calls.index(("pressure_close",))
+    assert rig.calls.index(("heater_off",)) < rig.calls.index(("force_close_transport",)) < rig.calls.index(("pressure_close",))
     prepare = rig.run.limit_preparer
     assert [c[1] for c in rig.calls if c[0] == "limits"] == [{"voltage_v": prepare(22.), "current_a": prepare(10.), "power_w": prepare(50., power=True)}]
     assert not ns["_PT_GUARD"] and not rig.run.guard_path.exists()
@@ -336,7 +352,7 @@ def test_complete_program_uses_real_temperature_six_pressures_and_verified_stop(
     assert all(float(row["temperature_c"]) != float(row["target_temperature_c"]) for row in heated)
     assert all(row["pressure_observed_utc"] and row["temperature_observed_utc"] for row in heated)
     assert float(heated[0]["elapsed_s"]) >= 3
-    assert rig.clock.now >= 3 + 15 * (2 + 3) + 3
+    assert rig.clock.now >= 3 + 15 * (2 + 3)
     assert all(stage["complete"] and stage["qualified_observation_s"] >= 3 for stage in metadata["stages"])
     assert metadata["cooling_complete"]
     assert any(row["phase"] == "cooling" and math.isfinite(float(row["temperature_c"])) for row in saved)
@@ -502,14 +518,14 @@ def test_running_faults_stop_and_preserve_partial_csv_json(ns, rig, kind):
     assert metadata["samples"] == len(rows(rig.run)) > 3
     assert rig.calls.count(("heater_on",)) == 1
     assert len([c for c in rig.calls if c[0] == "target"]) == 1
-    assert rig.calls.index(("heater_off",)) < rig.calls.index(("disconnect",))
+    assert rig.calls.index(("heater_off",)) < rig.calls.index(("force_close_transport",))
     if kind == "pressure":
         assert rig.pressure.count == 6, "No pressure retry after an acquisition error"
     if kind == "sensor":
         assert any(math.isnan(float(r["temperature_c"])) and r["error"] for r in rows(rig.run))
 
 
-@pytest.mark.parametrize("phase", ["connect", "diagnostics", "target", "heater_on", "heater_off", "disconnect"])
+@pytest.mark.parametrize("phase", ["connect", "diagnostics", "target", "heater_on", "heater_off", "force_safe_off", "force_close_transport"])
 def test_poisoned_native_call_is_never_followed_by_any_esi_command(ns, rig, phase):
     def poison():
         rig.esi._transport_poisoned = True
@@ -541,7 +557,7 @@ def test_interrupted_native_call_keeps_guard_across_cell_reexecution(ns, rig):
 
 
 def test_persistent_guard_survives_new_kernel_and_precedes_runtime_import(ns, rig, monkeypatch):
-    rig.esi.failures["disconnect"] = RuntimeError("Discharge not confirmed")
+    rig.esi.failures["force_close_transport"] = RuntimeError("Port closure not confirmed")
     rig.run.run()
     ns["_PT_GUARD"].clear()  # Simulate loss of RAM after a kernel restart.
     def load(path, **kwargs):
@@ -554,7 +570,7 @@ def test_persistent_guard_survives_new_kernel_and_precedes_runtime_import(ns, ri
         ns["main"]()
 
 
-def test_pressure_continues_during_discharge_without_stale_temperatures(rig):
+def test_pressure_continues_during_shutdown_without_stale_temperatures(rig):
     flushed = threading.Event()
     original = rig.run.append
     def append(row):
@@ -562,25 +578,25 @@ def test_pressure_continues_during_discharge_without_stale_temperatures(rig):
         if row["phase"] == "shutdown":
             flushed.set()
     rig.run.append = append
-    def discharge():
+    def closing():
         assert flushed.wait(1)
-        assert rig.calls.index(("heater_off",)) < rig.calls.index(("disconnect",))
+        assert rig.calls.index(("heater_off",)) < rig.calls.index(("force_close_transport",))
         assert any(row["phase"] == "shutdown" for row in rig.run.rows)
-    rig.esi.disconnect_hook = discharge
+    rig.esi.close_hook = closing
     rig.run.run()
     assert report(rig.run)["shutdown_confirmed"]
     assert all(math.isnan(row["temperature_c"]) for row in rig.run.rows if row["phase"] == "shutdown")
 
 
-def test_pressure_failure_during_discharge_cannot_prevent_esi_off(rig):
+def test_pressure_failure_during_shutdown_cannot_prevent_esi_off(rig):
     def read_hook(pressure):
         if pressure.is_shutdown():
-            raise RuntimeError("Pressure failed during ESI discharge")
+            raise RuntimeError("Pressure failed during ESI shutdown")
     rig.pressure.read_hook = read_hook
-    rig.esi.disconnect_hook = lambda: rig.pressure.read_on_shutdown.wait(1)
+    rig.esi.close_hook = lambda: rig.pressure.read_on_shutdown.wait(1)
     rig.run.run()
     assert report(rig.run)["shutdown_confirmed"]
-    assert ("disconnect",) in rig.calls and ("heater_off",) in rig.calls
+    assert ("force_close_transport",) in rig.calls and ("heater_off",) in rig.calls
 
 
 def test_blocked_pressure_does_not_delay_off_or_get_concurrent_close(ns, rig, monkeypatch, capsys):
@@ -593,7 +609,7 @@ def test_blocked_pressure_does_not_delay_off_or_get_concurrent_close(ns, rig, mo
     monkeypatch.setattr(ns["CallOwner"], "PRESSURE_CLOSE_WAIT_S", .03)
     try:
         rig.run.run()
-        assert ("heater_off",) in rig.calls and ("disconnect",) in rig.calls
+        assert ("heater_off",) in rig.calls and ("force_close_transport",) in rig.calls
         assert ("pressure_close",) not in rig.calls
         assert report(rig.run)["outcome"] == "shutdown_unconfirmed"
         assert ns["_PT_GUARD"]
@@ -606,7 +622,7 @@ def test_blocked_pressure_does_not_delay_off_or_get_concurrent_close(ns, rig, mo
     assert (rig.run.directory / "samples.csv").read_bytes() == frozen_csv
     assert report(rig.run)["samples"] == len(rows(rig.run))
     text = capsys.readouterr().out
-    assert "ESI OFF/discharge verified; pressure link closure unconfirmed" in text
+    assert "Heater OFF/HV disabled and ESI port closed; pressure link closure unconfirmed" in text
     assert "heater/HV may remain energized" not in text
 
 
@@ -692,7 +708,7 @@ def test_csv_write_failure_requests_off_before_finalization(rig):
     rig.run.run()
     assert report(rig.run)["shutdown_confirmed"]
     assert "Disk full" in " ".join(report(rig.run)["errors"])
-    assert ("heater_off",) in rig.calls and ("disconnect",) in rig.calls
+    assert ("heater_off",) in rig.calls and ("force_close_transport",) in rig.calls
 
 
 def test_rerun_after_confirmed_shutdown_is_allowed_and_never_overwrites(rig):
@@ -701,7 +717,7 @@ def test_rerun_after_confirmed_shutdown_is_allowed_and_never_overwrites(rig):
     prior = (first / "samples.csv").read_bytes()
     # A fresh run, like reexecuting the notebook cell after successful shutdown.
     run = type(rig.run)(rig.run.output_dir, lambda directory: rig.esi, lambda: rig.pressure,
-                        guard=SimulatedGuard(rig.run.output_dir), baseline_s=1., hold_s=1., cooling_s=1., stability_factory=rig.run.stability_factory,
+                        guard=SimulatedGuard(rig.run.output_dir), baseline_s=1., hold_s=1., stability_factory=rig.run.stability_factory,
                         limit_preparer=rig.run.limit_preparer,
                         clock=rig.clock, sleep=rig.clock.sleep, plots_factory=NoPlots)
     run.run()
@@ -796,7 +812,7 @@ def test_stop_during_native_heater_readiness_prevents_late_commands(
     clock, calls = Clock(), []
     pressure = FakePressure(calls, clock)
     run = ns["Experiment"](tmp_path / "cancel", lambda directory: native_esi.driver, lambda: pressure, limit_preparer=ns["bounded_limit"],
-                           guard=SimulatedGuard(tmp_path / "cancel"), baseline_s=1., hold_s=1., targets=(25.,), cooling_s=1.,
+                           guard=SimulatedGuard(tmp_path / "cancel"), baseline_s=1., hold_s=1., targets=(25.,),
                            stability_factory=lambda: ns["TemperatureStability"](window_s=2.), clock=clock,
                            sleep=clock.sleep, plots_factory=NoPlots)
     original = getattr(native_esi.driver, method)
@@ -861,6 +877,8 @@ def native_esi(esi_heater_rig, monkeypatch):
     def monitoring(self):
         if esi_heater_rig.state.target > 0:
             esi_heater_rig.state.temperature = esi_heater_rig.state.target - .1
+        elif not esi_heater_rig.state.active[0]:
+            esi_heater_rig.state.temperature = max(21., esi_heater_rig.state.temperature - 50.)
         return 0, esi_heater_rig.state.sensor_valid, 0., 0., 0., esi_heater_rig.state.temperature
     monkeypatch.setattr(esi_heater_rig.base, "get_heat_ctrl_monitoring", monitoring)
     return esi_heater_rig
@@ -873,7 +891,7 @@ def test_stop_during_real_native_limit_write_prevents_remaining_writes(ns, nativ
     native_esi.state.target = 0.
     native_esi.driver._verify_hv_discharge = lambda *a, **k: native_esi.calls.append(("verified_discharge",))
     run = ns["Experiment"](tmp_path / "limits_stop", lambda directory: native_esi.driver, lambda: pressure, limit_preparer=ns["bounded_limit"],
-                           guard=SimulatedGuard(tmp_path / "limits_stop"), baseline_s=1., hold_s=1., cooling_s=1.,
+                           guard=SimulatedGuard(tmp_path / "limits_stop"), baseline_s=1., hold_s=1.,
                            stability_factory=lambda: ns["TemperatureStability"](window_s=2.),
                            clock=clock, sleep=clock.sleep, plots_factory=NoPlots)
     writes = []
@@ -908,52 +926,55 @@ def test_real_esi_runtime_contract_with_simulated_native_calls(ns, native_esi, t
         assert facade._transport_poisoned is False
         device = facade
     run = ns["Experiment"](tmp_path / "native", lambda directory: device, lambda: pressure, limit_preparer=ns["bounded_limit"],
-                           guard=SimulatedGuard(tmp_path / "native"), baseline_s=1., hold_s=1., cooling_s=1.,
+                           guard=SimulatedGuard(tmp_path / "native"), baseline_s=1., hold_s=1.,
                            stability_factory=lambda: ns["TemperatureStability"](window_s=2.),
                            clock=clock, sleep=clock.sleep, plots_factory=NoPlots)
     run.run()
     assert report(run)["outcome"] == "complete"
     assert ("module", 0, True) in native_esi.calls
     assert not any(call[:2] in (("module", 1), ("module", 2)) and call[2] is True for call in native_esi.calls)
-    assert ("verified_discharge",) in native_esi.calls
-    assert native_esi.calls.index(("verified_discharge",)) < native_esi.calls.index(("close",))
+    assert ("verified_discharge",) not in native_esi.calls
+    assert ("close",) in native_esi.calls
     assert native_esi.state.enabled is False and native_esi.state.active[0] is False
 
 
 from support.tpg366 import FakeSerial
 
 
-@pytest.mark.parametrize("fault", [None, "sticky", "high_voltage", "invalid"])
-def test_real_discharge_verifier_requires_fresh_low_values(ns, rig, esi_discharge_rig, fault):
-    if fault == "sticky":
-        esi_discharge_rig.state.sticky = True
-    elif fault == "high_voltage":
-        esi_discharge_rig.values[2, True] = [-100.]
-    elif fault == "invalid":
-        esi_discharge_rig.state.invalid = "voltage"
-    def disconnect(**kwargs):
-        rig.esi.call("disconnect")
-        return esi_discharge_rig.driver.disconnect(**kwargs)
-    rig.esi.disconnect = disconnect
+@pytest.mark.parametrize("use_facade", [False, True])
+def test_unused_hv_measurements_and_discharge_cannot_interfere(ns, native_esi, rig, monkeypatch, use_facade):
+    native_esi.state.target = 0.
+    native_esi.state.temperature = 21.
+    def forbidden(*args, **kwargs):
+        pytest.fail("Heater-only notebook must not read/select HV ADCs or verify HV discharge")
+    for method in ("get_hv_supply_output_voltage", "get_hv_supply_output_current",
+                   "get_hv_supply_meas_ranges", "set_hv_supply_meas_ranges"):
+        monkeypatch.setattr(native_esi.base, method, forbidden)
+    monkeypatch.setattr(native_esi.driver, "_verify_hv_discharge", forbidden)
+    device = native_esi.driver
+    if use_facade:
+        facade_type = sys.modules[type(device).__module__].ESI
+        facade = object.__new__(facade_type)
+        object.__setattr__(facade, "_backend", device)
+        object.__setattr__(facade, "_backend_mode", "inline")
+        device = facade
+    rig.run.esi_factory = lambda directory: device
     rig.run.run()
-    metadata = report(rig.run)
-    if fault is None:
-        assert metadata["shutdown_confirmed"] and ("close",) in esi_discharge_rig.calls
-        assert metadata["last_discharge"]["consecutive"] == 3
-        assert metadata["last_discharge"]["limit_v"] == 1
-        assert all(abs(values[key]) <= 1 for values in metadata["last_discharge"]["modules"].values()
-                   for key in ("positive_v", "negative_v"))
-    if fault in (None, "high_voltage"):
-        # Every round with fresh readings is kept, not only the last one.
-        observations = metadata["discharge_observations"]
-        assert len(observations) > 1
-        assert {key: value for key, value in observations[-1].items() if key != "elapsed_s"} == metadata["last_discharge"]
-        elapsed = [observation["elapsed_s"] for observation in observations]
-        assert elapsed == sorted(elapsed)
-    if fault is not None:
-        assert not metadata["shutdown_confirmed"] and ("close",) not in esi_discharge_rig.calls
-        assert ns["_PT_GUARD"] and rig.run.guard_path.exists()
-    assert not any(call == ("gate", True) for call in esi_discharge_rig.calls)
+    data = report(rig.run)
+    assert data["outcome"] == "complete" and data["shutdown_confirmed"]
+    assert data["hv_discharge_verified"] is None and not data["hv_measurements_included"]
+    assert "HV discharge not measured" in data["shutdown_scope"]
+    assert "discharge_observations" not in data and "last_discharge" not in data
+    assert ("close",) in native_esi.calls and not ns["_PT_GUARD"]
+    assert native_esi.state.enabled is False and not any(native_esi.state.active.values())
+    for row in rig.run.rows:
+        if not row["esi_state_json"]:
+            continue
+        diagnostic = json.loads(row["esi_state_json"])
+        assert not diagnostic["hv_measurements_included"]
+        for module in diagnostic["modules"].values():
+            assert module["target_v"] == 0 and not module["module_active"]
+            assert "measured_v" not in module and "measured_a" not in module
 
 
 @pytest.mark.parametrize("fault", [None, "partial_gauges", "all_invalid", "nak", "unit_change", "initialize", "open", "close"])
@@ -1026,7 +1047,7 @@ def test_slow_reads_keep_actual_timestamps_without_catchup_bursts(rig):
 
 def test_each_instrument_keeps_one_owner_including_shutdown(rig):
     main_thread = threading.get_ident()
-    rig.esi.disconnect_hook = lambda: rig.pressure.read_on_shutdown.wait(1)
+    rig.esi.close_hook = lambda: rig.pressure.read_on_shutdown.wait(1)
     rig.run.run()
     assert report(rig.run)["outcome"] == "complete"
     assert set(rig.esi.thread_ids) == {rig.run.esi_owner.thread.ident}
@@ -1037,7 +1058,7 @@ def test_each_instrument_keeps_one_owner_including_shutdown(rig):
 
 def test_second_interrupt_during_shutdown_still_saves_json_and_blocks_rerun(ns, rig):
     rig.clock.interrupt_at = 5
-    rig.esi.failures["disconnect"] = KeyboardInterrupt("Second interruption")
+    rig.esi.failures["force_close_transport"] = KeyboardInterrupt("Second interruption")
     rig.run.run()
     metadata = report(rig.run)
     assert metadata["outcome"] == "shutdown_unconfirmed"
@@ -1050,7 +1071,7 @@ def test_old_esi_runtime_refused_before_constructor(ns):
         _PROCESS_CONTROLLER_CLASS = object
         def __init__(self, *a, **k):
             pytest.fail("An old runtime must not be constructed")
-    with pytest.raises(RuntimeError, match="heater safety"):
+    with pytest.raises(RuntimeError, match="heater-only"):
         ns["require_safe_esi"](SimpleNamespace(ESI=OldESI))
     runtime = ns["load_private"](ROOT / "esi/vendor/runtime/__init__.py", package=True)
     ns["require_safe_esi"](runtime)
@@ -1113,7 +1134,7 @@ def test_full_armed_main_uses_ports_runtime_guards_and_real_implementation(ns, r
     def experiment(output, esi_factory, pressure_factory, **kwargs):
         configured.append(kwargs["stability_factory"])
         kwargs["stability_factory"] = rig.run.stability_factory
-        return original(output, esi_factory, pressure_factory, baseline_s=1., hold_s=1., cooling_s=1.,
+        return original(output, esi_factory, pressure_factory, baseline_s=1., hold_s=1.,
                         clock=rig.clock, sleep=rig.clock.sleep, plots_factory=NoPlots, **kwargs)
     ns.update(ARM_HEATING=True, OUTPUT_DIR=rig.run.output_dir, find_plugins=lambda *a: ROOT,
               load_private=load, require_safe_esi=require, PressurePort=lambda *a: rig.pressure, Experiment=experiment)
@@ -1147,8 +1168,9 @@ def test_disarmed_cell_warns_that_previous_unconfirmed_heating_is_not_switched_o
     assert "disarming this cell does not switch hardware OFF" in capsys.readouterr().out
 
 
-def test_false_disconnect_result_cannot_clear_uncertainty(ns, rig):
-    rig.esi.disconnect = lambda **kwargs: False
+@pytest.mark.parametrize("method", ["force_safe_off", "force_close_transport"])
+def test_false_shutdown_result_cannot_clear_uncertainty(ns, rig, method):
+    setattr(rig.esi, method, lambda **kwargs: False)
     rig.run.run()
     assert report(rig.run)["outcome"] == "shutdown_unconfirmed"
     assert ns["_PT_GUARD"] and rig.run.guard_path.exists()
@@ -1185,7 +1207,7 @@ def test_zero_previous_limits_are_replaced_by_approved_values_and_reported(rig, 
 def test_local_off_failure_still_attempts_verified_global_shutdown(ns, rig):
     rig.esi.failures["heater_off"] = RuntimeError("Local heater OFF rejected")
     rig.run.run()
-    assert ("disconnect",) in rig.calls
+    assert ("force_close_transport",) in rig.calls
     assert report(rig.run)["shutdown_confirmed"] and not ns["_PT_GUARD"]
     assert report(rig.run)["outcome"] == "error"
 
@@ -1287,7 +1309,7 @@ def test_unknown_poison_state_never_allows_automatic_cleanup(ns, rig, fault):
         raise RuntimeError("Acquisition failed before shutdown")
     rig.esi.failures["diagnostics"] = corrupt
     rig.run.run()
-    assert ("heater_off",) not in rig.calls and ("disconnect",) not in rig.calls
+    assert ("heater_off",) not in rig.calls and ("force_close_transport",) not in rig.calls
     assert "transport unknown" in " ".join(report(rig.run)["errors"])
     assert report(rig.run)["outcome"] == "shutdown_unconfirmed" and ns["_PT_GUARD"]
 
@@ -1329,15 +1351,17 @@ def test_capability_guard_checks_actual_imported_class_not_a_valid_candidate_fil
     # Both method names existed in an unsafe intermediate version without the contract.
     source = tmp_path / "old.py"
     source.write_text("class Controller:\n    def _set_heat_module_active_unlocked(self): pass\n"
-                      "    def _validate_heat_operating_state_unlocked(self): pass\n")
+                      "    def _validate_heat_operating_state_unlocked(self): pass\n"
+                      "    def force_safe_off(self): pass\n"
+                      "    def force_close_transport(self): pass\n")
     init = tmp_path / "__init__.py"
     init.write_text("from .old import Controller\n")
     runtime = ns["load_private"](init, package=True)
     runtime.ESI = SimpleNamespace(_PROCESS_CONTROLLER_CLASS=runtime.Controller)
     assert runtime.Controller.__module__.startswith(runtime.__name__ + ".")
-    with pytest.raises(RuntimeError, match="heater safety"):
+    with pytest.raises(RuntimeError, match="heater-only"):
         ns["require_safe_esi"](runtime)
-    runtime.Controller.HEATER_SAFETY_CONTRACT = 1  # a later version keeping the contract
+    runtime.Controller.HEATER_SAFETY_CONTRACT = 2  # Includes heater-only diagnostics support
     ns["require_safe_esi"](runtime)
 
 
@@ -1428,7 +1452,7 @@ def _run_signal_probe(tmp_path, mode, notebook=NOTEBOOK):
         stability = ns['load_private'](Path.cwd() / 'esi/_heater_stability.py')
         limits = ns['load_private'](Path.cwd() / 'esi/_heater_limits.py')
         run = ns['Experiment'](target.parent / ('runs_' + mode), lambda directory: device, lambda: pressure,
-                               guard=SimulatedGuard(target.parent / ('runs_' + mode)), baseline_s=1., hold_s=2., targets=(25.,), clock=clock, cooling_s=1.,
+                               guard=SimulatedGuard(target.parent / ('runs_' + mode)), baseline_s=1., hold_s=2., targets=(25.,), clock=clock,
                                stability_factory=lambda: stability.TemperatureStability(window_s=2.), limit_preparer=limits.bounded_limit,
                                overrides={'voltage_v': None, 'current_a': None, 'power_w': None},
                                sleep=clock.sleep, plots_factory=NoPlots)
@@ -1449,7 +1473,7 @@ def _run_signal_probe(tmp_path, mode, notebook=NOTEBOOK):
                 if not release.wait(6):
                     raise RuntimeError('Probe release missing')
                 returned.set()
-            device.disconnect_hook = held_disconnect
+            device.close_hook = held_disconnect
         if mode.startswith('tpg_'):
             serial = FakeSerial()
             serial.is_open = False
@@ -1485,7 +1509,7 @@ def _run_signal_probe(tmp_path, mode, notebook=NOTEBOOK):
                     assert run_returned.wait(4), 'Notebook did not return an uncertainty report'
                     if serial is not None:
                         assert serial.close_count == 0, 'Concurrent/repeated serial Close'
-                        assert ('disconnect',) in calls, 'Pressure blocked ESI OFF'
+                        assert ('force_close_transport',) in calls, 'Pressure blocked ESI OFF'
                 else:
                     time.sleep(.10)
                     assert not returned.is_set()
@@ -1495,10 +1519,10 @@ def _run_signal_probe(tmp_path, mode, notebook=NOTEBOOK):
                     elif mode == 'esi_shutdown':
                         os.kill(os.getpid(), signal.SIGINT)
                         time.sleep(.05)
-                        # One verified OFF enters cooling, a second precedes final discharge.
-                        assert calls.count(('heater_off',)) == 2 and calls.count(('disconnect',)) == 1
+                        # One verified OFF enters cooling, a second precedes final port closure.
+                        assert calls.count(('heater_off',)) == 2 and calls.count(('force_close_transport',)) == 1
                     else:
-                        assert ('heater_off',) not in calls and ('disconnect',) not in calls
+                        assert ('heater_off',) not in calls and ('force_close_transport',) not in calls
                     release.set()
             except BaseException as error:
                 observer_errors.append(repr(error))
@@ -1552,7 +1576,7 @@ def _run_signal_probe(tmp_path, mode, notebook=NOTEBOOK):
                     assert ('module', 0, False) in native.calls[index + 1:]
                     assert ('close',) in native.calls[index + 1:]
                 elif mode == 'esi_connect':
-                    assert calls.index(('connect_return',)) < calls.index(('heater_off',)) < calls.index(('disconnect',))
+                    assert calls.index(('connect_return',)) < calls.index(('heater_off',)) < calls.index(('force_close_transport',))
                 else:
                     assert sum('KeyboardInterrupt' in error for error in saved['errors']) == 2
         finally:
@@ -1587,7 +1611,7 @@ def test_quantized_limits_through_real_esi_setter_and_getters(ns, native_esi, tm
     clock, calls = Clock(), []
     pressure = FakePressure(calls, clock)
     run = ns["Experiment"](tmp_path / "native_quantized", lambda directory: native_esi.driver, lambda: pressure, limit_preparer=ns["bounded_limit"],
-                           guard=SimulatedGuard(tmp_path / "native_quantized"), baseline_s=1., hold_s=1., targets=(25.,), clock=clock, sleep=clock.sleep, cooling_s=1.,
+                           guard=SimulatedGuard(tmp_path / "native_quantized"), baseline_s=1., hold_s=1., targets=(25.,), clock=clock, sleep=clock.sleep,
                            stability_factory=lambda: ns["TemperatureStability"](window_s=2.),
                            plots_factory=NoPlots, overrides={"voltage_v": 5., "current_a": 1., "power_w": 10.})
     run.run()
@@ -1609,7 +1633,7 @@ def test_recorder_completion_uses_its_event_not_thread_liveness(ns, rig, monkeyp
             assert release.wait(3)
         append(row)
     rig.run.append = blocked
-    rig.esi.disconnect_hook = lambda: entered.wait(1)
+    rig.esi.close_hook = lambda: entered.wait(1)
     monkeypatch.setattr(ns["CallOwner"], "PRESSURE_CLOSE_WAIT_S", .05)
     try:
         rig.run.run()
@@ -1724,7 +1748,7 @@ def test_real_shared_guard_wired_through_main_in_fresh_process(tmp_path, mode):
         def short_experiment(*args, **kwargs):
             real_stability = kwargs['stability_factory']
             kwargs['stability_factory'] = lambda: real_stability(window_s=2.)
-            run = experiment(*args, **kwargs, baseline_s=1., hold_s=1., cooling_s=1., targets=(30.,),
+            run = experiment(*args, **kwargs, baseline_s=1., hold_s=1., targets=(30.,),
                              clock=clock, sleep=clock.sleep, plots_factory=NoPlots)
             pressure.is_shutdown = lambda: run.phase == 'shutdown'
             return run
@@ -1903,11 +1927,11 @@ def test_safety_stop_is_strict_and_names_the_measured_value(rig, temperature):
 
 
 def test_cooling_keeps_fresh_temperature_pressure_after_verified_off(rig):
-    rig.run.targets = (30.,)
+    rig.run.targets = (40.,)
+    rig.esi.cooling_step_c = 2.
     def cooling(device):
         if rig.run.phase == "cooling":
             assert not device.active and ("heater_off",) in rig.calls
-            device.temperature -= .01
     rig.esi.diag_hook = cooling
     rig.run.run()
     cooled = [row for row in rows(rig.run) if row["phase"] == "cooling"]
@@ -1915,6 +1939,78 @@ def test_cooling_keeps_fresh_temperature_pressure_after_verified_off(rig):
     assert len({row["temperature_c"] for row in cooled}) == len(cooled)
     assert all(float(row["target_temperature_c"]) == 0 and float(row["P1_mbar"]) > 0 for row in cooled)
     assert report(rig.run)["cooling_complete"]
+
+
+@pytest.mark.parametrize("final_temperature", [30., 29.99])
+def test_cooling_exceeds_900_seconds_until_measured_threshold_and_saves_crossing(rig, final_temperature):
+    rig.run.targets = (170.,)
+    def cooling(device):
+        if rig.run.phase == "cooling":
+            elapsed = rig.clock() - rig.run.metadata["cooling_started_s"]
+            device.temperature = 125.33 if elapsed <= 900 else (30.0001 if elapsed == 901 else final_temperature)
+    rig.esi.diag_hook = cooling
+    rig.run.run()
+    data = report(rig.run)
+    cooled = [row for row in rows(rig.run) if row["phase"] == "cooling"]
+    assert data["outcome"] == "complete" and data["shutdown_confirmed"]
+    assert data["cooling_target_c"] == 30 and "cooling_s" not in data
+    assert data["cooling_complete"] and data["cooling_final_temperature_c"] == final_temperature
+    assert data["cooling_finished_s"] - data["cooling_started_s"] == 902
+    assert all(float(row["temperature_c"]) > 30 for row in cooled[:-1])
+    assert float(cooled[-1]["temperature_c"]) == final_temperature
+    assert all(row["temperature_observed_utc"] and row["pressure_observed_utc"] for row in cooled)
+    assert all(float(row[f"P{i}_mbar"]) > 0 for row in cooled for i in range(1, 7))
+    assert all(float(row["target_temperature_c"]) == 0 for row in cooled)
+
+
+def test_cooling_already_at_threshold_records_one_fresh_sample_before_shutdown(rig):
+    rig.run.targets = (30.,)
+    def cooling(device):
+        if rig.run.phase == "cooling":
+            device.temperature = 30.
+    rig.esi.diag_hook = cooling
+    rig.run.run()
+    data = report(rig.run)
+    cooled = [row for row in rows(rig.run) if row["phase"] == "cooling"]
+    assert data["outcome"] == "complete" and data["cooling_complete"]
+    assert len(cooled) == 1 and float(cooled[0]["temperature_c"]) == 30
+    assert data["cooling_finished_s"] == data["cooling_started_s"]
+
+
+@pytest.mark.parametrize("temperature", [float("nan"), float("inf"), -1., True])
+def test_invalid_cooling_temperature_cannot_complete_observation(rig, temperature):
+    rig.run.targets = (30.,)
+    def cooling(device):
+        if rig.run.phase == "cooling":
+            device.temperature = temperature
+    rig.esi.diag_hook = cooling
+    rig.run.run()
+    data = report(rig.run)
+    assert data["outcome"] == "error" and data["shutdown_confirmed"]
+    assert not data["cooling_complete"] and "cooling_finished_s" not in data
+
+
+def test_cooling_without_threshold_keeps_recording_until_operator_stop(rig):
+    rig.run.targets = (170.,)
+    def cooling(device):
+        if rig.run.phase == "cooling":
+            device.temperature = 31.
+            if rig.clock() - rig.run.metadata["cooling_started_s"] >= 905:
+                raise KeyboardInterrupt("Operator stops cooling above threshold")
+    rig.esi.diag_hook = cooling
+    rig.run.run()
+    data = report(rig.run)
+    assert data["outcome"] == "interrupted" and data["shutdown_confirmed"]
+    assert not data["cooling_complete"] and "cooling_finished_s" not in data
+    assert len([row for row in rows(rig.run) if row["phase"] == "cooling"]) == 906
+
+
+@pytest.mark.parametrize("value", [0., -1., float("nan"), float("inf"), True])
+def test_invalid_cooling_threshold_refused_before_hardware(rig, value):
+    rig.run.cooling_target_c = value
+    with pytest.raises(ValueError, match="cooling_target_c"):
+        rig.run.run()
+    assert not rig.calls
 
 
 @pytest.mark.parametrize("failure", ["stop", "pressure", "sensor"])
@@ -1982,10 +2078,9 @@ def test_lower_fresh_hardware_maximum_cannot_leave_an_excessive_limit_running(ri
     assert [call[1] for call in rig.calls if call[0] == "target"] == [30.]
 
 
-def test_full_default_175_program_uses_real_60_and_300_second_windows(ns, rig):
+def test_full_default_program_uses_real_60_and_300_second_windows(ns, rig):
     rig.run.baseline_s = 60.
     rig.run.hold_s = 300.
-    rig.run.cooling_s = 900.
     rig.run.stability_factory = ns["TemperatureStability"]
     rig.run.run()
     data = report(rig.run)
@@ -1996,8 +2091,8 @@ def test_full_default_175_program_uses_real_60_and_300_second_windows(ns, rig):
         assert stage["first_qualified_s"] - stage["commanded_s"] == 60
         assert stage["completed_s"] - stage["commanded_s"] == 360
         assert stage["qualified_observation_s"] == 300 and stage["complete"]
-    assert data["cooling_finished_s"] - data["cooling_started_s"] == 900
-    assert rig.clock.now == 60 + 15 * 360 + 900
+    assert data["cooling_finished_s"] - data["cooling_started_s"] == 2
+    assert rig.clock.now == 60 + 15 * 360 + 2
 
 
 def test_storage_stall_after_genuine_observation_cannot_hide_absolute_deadline(rig):
@@ -2147,7 +2242,7 @@ def test_keep_awake_spans_the_whole_run_including_shutdown(rig):
     rig.run.run()
     (first, before), (last, after) = events
     assert first is True and before == []
-    assert last is False and ("disconnect",) in after and ("pressure_close",) in after
+    assert last is False and ("force_close_transport",) in after and ("pressure_close",) in after
     assert report(rig.run)["keep_awake"] is True
 
 
@@ -2212,12 +2307,12 @@ def test_hot_start_refusal_is_explained_before_the_shutdown_wait(rig, capsys):
     # Lab run 2026-10-05 18:29: 44.3 °C after the previous run; the reason only
     # appeared after a minute of "shutdown pending", which looked like a COM failure.
     rig.esi.temperature = 44.3
-    rig.esi.disconnect_hook = lambda: print("<disconnect>")
+    rig.esi.close_hook = lambda: print("<force_close_transport>")
     rig.run.run()
     output = capsys.readouterr().out
     stopped = output.index("Run stopped: ValueError: Initial temperature 44.3 °C exceeds the first target (30 °C)")
-    assert stopped < output.index("<disconnect>")
-    assert "Shutting down: heater OFF" in output[stopped:output.index("<disconnect>")]
+    assert stopped < output.index("<force_close_transport>")
+    assert "Shutting down: verified heater OFF" in output[stopped:output.index("<force_close_transport>")]
     assert not any(call[0] in {"target", "heater_on"} for call in rig.calls)
     assert report(rig.run)["initial_unheated_temperature_c"] == 44.3
 
@@ -2230,7 +2325,7 @@ def test_default_program_completes_with_the_real_regulation_trace(ns, rig):
     residual = [mk / 1000 for mk in trace["residual_mk"]]
     hold = residual[trace["qualified_from_s"]:]
     assert max(residual) > 0  # Why a target at the safety stop can never be held.
-    rig.run.baseline_s, rig.run.hold_s, rig.run.cooling_s = 60., 300., 60.
+    rig.run.baseline_s, rig.run.hold_s = 60., 300.
     rig.run.stability_factory = functools.partial(ns["TemperatureStability"], max_gap_s=ns["MAX_SAMPLE_GAP_S"])
     def plant(device):
         stage = rig.run.commanded_stage
