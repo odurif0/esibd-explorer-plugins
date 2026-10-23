@@ -52,6 +52,7 @@ class RegisterDevice:
         self.fail_read = False
         self.period = 49998
         self.widths = [9998] * count
+        self.delays = [7] + [0] * (count - 1)
         self.config = -1
 
     def set_device_enabled(self, enabled, timeout_s=None):
@@ -62,6 +63,7 @@ class RegisterDevice:
         self.config = index
         self.period, widths = PRESETS[index]
         self.widths = list(widths[:self.count])
+        self.delays = [7] + [0] * (self.count - 1)
         self.calls.append(("load", index))
 
     def get_status(self):
@@ -71,9 +73,19 @@ class RegisterDevice:
         self.period = round(self.CLOCK / (frequency * 1000) - self.OSC_OFFSET)
         self.calls.append(("frequency", frequency))
 
+    def get_frequency_khz(self, timeout_s=None):
+        return self.CLOCK / (self.period + self.OSC_OFFSET) / 1000
+
     def set_pulser_width_ticks(self, pulser, width, timeout_s=None):
         self.widths[pulser] = width
         self.calls.append(("width", pulser, width))
+
+    def get_pulser_delay_ticks(self, pulser, timeout_s=None):
+        return self.delays[pulser]
+
+    def set_pulser_delay_ticks(self, pulser, delay, timeout_s=None):
+        self.delays[pulser] = delay
+        self.calls.append(("delay", pulser, delay))
 
     def collect_state_snapshot(self, timeout_s=None):
         return dict(device_enabled=self.enabled, main_state={"name": "STATE_ON"},
@@ -84,12 +96,12 @@ class RegisterDevice:
         if self.fail_read:
             raise RuntimeError("timing read failed")
         return dict(self.collect_state_snapshot(), oscillator={"period": self.period},
-                    pulsers=[dict(pulser=p, width_ticks=width, delay_ticks=7 if p == 0 else 0, burst=0)
-                             for p, width in enumerate(self.widths)])
+                    pulsers=[dict(pulser=p, width_ticks=width, delay_ticks=delay, burst=0)
+                             for p, (width, delay) in enumerate(zip(self.widths, self.delays))])
 
     @property
     def timing_writes(self):
-        return [call for call in self.calls if call[0] in ("frequency", "width")]
+        return [call for call in self.calls if call[0] in ("frequency", "width", "delay")]
 
 
 def load_module(folder):

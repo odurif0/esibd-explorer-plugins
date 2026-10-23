@@ -18,7 +18,7 @@ def test_disconnect_checks_four_outputs_after_disable_and_before_close(esi_disch
     assert esi_discharge_rig.ranges == original
     final = reports[-1]
     assert final["consecutive"] == 3
-    assert final["limit_v"] == 1.0
+    assert final["limit_v"] == 10.0
     for address in (1, 2):
         assert final["modules"][address]["positive_v"] == .5
         assert final["modules"][address]["negative_v"] == -.5
@@ -44,10 +44,18 @@ def test_default_disconnect_cannot_bypass_discharge(esi_discharge_rig):
 
 @pytest.mark.parametrize("address,negative", [(1, False), (1, True), (2, False), (2, True)])
 def test_one_high_polarity_blocks_off(esi_discharge_rig, address, negative):
-    esi_discharge_rig.values[address, negative] = [-1.01 if negative else 1.01]
+    esi_discharge_rig.values[address, negative] = [-10.01 if negative else 10.01]
     with pytest.raises(RuntimeError, match="discharge|Discharge"):
         esi_discharge_rig.driver.disconnect(timeout_s=.5)
     assert ("close",) not in esi_discharge_rig.calls
+
+
+def test_ten_volts_left_confirm_off(esi_discharge_rig):
+    # Operator choice 2026-10-23: HV1 needs ~40 s from 1000 V to 10 V but ~90 s to 1 V.
+    for address, negative in esi_discharge_rig.values:
+        esi_discharge_rig.values[address, negative] = [-9.9 if negative else 9.9]
+    assert esi_discharge_rig.driver.disconnect(timeout_s=.5) is True
+    assert esi_discharge_rig.calls[-1] == ("close",)
 
 
 def test_above_threshold_resets_consecutive_confirmations(esi_discharge_rig):

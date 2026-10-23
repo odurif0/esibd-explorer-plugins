@@ -1054,6 +1054,35 @@ class DMMRDevice(Device):
         super().__init__(**kwargs)
         self.channelType = DMMRChannel
 
+    def bufferLagging(self, wait: "int | None" = None) -> bool:
+        """Name Explorer's display-lag pauses: each one silently counts a DMMR error.
+
+        Explorer 1.0.2 pauses recording when any device's display lags past its
+        tolerance and adds one to this controller's error count per pause, only
+        logging at DEBUG level; at the maximum it closes the DMMR communication
+        although the DMMR link reported nothing (lab log 2026-10-21 16:20-16:24).
+        """
+        paused = bool(super().bufferLagging(wait))
+        if not paused:
+            self._display_lag_reported = False
+        elif not getattr(self, "_display_lag_reported", False):
+            self._display_lag_reported = True
+            manager = getattr(self, "pluginManager", None)
+            devices = getattr(getattr(manager, "DeviceManager", None), "getDevices", lambda: [])()
+            worst = max(devices, key=lambda device: getattr(device, "lagging_seconds", 0) or 0, default=None)
+            settings = getattr(manager, "Settings", None)
+            self.print(
+                f"Explorer display lag: {getattr(worst, 'name', 'a device')} is "
+                f"{getattr(worst, 'lagging_seconds', '?')} s behind (tolerance "
+                f"{getattr(settings, 'maxLagTolerance', '?')} s). Explorer pauses DMMR recording "
+                f"for {wait if wait is not None else getattr(settings, 'lagWaitTime', '?')} s and counts "
+                "each pause as a DMMR error, closing communication after "
+                f"{getattr(getattr(self, 'controller', None), 'maxErrorCount', '?')}; the DMMR link "
+                "itself reported no error. Reduce plotted data or the acquisition rate.",
+                flag=PRINT.WARNING,
+            )
+        return paused
+
     def initGUI(self) -> None:
         super().initGUI()
         if hasattr(self, "initAction"):

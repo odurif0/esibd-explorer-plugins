@@ -496,9 +496,17 @@ fn voltage_snapshot_does_not_substitute_setpoints_for_missing_measurements() {
 }
 
 #[test]
-fn bulk_write_is_sorted_sequential_and_preserves_partial_statuses_without_retry() {
+fn bulk_write_is_sorted_sequential_and_preserves_partial_statuses_after_one_resend() {
     let (mut c, script) = controller(vec![
         exact("SetModuleOutputVoltage", json!([0, 0, 10.0]), 0, vec![]),
+        exact("SetModuleOutputVoltage", json!([0, 1, 20.0]), -11, vec![]),
+        step("Purge", 0, vec![]),
+        exact(
+            "GetModuleOutputVoltage",
+            json!([0, 1, 0.0]),
+            0,
+            vec![json!(0.0)],
+        ),
         exact("SetModuleOutputVoltage", json!([0, 1, 20.0]), -11, vec![]),
         exact("SetModuleOutputVoltage", json!([0, 3, 30.0]), 0, vec![]),
     ]);
@@ -510,6 +518,151 @@ fn bulk_write_is_sorted_sequential_and_preserves_partial_statuses_without_retry(
     .unwrap();
     assert_eq!(map(&result, 2), &json!(-11));
     completed(&script);
+}
+
+// 2026-10-23 lab: the first zero setpoint after the PSU was enabled got no reply within the
+// DLL's 1.5 s (-10), every later command answered, and the start failed.
+#[test]
+fn lost_reply_to_an_applied_setpoint_is_verified_not_resent() {
+    let (mut c, script) = controller(vec![
+        exact("SetModuleOutputVoltage", json!([0, 0, 0.0]), -10, vec![]),
+        step("Purge", 0, vec![]),
+        exact(
+            "GetModuleOutputVoltage",
+            json!([0, 0, 0.0]),
+            0,
+            vec![json!(0.0)],
+        ),
+    ]);
+    let result = call(
+        &mut c,
+        "set_module_voltages",
+        vec![json!(0), json!({"$map": [[1, 0.0]]})],
+    )
+    .unwrap();
+    assert_eq!(map(&result, 1), &json!(0));
+    completed(&script);
+    let events = call(&mut c, "take_receive_errors", vec![]).unwrap();
+    let events = events.as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["export"], json!("SetModuleOutputVoltage"));
+    assert_eq!(events[0]["inputs"], json!([0, 0, 0.0]));
+    assert_eq!(events[0]["status"], json!(-10));
+    assert_eq!(events[0]["recovery"]["applied"], json!(true));
+    assert!(events[0]["recovery"]["resend_status"].is_null());
+    assert_eq!(
+        call(&mut c, "take_receive_errors", vec![]).unwrap(),
+        json!([])
+    );
+}
+
+#[test]
+fn setpoint_not_applied_is_sent_exactly_once_more() {
+    let (mut c, script) = controller(vec![
+        exact("SetModuleOutputVoltage", json!([2, 3, 15.0]), -10, vec![]),
+        step("Purge", 0, vec![]),
+        exact(
+            "GetModuleOutputVoltage",
+            json!([2, 3, 0.0]),
+            0,
+            vec![json!(5.0)],
+        ),
+        exact("SetModuleOutputVoltage", json!([2, 3, 15.0]), 0, vec![]),
+    ]);
+    let result = call(
+        &mut c,
+        "set_module_voltages",
+        vec![json!(2), json!({"$map": [[4, 15.0]]})],
+    )
+    .unwrap();
+    assert_eq!(map(&result, 4), &json!(0));
+    completed(&script);
+    let events = call(&mut c, "take_receive_errors", vec![]).unwrap();
+    let recovery = &events[0]["recovery"];
+    assert_eq!(recovery["applied"], json!(false));
+    assert_eq!(recovery["readback_v"], json!(5.0));
+    assert_eq!(recovery["resend_status"], json!(0));
+}
+
+#[test]
+fn a_lost_read_reply_is_recorded_without_any_retry() {
+    let (mut c, script) = controller(vec![exact(
+        "GetModuleOutputVoltage",
+        json!([0, 0, 0.0]),
+        -10,
+        vec![json!(0.0)],
+    )]);
+    call(
+        &mut c,
+        "get_module_voltage_setpoint",
+        vec![json!(0), json!(1)],
+    )
+    .unwrap();
+    completed(&script);
+    let events = call(&mut c, "take_receive_errors", vec![]).unwrap();
+    assert_eq!(events[0]["export"], json!("GetModuleOutputVoltage"));
+    assert_eq!(events[0]["inputs"], json!([0, 0]));
+    assert!(events[0].get("recovery").is_none());
+}
+
+#[test]
+fn each_connection_keeps_its_own_dll_trace_until_the_port_closes() {
+    let root = std::env::temp_dir().join(format!("ampr-trace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    for n in 0..12 {
+        std::fs::write(
+            root.join(format!("ampr_startup_com5_2026010{n:02}T000000Z.log")),
+            "old",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("ampr_startup_com6_20260101T000000Z.log"),
+        "other port",
+    )
+    .unwrap();
+    let shared = Arc::new(Mutex::new(Script::default()));
+    let mut steps = vec![step("OpenDebugFile", 0, vec![])];
+    steps.extend(connect_steps());
+    steps.extend([step("Close", 0, vec![]), step("CloseDebugFile", 0, vec![])]);
+    shared.lock().unwrap().steps = steps.into();
+    let mut c = Controller::new(
+        &json!({"device_id": "test", "com": 5, "log_dir": root.to_str().unwrap()}),
+        Box::new(Mock(shared.clone())),
+    )
+    .unwrap();
+    call(&mut c, "connect", vec![]).unwrap();
+    call(&mut c, "disconnect", vec![]).unwrap();
+    completed(&shared);
+    let calls = shared.lock().unwrap().calls.clone();
+    let path = calls[0].1[0].as_str().unwrap().to_string();
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(path.starts_with(root.to_str().unwrap()), "{path}");
+    assert!(
+        name.starts_with("ampr_startup_com5_") && name.ends_with("Z.log"),
+        "{name}"
+    );
+    assert_eq!(name.len(), "ampr_startup_com5_20261023T131352Z.log".len());
+    let mut kept: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    kept.sort();
+    assert_eq!(
+        kept.iter()
+            .filter(|name| name.starts_with("ampr_startup_com5_"))
+            .count(),
+        9
+    );
+    assert!(kept.contains(&"ampr_startup_com5_202601011T000000Z.log".to_string()));
+    assert!(kept.contains(&"ampr_startup_com6_20260101T000000Z.log".to_string()));
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -531,15 +684,15 @@ fn shutdown_zeros_only_detected_dual_channels_then_confirms_disable_before_close
 
 #[test]
 fn zero_failure_still_disables_but_does_not_close_and_explicit_retry_can_succeed() {
+    // Without a connect-time scan the first OFF reads the module identity; the
+    // first zeroing failure goes straight to PSU disable, and the retry reads
+    // only the presence and reuses the resolved channel count.
     let mut steps = connect_steps();
     steps.extend(scan_steps(0, "Dual 500V"));
     steps.extend([
         step("SetModuleOutputVoltage", -7, vec![]),
-        step("SetModuleOutputVoltage", 0, vec![]),
         step("EnablePSU", 0, vec![json!(false)]),
-    ]);
-    steps.extend(scan_steps(0, "Dual 500V"));
-    steps.extend([
+        scan_steps(0, "Dual 500V").remove(0),
         step("SetModuleOutputVoltage", 0, vec![]),
         step("SetModuleOutputVoltage", 0, vec![]),
         step("EnablePSU", 0, vec![json!(false)]),
@@ -547,14 +700,51 @@ fn zero_failure_still_disables_but_does_not_close_and_explicit_retry_can_succeed
     ]);
     let (mut c, script) = controller(steps);
     call(&mut c, "connect", vec![]).unwrap();
-    assert!(
-        call(&mut c, "shutdown", vec![])
-            .unwrap_err()
-            .message
-            .contains("zero module")
-    );
+    let error = call(&mut c, "shutdown", vec![]).unwrap_err().message;
+    assert!(error.contains("zero module 0 CH1") && error.contains("remaining channels not zeroed"));
     assert_eq!(c.get_attribute("connected").unwrap(), json!(true));
     assert_eq!(call(&mut c, "shutdown", vec![]).unwrap(), json!(true));
+    completed(&script);
+}
+
+#[test]
+fn shutdown_zeroes_the_modules_resolved_at_connect_without_rescanning() {
+    let mut steps = connect_steps();
+    steps.extend(scan_steps(0, "Dual 500V"));
+    steps.extend([
+        scan_steps(0, "Dual 500V").remove(0),
+        exact("SetModuleOutputVoltage", json!([0, 0, 0.0]), 0, vec![]),
+        exact("SetModuleOutputVoltage", json!([0, 1, 0.0]), 0, vec![]),
+        step("EnablePSU", 0, vec![json!(false)]),
+        step("Close", 0, vec![]),
+    ]);
+    let (mut c, script) = controller(steps);
+    call(&mut c, "connect", vec![]).unwrap();
+    call(&mut c, "scan_modules", vec![]).unwrap();
+    assert_eq!(call(&mut c, "shutdown", vec![]).unwrap(), json!(true));
+    completed(&script);
+}
+
+#[test]
+fn failed_presence_read_still_zeroes_the_modules_resolved_at_connect() {
+    let mut steps = connect_steps();
+    steps.extend(scan_steps(0, "Dual 500V"));
+    steps.extend([
+        step(
+            "GetModulePresence",
+            -10,
+            vec![json!(false), json!(0), json!(vec![0; 13])],
+        ),
+        exact("SetModuleOutputVoltage", json!([0, 0, 0.0]), 0, vec![]),
+        exact("SetModuleOutputVoltage", json!([0, 1, 0.0]), 0, vec![]),
+        step("EnablePSU", 0, vec![json!(false)]),
+    ]);
+    let (mut c, script) = controller(steps);
+    call(&mut c, "connect", vec![]).unwrap();
+    call(&mut c, "scan_modules", vec![]).unwrap();
+    let error = call(&mut c, "shutdown", vec![]).unwrap_err().message;
+    assert!(error.contains("module presence"), "{error}");
+    assert_eq!(c.get_attribute("connected").unwrap(), json!(true));
     completed(&script);
 }
 

@@ -9,8 +9,21 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::ffi::{Dll, NativeReply};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, VecDeque};
+use std::fs;
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// CGC receive errors: the command may have run with only its reply lost. 2026-10-22/23 lab: the
+// first command to module 0 after reconnecting, or after the PSU was enabled, got no reply within
+// the DLL's 1.5 s, then every later command answered in 30 ms; the start then failed.
+const RECEIVE_ERRORS: [i64; 3] = [-10, -11, -12];
+const RECEIVE_ERRORS_KEPT: usize = 32;
+const SETPOINT_READBACK_TOLERANCE_V: f64 = 1e-3;
+// The DLL's own trace (sent commands, missing replies, DSR/DCD/CTS lines) of each connection's
+// first calls, kept per connection to find the cause of those lost replies.
+const STARTUP_TRACE_CALLS: u64 = 1000;
+const STARTUP_TRACES_KEPT: usize = 10;
 
 pub const GUI_METHODS: &[&str] = &[
     "connect",
@@ -25,12 +38,15 @@ pub const GUI_METHODS: &[&str] = &[
     "scan_modules",
     "get_module_capabilities",
     "get_module_voltages",
+    "get_all_module_voltage_measured",
+    "get_module_voltage_setpoint",
     "set_module_voltage",
     "set_module_voltages",
     "enable_psu",
     "shutdown",
     "disconnect",
     "format_status",
+    "take_receive_errors",
 ];
 pub const GUI_ATTRIBUTES: &[&str] = &[
     "NO_ERR",
@@ -129,6 +145,10 @@ pub struct Controller {
     capabilities: BTreeMap<u64, Capabilities>,
     accepted: BTreeMap<(u64, u64), f64>,
     errors: Value,
+    log_dir: Option<PathBuf>,
+    trace_path: Option<PathBuf>,
+    trace_calls: u64,
+    receive_errors: VecDeque<Value>,
 }
 
 impl Controller {
@@ -171,6 +191,13 @@ impl Controller {
             accepted: BTreeMap::new(),
             errors: serde_json::from_str(crate::ERROR_CATALOG)
                 .map_err(|e| Error::runtime(format!("Invalid bundled error catalog: {e}")))?,
+            log_dir: config
+                .get("log_dir")
+                .and_then(Value::as_str)
+                .map(PathBuf::from),
+            trace_path: None,
+            trace_calls: 0,
+            receive_errors: VecDeque::new(),
         })
     }
 
@@ -188,7 +215,7 @@ impl Controller {
             ));
         }
         let symbol = format!("COM_AMPR_12_{export}");
-        let reply = ctx.native_call(&symbol, None, || self.dll.call(&symbol, args));
+        let reply = ctx.native_reply(&symbol, None, || self.dll.call(&symbol, args));
         if let Err(error) = &reply
             && error.kind == "TimeoutError"
         {
@@ -213,6 +240,12 @@ impl Controller {
                 reply.values.len()
             )));
         }
+        if self.trace_path.is_some() && !export.ends_with("DebugFile") {
+            self.trace_calls += 1;
+            if self.trace_calls >= STARTUP_TRACE_CALLS {
+                self.close_trace(ctx);
+            }
+        }
         Ok(reply)
     }
 
@@ -224,12 +257,109 @@ impl Controller {
         ctx: &Context,
     ) -> Result<NativeReply> {
         let count = seeds.len();
+        let started = Instant::now();
+        let arguments = inputs.clone();
         inputs.extend(seeds);
-        self.native(export, &inputs, count, ctx)
+        let reply = self.native(export, &inputs, count, ctx)?;
+        self.note_receive_error(export, &arguments, reply.status, started);
+        Ok(reply)
     }
 
     fn write(&mut self, export: &str, inputs: &[Value], ctx: &Context) -> Result<i64> {
-        Ok(self.native(export, inputs, 0, ctx)?.status)
+        let started = Instant::now();
+        let status = self.native(export, inputs, 0, ctx)?.status;
+        self.note_receive_error(export, inputs, status, started);
+        Ok(status)
+    }
+
+    fn note_receive_error(
+        &mut self,
+        export: &str,
+        inputs: &[Value],
+        status: i64,
+        started: Instant,
+    ) {
+        if !RECEIVE_ERRORS.contains(&status) {
+            return;
+        }
+        let event = json!({
+            "time": SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()),
+            "export": export, "inputs": inputs, "status": status,
+            "elapsed_s": started.elapsed().as_secs_f64(),
+            "trace": self.trace_path.as_ref().map(|path| path.display().to_string()),
+        });
+        eprintln!("AMPR receive error: {event}");
+        if self.receive_errors.len() == RECEIVE_ERRORS_KEPT {
+            self.receive_errors.pop_front();
+        }
+        self.receive_errors.push_back(event);
+    }
+
+    fn open_trace(&mut self, ctx: &Context) {
+        // Diagnostics only: a missing trace never fails the connection.
+        self.close_trace(ctx);
+        let Some(root) = self.log_dir.clone() else {
+            return;
+        };
+        let outcome = (|| -> Result<PathBuf> {
+            fs::create_dir_all(&root).map_err(|e| Error::runtime(e.to_string()))?;
+            let prefix = format!("ampr_startup_com{}_", self.com);
+            let mut old: Vec<PathBuf> = fs::read_dir(&root)
+                .map_err(|e| Error::runtime(e.to_string()))?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".log"))
+                })
+                .collect();
+            old.sort();
+            for path in &old[..old.len().saturating_sub(STARTUP_TRACES_KEPT - 1)] {
+                let _ = fs::remove_file(path);
+            }
+            let path = root.join(format!("{prefix}{}.log", utc_stamp(SystemTime::now())));
+            let path = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| Error::runtime(e.to_string()))?
+                    .join(path)
+            };
+            let text = path
+                .to_str()
+                .ok_or_else(|| Error::runtime("trace path is not representable as text"))?;
+            // fopen uses ANSI on Windows: never misaddress a non-ASCII path.
+            if !text.is_ascii() || text.contains('\0') || text.len() > 4095 {
+                return Err(Error::runtime(
+                    "the DLL trace requires a bounded ASCII path",
+                ));
+            }
+            ensure(
+                self.write("OpenDebugFile", &[json!(text)], ctx)?,
+                "OpenDebugFile",
+            )?;
+            Ok(path)
+        })();
+        match outcome {
+            Ok(path) => {
+                self.trace_path = Some(path);
+                self.trace_calls = 0;
+            }
+            Err(error) => eprintln!("AMPR startup trace unavailable: {error}"),
+        }
+    }
+
+    fn close_trace(&mut self, ctx: &Context) {
+        if self.trace_path.take().is_none() || self.poisoned {
+            return;
+        }
+        match self.write("CloseDebugFile", &[], ctx) {
+            Ok(0) => {}
+            Ok(status) => {
+                eprintln!("AMPR CloseDebugFile returned {status}; the trace may be incomplete")
+            }
+            Err(error) => eprintln!("AMPR trace not closed: {error}"),
+        }
     }
 
     fn connected(&self) -> Result<()> {
@@ -261,6 +391,7 @@ impl Controller {
         self.failed_open_cleanup_outcome = Value::Null;
         self.port_claimed = true;
         self.open_failed = true;
+        self.open_trace(ctx);
         let outcome = (|| {
             ensure(self.write("Open", &[json!(self.com)], ctx)?, "open_port")?;
             self.connected = true;
@@ -290,6 +421,7 @@ impl Controller {
                     self.open_failed = false;
                     self.failed_open_released = true;
                 }
+                self.close_trace(&cleanup);
             }
         } else {
             self.open_failed = false;
@@ -306,6 +438,7 @@ impl Controller {
             return Ok(true);
         }
         let closed = self.write("Close", &[], ctx);
+        self.close_trace(ctx);
         if self.open_failed {
             self.failed_open_cleanup_outcome = match &closed {
                 Ok(status) => tuple(vec![json!("result"), json!(status)]),
@@ -440,14 +573,18 @@ impl Controller {
         Ok(Value::Object(info))
     }
 
-    fn scan(&mut self, ctx: &Context) -> Result<BTreeMap<u64, Value>> {
+    fn fitted(&mut self, ctx: &Context) -> Result<Vec<u64>> {
         let presence = self.presence(ctx)?;
         ensure(presence.status, "scan_modules")?;
         let flags = array(&presence.values[2], 13, "AMPR module presence")?;
         let max = output_u64(&presence, 1)?.min(11);
-        let addresses: Vec<_> = (0..=max)
+        Ok((0..=max)
             .filter(|n| flags[*n as usize] == json!(1))
-            .collect();
+            .collect())
+    }
+
+    fn scan(&mut self, ctx: &Context) -> Result<BTreeMap<u64, Value>> {
+        let addresses = self.fitted(ctx)?;
         self.capabilities.clear();
         let mut modules = BTreeMap::new();
         for address in addresses {
@@ -501,13 +638,62 @@ impl Controller {
         if !self.valid_voltage(address, channel, voltage) {
             return Ok(-15);
         }
-        let status = self.write(
-            "SetModuleOutputVoltage",
-            &[json!(address), json!(channel - 1), float(voltage)],
-            ctx,
-        )?;
+        let inputs = [json!(address), json!(channel - 1), float(voltage)];
+        let mut status = self.write("SetModuleOutputVoltage", &inputs, ctx)?;
+        if RECEIVE_ERRORS.contains(&status) {
+            status = self.recover_setpoint(address, channel, voltage, &inputs, ctx)?;
+        }
         if status == 0 {
             self.accepted.insert((address, channel), voltage);
+        }
+        Ok(status)
+    }
+
+    /// A lost reply: clear the port buffers and read the setpoint back. The same absolute value
+    /// is sent once more only if it was not applied, so a write is never applied twice.
+    fn recover_setpoint(
+        &mut self,
+        address: u64,
+        channel: u64,
+        voltage: f64,
+        inputs: &[Value],
+        ctx: &Context,
+    ) -> Result<i64> {
+        let failed = self
+            .receive_errors
+            .back()
+            .map_or(-10, |event| event["status"].as_i64().unwrap_or(-10));
+        let purge = self.write("Purge", &[], ctx)?;
+        let readback = self.read(
+            "GetModuleOutputVoltage",
+            vec![json!(address), json!(channel - 1)],
+            vec![json!(0.0)],
+            ctx,
+        )?;
+        let read_v = (readback.status == 0)
+            .then(|| readback.values[0].as_f64())
+            .flatten();
+        let applied =
+            read_v.is_some_and(|value| (value - voltage).abs() <= SETPOINT_READBACK_TOLERANCE_V);
+        let status = if applied {
+            0
+        } else {
+            self.write("SetModuleOutputVoltage", inputs, ctx)?
+        };
+        let outcome = json!({
+            "purge_status": purge, "readback_status": readback.status, "readback_v": read_v,
+            "applied": applied, "resend_status": if applied { Value::Null } else { json!(status) },
+        });
+        eprintln!(
+            "AMPR module {address} CH{channel}: {failed} on {voltage} V setpoint; recovery {outcome}"
+        );
+        if let Some(event) = self
+            .receive_errors
+            .iter_mut()
+            .rev()
+            .find(|event| event["export"] == "SetModuleOutputVoltage")
+        {
+            event["recovery"] = outcome;
         }
         Ok(status)
     }
@@ -580,25 +766,48 @@ impl Controller {
         self.connected()?;
         self.hk_running = false;
         let mut errors = Vec::new();
-        let modules = match self.scan(ctx) {
-            Ok(modules) => modules,
+        // One presence read names the fitted modules; their channel counts were
+        // resolved at connect. A full rescan cost ~3 s per OFF, and when its
+        // presence read failed no channel was zeroed at all.
+        let resolved: BTreeMap<u64, u64> = self
+            .capabilities
+            .iter()
+            .map(|(address, cap)| (*address, cap.channels.unwrap_or(4)))
+            .collect();
+        let modules: Vec<(u64, u64)> = match self.fitted(ctx) {
+            Ok(addresses) => {
+                let mut modules = Vec::new();
+                for address in addresses {
+                    let channels = match resolved.get(&address) {
+                        Some(channels) => *channels,
+                        None => match self.module_metadata(address, ctx) {
+                            Ok(info) => resolve_capabilities(&info).channels.unwrap_or(4),
+                            Err(error) => {
+                                errors.push(format!("module {address} metadata: {error}"));
+                                4
+                            }
+                        },
+                    };
+                    modules.push((address, channels));
+                }
+                modules
+            }
             Err(error) => {
-                errors.push(format!("scan_modules: {error}"));
-                BTreeMap::new()
+                errors.push(format!("module presence: {error}"));
+                resolved.into_iter().collect()
             }
         };
-        for (address, info) in modules {
-            let cap = resolve_capabilities(&info);
-            for channel in 1..=cap.channels.unwrap_or(4) {
-                match self.set_voltage(address, channel, 0.0, ctx) {
-                    Ok(0) => (),
-                    Ok(status) => errors.push(format!(
-                        "zero module {address} CH{channel}: status {status}"
-                    )),
-                    Err(error) => {
-                        errors.push(format!("zero module {address} CH{channel}: {error}"))
-                    }
-                }
+        'zero: for (address, channels) in modules {
+            for channel in 1..=channels {
+                let failure = match self.set_voltage(address, channel, 0.0, ctx) {
+                    Ok(0) => continue,
+                    Ok(status) => format!("zero module {address} CH{channel}: status {status}"),
+                    Err(error) => format!("zero module {address} CH{channel}: {error}"),
+                };
+                // A failing link would fail (or time out) on every remaining
+                // channel; disable the PSU now rather than after all of them.
+                errors.push(format!("{failure}; remaining channels not zeroed"));
+                break 'zero;
             }
         }
         match self.read("EnablePSU", vec![], vec![json!(false)], ctx) {
@@ -885,8 +1094,13 @@ impl Backend for Controller {
                 | "stop_housekeeping"
                 | "hk_monitor"
                 | "do_housekeeping_cycle"
+                | "take_receive_errors"
         ) {
             self.due_housekeeping(ctx)?;
+        }
+        if method == "take_receive_errors" {
+            Params::new(args, kwargs, &["timeout_s"], &[])?;
+            return Ok(Value::Array(self.receive_errors.drain(..).collect()));
         }
         if let Some(value) = self.low_level(method, args, kwargs, ctx)? {
             return Ok(value);
@@ -1548,4 +1762,25 @@ fn error_constant(name: &str) -> Option<i64> {
         "ERR_READY" => -102,
         _ => return None,
     })
+}
+
+/// `YYYYmmddTHHMMSSZ` (UTC) for file names, from the civil-from-days algorithm.
+fn utc_stamp(now: SystemTime) -> String {
+    let seconds = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (days, rest) = ((seconds / 86_400) as i64, seconds % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }

@@ -121,8 +121,9 @@ still requires measured discharge. A failed check triggers output-disable recove
 **Last values.** While connected, the plugin remembers the `Vset` and `Ilim` the
 PSU holds (`<Explorer config path>/PSU_A_last_setpoints.json`, with the COM port).
 At the next connection in manual mode (`Operating config` `-1`), a channel whose
-output is OFF and whose PSU now holds other values (for example 0 V after a power
-cycle) gets its last values **proposed** in the panel, in italics: nothing is sent
+output is OFF and whose PSU now holds other values (0 V after the shutdown, which
+zeroes `Vset` and `Ilim`, or after a power cycle) gets its last values **proposed**
+in the panel, in italics, and its `Vset` in the channel table: nothing is sent
 until you validate the field or turn the output ON, which applies the panel. A
 stored config, a live output, another PSU on this COM port or values outside the
 channel limits are never proposed; a setpoint requested by a scan, Transmission or

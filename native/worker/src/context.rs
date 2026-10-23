@@ -1,11 +1,15 @@
 use crate::error::{Error, Result};
-use serde_json::Value;
+use crate::ffi::NativeReply;
+use serde_json::{Map, Value, json};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{SyncSender, TrySendError},
 };
 use std::time::{Duration, Instant};
+
+// Longer pointer outputs (strings, presence arrays) are counted, not copied.
+const MAX_REPORTED_OUTPUT: usize = 120;
 
 struct WatchedCall {
     symbol: String,
@@ -173,6 +177,38 @@ impl Context {
         timeout: Option<Duration>,
         call: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
+        self.native_call_reporting(symbol, timeout, call, |_| Map::new())
+    }
+
+    /// `native_call` for a vendor export whose exit frame also reports the DLL
+    /// status and its short pointer outputs, so the log shows what the
+    /// instrument answered (a state, an unconfirmed enable), not only timing.
+    pub fn native_reply(
+        &self,
+        symbol: &str,
+        timeout: Option<Duration>,
+        call: impl FnOnce() -> Result<NativeReply>,
+    ) -> Result<NativeReply> {
+        self.native_call_reporting(symbol, timeout, call, |reply| {
+            let mut outcome = Map::new();
+            outcome.insert("status".into(), json!(reply.status));
+            let values = Value::Array(reply.values.clone());
+            if values.to_string().len() <= MAX_REPORTED_OUTPUT {
+                outcome.insert("values".into(), values);
+            } else {
+                outcome.insert("values_omitted".into(), json!(reply.values.len()));
+            }
+            outcome
+        })
+    }
+
+    fn native_call_reporting<T>(
+        &self,
+        symbol: &str,
+        timeout: Option<Duration>,
+        call: impl FnOnce() -> Result<T>,
+        report: impl FnOnce(&T) -> Map<String, Value>,
+    ) -> Result<T> {
         let limit = timeout
             .or(self.native_timeout)
             .unwrap_or(self.remaining())
@@ -200,10 +236,12 @@ impl Context {
         drop(guard);
         let elapsed = started.elapsed();
         if let Some(id) = self.request_id {
-            self.emit(
-                serde_json::json!({"version":1,"id":id,"kind":"native_io","phase":"exit",
-                "sequence":sequence,"symbol":symbol,"elapsed_s":elapsed.as_secs_f64()}),
-            )?;
+            let mut frame = serde_json::json!({"version":1,"id":id,"kind":"native_io","phase":"exit",
+                "sequence":sequence,"symbol":symbol,"elapsed_s":elapsed.as_secs_f64()});
+            if let (Ok(value), Some(fields)) = (&result, frame.as_object_mut()) {
+                fields.extend(report(value));
+            }
+            self.emit(frame)?;
         }
         if elapsed >= limit {
             return Err(Error::new(

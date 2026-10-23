@@ -1941,6 +1941,8 @@ class PSUDevice(Device):
         if proposed:
             self.print("Last PSU values proposed in the panel (" + "; ".join(proposed) + "). They are applied "
                        "when you validate a field or turn the output ON.")
+            # The panel was filled from the zeroed PSU before this decision.
+            self._sync_manual_panel_from_controller()
 
     def _drop_pending_setpoints(self, fields_by_channel: "dict[int, Any] | None" = None) -> None:
         """Forget proposed values: all of them, or the given {channel: fields}."""
@@ -5321,6 +5323,13 @@ class PSUController(DeviceController):
             "initializing", "transitioning", "_manual_apply_active",
             "_manual_apply_worker_running", "_hv_config_loading",
         ))
+        if sync_setpoints:
+            # First: a new connection may propose the last values, which the
+            # channels below then show instead of the zeroed PSU setpoints.
+            observed = getattr(parent, "_setpoints_observed", None)
+            if callable(observed):
+                observed(self, busy=busy)
+        proposed = getattr(parent, "_pending_setpoints", None) or {}
         syncing = getattr(parent, "_channelValueSyncing", False)
         parent._channelValueSyncing = True
         try:
@@ -5361,7 +5370,10 @@ class PSUController(DeviceController):
                 # A hardware readback is an observation, not a new command.
                 # Never replace a queued request, an equation or an active edit.
                 if sync_setpoints and not busy and channel.real and getattr(channel, "active", True):
-                    target = _coerce_float(self.voltage_setpoint_values.get(ch), np.nan)
+                    # A proposed value is shown, not sent: lastAppliedValue below keeps
+                    # Explorer from dispatching it before the operator validates.
+                    target = _coerce_float(proposed.get(ch, {}).get(
+                        "voltage", self.voltage_setpoint_values.get(ch)), np.nan)
                     getter = getattr(channel, "getParameterByName", None)
                     parameter = getter(getattr(channel, "VALUE", "Value")) if callable(getter) else None
                     widget = getattr(parameter, "getWidget", lambda: None)()
@@ -5373,10 +5385,6 @@ class PSUController(DeviceController):
                         channel.lastAppliedValue = channel.value
         finally:
             parent._channelValueSyncing = syncing
-        if sync_setpoints:
-            observed = getattr(parent, "_setpoints_observed", None)
-            if callable(observed):
-                observed(self, busy=busy)
         self._schedule_readback_expiry(sample)
         self._schedule_readback_expiry(limits, limits=True)
 

@@ -108,6 +108,17 @@ closing the port. If this fails, `Shutdown unconfirmed` stays visible and the ne
 click retries OFF; the button's ON state does not confirm an active output.
 A confirmed OFF does not certify complete electrical discharge.
 
+On 2026-10-22 and 2026-10-23, the first command to module 0 after reconnecting, or
+after the PSU was enabled, sometimes got no reply within the DLL's 1.5 s
+(`-10 Error receiving command`); every later command answered in 30 ms, but the start
+failed. After such a receive error (-10, -11, -12) on a setpoint, the worker purges the
+port and reads the setpoint back: if it was applied, only the reply was lost and nothing
+is sent again; otherwise the same absolute value is sent once more, and a second failure
+still fails the start. Each lost reply, read or write, is printed in the console with
+its module, delay and outcome. To find the cause, each connection also keeps the DLL's
+own trace of its first 1000 calls (sent commands, missing replies, DSR/DCD/CTS lines):
+`<Data path>/logs/<plugin>/ampr_startup_com<N>_<UTC time>.log`, the last ten per port.
+
 ## Portability Note
 
 To copy this plugin to another machine, keep the whole `ampr_b/` directory

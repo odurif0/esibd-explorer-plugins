@@ -89,7 +89,8 @@ The deployment binary accepts exactly its compiled family; `test-backend` is
 reserved for explicit fault fixtures and must never be shipped. IDs are monotonic
 unsigned 64-bit integers. Late replies are retired, duplicate/unsolicited replies
 and malformed frames poison the session. No hardware write is replayed after
-failure. JSON NaN/Infinity tokens are forbidden; nonfinite readings use tagged
+failure; the only exception is an AMPR setpoint whose reply was lost (receive error):
+it is read back and sent once more only if it was not applied. JSON NaN/Infinity tokens are forbidden; nonfinite readings use tagged
 values. Request and output queues are bounded (8 and 64).
 
 After each executor reply, a `state` map contains only cached lifecycle attributes:
@@ -102,8 +103,19 @@ An independent child-side watchdog also observes idle housekeeping DLL calls;
 it exits with a best-effort, bounded diagnostic even when stderr is undrained.
 
 `native_io` frames contain request `id`, `sequence`, export `symbol`, `phase`
-(`enter`/`exit`), and `timeout_s`/`elapsed_s`. The parent enforces that deadline
-even inside a long batch. Calls also have an overall request deadline; a batch
+(`enter`/`exit`), and `timeout_s`/`elapsed_s`. An `exit` frame of a vendor export
+also carries the DLL `status` and its pointer outputs as `values` (or only their
+count, `values_omitted`, when longer than 120 characters). The parent enforces that deadline
+even inside a long batch.
+
+The parent's session log (`<Data path>/logs/<plugin>/native/<family>/*.jsonl`) is
+sized for about 12 h. A request's records are held until it ends; a routine read
+(`getattr`, or a method named `get_`, `read_`, `poll_`, `collect_`, …) that ends
+successfully within 0.5 s, with no export over 0.25 s and no change of a status
+or of a `*State`/`*Enable` output, is counted in a per-minute `summary` record
+once its method was written in full in that minute (other calls: ten per minute).
+Failures, timeouts and slow calls are always written in full. At 8 MB the log
+continues in a numbered segment; at most eight are kept, the first always. Calls also have an overall request deadline; a batch
 budget does not allow an individual export to block for that entire period.
 Cancellation Events and progress callbacks are Python-local arguments, not JSON
 payloads. Progress executes on the calling thread, never the pipe-reader thread.

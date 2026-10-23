@@ -43,6 +43,10 @@ struct Hardware {
     cancel_on: Option<(String, Context)>,
     cancel_on_voltage: Option<Context>,
     delays: HashMap<String, Duration>,
+    // Firmware lag: this many GetPSUSetOutputVoltage reads after a write still
+    // return the previous setpoint (seen on hardware 2026-10-21).
+    lagging_voltage_reads: usize,
+    lag: Option<(usize, f64, usize)>,
 }
 
 impl Default for Hardware {
@@ -73,6 +77,8 @@ impl Default for Hardware {
             cancel_on: None,
             cancel_on_voltage: None,
             delays: HashMap::new(),
+            lagging_voltage_reads: 0,
+            lag: None,
         }
     }
 }
@@ -199,6 +205,9 @@ impl Dll for MockDll {
             "GetInterlockEnable" => reply(h.interlocks.map(|b| json!(i32::from(b))).to_vec()),
             "SetPSUOutputVoltage" => {
                 if !ignored {
+                    if h.lagging_voltage_reads > 0 {
+                        h.lag = Some((ch(), h.voltages[ch()], h.lagging_voltage_reads));
+                    }
                     h.voltages[ch()] = args[2].as_f64().unwrap();
                 }
                 reply(vec![])
@@ -212,7 +221,14 @@ impl Dll for MockDll {
             "GetPSUOutputVoltage" => reply(vec![float(h.voltages[ch()])]),
             "GetPSUOutputCurrent" => reply(vec![float(h.currents[ch()])]),
             "GetPSUSetOutputVoltage" => {
-                reply(vec![float(h.voltages[ch()]), float(h.voltage_limits[ch()])])
+                let mut voltage = h.voltages[ch()];
+                if let Some((channel, previous, reads)) = h.lag
+                    && channel == ch()
+                {
+                    voltage = previous;
+                    h.lag = (reads > 1).then_some((channel, previous, reads - 1));
+                }
+                reply(vec![float(voltage), float(h.voltage_limits[ch()])])
             }
             "GetPSUSetOutputCurrent" => {
                 reply(vec![float(h.currents[ch()]), float(h.current_limits[ch()])])
@@ -1137,6 +1153,38 @@ fn setpoint_only_ramps_from_hardware_and_does_not_restart_or_touch_other_channel
         })
         .collect();
     assert_eq!(steps, [240.0, 160.0, 80.0]);
+}
+
+#[test]
+fn setpoint_readback_lagging_the_write_is_awaited_not_reported_as_mismatch() {
+    let (mut c, h) = connected();
+    {
+        let mut h = h.lock().unwrap();
+        h.voltages = [100.0, 0.0];
+        h.currents = [0.01, 0.0];
+        h.lagging_voltage_reads = 2;
+    }
+    let state = json!({"setpoints_only":true,"voltage_values":{"$map":[[0,0.0]]}});
+    call(&mut c, "apply_manual_state", &[state], fast_profile()).unwrap();
+    let h = h.lock().unwrap();
+    assert_eq!(h.voltages, [0.0, 0.0]);
+    let write = h
+        .names()
+        .iter()
+        .position(|n| *n == "SetPSUOutputVoltage")
+        .unwrap();
+    let rereads = h.calls[write..]
+        .iter()
+        .filter(|c| c.name == "GetPSUSetOutputVoltage" && c.args[1] == json!(0))
+        .count();
+    assert!(
+        rereads >= 3,
+        "the stale readbacks were re-read, got {rereads}"
+    );
+    assert!(
+        !h.calls.iter().any(|c| c.name == "SetPSUEnable"),
+        "no recovery OFF"
+    );
 }
 
 #[test]

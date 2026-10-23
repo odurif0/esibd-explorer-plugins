@@ -114,15 +114,46 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   PSU panel. Only afterwards select `AMX_HD` in MScan, at zero amplitude first.
 - **AMX panel sketch (2026-10-13):** with the same scope set-up, on AMX HD and on
   AMX A/B (config 79: 500 kHz, 1 µs per level, CH0/CH2 together), compare the
-  expected-switching sketch under the CH0–CH3 table with the scope (edge order,
+  expected-switching sketch (Advanced) with the scope (edge order,
   Vpos/Vneg dwell); a static or Hi-Z config must give a flat or dashed row. Select another config while ON: `Load now` must turn amber until
   it is loaded. Switch Explorer to the light theme once: all panel text must stay
   readable.
+- **AMX frequency keeps symmetry (2026-10-22):** same scope set-up, PSUs at zero.
+  Load config 79 (500 kHz), then type 450 kHz: the scope must show 1.11 µs at each
+  level (was 1.00 / 1.22 µs), the panel `450.4505 kHz (222 × 10 ns)`, `Vpos (%)` 50
+  and P0 `Duty` 50.00 %; only the P0 timing row is shown, P1–P3 in Advanced.
+  Type 600 then 500 kHz: back to 1.00 / 1.00 µs, P0 width
+  register 98, delay register 7. Type 25 % in P0 `Duty`: 0.5 µs at Vpos. Set P0
+  `Osc change keeps` to `width µs`, change the frequency: the width stays in µs.
+  On AMX HD, Configuration273 at 9 kHz must stay 50 / 50 within one tick and the
+  oscillator line must report the odd period.
 - **MScan quadrupole offset (2026-10-08):** select the AMPR offset channel and a
   small coefficient; in a short stepped scan, check on an independent meter that
   the offset follows U = U/V × A at each point and returns to its initial value.
   Then check that a continuous scan's Time step leaves the AMPR time to confirm each
   target (otherwise it aborts, naming the offset).
+- **AMPR responsiveness (2026-10-21):** with the 12-module AMPR_A, time ON (click to
+  "Starting AMPR ramp-up", was ~18 s), an edit to its green confirmed Status (was
+  2–7 s) and OFF after the ramp-down; the Monitor column must still refresh about
+  once per second. OFF during a running poll must ramp down, never log "Could not
+  acquire lock before AMPR ramp-down". Device/voltage/interlock state must show
+  real values, not "Unknown"; opening the interlock while ON must log "AMPR left
+  ST_ON" with the interlock state.
+- **Native logs and GUI lag (2026-10-22):** after a session of several hours with
+  AMPR, AMX, PSU and DMMR ON, each `logs/<plugin>/native/<family>/*.jsonl` must hold
+  the whole session (a few MB, `summary` lines each minute, `status`/`values` on
+  vendor calls). With the AMX panel open while an AMX connects to a powered-off
+  unit, Explorer must stay responsive (no "operation queue timed out" traceback).
+  A DMMR closed by Explorer's display-lag protection must log "Explorer display
+  lag: …" naming the lagging device.
+- **PSU last values after shutdown (2026-10-22):** in manual mode set CH0 to e.g.
+  100 V / 1 mA with the output OFF, then OFF (shutdown) and ON again: the panel
+  must show 100 V and 1 mA in italics and the channel table 100 V, while the PSU
+  front panel still shows 0 V. Nothing changes on the PSU until a field is
+  validated or the output turned ON; turning it ON ramps to 100 V.
+- **PSU readback lag (2026-10-21):** on PSU_D/PSU_E with an output OFF, alternate a
+  channel between 0 and 100 V a dozen times: no "setpoint readback … does not match"
+  error and no outputs switched OFF.
 - **PSU_D:** check the selected module and reference/readback mapping at zero.
   Do not introduce an arbitrary software offset to match the plot. If disagreement
   remains, retain targets, native readbacks and independent meter readings.
@@ -203,6 +234,31 @@ discharge round in `metadata.json` (`discharge_observations`). During the
 records every fresh conversion after each channel selection, with the raw
 ready/overflow flags and a native call trace: run it together with an independent
 HV measurement of both outputs.
+
+**ESI OFF with settled readings (2026-10-22):** on 2026-10-22 the first conversions after
+each ADC selection read k × 110.7 V (up to 1328 V, also on a never-enabled HV2) and the
+check never confirmed; HV1 also really held about 280 V 8 s after its OFF from 1300 V.
+The check now discards the first two conversions and the first second after each
+selection (as the electrospray readback). With HV off for minutes, OFF must confirm in
+about 6–8 s. If it still fails, the native log now holds every
+discarded conversion (`values` of `GetHVsupplyOutputVoltage`): note how many follow a
+selection before the readings agree, and compare with an independent HV probe.
+
+**ESI non-blocking OFF at 10 V (2026-10-23):** the settled check worked, but HV1 really
+decays slowly (247 V 10 s after OFF from 1000 V, 10 V after 41 s, 2.8 V after 66 s), so
+the 1 V / 60 s check never confirmed; the operator chose 10 V. Right after HV1 at 1000 V,
+press OFF: within about 3 s the button must be OFF and the badge `OFF: HV discharging`,
+with readings every 10 s; ON must be refused meanwhile; `ESI HV discharge verified after
+N s` must follow after about 45–50 s, then `Disconnected`. Repeat, closing Explorer during
+the check: it must wait for the verdict, with no "unconfirmed" message. Check the
+discharge time against an independent HV probe on the spray connector.
+
+**AMPR first ON after OFF (2026-10-23):** the first command to module 0 after reconnecting,
+or after the PSU was enabled, sometimes got no reply within 1.5 s (-10) and the start
+failed; the second ON worked. Repeat OFF, wait one minute, ON, ten times. Each lost reply
+must now be printed (`got no reply within …`) and the start must succeed; keep
+`<Data path>/logs/ampr_a/` (native log and `ampr_startup_com*_*.log` DLL traces) of every
+occurrence, to tell a busy controller (CTS inactive) from a reply lost on the line.
 
 ## Transmission optimizer
 

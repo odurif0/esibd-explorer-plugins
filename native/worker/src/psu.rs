@@ -65,6 +65,10 @@ const DEFAULT_STEP_S: f64 = 0.05;
 const VOLTAGE_ABS_TOLERANCE: f64 = 0.01;
 const CURRENT_ABS_TOLERANCE: f64 = 0.001;
 const SETPOINT_REL_TOLERANCE: f64 = 0.01;
+// The setpoint readback lags the write ACK by a few ms (lab logs 2026-10-21:
+// a read 2-4 ms after SetPSUOutputVoltage still returned the old value).
+const SETPOINT_SETTLE_S: f64 = 0.25;
+const SETPOINT_POLL_S: f64 = 0.02;
 
 pub struct Controller {
     dll: Box<dyn Dll>,
@@ -434,7 +438,7 @@ impl Controller {
         let symbol = format!("COM_HVPSU2D_{suffix}");
         let result = io
             .ctx
-            .native_call(&symbol, Some(io.timeout), || self.dll.call(&symbol, &args));
+            .native_reply(&symbol, Some(io.timeout), || self.dll.call(&symbol, &args));
         if let Err(error) = &result
             && matches!(
                 error.kind.as_str(),
@@ -655,6 +659,25 @@ impl Controller {
         };
         let v = self.read(symbol, &[json!(channel), json!(0.0), json!(0.0)], 2, io)?;
         Ok([read_number(&v[0], quantity)?, read_number(&v[1], quantity)?])
+    }
+
+    /// Re-reads a setpoint/limit pair until `settled` accepts it or the PSU had
+    /// SETPOINT_SETTLE_S to apply the write; the caller still judges the result.
+    fn settled_limits(
+        &mut self,
+        channel: usize,
+        quantity: &str,
+        io: &Io<'_>,
+        settled: impl Fn([f64; 2]) -> bool,
+    ) -> Result<[f64; 2]> {
+        let deadline = Instant::now() + Duration::from_secs_f64(SETPOINT_SETTLE_S);
+        loop {
+            let values = self.limits(channel, quantity, io)?;
+            if settled(values) || Instant::now() >= deadline {
+                return Ok(values);
+            }
+            io.ctx.sleep(Duration::from_secs_f64(SETPOINT_POLL_S))?;
+        }
     }
 
     fn setpoint(
@@ -1363,7 +1386,9 @@ impl Controller {
         io: &Io<'_>,
     ) -> Result<()> {
         for ch in 0..2 {
-            let [voltage, limit] = self.limits(ch, "voltage", io)?;
+            let [voltage, limit] = self.settled_limits(ch, "voltage", io, |[voltage, _]| {
+                voltage.is_finite() && setpoint_matches(voltage, voltages[ch])
+            })?;
             validate_voltage_target(ch, targets[ch], limit)?;
             if !voltage.is_finite() || !setpoint_matches(voltage, voltages[ch]) {
                 return Err(Error::runtime(format!(
@@ -1371,7 +1396,11 @@ impl Controller {
                     voltages[ch]
                 )));
             }
-            let [current, limit] = self.limits(ch, "current", io)?;
+            let [current, limit] = self.settled_limits(ch, "current", io, |[current, _]| {
+                current.is_finite()
+                    && current >= 0.0
+                    && current <= currents[ch] + CURRENT_ABS_TOLERANCE
+            })?;
             if currents[ch] > 0.0 && (!limit.is_finite() || limit < 0.0) {
                 return Err(Error::runtime(format!(
                     "CH{ch} current hardware limit is invalid."

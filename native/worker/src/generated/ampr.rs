@@ -12,6 +12,12 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let status = unsafe { function() };
             Ok(NativeReply { status: i64::from(status), values: vec![] })
         }
+        "COM_AMPR_12_CloseDebugFile" => {
+            arity(args, 0, symbol)?;
+            let function = unsafe { lib.get::<unsafe extern "system" fn() -> i32>(b"COM_AMPR_12_CloseDebugFile\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
+            let status = unsafe { function() };
+            Ok(NativeReply { status: i64::from(status), values: vec![] })
+        }
         "COM_AMPR_12_DevicePurge" => {
             arity(args, 1, symbol)?;
             let mut a0 = pointer::<u8>(&args[0], 1, true)?;
@@ -329,6 +335,13 @@ pub fn dispatch(lib: &Library, symbol: &str, args: &[Value]) -> Result<NativeRep
             let a0 = scalar::<u8>(&args[0], false)?;
             let function = unsafe { lib.get::<unsafe extern "system" fn(u8) -> i32>(b"COM_AMPR_12_Open\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
             let status = unsafe { function(a0) };
+            Ok(NativeReply { status: i64::from(status), values: vec![] })
+        }
+        "COM_AMPR_12_OpenDebugFile" => {
+            arity(args, 1, symbol)?;
+            let mut a0 = text_input(&args[0], 4096)?;
+            let function = unsafe { lib.get::<unsafe extern "system" fn(*mut u8) -> i32>(b"COM_AMPR_12_OpenDebugFile\0") }.map_err(|e| Error::new("AttributeError", format!("Missing vendor export {symbol}: {e}")))?;
+            let status = unsafe { function(a0.as_mut_ptr()) };
             Ok(NativeReply { status: i64::from(status), values: vec![] })
         }
         "COM_AMPR_12_Purge" => {

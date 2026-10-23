@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock, RLock, Thread
 from typing import Any, cast
@@ -48,6 +49,11 @@ _AMPR_ABS_VOLTAGE_LIMIT = 1000.0
 _AMPR_MIN_ROW_HEIGHT = 28
 _AMPR_RAMP_STEP_S = 0.1
 _AMPR_MONITOR_INTERVAL_S = 1.0
+# A poll pauses this long between modules when a setpoint write is queued, so
+# the writer takes the controller lock instead of waiting for the whole cycle.
+_AMPR_WRITER_YIELD_S = 0.01
+# Device/voltage/interlock summaries are refreshed at this period while ST_ON.
+_AMPR_STATE_SUMMARY_INTERVAL_S = 5.0
 _AMPR_COMMUNICATION_LOST_STATE = "Communication lost"
 _AMPR_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
 _AMPR_TRANSPORT_FAILURE_THRESHOLD = 3
@@ -604,6 +610,33 @@ def _load_private_runtime_package_unlocked(module_name: str, package_dir: Path) 
         raise
 
 
+def _receive_error_text(event: dict[str, Any]) -> str:
+    """One console line for a reply the AMPR did not send within the DLL timeout."""
+    export = str(event.get("export", "?"))
+    inputs = list(event.get("inputs") or ())
+    target = "controller"
+    if export == "SetModuleOutputVoltage" and len(inputs) >= 3:
+        target = f"module {inputs[0]} CH{int(inputs[1]) + 1}, {float(inputs[2]):.3f} V"
+    elif export.startswith(("GetModule", "SetModule")) and inputs:
+        target = f"module {inputs[0]}"
+    when = datetime.fromtimestamp(float(event.get("time", 0.))).strftime("%H:%M:%S")
+    text = (f"AMPR {export} ({target}) got no reply within {float(event.get('elapsed_s', 0.)):.2f} s "
+            f"at {when} (status {event.get('status')}).")
+    recovery = event.get("recovery")
+    if isinstance(recovery, dict):
+        if recovery.get("applied"):
+            text += " The read-back setpoint shows it was applied: only the reply was lost."
+        else:
+            readback = recovery.get("readback_v")
+            read = "unreadable" if readback is None else f"{float(readback):.3f} V"
+            resent = recovery.get("resend_status")
+            text += (f" Not applied (read back {read}); sent once more: "
+                     f"{'accepted' if resent == 0 else f'status {resent}'}.")
+    if event.get("trace"):
+        text += f" DLL trace: {event['trace']}"
+    return text
+
+
 def _get_ampr_driver_class() -> type[Any]:
     """Load the AMPR driver lazily from the bundled runtime only."""
     global _AMPR_DRIVER_CLASS
@@ -801,6 +834,16 @@ class AMPRDevice(Device):
         base = getattr(super(), "exportConfigurationIfChanged", None)
         if callable(base):
             _invoke_gui_callback(base)
+
+    def exportConfiguration(self, file: "Path | None" = None, useDefaultFile: bool = False) -> None:
+        """Skip an AMPR never initialized: its channels come from the module scan.
+
+        Explorer exports every device at each data save and logs "No channels
+        found to export." as an error for one without channels (an unused AMPR_B).
+        """
+        if not getattr(self, "channels", None):
+            return
+        super().exportConfiguration(file=file, useDefaultFile=useDefaultFile)
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -2282,6 +2325,7 @@ class AMPRController(DeviceController):
                 self.controllerParent.exportConfiguration(useDefaultFile=True)
         self.initializeValues()
         self.initialized = True
+        self._st_on_loss_reported = False
         # A fresh transport reached this far, so any earlier in-process port
         # poisoning is no longer relevant for this COM port.
         self._poisoned_com = None
@@ -2302,6 +2346,7 @@ class AMPRController(DeviceController):
             f"AMPR initialized on COM{int(self.controllerParent.com)}. "
             f"State: {self.main_state}. Detected modules: {modules_text}."
         )
+        self._report_receive_errors()
         if getattr(self, "_cancel_ramp", False):
             if self._begin_transition(False):
                 self.toggleOnFromThread(parallel=True)
@@ -2325,26 +2370,70 @@ class AMPRController(DeviceController):
                 self.toggleOnFromThread(parallel=True)
 
     def runAcquisition(self) -> None:
-        """Poll AMPR readbacks while reusing the acquisition-loop lock."""
+        """Poll AMPR readbacks, holding the controller lock for one module at a time."""
         token = self._native_session_token
         while self.acquiring and token is self._native_session_token:
             started = time.monotonic()
             try:
-                with self._controller_lock_section(
-                    "Could not acquire lock to acquire AMPR data.",
-                    timeout_s=1.0,
-                    log_timeout=False,
-                ):
-                    if not self.acquiring or token is not self._native_session_token:
-                        break  # A ramp/OFF may have taken over while this thread waited.
-                    self.readNumbers(already_acquired=True)
+                # A whole 12-module cycle under one lock made setpoint writes,
+                # stopAcquisition and the OFF ramp wait for seconds.
+                self.readNumbers(poll_token=token)
+                if self.acquiring and token is self._native_session_token:
                     self.signalComm.updateValuesSignal.emit()
-            except TimeoutError:
-                continue
             finally:
                 time.sleep(max(0.0, _AMPR_MONITOR_INTERVAL_S - (time.monotonic() - started)))
 
-    def readNumbers(self, *, already_acquired: bool = False) -> None:
+    def _poll_cancelled(self, poll_token: object | None) -> bool:
+        """True when the acquisition poll that owns ``poll_token`` was stopped."""
+        return poll_token is not None and (
+            not self.acquiring or poll_token is not self._native_session_token)
+
+    def _yield_to_setpoint_writer(self) -> None:
+        """Let a queued setpoint write take the lock before the next module read."""
+        lock = getattr(self, "_setpoint_lock", None)
+        if lock is None:
+            return
+        with lock:
+            waiting = bool(self._pending_setpoints) and self._setpoint_thread is not None
+        if waiting:
+            time.sleep(_AMPR_WRITER_YIELD_S)
+
+    def _setpoint_readback_modules(self, poll_modules: list[int], device: Any) -> set[int]:
+        """Modules whose setpoints are read this cycle; the others are read measured-only.
+
+        A setpoint readback costs four serial transactions per module. It is
+        done where a written value still awaits confirmation, for every module
+        when a crash resume adopts the hardware setpoints, and otherwise for one
+        module per cycle in turn so confirmed values are re-verified.
+        """
+        if not poll_modules:
+            return set()
+        if self.resume_session:
+            return set(poll_modules)
+        lock = getattr(self, "_setpoint_lock", None)
+        modules: set[int] = set()
+        if lock is not None:
+            with lock:
+                modules = {key[0] for key, request in self._latest_setpoints.items()
+                           if request.device is device and not request.cancel.is_set()
+                           and request.state in {"sent", "mismatch"}}
+        cursor = int(getattr(self, "_setpoint_refresh_cursor", 0))
+        modules.add(poll_modules[cursor % len(poll_modules)])
+        self._setpoint_refresh_cursor = cursor + 1
+        return modules
+
+    @staticmethod
+    def _read_measured_voltages(device: Any, module: int) -> dict[int, dict[str, Any]]:
+        """Read one module's measured outputs with the single-transaction export."""
+        reader = getattr(device, "get_all_module_voltage_measured", None)
+        if not callable(reader):
+            return device.get_module_voltages(module)
+        status, measured = reader(module)
+        if status != getattr(device, "NO_ERR", 0) or not isinstance(measured, (list, tuple)):
+            return {}  # Same as a failed measured read in get_module_voltages: no value.
+        return {number: {"measured": value} for number, value in enumerate(measured[:_CHANNELS_PER_MODULE], 1)}
+
+    def readNumbers(self, *, already_acquired: bool = False, poll_token: object | None = None) -> None:
         if self.device is None or not getattr(self, "initialized", False):
             self.initializeValues(reset=True)
             return
@@ -2371,28 +2460,40 @@ class AMPRController(DeviceController):
             poll_modules = sorted(configured_modules)
 
         poll_device = self.device
+        readback_modules = self._setpoint_readback_modules(poll_modules, poll_device)
         for module in poll_modules:
+            if self._poll_cancelled(poll_token):
+                return
+            if not already_acquired:
+                self._yield_to_setpoint_writer()
             try:
                 with self._controller_lock_section(
                     f"Could not acquire lock to read AMPR module {module}.",
                     already_acquired=already_acquired,
+                    log_timeout=False,
                 ):
+                    if self._poll_cancelled(poll_token):
+                        return  # A ramp/OFF took over while this thread waited.
                     device = self.device
                     if device is None or device is not poll_device:
                         return
-                    voltages = device.get_module_voltages(module)
+                    if module not in readback_modules:
+                        voltages = self._read_measured_voltages(device, module)
+                    else:
+                        voltages = device.get_module_voltages(module)
+                        if self.device is not device:
+                            return
+                        # Check the request while holding the same hardware lock
+                        # so an old frame can never confirm a newer write.
+                        self._confirm_setpoints(module, voltages, device)
+                        if not hasattr(self, "_last_output_targets"):
+                            self._last_output_targets = {}
+                        for channel_id, data in voltages.items():
+                            target = data.get("setpoint")
+                            if target is not None and np.isfinite(target):
+                                self._last_output_targets[(module, channel_id)] = float(target)
                     if self.device is not device:
                         return
-                    # Polling already reads both requested and measured voltage.
-                    # Check the request while holding the same hardware lock so
-                    # an old frame can never confirm a newer write.
-                    self._confirm_setpoints(module, voltages, device)
-                    if not hasattr(self, "_last_output_targets"):
-                        self._last_output_targets = {}
-                    for channel_id, data in voltages.items():
-                        target = data.get("setpoint")
-                        if target is not None and np.isfinite(target):
-                            self._last_output_targets[(module, channel_id)] = float(target)
             except TimeoutError:
                 # Transient controller-lock contention (another operation holds
                 # the lock); skip this module this cycle. A real read fault is
@@ -2550,6 +2651,7 @@ class AMPRController(DeviceController):
                     else:
                         self._last_output_targets[key] = request.target
                         self._publish_setpoint(request, "sent", "Sent; awaiting the hardware setpoint readback.")
+                        self._confirm_written_setpoint(request)
             except TimeoutError:
                 # Retain every channel's latest request until the poll/ramp
                 # releases the lock. Never access widgets from this worker.
@@ -2609,6 +2711,26 @@ class AMPRController(DeviceController):
                 self._publish_setpoint(request, "confirmed", f"Hardware setpoint: {actual:.3f} V. Measured voltage is shown in Monitor.")
             else:
                 self._publish_setpoint(request, "mismatch", f"Hardware setpoint is {actual:.3f} V, not the requested value.")
+
+    def _confirm_written_setpoint(self, request: _AMPRSetpoint) -> None:
+        """Read one written setpoint back under the write's lock; only a match confirms.
+
+        Anything else stays "sent", so the next module readback decides: a
+        readback taken right after the write is never reported as a mismatch.
+        """
+        reader = getattr(request.device, "get_module_voltage_setpoint", None)
+        if not callable(reader):
+            return
+        try:
+            status, actual = reader(*request.key)
+        except Exception as exc:  # noqa: BLE001
+            if _transport_failure_is_fatal(exc):
+                self._handle_transport_loss()
+            return
+        actual = _coerce_float(actual, np.nan)
+        if (status == request.device.NO_ERR and np.isfinite(actual)
+                and round(actual, request.decimals) == round(request.target, request.decimals)):
+            self._publish_setpoint(request, "confirmed", f"Hardware setpoint: {actual:.3f} V. Measured voltage is shown in Monitor.")
 
     def _cancel_setpoints(self) -> None:
         if not hasattr(self, "_setpoint_lock"):
@@ -2693,7 +2815,10 @@ class AMPRController(DeviceController):
                     # Even a timed-out startup may already have enabled the PSU.
                     raise
                 if status == device.NO_ERR:
-                    self._refresh_module_scan()
+                    if not getattr(self, "detected_module_ids", None):
+                        # Connect already scanned and resolved every module;
+                        # enabling the PSU does not change which are fitted.
+                        self._refresh_module_scan()
                     self._update_state()
                     state_updated = True
                     apply_limits = getattr(self.controllerParent, "_apply_module_voltage_limits", None)
@@ -2724,10 +2849,18 @@ class AMPRController(DeviceController):
             return
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
+            diagnostics = ""
+            if (not startup_targets and not isinstance(exc, TimeoutError)
+                    and not _transport_failure_is_fatal(exc)):
+                # Startup was refused before any output was driven and the
+                # worker already disabled the PSU: read why (interlock, supply,
+                # module) while the port is still open; cleanup disconnects.
+                diagnostics = self._runtime_diagnostics(device=device)
+            self._report_receive_errors()
             self._safe_disable_after_toggle_failure(startup_targets)
             self.print(
                 f"Failed to toggle AMPR PSU: {self._format_exception(exc)}"
-                f"{self._runtime_diagnostics(device=device)}",
+                f"{diagnostics or self._runtime_diagnostics(device=device)}",
                 flag=PRINT.ERROR,
             )
             return
@@ -2757,6 +2890,7 @@ class AMPRController(DeviceController):
             if callable(start_acquisition):
                 start_acquisition()
             self.print("AMPR PSU turned ON. State: ST_ON.")
+            self._report_receive_errors()
 
     def closeCommunication(self, *, final_state: str | None = None) -> None:
         self._native_initialization_ready = None
@@ -2910,7 +3044,7 @@ class AMPRController(DeviceController):
             if self.detected_module_ids
             else "None"
         )
-        self._refresh_module_capabilities()
+        self._refresh_module_capabilities(module_info)
 
         configured_modules = set(self.controllerParent.getConfiguredModules())
         current_items = self.controllerParent._current_channel_items()
@@ -2929,17 +3063,26 @@ class AMPRController(DeviceController):
                 flag=PRINT.WARNING,
             )
 
-    def _refresh_module_capabilities(self) -> None:
-        """Update per-module voltage limits and channel counts from AMPR metadata."""
+    def _refresh_module_capabilities(self, module_info: Any = None) -> None:
+        """Update per-module voltage limits and channel counts from AMPR metadata.
+
+        ``module_info`` is the scan just performed: its identity fields give the
+        capabilities without scanning all modules a second time.
+        """
         if self.device is None:
             self.controllerParent.module_channel_counts = {}
             self.controllerParent.module_voltage_limits = {}
             return
-        if not hasattr(self.device, "get_module_capabilities"):
+        from_scan = getattr(self.device, "get_module_capabilities_from_scan", None)
+        if not hasattr(self.device, "get_module_capabilities") and not callable(from_scan):
             return
 
         try:
-            module_capabilities = self.device.get_module_capabilities()
+            module_capabilities = (
+                from_scan(module_info)
+                if callable(from_scan) and isinstance(module_info, dict)
+                else self.device.get_module_capabilities()
+            )
         except Exception as exc:  # noqa: BLE001
             self.print(
                 f"Could not query AMPR module capabilities: {exc}",
@@ -3045,6 +3188,7 @@ class AMPRController(DeviceController):
         if (self.device is not device or not getattr(self, "initialized", False)
                 or self.main_state == _AMPR_SHUTDOWN_UNCONFIRMED_STATE):
             return
+        previous_state = self.main_state
         if status == device.NO_ERR:
             self.main_state = state_name
         else:
@@ -3054,11 +3198,48 @@ class AMPRController(DeviceController):
                 f"Failed to read AMPR state: {self._format_status(status, device=device)}",
                 flag=PRINT.ERROR,
             )
-        self.device_state_summary = self._safe_query_state("get_device_state") or "Unknown"
-        self.interlock_state_summary = (
-            self._safe_query_state("get_interlock_state") or "Unknown"
-        )
-        self.voltage_state_summary = self._safe_query_state("get_voltage_state") or "Unknown"
+        now = time.monotonic()
+        if (self.main_state != previous_state or self.main_state != "ST_ON"
+                or now >= getattr(self, "_next_state_summary_s", 0.0)):
+            self._next_state_summary_s = now + _AMPR_STATE_SUMMARY_INTERVAL_S
+            self._refresh_state_summaries(device, already_acquired=already_acquired)
+        if status == device.NO_ERR:
+            self._report_st_on_change(previous_state)
+
+    def _refresh_state_summaries(self, device: Any, *, already_acquired: bool = False) -> None:
+        """Read the device/interlock/voltage summaries under the same lock as other DLL calls."""
+        try:
+            with self._controller_lock_section(
+                "Could not acquire lock to refresh the AMPR status.",
+                already_acquired=already_acquired,
+                log_timeout=False,
+            ):
+                if self.device is not device:
+                    return
+                self.device_state_summary = self._safe_query_state("get_device_state") or "Unknown"
+                self.interlock_state_summary = (
+                    self._safe_query_state("get_interlock_state") or "Unknown"
+                )
+                self.voltage_state_summary = self._safe_query_state("get_voltage_state") or "Unknown"
+        except TimeoutError:
+            pass  # Keep the last summaries; the next refresh retries.
+
+    def _report_st_on_change(self, previous_state: str) -> None:
+        """Say when a monitored AMPR leaves or regains ST_ON instead of only blanking Monitor."""
+        polling = (getattr(self, "acquiring", False) and not getattr(self, "transitioning", False)
+                   and not getattr(self, "ramping", False))
+        if previous_state == "ST_ON" and self.main_state != "ST_ON" and polling:
+            self._st_on_loss_reported = True
+            self.print(
+                f"AMPR left ST_ON and now reports {self.main_state} (device state: "
+                f"{self.device_state_summary}; voltage state: {self.voltage_state_summary}; "
+                f"interlock state: {self.interlock_state_summary}). Measured voltages are not "
+                "shown until it returns to ST_ON; check the interlock, supply and modules.",
+                flag=PRINT.ERROR,
+            )
+        elif self.main_state == "ST_ON" and getattr(self, "_st_on_loss_reported", False):
+            self._st_on_loss_reported = False
+            self.print("AMPR is back in ST_ON.")
 
     def _handle_transport_loss(self) -> None:
         """Force immediate AMPR teardown after repeated transport failures."""
@@ -3163,8 +3344,13 @@ class AMPRController(DeviceController):
             return False
         if not isinstance(getattr(backend, "session", None), str):
             return False
-        if not force and not getattr(backend, "closed", False):
+        already_closed = bool(getattr(backend, "closed", False))
+        if not force and not already_closed:
             return False
+        cause = ""
+        if already_closed:
+            with contextlib.suppress(Exception):
+                cause = str(backend.lifecycle_attribute("_transport_error") or "").strip()
         try:
             if not backend.close(grace_s=0):
                 return False
@@ -3191,7 +3377,8 @@ class AMPRController(DeviceController):
         self.initializeValues(reset=True)
         self._restore_off_ui_state()
         self._sync_status_to_gui()
-        self.print("AMPR native worker released. Hardware OFF was not confirmed; outputs may still be live. "
+        self.print("AMPR native worker released" + (f" after: {cause}" if cause else "")
+                   + ". Hardware OFF was not confirmed; outputs may still be live. "
                    "Verify the hardware state before reconnecting or approaching the device.", flag=PRINT.ERROR)
         return True
 
@@ -3253,11 +3440,9 @@ class AMPRController(DeviceController):
         if getter is None:
             return None
         try:
-            status, _state_hex, state = getter(
-                timeout_s=float(
-                    getattr(self.controllerParent, "poll_timeout_s", 5.0)
-                )
-            )
+            # Only get_state takes timeout_s; passing it to the other getters
+            # raised TypeError, so these summaries always read "Unknown".
+            status, _state_hex, state = getter()
         except Exception:  # noqa: BLE001
             return None
         if status != getattr(device, "NO_ERR", status):
@@ -3265,6 +3450,23 @@ class AMPRController(DeviceController):
         if isinstance(state, list):
             return ", ".join(str(entry) for entry in state) if state else "OK"
         return str(state)
+
+    def _report_receive_errors(self) -> None:
+        """Print the replies the worker did not get in time, and how each setpoint ended.
+
+        2026-10-22/23 lab: the first command to module 0 after reconnecting, or after the PSU
+        was enabled, got no reply within the DLL's 1.5 s and the start failed.
+        """
+        take = getattr(self.device, "take_receive_errors", None)
+        if not callable(take):
+            return
+        try:
+            events = list(take(timeout_s=float(self.controllerParent.connect_timeout_s)) or ())
+        except Exception:  # noqa: BLE001 - diagnostics never change the ON/OFF outcome
+            return
+        for event in events:
+            if isinstance(event, dict):
+                self.print(_receive_error_text(event), flag=PRINT.WARNING)
 
     def _runtime_diagnostics(self, device: Any | None = None) -> str:
         diagnostics: list[str] = []

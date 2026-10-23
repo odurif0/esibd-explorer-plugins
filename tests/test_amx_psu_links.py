@@ -24,7 +24,7 @@ def rig(request):
     module, parent, controller = make_case(request.param)
     assert module._AMX_OUTPUT_COLUMNS[PSU_COLUMN][0] == "psu"
     items = [[Item() for _ in range(len(module._AMX_OUTPUT_COLUMNS))] for _ in range(4)]
-    parent.amxOutputTable = SimpleNamespace(item=lambda row, col: items[row][col])
+    parent.amxOutputTable = SimpleNamespace(item=lambda row, col: items[row][col], setColumnHidden=lambda *_: None)
     apply_reference_routing(request.param, controller)
     parent.psu_ch01, parent.psu_ch23 = "PSU_A", "None"
     register_sources(parent)

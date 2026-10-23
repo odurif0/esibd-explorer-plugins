@@ -1239,6 +1239,30 @@ class AMPR(ProcessIsolatedClientMixin):
             )
         return module_capabilities
 
+    def get_module_capabilities_from_scan(self, modules: dict) -> dict:
+        """Resolve capabilities from ``scan_modules()`` metadata without scanning again.
+
+        A module whose scan entry lacks an identity field is queried directly.
+        """
+        module_capabilities = {}
+        for module_address, info in sorted((int(address), info) for address, info in dict(modules).items()):
+            info = info if isinstance(info, dict) else {}
+            if not all(key in info for key in ("product_id", "product_no", "hw_type")):
+                module_capabilities[module_address] = self.get_module_capabilities(module_address)
+                continue
+            module_capabilities[module_address] = {
+                "status": self.NO_ERR,
+                "product_id": info["product_id"],
+                "product_no": info["product_no"],
+                "hw_type": info["hw_type"],
+                **_resolve_module_capabilities(
+                    product_id=info["product_id"],
+                    product_no=info["product_no"],
+                    hw_type=info["hw_type"],
+                ),
+            }
+        return module_capabilities
+
     def get_module_voltage_rating(self, address: Optional[int] = None):
         """Return one module voltage rating or all scanned module voltage ratings."""
         if address is not None:

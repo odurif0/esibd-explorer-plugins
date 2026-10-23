@@ -100,9 +100,10 @@ Runtime timing notes:
 
 ## Operator Panel
 
-The default view shows the config in controller memory and the four outputs
-CH0–CH3, decoded from the live controller registers, never from a config name
-or slot number:
+The default view has two lines (the config in controller memory and
+oscillator 0) and two tables: the four outputs CH0–CH3, decoded from the live
+controller registers, never from a config name or slot number, and the timing of
+the timers in use. `Levels` and `PSU` appear once a PSU is linked in Settings:
 
 | Column | Meaning |
 | --- | --- |
@@ -111,9 +112,10 @@ or slot number:
 | Levels | `Vneg ↔ Vpos`, `Vpos`, `Vneg` or `Hi-Z`; measured PSU voltages replace the rail names when a PSU is associated |
 | PSU | Associated PSU plugin |
 | Vpos / Vneg (µs) | Exact dwell, only when all switch edge delays are zero |
+| Vpos (%) | Share of the period at Vpos (`50` is symmetric; `≈` when edge delays shift the edges) |
 | Relative timing | Same / opposite / delay in µs relative to the first decoded output |
 
-Below the table, a sketch shows the expected switching over two periods of the
+In **Advanced**, a sketch shows the expected switching over two periods of the
 first decoded output (time 0 is its switch to Vpos). It draws a square wave only
 where the table has the exact timing, a flat line for a constant rail and a
 dashed line for Hi-Z; every other output stays an empty, labelled row, and an
@@ -135,12 +137,42 @@ in the tooltip. Hi-Z never implies 0 V.
 
 The routing registers are read only while the controller is ON (`STATE_ON`),
 right after each ON/config load and then every 5 s; timing edits invalidate the
-table until the next readback. **Advanced** shows the timer cards (requested
-enable and width, register readbacks, trigger and clock, `REGISTERS APPLIED`
-when the width and oscillator-0 registers match the request) and the channel
-table; the four cards share one row when the dock is wide enough. The
-oscillator-0 line turns amber, `(not applied)`, when the requested frequency and
-the period register differ. Viewing the panel never writes to the controller.
+table until the next readback. Viewing the panel never writes to the controller.
+
+### Timer timing
+
+Below the outputs, one row per timer in use (driving an output or enabled)
+shows the outputs it drives (`CH0, CH2 · inverted CH1, CH3` for SwitchSym
+configs), its enable request and its width, in µs and as a duty cycle of the
+oscillator-0 period. Width and duty are one setting: editing either updates the
+other on the 10 ns clock grid. The unused timers are listed under the table and
+shown in **Advanced**. The timer number is coloured by its register state; its
+tooltip gives the details, including the trigger and clock registers.
+
+`Osc change keeps` (the channel's `Keep` column) chooses what a `Freq` change
+preserves:
+
+- `duty %` (default): the width and the delay follow the period, so a
+  symmetric output stays symmetric.
+- `width µs`: both stay in microseconds, for fixed-length pulses.
+
+Only manual timers triggered by oscillator 0 follow it; equation widths and
+timers on another oscillator or an external trigger are left alone. Rescaling
+starts from the last edited or loaded timing, so returning to the loaded
+frequency restores its registers exactly. A higher frequency writes the shorter
+widths and delays before the period, a lower one the period first: no pulse
+overruns a period.
+
+The oscillator-0 line shows the requested frequency and the one the controller
+runs: the period is a whole number of 10 ns ticks (9 kHz gives 11111 ticks,
+9.00009 kHz). With an odd number of ticks an exact 50 % is impossible, and the
+line says so. It turns amber, `(not applied)`, when the period register
+differs. After a frequency, width or enable edit, `Loaded config` adds
+`timing edited since load`; the next load replaces those edits.
+
+**Advanced** shows every timer with a `Registers` column (`REGISTERS APPLIED`
+when the width and oscillator-0 registers match the request), the sketch and
+the channel table.
 
 The table states the expected signal from registers; it is not a waveform
 measurement. Check it once with an oscilloscope on each output before relying on
@@ -173,6 +205,7 @@ controller reports (`get_timer_count()`), and the CH0–CH3 table decodes whiche
 timers the outputs actually use. Each timer channel exposes:
 
 - duty-cycle setpoint in percent
+- `Keep`: what a `Freq` change preserves (`duty` or `width`)
 - timer delay in ticks
 - channel ON/OFF state for whether the timer is actively applied
 - measured duty-cycle monitor

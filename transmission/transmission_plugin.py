@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -189,6 +190,21 @@ def is_esi_channel(channel):
     except Exception:  # noqa: BLE001 - a channel without a device is not an ESI channel
         device = None
     return getattr(device, "name", "") == "ESI" or callable(getattr(channel, "is_heat_channel", None))
+
+
+def current_source_problem(device_of, detector, spray):
+    """The spray current is read on the ESI, never on the DMMR; the detector is never an ESI current.
+
+    ``device_of`` maps channel names to their device; an unknown device is not judged.
+    """
+    spray_device = device_of.get(spray) if spray else None
+    if spray_device not in (None, "ESI"):
+        return (f"The spray current is read on the ESI, never on {spray_device}: choose an ESI current "
+                f"(ESI_HV1_I or ESI_HV2_I) instead of {spray}.")
+    if detector and device_of.get(detector) == "ESI":
+        return (f"{detector} is the ESI spray current: the detector is the transmitted current "
+                "(DMMR), never the ESI.")
+    return ""
 
 
 def read_mscan(path):
@@ -695,7 +711,10 @@ class _BeamlineDialog(QDialog):
         row = QHBoxLayout()
         detector = beamline["detector"]
         row.addWidget(QLabel("Current channel"))
-        self.detector_channel = self._combo(currents, detector.get("channel"))
+        # Physically the spray current is read on the ESI and the detector never is (lab, 2026-10-22).
+        spray_currents = [name for name in currents if self.device_of.get(name) == "ESI"]
+        detector_currents = [name for name in currents if name not in spray_currents]
+        self.detector_channel = self._combo(detector_currents, detector.get("channel"))
         row.addWidget(self.detector_channel, 1)
         row.addWidget(QLabel("Position"))
         self.detector_position = QComboBox()
@@ -714,8 +733,9 @@ class _BeamlineDialog(QDialog):
         spray = beamline["spray"]
         low, high = spray.get("range_na", _beamline.SPRAY_RANGE_NA)
         row.addWidget(QLabel("Current channel"))
-        self.spray_channel = self._combo(currents, spray.get("channel"))
-        self.spray_channel.setToolTip("The ESI HV current of the emitter (ESI plugin), read at 1 Hz or faster.")
+        self.spray_channel = self._combo(spray_currents, spray.get("channel"))
+        self.spray_channel.setToolTip("The ESI HV current of the emitter (ESI plugin), read at 1 Hz or faster. "
+                                      "It is always read on the ESI, never on the DMMR.")
         row.addWidget(self.spray_channel, 1)
         row.addWidget(QLabel("Minimum (nA)"))
         self.spray_low = QLineEdit(f"{low:g}")
@@ -819,6 +839,9 @@ class _BeamlineDialog(QDialog):
         detector = ({"channel": self.detector_channel.currentText(), "position": self.detector_position.currentData()}
                     if self.detector_channel.currentText() != self.NONE else {})
         spray = {}
+        problem = current_source_problem(self.device_of, detector.get("channel"), self.spray_channel.currentText())
+        if problem:
+            raise ValueError(problem)
         if self.spray_channel.currentText() != self.NONE:
             try:
                 spray = {"channel": self.spray_channel.currentText(),
@@ -1893,7 +1916,7 @@ class Transmission(Scan):
                 entry.update(state="not recording", fix="start its recording")
             else:
                 entry.update(state="ready", fix="")
-            if entry["esi"] and entry["state"] in ("off", "not recording"):
+            if entry["esi"] and entry["state"] == "off":
                 entry["fix"] = "turn it ON in the ESI plugin (never from Transmission)"
             interval = getattr(device, "interval", None)
             currents = [name for name in entry["measured"] if getattr(channels[name.strip().lower()], "unit", "") == "A"]
@@ -1906,7 +1929,9 @@ class Transmission(Scan):
 
     @staticmethod
     def _startable(entry):
-        return entry["state"] in ("off", "not recording") and not entry["esi"]
+        # An ESI that is ON may start recording from here (it only reads it); turning the ESI ON
+        # is the operator's, in its plugin. 2026-10-22: "turn it ON" was shown for an ESI ON.
+        return entry["state"] == "not recording" or (entry["state"] == "off" and not entry["esi"])
 
     @staticmethod
     def _roles(entry):
@@ -2082,7 +2107,18 @@ class Transmission(Scan):
                 text = self._generated()
             except ValueError as exc:
                 raise _engine.ConfigError(str(exc)) from None
-        return text, _engine.parse_config(text)
+        config = _engine.parse_config(text)
+        if not self._simulated():
+            device_of = {}
+            for channel in self.pluginManager.DeviceManager.channels():
+                with contextlib.suppress(Exception):  # A channel without a device is not judged.
+                    device_of[channel.name] = channel.getDevice().name
+            spray = config.spray.channel if config.spray is not None else None
+            for detector in config.current_channels or (None,):
+                problem = current_source_problem(device_of, detector, spray)
+                if problem:
+                    raise _engine.ConfigError(problem)
+        return text, config
 
     def initScan(self):
         if self._dummy_initialization:

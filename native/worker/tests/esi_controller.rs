@@ -9,7 +9,7 @@ use esibd_native_worker::ffi::{Dll, NativeReply};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ACTIVE: u64 = 0xc100;
 const HV_READY: u64 = 0x50;
@@ -52,6 +52,9 @@ struct Instrument {
     current: f64,
     voltage_plan: BTreeMap<(usize, bool), VecDeque<f64>>,
     fresh_counts: [[usize; 2]; 3],
+    // A fresh voltage read clears only the voltage-ready bit until the next
+    // conversion (lab log 2026-10-22: flags 223 -> 207 -> 223).
+    voltage_drop: [bool; 3],
     config: Vec<u8>,
     config_corrupt: bool,
     // The volatile config mirrors the live gate/target/activation state, and a
@@ -96,6 +99,7 @@ impl Default for Instrument {
             current: -2e-9,
             voltage_plan: BTreeMap::new(),
             fresh_counts: [[0; 2]; 3],
+            voltage_drop: [false; 3],
             config: vec![0; 53],
             config_corrupt: false,
             config_tracks_outputs: false,
@@ -150,7 +154,8 @@ impl Dll for MockDll {
                 vec![json!(state.active[0])]
             }
             "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage" => {
-                state.target[address()] = args[1].as_f64().unwrap();
+                // The module keeps millivolts, as the real controller reports them.
+                state.target[address()] = (args[1].as_f64().unwrap() * 1000.0).round() / 1000.0;
                 vec![]
             }
             "COM_ESI_CTRL_GetHVsupplyTargetOutputVoltage" => vec![float(state.target[address()])],
@@ -213,6 +218,8 @@ impl Dll for MockDll {
                     let address = address();
                     let flags = if state.adc_steps[address] == 0 {
                         0
+                    } else if std::mem::take(&mut state.voltage_drop[address]) {
+                        HV_READY & !0x10
                     } else {
                         HV_READY
                     };
@@ -282,6 +289,7 @@ impl Dll for MockDll {
                         voltage = value;
                     }
                     state.fresh_counts[address][usize::from(negative)] += 1;
+                    state.voltage_drop[address] = true;
                 }
                 state.adc_ready[address] &= !0x10;
                 vec![json!(state.voltage_valid), float(voltage)]
@@ -400,11 +408,19 @@ fn reply(status: i64, values: Vec<Value>) -> NativeReply {
 impl Rig {
     fn new() -> Self {
         let state = Arc::new(Mutex::new(Instrument::default()));
-        let controller = Controller::new(
+        let mut controller = Controller::new(
             &json!({"device_id": "test_esi", "com": 14, "baudrate": 230400}),
             Box::new(MockDll(state.clone())),
         )
         .unwrap();
+        // The mock's first conversion after a selection is already settled; the
+        // settling itself is covered by `discharge_waits_for_the_adc_to_settle`.
+        controller
+            .set_attribute("DISCHARGE_SETTLE_S", json!(0.0))
+            .unwrap();
+        controller
+            .set_attribute("DISCHARGE_SETTLE_CONVERSIONS", json!(0))
+            .unwrap();
         Self { controller, state }
     }
     fn connected(preserve: bool) -> Self {
@@ -622,6 +638,26 @@ fn global_on_requires_matching_readback_and_never_replays_on() {
         .unwrap_err();
     assert!(error.message.contains("verification failed"));
     assert_eq!(rig.count("COM_ESI_CTRL_SetEnable"), 1);
+}
+
+#[test]
+fn ramp_steps_are_sent_at_the_module_millivolt_resolution() {
+    // 2026-10-22 lab: 1140 V x 22/23 was verified against 1090.435 V and forced HV1 OFF.
+    let mut rig = Rig::connected(false);
+    let applied = rig
+        .call(
+            "set_hv_module_target",
+            &[json!(1), json!(1140.0 * 22.0 / 23.0)],
+            json!({}),
+        )
+        .unwrap();
+    assert_eq!(applied, 1090.435);
+    let sent = rig
+        .calls()
+        .into_iter()
+        .find(|(name, _)| name == "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage")
+        .unwrap();
+    assert_eq!(sent.1[1], json!(1090.435));
 }
 
 #[test]
@@ -1160,6 +1196,9 @@ fn every_esi_dll_call_emits_paired_watchdog_frames_with_the_io_budget() {
         assert_eq!(pair[1]["phase"], "exit");
         assert_eq!(pair[1]["sequence"], pair[0]["sequence"]);
         assert_eq!(pair[1]["symbol"], pair[0]["symbol"]);
+        // The log records what the vendor DLL answered, not only how long it took.
+        assert!(pair[1]["status"].is_i64(), "{}", pair[1]);
+        assert!(pair[1]["values"].is_array() || pair[1]["values_omitted"].is_u64());
     }
 }
 
@@ -1402,7 +1441,7 @@ fn runtime_attributes_validate_configuration_and_never_allow_forged_state() {
         ("connected", json!(true)),
         ("_transport_poisoned", json!(false)),
         ("DISCHARGE_SAMPLES", json!(1)),
-        ("DISCHARGE_LIMIT_V", json!(2.0)),
+        ("DISCHARGE_LIMIT_V", json!(11.0)),
         ("DISCHARGE_TIMEOUT_S", json!(0)),
     ] {
         assert!(rig.controller.set_attribute(name, value).is_err());
@@ -1745,7 +1784,7 @@ fn disconnect_requires_three_fresh_rounds_on_all_four_outputs_then_closes() {
     let reports = receiver.try_iter().collect::<Vec<_>>();
     let last = reports.last().unwrap();
     assert_eq!(last["consecutive"], 3);
-    assert_eq!(last["limit_v"], 1.0);
+    assert_eq!(last["limit_v"], 10.0);
     for address in [1, 2] {
         let values = int_key(&last["modules"], address);
         assert_eq!(values["positive_v"], 0.5);
@@ -1774,6 +1813,96 @@ fn disconnect_requires_three_fresh_rounds_on_all_four_outputs_then_closes() {
             .get_attribute("_hv_measurement_requests")
             .unwrap(),
         json!({"$map": []})
+    );
+}
+
+/// 2026-10-22 lab: after each polarity selection the first conversions read k x 110.7 V,
+/// even on a module that was never enabled, so the check never saw three rounds <= 1 V.
+fn settling_rig(settle_s: f64, conversions: u64) -> Rig {
+    let mut rig = Rig::connected(false);
+    rig.controller
+        .set_attribute("DISCHARGE_SETTLE_S", json!(settle_s))
+        .unwrap();
+    rig.controller
+        .set_attribute("DISCHARGE_SETTLE_CONVERSIONS", json!(conversions))
+        .unwrap();
+    {
+        let mut state = rig.state.lock().unwrap();
+        for address in [1, 2] {
+            for negative in [false, true] {
+                let artifact = if negative { -110.7 } else { 110.7 };
+                let plan = (0..4).flat_map(|_| [artifact, 3.0 * artifact, 0.2]);
+                state
+                    .voltage_plan
+                    .insert((address, negative), plan.collect());
+            }
+        }
+    }
+    rig
+}
+
+#[test]
+fn discharge_waits_for_the_adc_to_settle_after_each_selection() {
+    let mut rig = settling_rig(0.05, 2);
+    let ctx = Context::test(10.0);
+    let started = Instant::now();
+    assert_eq!(
+        rig.controller
+            .call("disconnect", &[], &json!({}), &ctx)
+            .unwrap(),
+        true
+    );
+    // Three rounds, each counting only the third conversion of every selection.
+    let state = rig.state.lock().unwrap();
+    for address in [1, 2] {
+        assert_eq!(state.fresh_counts[address], [9, 9]);
+    }
+    assert!(started.elapsed() >= Duration::from_millis(6 * 50));
+}
+
+#[test]
+fn first_conversions_after_a_selection_never_confirm_a_discharge() {
+    let mut rig = settling_rig(0.0, 0);
+    rig.controller
+        .set_attribute("DISCHARGE_TIMEOUT_S", json!(0.5))
+        .unwrap();
+    assert!(rig.call("disconnect", &[], json!({})).is_err());
+}
+
+#[test]
+fn discharge_defaults_to_10_v_within_two_minutes_after_one_second_and_two_conversions() {
+    let rig = Rig::new();
+    let fresh = Controller::new(
+        &json!({"device_id": "test_esi", "com": 14, "baudrate": 230400}),
+        Box::new(MockDll(rig.state.clone())),
+    )
+    .unwrap();
+    assert_eq!(
+        fresh.get_attribute("DISCHARGE_TIMEOUT_S").unwrap(),
+        json!(120.0)
+    );
+    assert_eq!(
+        fresh.get_attribute("DISCHARGE_LIMIT_V").unwrap(),
+        json!(10.0)
+    );
+    assert_eq!(
+        fresh.get_attribute("DISCHARGE_SETTLE_S").unwrap(),
+        json!(1.0)
+    );
+    assert_eq!(
+        fresh.get_attribute("DISCHARGE_SETTLE_CONVERSIONS").unwrap(),
+        json!(2)
+    );
+    let mut rig = rig;
+    assert!(
+        rig.controller
+            .set_attribute("DISCHARGE_SETTLE_S", json!(11.0))
+            .is_err()
+    );
+    assert!(
+        rig.controller
+            .set_attribute("DISCHARGE_SETTLE_CONVERSIONS", json!(101))
+            .is_err()
     );
 }
 
@@ -1869,7 +1998,7 @@ fn high_voltage_round_resets_consecutive_confirmation_count() {
         .lock()
         .unwrap()
         .voltage_plan
-        .insert((2, true), VecDeque::from([-0.5, -2.0, -0.5, -0.5, -0.5]));
+        .insert((2, true), VecDeque::from([-0.5, -20.0, -0.5, -0.5, -0.5]));
     let (sender, receiver) = mpsc::sync_channel(128);
     let ctx = Context::new(
         Duration::from_secs(3),
