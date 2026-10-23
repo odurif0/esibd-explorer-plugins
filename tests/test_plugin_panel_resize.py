@@ -110,12 +110,11 @@ def probe(folder, output):
                 assert title.text() == f"CH{i} ({sign})"
                 assert "magnitudes, not signed voltages to earth" in title.toolTip()
     elif family in ("amx", "amx_hd"):
-        # Output rows are the default view; exercise the existing pulser controls
-        # in Advanced as well (default/narrow output view has dedicated Qt tests).
+        # Two tables, no cards: each table scrolls sideways itself (dedicated Qt
+        # tests); here every pulser row is shown, as in Advanced.
         device.advancedAction = SimpleNamespace(state=True)
         device._ensure_operator_panel()
         panel = device.amxPanel
-        cards = [entry["card"] for entry in device.amxPanelCards.values()]
     elif family == "esi":
         device._ensure_operator_panel()
         assert device.controller is None
@@ -169,8 +168,9 @@ def probe(folder, output):
         assert columns() == 2
     resize(370)
     assert control.width() <= 380, (folder, control.width(), control.minimumSizeHint().width())
-    if cards:
-        assert columns() == 1, (folder, columns())
+    if cards or family in ("amx", "amx_hd"):
+        if cards:
+            assert columns() == 1, (folder, columns())
         scrolls = host.findChildren(QScrollArea)
         assert len(scrolls) == 1
         scroll = scrolls[0]
@@ -234,9 +234,9 @@ def probe(folder, output):
         window.resize(1300, 800)
         for _ in range(3):
             resize(900)
-            assert columns() == (4 if family == "dmmr" else 2)
+            assert not cards or columns() == (4 if family == "dmmr" else 2)
             resize(370)
-            assert columns() == 1
+            assert not cards or columns() == 1
         assert all(len(spy) == 0 for spy in spies)
 
     resize(160)

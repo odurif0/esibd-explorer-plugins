@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from support.psu import make_psu
+from support.qt import run_probe
 
 
 @pytest.fixture(params=[f"psu_{suffix}" for suffix in "abcde"])
@@ -108,3 +109,53 @@ def test_without_explorer_settings_nothing_is_written(psu):
     del parent.pluginManager
     _connect(parent, controller, {0: 300.0, 1: 120.0}, {0: 0.001, 1: 0.002})
     assert not path.exists() and np.isnan(np.nan)
+
+
+@pytest.mark.parametrize("folder", ["psu_a", "psu_e"])
+def test_after_a_shutdown_the_panel_and_table_show_the_last_values(folder, tmp_path):
+    # 2026-10-22 lab: shutdown zeroes Vset/Ilim on the PSU; the next connection proposed the
+    # last values in the console only. Ilim stayed 0 in the panel and the Vset column was
+    # overwritten with 0 (then saved as 0 in the channel file).
+    run_probe(__file__, folder, tmp_path, timeout=30)
+
+
+def probe(folder, output):
+    try:
+        from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
+    except ImportError:
+        return 77
+    app = QApplication([])
+    module, parent, controller = make_psu(folder)
+    module._invoke_gui_callback = lambda callback: callback()
+    parent.pluginManager = types.SimpleNamespace(Settings=types.SimpleNamespace(configPath=output))
+    parent.com, parent.operating_config = 5, -1
+    (output / f"{parent.name}_last_setpoints.json").write_text(json.dumps(
+        {"com": "5", "channels": {"0": {"vset": 300.0, "ilim": 0.001}, "1": {"vset": 120.0, "ilim": 0.002}}}))
+    window = QWidget()
+    parent.addContentWidget = QVBoxLayout(window).addWidget
+    parent.tree = None
+    controller.current_limit_values = {0: 0., 1: 0.}
+    controller.output_enabled_by_channel = {0: False, 1: False}
+    parent._ensure_channel_panel()
+    commands = []
+    controller.applyManualStateFromThread = lambda state, **_: commands.append(state)
+    parent._pending_setpoints, parent._setpoint_prefill_decided = {}, False  # initializeCommunication
+    zeroed = {"main_state": {"name": "ST_ON"}, "device_enabled": True, "output_enabled": (False, False),
+              "channels": [dict(channel=ch, enabled=False, voltage={"measured_v": 0., "set_v": 0.},
+                                current={"measured_a": 0., "set_a": 0.}) for ch in (0, 1)]}
+    for _ in range(2):  # The second housekeeping read must not bring the zeros back.
+        controller._apply_snapshot(zeroed)
+        for ch, (vset, ilim) in enumerate(((300.0, 0.001), (120.0, 0.002))):
+            widgets = parent.manualPanelControls[ch]
+            assert widgets["voltage"].value() == vset and widgets["voltage"].font().italic()
+            assert widgets["current_limit"].value() == ilim and widgets["current_limit"].font().italic()
+            channel = parent.channels[ch]
+            assert channel.value == vset and channel.lastAppliedValue == vset, "shown, never dispatched"
+    assert commands == []
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    raise SystemExit(probe(sys.argv[1], Path(sys.argv[2])))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import types
 from pathlib import Path
 
@@ -605,9 +606,8 @@ def test_read_numbers_acquires_lock_for_ampr_module_polling():
 
     module.AMPRController.readNumbers(controller)
 
-    assert controller.lock.calls == [
-        (1, "Could not acquire lock to read AMPR module 2.")
-    ]
+    # One lock section per module; a busy module is skipped without an error log.
+    assert controller.lock.calls == [(1, "")]
     assert controller.values == {(2, 1): 11.0}
 
 
@@ -720,7 +720,7 @@ def test_update_values_reapplies_monitor_styles_while_device_is_on():
     assert monitor_widget.style == ""
 
 
-def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch):
+def test_run_acquisition_locks_each_module_read_separately(monkeypatch):
     module = load_plugin(module_name="ampr_plugin_sync_test")
 
     class FakeFrameworkLock:
@@ -736,12 +736,8 @@ def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch
             timeoutMessage="",
             already_acquired=False,
         ):
-            if already_acquired:
-                yield self.locked
-                return
-            if self.locked:
-                yield False
-                return
+            assert not already_acquired, "the poll holds no outer cycle lock"
+            assert not self.locked, "lock sections must not nest"
             self.locked = True
             self.acquisitions += 1
             try:
@@ -753,49 +749,36 @@ def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch
     class FakeChannel:
         real = True
 
+        def __init__(self, module_id):
+            self.module_id = module_id
+
         def module_address(self):
-            return 2
+            return self.module_id
 
         def channel_number(self):
             return 1
 
+    reads = []
+
     class FakeDevice:
         def get_module_voltages(self, module_id):
-            assert module_id == 2
-            return {1: {"measured": 11.0}}
+            # A whole-cycle lock would let no write or OFF in between modules.
+            reads.append((module_id, controller.lock.locked))
+            return {1: {"measured": 11.0 + module_id}}
 
     emitted = []
     state_lock_flags = []
-
-    def framework_run_acquisition(self):
-        while self.acquiring:
-            with self.lock.acquire_timeout(
-                1,
-                timeoutMessage="Could not acquire lock to acquire data",
-            ) as lock_acquired:
-                if lock_acquired:
-                    self.readNumbers()
-                    self.signalComm.updateValuesSignal.emit()
-            module.time.sleep(self.controllerParent.interval / 1000)
-
-    # Given the ESIBD 1.0.1 acquisition loop already owns a non-reentrant lock.
-    monkeypatch.setattr(
-        module.DeviceController,
-        "runAcquisition",
-        framework_run_acquisition,
-        raising=False,
-    )
     parent = types.SimpleNamespace(
         interval=1000,
         poll_timeout_s=2.5,
-        getChannels=lambda: [FakeChannel()],
-        getConfiguredModules=lambda: [2],
+        getChannels=lambda: [FakeChannel(2), FakeChannel(3)],
+        getConfiguredModules=lambda: [2, 3],
     )
     controller = module.AMPRController(parent)
     controller.lock = FakeFrameworkLock()
     controller.device = FakeDevice()
     controller.initialized = True
-    controller.detected_module_ids = [2]
+    controller.detected_module_ids = [2, 3]
     controller.errorCount = 0
     controller.main_state = "ST_ON"
     controller._update_state = lambda *, already_acquired=False: state_lock_flags.append(
@@ -810,16 +793,16 @@ def test_run_acquisition_reuses_framework_lock_for_nested_ampr_reads(monkeypatch
         lambda *_args: setattr(controller, "acquiring", False),
     )
 
-    # When one acquisition tick reads state and module voltages.
+    # When one acquisition tick reads state and two modules.
     controller.acquiring = True
     controller.runAcquisition()
 
-    # Then nested reads reuse the outer lock instead of timing out on themselves.
-    assert controller.values == {(2, 1): 11.0}
-    assert state_lock_flags == [True]
+    # Then each module read takes and releases the lock on its own.
+    assert controller.values == {(2, 1): 13.0, (3, 1): 14.0}
+    assert reads == [(2, True), (3, True)]
+    assert state_lock_flags == [False]
     assert emitted == [True]
-    assert controller.lock.acquisitions == 1
-    assert controller.lock.releases == 1
+    assert controller.lock.acquisitions == controller.lock.releases == 2
 
 
 def test_update_state_marks_communication_lost_after_repeated_generic_failures():
@@ -1203,6 +1186,73 @@ def test_toggle_on_runs_full_initialize_sequence_when_switching_on():
 
     assert device.calls == [("initialize", 12.0)]
     assert state_calls == ["scan", "state"]
+    assert acquisition_calls == ["start"]
+    assert logs == [
+        ("Starting AMPR PSU. Waiting up to 12.0 s for ST_ON.", None),
+        ("AMPR PSU turned ON. State: ST_ON.", None),
+    ]
+
+
+def test_toggle_on_does_not_rescan_modules_already_detected_at_connect():
+    # The connect scan resolved every module; a second scan cost ~5 s per ON.
+    module = load_plugin(module_name="ampr_plugin_sync_test")
+
+    class FakeContext:
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeLock:
+        def acquire_timeout(self, *args, **kwargs):
+            return FakeContext()
+
+    class FakeDevice:
+        NO_ERR = 0
+
+        def __init__(self):
+            self.calls = []
+
+        def initialize(self, timeout_s):
+            self.calls.append(("initialize", timeout_s))
+
+    original_toggle_on = getattr(module.DeviceController, "toggleOn", None)
+    module.DeviceController.toggleOn = lambda self: None
+    try:
+        device = FakeDevice()
+        state_calls = []
+        logs = []
+        controller = _new_controller(module)
+        controller.lock = FakeLock()
+        controller.device = device
+        controller.errorCount = 0
+        controller.main_state = "Disconnected"
+        controller.detected_module_ids = [0, 1]
+        controller.acquiring = False
+        controller.controllerParent = types.SimpleNamespace(
+            isOn=lambda: True,
+            connect_timeout_s=7.5,
+            startup_timeout_s=12.0,
+        )
+        acquisition_calls = []
+        controller.startAcquisition = lambda: acquisition_calls.append("start")
+        controller._refresh_module_scan = lambda: state_calls.append("scan")
+        controller._update_state = lambda: (
+            state_calls.append("state"),
+            setattr(controller, "main_state", "ST_ON"),
+        )
+        controller.print = lambda message, flag=None: logs.append((message, flag))
+
+        module.AMPRController.toggleOn(controller)
+    finally:
+        if original_toggle_on is None:
+            delattr(module.DeviceController, "toggleOn")
+        else:
+            module.DeviceController.toggleOn = original_toggle_on
+
+    assert device.calls == [("initialize", 12.0)]
+    assert state_calls == ["state"]
     assert acquisition_calls == ["start"]
     assert logs == [
         ("Starting AMPR PSU. Waiting up to 12.0 s for ST_ON.", None),
@@ -2123,29 +2173,26 @@ def test_channel_target_voltages_skips_invalid_channels():
     assert "invalid module/channel" in printed[0]
 
 
-def test_safe_query_state_uses_setting_or_default():
-    """Without the poll_timeout_s setting the default 5.0 applies (no crash)."""
+def test_safe_query_state_calls_driver_getters_without_timeout():
+    """The AMPR summary getters take no timeout_s; passing one made every summary "Unknown"."""
     module = load_plugin(module_name="ampr_plugin_sync_test")
     controller = _new_controller(module)
-    controller.controllerParent = types.SimpleNamespace()  # no poll_timeout_s
+    controller.controllerParent = types.SimpleNamespace(poll_timeout_s=2.5)
+    runtime_controller = module._get_ampr_driver_class()._PROCESS_CONTROLLER_CLASS
 
-    class FakeDevice:
+    class FacadeDevice:
+        """Binds arguments against the runtime signature, like the native facade."""
         NO_ERR = 0
 
-        def get_device_state(self, timeout_s=None):
-            return (0, "0x0", ["DEVST_OK"])
+        def __getattr__(self, name):
+            method = getattr(runtime_controller, name)
 
-    controller.device = FakeDevice()
-    assert controller._safe_query_state("get_device_state") == "DEVST_OK"
+            def call(*args, **kwargs):
+                inspect.signature(method).bind(None, *args, **kwargs)
+                return (0, "0x0", ["DEVICE_OK"] if name == "get_device_state" else "ST_ON")
+            return call
 
-    controller.controllerParent = types.SimpleNamespace(poll_timeout_s=2.5)
-    seen = []
-
-    class RecordingDevice(FakeDevice):
-        def get_device_state(self, timeout_s=None):
-            seen.append(timeout_s)
-            return (0, "0x0", ["DEVST_OK"])
-
-    controller.device = RecordingDevice()
-    controller._safe_query_state("get_device_state")
-    assert seen == [2.5]
+    controller.device = FacadeDevice()
+    for getter in ("get_state", "get_device_state", "get_voltage_state", "get_interlock_state"):
+        assert controller._safe_query_state(getter) is not None, getter
+    assert controller._safe_query_state("get_device_state") == "DEVICE_OK"

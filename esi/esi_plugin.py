@@ -48,6 +48,12 @@ _ESI_HV_MODULES = (1, 2)
 _ESI_MODULES = (_ESI_HEAT_MODULE, *_ESI_HV_MODULES)
 _ESI_COMMUNICATION_LOST = "Communication lost"
 _ESI_STOPPING = "Stopping: checking HV"
+# Once HV, heater and the global enable are verified OFF, the button shows OFF and the discharge
+# check continues in the background (2026-10-23: HV1 took ~40 s from 1000 V to 10 V), reporting
+# its readings meanwhile. Explorer closing waits for its verdict.
+_ESI_DISCHARGING = "OFF: HV discharging"
+_ESI_DISCHARGE_REPORT_S = 10.0
+_ESI_DISCHARGE_WAIT_S = 135.0  # The runtime's 120 s check plus margin.
 _ESI_DISCONNECTED_UNCONFIRMED = "Disconnected: shutdown unconfirmed"
 _PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
 _ESI_POWER_ON_ICON = "switch-medium_on.png"
@@ -887,6 +893,8 @@ class ESIDevice(Device):
         if badge is None or summary is None:
             return
         state = str(getattr(self, "main_state", "Disconnected") or "Disconnected")
+        if state == _ESI_STOPPING and getattr(getattr(self, "controller", None), "_discharge_outputs_off", False):
+            state = _ESI_DISCHARGING
         summary_text = self._status_summary_text()
         tooltip = "\n".join((
             f"State: {state}",
@@ -2180,6 +2188,7 @@ class ESIController(DeviceController):
         self.main_state = "Disconnected"
         self.shutdown_unconfirmed = False
         self.discharge_readings: dict[int, dict[str, float]] = {}
+        self._discharge_outputs_off = False  # Set by the first discharge report of an OFF.
         self.interlock_state = "n/a"
         self.detected_modules = "n/a"
         self.heat_status = "n/a"
@@ -3092,6 +3101,12 @@ class ESIController(DeviceController):
 
     def toggleOn(self) -> None:
         target_on = bool(self.controllerParent.isOn())
+        if target_on and self.main_state == _ESI_STOPPING and self._discharge_outputs_off:
+            _session_request(self.controllerParent, False)
+            self._restore_off_ui_state()
+            self.print("ESI outputs are OFF and the HV discharge check is still running; "
+                       "ON is possible once it ends.", flag=PRINT.WARNING)
+            return
         if target_on and self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
             self._restore_on_ui_state()
             self.print("ESI cannot reconnect until communication has been released; retry OFF.", flag=PRINT.WARNING)
@@ -3334,7 +3349,12 @@ class ESIController(DeviceController):
         self._initialization_ready = None
         self._output_cancel.set()
         self._stop_local_acquisition()
-        if not self._output_lock.acquire(timeout=1.):
+        wait = 1.
+        if self.main_state == _ESI_STOPPING and hasattr(self, "_discharge_started_at"):
+            # The check owns the ADC and is bounded by its own deadline: wait for its verdict.
+            wait = max(1., self._discharge_started_at + _ESI_DISCHARGE_WAIT_S - time.monotonic())
+            self.print(f"Waiting up to {wait:.0f} s for the ESI HV discharge check to finish.")
+        if not self._output_lock.acquire(timeout=wait):
             operation = "discharge check" if self.main_state == _ESI_STOPPING else "command"
             self.print(f"ESI {operation} is still running; attempting to release communication. "
                        "HV/heater shutdown remains unconfirmed.", flag=PRINT.ERROR)
@@ -3342,7 +3362,7 @@ class ESIController(DeviceController):
             return False
         try:
             if device is not self.device or generation != self._connection_generation:
-                return False
+                return self.device is None and self.main_state == "Disconnected"  # The check passed meanwhile.
             wait_for_idle = getattr(device, "wait_for_idle", None)
             if callable(wait_for_idle):
                 try:
@@ -3420,6 +3440,11 @@ class ESIController(DeviceController):
         # The runtime request is still active; never issue another device call here.
         if self.main_state != _ESI_STOPPING:
             return  # A late return after timeout cannot turn uncertainty into OFF.
+        if not self._discharge_outputs_off:
+            # The runtime checks discharge only after HV, heater and the global enable are verified OFF.
+            self._discharge_outputs_off = True
+            self._restore_off_ui_state()
+            self.print("ESI outputs OFF; the HV discharge check continues in the background.")
         self.discharge_readings = report["modules"]
         self.global_enabled = False
         for address, data in self.discharge_readings.items():
@@ -3427,7 +3452,20 @@ class ESIController(DeviceController):
             self.module_active[address] = False
             self.values[address] = data.get("negative_v", np.nan)
             self.currents[address] = data.get("measured_a", np.nan)
+        now = time.monotonic()
+        started = getattr(self, "_discharge_started_at", now)
+        if now - getattr(self, "_discharge_reported_at", started) >= _ESI_DISCHARGE_REPORT_S:
+            self._discharge_reported_at = now
+            self.print(f"ESI discharge check, {now - started:.0f} s: {self._discharge_readings_text()}; "
+                       f"{report.get('consecutive', 0)} consecutive rounds <= {report.get('limit_v', 1.0):g} V so far.")
         self._sync_status()
+
+    def _discharge_readings_text(self) -> str:
+        def volts(value: Any) -> str:
+            return f"{value:+.1f}" if isinstance(value, (int, float)) and np.isfinite(value) else "n/a"
+        return ", ".join(
+            f"HV{address} POS {volts(data.get('positive_v'))} V / NEG {volts(data.get('negative_v'))} V"
+            for address, data in sorted(self.discharge_readings.items()))
 
     def _shutdown_communication_unlocked(self) -> bool:
         device = self.device
@@ -3447,8 +3485,10 @@ class ESIController(DeviceController):
         self.discharge_readings = {}
         self._restore_on_ui_state()
         self._sync_status()
-        self.print("ESI OFF requested: disabling HV/heater and checking both HV polarities "
-                   "for discharge (three fresh rounds <= 1 V, up to 60 s).")
+        self.print("ESI OFF requested: disabling HV/heater, then checking both HV polarities "
+                   "for discharge (three settled rounds <= 10 V, up to 2 min).")
+        self._discharge_outputs_off = False
+        self._discharge_started_at = self._discharge_reported_at = time.monotonic()
         def progress(report):
             if device is self.device and generation == self._connection_generation:
                 self._on_discharge_progress(report)
@@ -3462,9 +3502,11 @@ class ESIController(DeviceController):
             confirmed = True
         except Exception as exc:
             if device is self.device and generation == self._connection_generation:
+                last = (f" Last readings: {self._discharge_readings_text()}."
+                        if self.discharge_readings else "")
                 self.print(
                     "ESI shutdown could not be confirmed. HV may remain energized; "
-                    f"use the hardware interlock/front panel: {exc}",
+                    f"use the hardware interlock/front panel: {str(exc).rstrip('.')}.{last}",
                     flag=PRINT.ERROR,
                 )
         finally:
@@ -3492,6 +3534,9 @@ class ESIController(DeviceController):
                     self._release_failed_transport(device)
             if confirmed:
                 self.main_state = "Disconnected"
+                self.print(f"ESI HV discharge verified after {time.monotonic() - self._discharge_started_at:.0f} s; "
+                           "communication closed.")
+            self._discharge_outputs_off = False
             self._sync_status()
         return confirmed
 

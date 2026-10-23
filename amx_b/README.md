@@ -68,8 +68,9 @@ Toolbar notes:
   frequency. Validate typed changes with Enter, Tab,
   or a click outside the field. They apply while ON, until the next config load.
   As in Explorer's own fields there are no step buttons: type the value or use
-  the ↑/↓ keys.
-- `Advanced`: pulser enable/width controls, equations and channel metadata.
+  the ↑/↓ keys. A change keeps each pulser's duty cycle unless its `Keep` is
+  `width` (see [Pulser timing](#pulser-timing)).
+- `Advanced`: register readbacks, equations and channel metadata.
 
 ON and `Load now` load the selected configuration's saved timing and update
 frequency, widths and enable requests from the hardware readback. Previous
@@ -78,15 +79,18 @@ Channels return to manual mode; equation text is retained for explicit reuse.
 
 ## Operator Panel
 
-The default view shows the config in controller memory, a compact CH0–CH3
-table and a sketch of the expected switching. The table gives the signal type,
-frequency, rail levels, linked PSU, time at Vpos/Vneg, and timing relative to
-the first periodic output. A signal the panel could not infer is shown in amber.
+The default view has two lines (the config in controller memory and the
+oscillator) and two tables: the CH0–CH3 outputs and the timing of the pulsers in
+use. The output table gives the signal type, frequency, time at Vpos/Vneg, the
+share of the period at Vpos (`50` is symmetric) and timing relative to the first
+periodic output; `Levels` and `PSU` columns appear once a PSU is linked in
+Settings. A signal the panel could not infer is shown in amber.
 For the original config 79, all four outputs switch at 500 kHz with 1 µs at
 each level: CH0/CH2 together, CH1/CH3 opposite. P1–P3 being stopped does not
 mean that CH1–CH3 are disabled. Stopping P0 can leave outputs at a fixed rail.
 
-The sketch spans two periods of the first periodic output; time 0 is its switch
+`Advanced` adds a sketch of the expected switching, the notice below and the
+channel table. The sketch spans two periods of the first periodic output; time 0 is its switch
 to Vpos. It draws a square wave only where the table inferred the exact timing,
 a flat line for a constant rail and a dashed line for Hi-Z. Every other output
 stays an empty, labelled row; an output with its own period is marked as not
@@ -125,14 +129,41 @@ frequency. Nonzero or unread switch edge delays suppress exact dwell/phase
 claims. Failed reads, writes awaiting readback, transitions and disconnection
 invalidate the displayed signal. Hi-Z does not mean 0 V or a discharged output.
 
-`Advanced` contains P0–P3 controls and the channel table within the same
-scrollable panel. The four cards share one row when the dock is wide enough.
-Cards separate requests from register readbacks; a green
+### Pulser timing
+
+Below the outputs, one row per pulser in use (driving an output or enabled)
+shows the outputs it drives (`CH0, CH2 · inverted CH1, CH3` for config 79), its
+enable request and its width, in µs and as a duty cycle. Width and duty are one
+setting: editing either updates the other on the 10 ns clock grid. The unused
+pulsers are listed under the table and shown in `Advanced`. The pulser number
+is coloured by its register state (green: registers hold the request; amber:
+mismatch or waiting); its tooltip gives the details.
+
+`Osc change keeps` (the channel's `Keep` column) chooses what an oscillator
+frequency change preserves:
+
+- `duty %` (default): the width and the delay follow the period, so a
+  symmetric output stays symmetric (config 79 at 450 kHz: 1.11 µs / 1.11 µs).
+- `width µs`: both stay in microseconds, for fixed-length pulses.
+
+Only manual pulsers triggered by the oscillator follow it; equation widths and
+externally triggered pulsers are left alone. Rescaling starts from the last
+edited or loaded timing, so returning to the loaded frequency restores its
+registers exactly. A higher frequency writes the shorter widths and delays
+before the period, a lower one the period first: no pulse overruns a period.
+
+The oscillator line shows the requested frequency and the one the controller
+runs: the period is a whole number of 10 ns ticks (450 kHz gives 222 ticks,
+450.4505 kHz). With an odd number of ticks an exact 50 % is impossible, and the
+line says so. It turns amber, `(not applied)`, when the period register differs.
+After a frequency, width or enable edit, `Loaded config` adds
+`timing edited since load`; the next load replaces those edits.
+
+`Advanced` shows every pulser with a `Registers` column, and the channel table
+(width, delay and burst registers) in the same scrollable panel. A green
 `REGISTERS APPLIED` confirms matching registers, not a physical waveform.
-The oscillator line compares the requested frequency with the period register
-and turns amber, `(not applied)`, when they differ.
-Typed widths wait for Enter, Tab or focus-out; scrolling never edits them.
-Equation-controlled widths are read-only in the cards. The switch delay
+Typed values wait for Enter, Tab or focus-out; scrolling never edits them.
+Equation-controlled widths are read-only in the timing rows. The switch delay
 register range remains `0..15`; values outside it are rejected.
 
 ## AMX Configurations
@@ -193,6 +224,7 @@ Each pulser exposes:
 
 - requested pulse width in microseconds
 - duty request calculated from the width and oscillator frequency
+- `Keep`: what an oscillator frequency change preserves (`duty` or `width`)
 - pulser delay in ticks
 - channel enable request used when the global AMX state is ON
 - duty calculated from controller period/width register readbacks

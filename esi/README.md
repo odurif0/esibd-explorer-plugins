@@ -232,12 +232,16 @@ command is not retried. Successful readback resets the consecutive-error count;
 persistent errors close communication. Output requests are logged with their
 module, ON/OFF state and target so future failures can be correlated with HT clicks.
 
-For an established connection, global OFF first disables the outputs, then
-displays `Stopping: checking HV`.
-The port stays open while the driver checks both ADC polarities on both HV
-modules. All four absolute voltages must be **at most 1 V for three consecutive
-fresh measurement rounds** before the port closes. The check has a 60-second
-deadline; a blocked DLL is handled by the transport watchdog.
+For an established connection, global OFF displays `Stopping: checking HV` while it
+disables the HV outputs, the heater and the global enable. Once they are verified
+OFF (about 3 s, with the first settled reading), the button returns to OFF and the badge shows
+`OFF: HV discharging`: the discharge check continues in the background, without
+blocking the operator. The port stays open while the driver checks both ADC
+polarities on both HV modules. All four absolute voltages must be **at most 10 V for
+three consecutive fresh measurement rounds** before the port closes; the console then
+reports `ESI HV discharge verified after N s`. The check has a 120-second deadline; a
+blocked DLL is handled by the transport watchdog. ON is refused until the check ends.
+Explorer closing waits for its verdict (at most about 2 min) instead of interrupting it.
 Repeated communication-release requests cannot close the same owner twice.
 The log records the start of shutdown, and errors identify the failed ADC operation
 and module. A cleanup failure cannot hide the original discharge error. ADC
@@ -246,6 +250,19 @@ unconfirmed, rather than sending further commands on a broken stream.
 
 The ADC selection is switched and checked for each polarity, old samples are
 discarded, and the data-ready flags must clear then signal a new conversion.
+As for the electrospray readback, the first two new conversions after each
+selection and those within 1 s of it are discarded: on 2026-10-22 they read
+multiples of about 110.7 V (up to 1328 V, also on a never-enabled HV2), so the
+check never confirmed a discharge. A check on discharged modules takes about
+6–8 s. After HV was on, the outputs discharge slowly and ever more slowly: the
+module has no active discharge, and its output (about 0.3 nF) bleeds only through
+the module itself (20 GΩ at 1 kV, 45 GΩ at a few volts). On 2026-10-23, after HV1 at
+1000 V: 247 V after 10 s, 51 V after 23 s, 10 V after 41 s and 2.8 V after 66 s, so
+the former 1 V limit needed about 90 s and its 60 s check never confirmed. The
+operator chose 10 V: the check then confirms about 45–50 s after such an OFF. The
+console reports the readings every 10 s meanwhile, and the last ones if it fails.
+A switched hardware discharge (relay and 0.1–1 GΩ to ground while HV is off) would
+bring this down to a few seconds; a permanent bleeder would swamp the nA spray current.
 The initial selections are restored unless the transport is unusable. Invalid
 readings, unproven ADC freshness, a timeout, or a failed port closure leave output
 shutdown unconfirmed. If communication can be released, Explorer displays
@@ -263,7 +280,7 @@ and acceptable zero-current residual are established. After successful OFF,
 the cards and buttons are neutral gray, the state is `Disconnected`, and the
 next ON reconnects. Saved output selections are not changed.
 
-**This 1 V software check does not certify safe access or complete discharge.**
+**This 10 V software check does not certify safe access or complete discharge.**
 It cannot verify disconnected loads or replace an independent voltage check.
 If shutdown is unconfirmed, use the physical interlock/front panel and the
 instrument's safety procedure. A blocked DLL is isolated by terminating the ESI

@@ -29,9 +29,9 @@ class _ESIController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, ESIBase):
     CONTROLLED_MODULE_ADDRESSES = (HEAT_MODULE_ADDRESS, *HV_MODULE_ADDRESSES)
     MAX_ABS_VOLTAGE_V = 3000.0
     # Operational shutdown check, not a touch-safe certification.
-    DISCHARGE_LIMIT_V = 1.0
+    DISCHARGE_LIMIT_V = 10.0  # Operator choice 2026-10-23: HV1 needs ~40 s from 1000 V to 10 V, ~90 s to 1 V
     DISCHARGE_SAMPLES = 3
-    DISCHARGE_TIMEOUT_S = 60.0
+    DISCHARGE_TIMEOUT_S = 120.0
     HEAT_MON_READY = 1 << 0  # CGC COM_ESI_CTRL_HTCTRL_MON_RDY
     HV_ADC_V_READY = 1 << 4
     HV_ADC_I_READY = 1 << 6

@@ -15,11 +15,11 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | Scope | Implementation | Integration | Local validation | Hardware validation |
 | --- | --- | --- | --- | --- |
 | IPC, supervision, ABI, build | Implemented | Implemented | 36 real-process fault tests; all deployment targets built | Not applicable |
-| ESI | Implemented | Implemented | 61 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
+| ESI | Implemented | Implemented | 67 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
 | PSU A/B/C/D/E | Implemented | Implemented | 52 controller tests; isolated recovery checks | Not tested |
 | AMX A/B | Implemented | Implemented | 43 combined AMX/HD controller tests; 60 adapter tests | Not tested |
 | AMX HD | Implemented | Implemented | Same combined suite; independent HD ABI and process | Not tested |
-| AMPR A/B | Implemented | Implemented | 23 controller tests; isolated recovery checks | Not tested |
+| AMPR A/B | Implemented | Implemented | 29 controller tests; isolated recovery checks | Not tested |
 | DMMR | Implemented | Implemented | 38 controller tests; isolated recovery checks | Not tested |
 | TPG366 | Implemented | Implemented | 17 Rust + 36 adapter/PTY tests; 30 Explorer 1.0.2 Qt cases | Not tested |
 | MScan | Implemented | Implemented | 39 native tests; 36 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
@@ -32,8 +32,60 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`c68c32555393b4e1d12dc10e14ed8cf51c53a900980fd14998377d354a2a4c4f`
-(v0.5.2 below).
+`bb62e016942e80955e05b7879b99e31b71c60aa44c79bc1a21b79833785dad58`
+(v0.5.3 below).
+
+## v0.5.3 Update (2026-10-23)
+
+The first lab runs of v0.5.2 (logs of 2026-10-21 to 2026-10-23) led to these fixes.
+None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **AMPR:** a poll no longer holds one lock across all 12 modules (about 31 ms per
+  serial transaction), so an edit waits for one module and OFF never skips its
+  ramp-down; connect scans once. The first command to module 0 after reconnecting,
+  or after the PSU was enabled, sometimes got no reply within the DLL's 1.5 s and the
+  start failed. After a receive error on a setpoint the worker purges the port and
+  reads the setpoint back; it sends the same value once more only if it was not
+  applied (the single exception to "no write is replayed", `native/CONTRACT.md`).
+  Each lost reply is printed, and each connection keeps the DLL's own trace of its
+  first 1000 calls (`ampr_startup_com<N>_<UTC>.log`) to find the cause.
+- **PSU:** no false setpoint-readback mismatch right after an edit; after a shutdown
+  the panel and table show the last values, sent only when the operator applies them.
+- **DMMR:** Explorer's display-lag pauses, which silently raised its error count,
+  are logged with the lagging device.
+- **AMX A/B, AMX HD:** a frequency change keeps each pulser's duty cycle (or its
+  width) and delay share, without rounding drift, in a write order that keeps every
+  pulse inside the period; the operator view is an outputs table plus one row per
+  used pulser (registers and sketch in Advanced); the output panel no longer reads
+  constants by IPC on the GUI thread.
+- **ESI:** the OFF check discards the first two conversions and first second after
+  each ADC selection (the k × 110.7 V artefacts). HV1 really bleeds slowly through the
+  module (247 V 10 s after an OFF from 1000 V, 10 V after 41 s, 2.8 V after 66 s), so
+  the operator set the limit to 10 V (three settled rounds, 120 s). The button returns
+  to OFF once the outputs are verified OFF; the check continues in the background
+  and Explorer closing waits for it. Ramp targets are rounded to millivolts.
+- **Transmission:** the spray current is read only from the ESI, the detector never;
+  an ESI that is ON but not recording can be started from Transmission.
+- **Native logs:** requests are buffered, routine reads summarised per minute, DLL
+  statuses and outputs written in exit frames, 8 MB segments (eight kept); ESI
+  data-ready flags no longer count as changes (43 MB/h before).
+- **Development scripts** no longer run at import: a `tools/` folder copied into the
+  plugin path had closed Explorer at startup.
+
+All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1;
+Linux for TPG366, MScan and Transmission). The Rust suite passes 318 tests; Clippy
+(`-D warnings`), formatting and the ABI/source/family/worker checks pass. The release
+validation (`pytest -q --all-siblings` on Explorer 1.0.2) ran 5592 of 5701 tests (5584
+passed, 8 skipped) before the session was stopped because other jobs had nearly
+exhausted the system memory; the four files it had not reached (`test_tpg366_ui.py` and
+`test_transmission_*.py`, 113 tests) then passed on their own, so every test passed or
+was skipped once, with no failure. An earlier run under heavy CPU load from another job
+failed three MScan real-Qt probes on their 45 s limit; they passed in this run. All nine
+Windows workers pass the constructor-only Wine checks (all six vendor DLLs load) and the
+three Linux workers the Linux ones; no instrument is opened. The archive
+`esibd-explorer-plugins-v0.5.3.zip` is built from the release commit and passes
+`tests/test_release_archive_integrity.py`; the v0.5.3 tag message gives its file count
+and SHA-256. Hardware validation is still pending.
 
 ## v0.5.2 Update (2026-10-18)
 

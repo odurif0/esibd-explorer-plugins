@@ -180,6 +180,8 @@ def test_blocked_log_sink_cannot_delay_native_io_watchdog(worker, blocked_log_si
 def test_blocked_log_sink_cannot_delay_close_or_other_worker(worker, blocked_log_sink, worker_binary):
     sink = blocked_log_sink()
     other = TRANSPORT.NativeWorkerProxy(ROOT, "test", {}, command=[str(worker_binary), "--family", "test"])
+    # A request's records are written when it ends: a finished call stalls the sink.
+    assert worker.call("native_wait", .001, _io_timeout_s=1.) is True
     thread, errors = _native_hang_thread(worker, 5.)
     closed = []
     closer = None
@@ -504,14 +506,102 @@ def test_malformed_response_retires_and_reaps_process(tmp_path, bad):
         proxy.close(grace_s=0)
 
 
-def test_log_volume_is_bounded(worker, monkeypatch):
+def test_log_segments_rotate_keeping_the_first_and_the_newest(worker, monkeypatch):
     monkeypatch.setattr(TRANSPORT, "MAX_LOG_BYTES", 1024)
-    for _ in range(20):
-        worker._log("large", message="x" * 400)
+    monkeypatch.setattr(TRANSPORT, "MAX_LOG_SEGMENTS", 3)
+    first = worker._log_base
+    for index in range(40):
+        worker._log("large", index=index, message="x" * 400)
     assert worker._flush_logs(timeout_s=1)
-    records = worker._log_path.read_text()
-    assert records.count('"kind": "log_truncated"') == 1
-    assert worker._log_path.stat().st_size < 1300
+    files = sorted(first.parent.glob(f"{first.stem}*.jsonl"))
+    assert first in files and len(files) == 3
+    assert all(path.stat().st_size < 2 * 1024 for path in files)
+    newest = [json.loads(line) for line in worker._log_path.read_text().splitlines()]
+    assert newest[0]["kind"] == "log_segment" and newest[0]["removed"]
+    assert newest[-1]["index"] == 39
+    assert '"kind": "start"' in first.read_text(), "the session start is never rotated away"
+
+
+def _finished(worker, key, *, routine=True, elapsed=.01, symbols=(("COM_X_GetState", .005, 0, [0]),)):
+    pending = TRANSPORT._Pending()
+    pending.log_key, pending.log_routine = key, routine
+    pending.log_started = time.monotonic() - elapsed
+    with worker._state_lock:
+        worker._buffer_log(pending, "request", first=True, request=1, operation="call", method=key)
+        for symbol, seconds, status, values in symbols:
+            frame = {"phase": "exit", "symbol": symbol, "elapsed_s": seconds, "status": status, "values": values}
+            worker._buffer_log(pending, "native_io", request=1, **frame)
+            worker._note_native_outcome(pending, symbol, seconds, frame)
+    worker._finish_request_log(pending, 1, "reply")
+
+
+def _records(worker):
+    assert worker._flush_logs(timeout_s=1)
+    return [json.loads(line) for line in worker._log_path.read_text().splitlines()]
+
+
+def test_routine_reads_are_summarized_unless_slow_or_changed(worker, monkeypatch):
+    clock = [time.monotonic()]
+    monkeypatch.setattr(TRANSPORT.time, "monotonic", lambda: clock[0])
+    worker._log_window_start = clock[0]
+    for _ in range(50):
+        _finished(worker, "call:get_state")
+    _finished(worker, "call:get_state", elapsed=1.)  # slow
+    _finished(worker, "call:get_state", symbols=(("COM_X_GetState", .005, 0, [32773]),))  # state changed
+    _finished(worker, "call:get_state", symbols=(("COM_X_GetState", .005, -10, []),))  # receive error
+    for _ in range(15):
+        _finished(worker, "call:set_voltage", routine=False)
+    clock[0] += TRANSPORT.LOG_SUMMARY_S
+    _finished(worker, "call:get_state")
+    records = _records(worker)
+    replies = [record for record in records if record["kind"] == "reply" and record["request"] == 1]
+    assert len(replies) == 1 + 3 + TRANSPORT.LOG_FULL_CALLS_PER_WINDOW + 1
+    summary = next(record for record in records if record["kind"] == "summary")
+    assert summary["calls"]["call:get_state"][0] == 49
+    assert summary["calls"]["call:set_voltage"][0] == 15 - TRANSPORT.LOG_FULL_CALLS_PER_WINDOW
+    assert summary["native_io"]["COM_X_GetState"][0] == 49 + 5
+    changed = [record for record in records if record["kind"] == "native_io" and record.get("values") == [32773]]
+    assert changed, "a changed discrete output is written in full"
+
+
+def test_esi_conversion_ready_flags_are_not_a_state_change(worker, monkeypatch):
+    # 2026-10-22 lab: GetCompleteState index 7 toggles 223 <-> 255 on every 1 s poll.
+    clock = [time.monotonic()]
+    monkeypatch.setattr(TRANSPORT.time, "monotonic", lambda: clock[0])
+    worker._log_window_start = clock[0]
+    state = lambda ready, modules=32768: (("COM_ESI_CTRL_GetCompleteState", .003, 0,
+                                           [15, 0, 55, 0, 15, 61452, 0, [15, ready, ready, 0, 12],
+                                            [33024, 49408, modules, 0, 32768]]),)
+    for second in range(30):
+        _finished(worker, "call:collect_diagnostics", symbols=state(223 if second % 2 else 255))
+    _finished(worker, "call:collect_diagnostics", symbols=state(223, modules=16384))  # a module state changed
+    clock[0] += TRANSPORT.LOG_SUMMARY_S
+    _finished(worker, "call:collect_diagnostics", symbols=state(255, modules=16384))
+    records = _records(worker)
+    replies = [record for record in records if record["kind"] == "reply" and record["request"] == 1]
+    assert len(replies) == 1 + 1 + 1, len(replies)
+    assert next(record for record in records if record["kind"] == "summary")["calls"]["call:collect_diagnostics"][0] == 29
+
+
+def test_twelve_hours_of_a_polling_ampr_fit_in_the_first_segment(worker, monkeypatch):
+    """One 12-module cycle per second: get_state, 11 measured reads, one setpoint readback."""
+    clock = [time.monotonic()]
+    monkeypatch.setattr(TRANSPORT.time, "monotonic", lambda: clock[0])
+    worker._log_window_start = clock[0]
+    written = []
+    # Count what would be written; the simulated hour outruns the bounded writer queue.
+    monkeypatch.setattr(worker, "_emit", lambda record: written.append(len(json.dumps(record)) + 1))
+    measured = (("COM_AMPR_12_GetMeasuredModuleOutputVoltages", .06, 0, [[1.5, 2.5, 3.5, 4.5]]),)
+    readback = tuple(("COM_AMPR_12_GetModuleOutputVoltage", .03, 0, [12.5]) for _ in range(4))
+    hour = 3600
+    for second in range(hour):
+        _finished(worker, "call:get_state", symbols=(("COM_AMPR_12_GetState", .015, 0, [0]),))
+        for _ in range(11):
+            _finished(worker, "call:get_all_module_voltage_measured", symbols=measured)
+        _finished(worker, "call:get_module_voltages", symbols=measured + readback, elapsed=.19)
+        clock[0] += 1.
+    twelve_hours = 12 * sum(written)
+    assert twelve_hours < TRANSPORT.MAX_LOG_BYTES, twelve_hours
 
 
 def test_abi_generated_sources_are_current():

@@ -138,6 +138,11 @@ def declarations(family, folder):
             raise ValueError(f"COM_HVPSU2D_GetFanData PWM declaration changed: {pwm}")
         pwm["type"] = "double"
         functions["COM_HVPSU2D_GetFanData"]["verified_dll_sha256"] = PSU_FAN_DATA_DLL_SHA256
+    if family == "ampr":
+        # Exported but not declared in the header; same code as the DMMR pair (disassembled
+        # 2026-10-23): fopen(FileName, "w+") of one char*, 0 or -400.
+        functions["COM_AMPR_12_OpenDebugFile"] = {"args": [{"type": "char", "pointer": True, "length": 4096, "input": True, "name": "FileName"}], "result": "int", "verified_dll_sha256": "5482400935153b5923582b457a88281be6bbb55d37cf9f0c5c530d54aaa1f6c8"}
+        functions["COM_AMPR_12_CloseDebugFile"] = {"args": [], "result": "int", "verified_dll_sha256": "5482400935153b5923582b457a88281be6bbb55d37cf9f0c5c530d54aaa1f6c8"}
     if family == "dmmr":
         functions["COM_DMMR_8_OpenDebugFile"] = {"args": [{"type": "char", "pointer": True, "length": 4096, "input": True, "name": "FileName"}], "result": "int", "verified_dll_sha256": "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3"}
         functions["COM_DMMR_8_CloseDebugFile"] = {"args": [], "result": "int", "verified_dll_sha256": "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3"}

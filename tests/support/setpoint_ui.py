@@ -180,7 +180,7 @@ def probe(folder, surface, output, *, actions=False):
     elif surface == "width":
         device.advancedAction = SimpleNamespace(state=True)
         device._ensure_operator_panel()
-        spin = device.amxPanelCards[0]["width"]
+        spin = device.amxTimingRows[0]["width"]
         refresh = device._update_operator_panel
         get_committed = lambda: device.channels[0].value
     else:
@@ -291,7 +291,7 @@ def local_probe(device, window, spin, current_value, calls, folder, surface, out
         if folder == 'esi':
             button_on, button_off = (device.esiHVCards[1][name] for name in ('btn_on', 'btn_off'))
         else:
-            button_on = button_off = device.amxPanelCards[0]['enable']
+            button_on = button_off = device.amxTimingRows[0]['enable']
     for button, checked in ((button_on, False), (button_off, folder == 'esi')):
         blocked = button.blockSignals(True)
         button.setChecked(checked)

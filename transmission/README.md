@@ -53,7 +53,9 @@ The panel has three steps, then **▶ Optimize**.
    voltage; funnel RF amplitude, DC gradient and exit; offset and RF amplitude of
    Q1–Q4), the **detector** (its current channel and its position), the **spray
    current** (the ESI HV current of the emitter, and its accepted range, 10–30 nA by
-   default) and optionally which gauges to watch with their pressure range. The detector normally sits
+   default) and optionally which gauges to watch with their pressure range. The spray
+   current is always read on the ESI, never on the DMMR: only ESI currents are offered
+   for it, and they are not offered as the detector. The detector normally sits
    **after Q4**; it can also be placed right behind one of the four apertures
    (1 funnel → Q1, 2 Q1 → Q2, 3 Q2 → Q3, 4 Q3 → Q4) to optimize what passes through
    that aperture, and then only the elements before it are optimized (and offered
@@ -95,7 +97,8 @@ recording: nothing happens without confirmation. Turning ON works as each device
 power button, so a supply then applies the setpoints set in its plugin. The
 optimization or the sweep starts once every device is ready (at most 5 min; **■ Stop**
 cancels the wait and leaves the devices as they are). Transmission never turns the ESI
-ON, and leaves a device in transition alone; a channel whose plugin is not loaded is
+ON; an ESI that is ON but not recording is offered for recording only, which reads it
+without any command. A device in transition is left alone; a channel whose plugin is not loaded is
 named with its plugin (enable it in the Plugin Manager, then restart Explorer). A PSU
 output gate that is OFF is reported (**output off**) but never switched from here:
 turn it ON in the PSU panel. A gate that goes OFF during a run stops it without any

@@ -584,3 +584,28 @@ def test_actual_local_quick_sweep_is_tracked_and_reaped(rig, monkeypatch, mode):
         assert rig.instrument.setpoint["Q2_RF"] == initial
     if mode == "stop":
         assert cancel.is_set() and len(points) == 2
+
+
+def test_the_spray_current_is_read_on_the_esi_never_on_the_dmmr(module, tmp_path):
+    # Lab rule (2026-10-22): the spray (emitter) current is always the ESI's; the detector is never.
+    devices = {"ESI_HV1_I": "ESI", "Collector": "DMMR", "Unknown_I": None}
+    devices = {name: device for name, device in devices.items() if device}
+    problem = module.current_source_problem
+    assert problem(devices, "Collector", "ESI_HV1_I") == ""
+    assert "never on DMMR" in problem(devices, None, "Collector")
+    assert "never the ESI" in problem(devices, "ESI_HV1_I", None)
+    assert problem(devices, "Collector", "Unknown_I") == "", "a channel of an unloaded device is not judged"
+    scan = module.Transmission(pluginManager=NS(Settings=NS(dataPath=tmp_path, configPath=tmp_path)))
+    channel = lambda name, device: NS(name=name, getDevice=lambda: NS(name=device))
+    scan.pluginManager.DeviceManager = NS(channels=lambda: [
+        channel("ESI_HV1_I", "ESI"), channel("Collector", "DMMR"), channel("DMMR_CH2", "DMMR")])
+    scan.state.update(advanced=True, simulation=False)
+    for spray, refused in (("ESI_HV1_I", False), ("DMMR_CH2", True)):
+        text = CONFIG.replace("[pressure]", f'[spray]\nchannel = "{spray}"\nrange = [1e-8, 3e-8]\n[pressure]')
+        scan.default_config_path().parent.mkdir(parents=True, exist_ok=True)
+        scan.default_config_path().write_text(text, encoding="utf-8")
+        if refused:
+            with pytest.raises(module._engine.ConfigError, match="read on the ESI"):
+                scan._configuration()
+        else:
+            assert scan._configuration()[1].spray.channel == spray

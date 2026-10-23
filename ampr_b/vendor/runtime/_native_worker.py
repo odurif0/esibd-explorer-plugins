@@ -20,7 +20,24 @@ import uuid
 
 PROTOCOL = 1
 MAX_FRAME = 16 * 1024 * 1024
-MAX_LOG_BYTES = 8 * 1024 * 1024
+# Native logs must cover about 12 h of one session. Routine reads that end fast
+# and unchanged are counted in a per-minute summary instead of written one by
+# one; a full log rotates through segments, keeping the first and the newest.
+MAX_LOG_BYTES = 8 * 1024 * 1024  # one segment
+MAX_LOG_SEGMENTS = 8
+LOG_SUMMARY_S = 60.
+LOG_SLOW_REQUEST_S = .5
+LOG_SLOW_IO_S = .25
+LOG_FULL_READS_PER_WINDOW = 1
+LOG_FULL_CALLS_PER_WINDOW = 10
+LOG_BUFFER_RECORDS = 256
+ROUTINE_READ_PREFIXES = ("get_", "read_", "poll_", "collect_", "is_", "list_", "describe_", "format_")
+# Outputs of these vendor exports are discrete; a change is logged even in a routine read.
+DISCRETE_OUTPUT_TOKENS = ("State", "Enable")
+# Positions of a discrete output that change on every read, left out of change detection.
+# 2026-10-22: ESI GetCompleteState also returns the modules' conversion-ready flags (index 7,
+# 223 <-> 255): every 1 s poll counted as a change, 43 MB of log per hour.
+LOG_VOLATILE_OUTPUTS = {"COM_ESI_CTRL_GetCompleteState": frozenset({7})}
 LIFECYCLE_ATTRIBUTES = frozenset({"connected", "_dll_port_claimed", "_open_failed", "_opening_in_progress",
                                 "_failed_open_released", "_failed_open_cleanup_outcome",
                                 "_transport_poisoned", "_transport_error"})
@@ -139,6 +156,15 @@ class _Pending:
         self.io_symbol = None
         self.io_sequence = -1
         self.timeout_failure = None
+        self.log = []
+        self.log_key = None
+        self.log_routine = False
+        self.log_started = time.monotonic()
+        self.log_full = False
+        self.log_streaming = False
+        self.log_done = False
+        self.log_io = []
+        self.log_occurrences = {}
 
 
 class NativeWorkerProxy:
@@ -174,7 +200,15 @@ class NativeWorkerProxy:
         self._stop_grace_s = max(0., min(float(stop_grace_s), 5.))
         self._writes = queue.Queue(maxsize=8)
         self._log_path = None
+        self._log_base = None
+        self._log_segments = []
+        self._log_expired = []
         self._log_bytes = 0
+        self._log_window_start = time.monotonic()
+        self._log_window_counts = {}
+        self._log_summary_calls = {}
+        self._log_summary_io = {}
+        self._log_outcomes = {}
         self._awake_request = awake_request
         self._threads = []
         if log_dir is not None:
@@ -183,6 +217,7 @@ class NativeWorkerProxy:
                 raise ValueError("Native logs require an absolute Explorer data-directory path")
             directory = base / "native" / self.family
             self._log_path = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-{self.session[:8]}.jsonl"
+            self._log_base, self._log_segments = self._log_path, [self._log_path]
         self._command = list(command) if command is not None else [str(executable(plugin_root, self.family)), "--family", self.family]
         environment = os.environ.copy()
         for key in ("PYTHONHOME", "PYTHONPATH"):
@@ -229,43 +264,153 @@ class NativeWorkerProxy:
                 return not self.closed and self._active_method in {"connect", "initialize"}
             return self._lifecycle[name]
 
+    def _record(self, kind, **fields):
+        return {"time": time.time(), "session": self.session, "family": self.family, "kind": kind, **fields}
+
     def _log(self, kind, **fields):
         if self._log_path is None or self._logs_stop.is_set():
             return
-        record = {"time": time.time(), "session": self.session, "family": self.family, "kind": kind, **fields}
+        self._emit(self._record(kind, **fields))
+
+    def _emit(self, record):
         try:
             with self._log_lock:
-                if self._log_bytes >= MAX_LOG_BYTES:
-                    return
                 if self._log_dropped:
                     record["dropped_records"] = self._log_dropped
                 line = json.dumps(record, allow_nan=False) + "\n"
                 length = len(line.encode("utf-8"))
-                if self._log_bytes + length > MAX_LOG_BYTES:
-                    line = json.dumps({"time": time.time(), "session": self.session, "kind": "log_truncated", "limit_bytes": MAX_LOG_BYTES}) + "\n"
+                if self._log_bytes and self._log_bytes + length > MAX_LOG_BYTES:
+                    marker = json.dumps(self._next_log_segment()) + "\n"
+                    line, length = marker + line, length + len(marker.encode("utf-8"))
                 try:
-                    self._logs.put_nowait((line, None))
+                    self._logs.put_nowait((line, None, self._log_path, tuple(self._log_expired)))
                 except queue.Full:
                     self._log_dropped += 1
                     return
+                self._log_expired.clear()
                 self._log_dropped = 0
-                self._log_bytes = (MAX_LOG_BYTES if self._log_bytes + length > MAX_LOG_BYTES
-                                   else self._log_bytes + length)
+                self._log_bytes += length
         except (OSError, TypeError, ValueError):
             pass
+
+    def _next_log_segment(self):
+        """Switch to a new segment (caller holds the log lock); retire the oldest but the first."""
+        number = int(self._log_segments[-1].stem.rpartition(".")[2]) + 1 if len(self._log_segments) > 1 else 2
+        path = self._log_base.with_name(f"{self._log_base.stem}.{number}{self._log_base.suffix}")
+        self._log_segments.append(path)
+        removed = []
+        while len(self._log_segments) > MAX_LOG_SEGMENTS:
+            removed.append(self._log_segments.pop(1))
+        self._log_expired.extend(removed)
+        self._log_path, self._log_bytes = path, 0
+        return self._record("log_segment", segment=number, segment_limit_bytes=MAX_LOG_BYTES,
+                            removed=[old.name for old in removed])
+
+    def _buffer_log(self, pending, kind, *, first=False, **fields):
+        """Hold a request's records until its outcome decides; the caller holds the state lock."""
+        if self._log_path is None or self._logs_stop.is_set():
+            return
+        record = self._record(kind, **fields)
+        if pending.log_streaming:
+            self._emit(record)
+            return
+        pending.log.insert(0, record) if first else pending.log.append(record)
+        if len(pending.log) >= LOG_BUFFER_RECORDS:
+            # A long operation (discharge, ramp) is written as it goes.
+            pending.log_full = pending.log_streaming = True
+            for buffered in pending.log:
+                self._emit(buffered)
+            pending.log.clear()
+
+    def _note_native_outcome(self, pending, symbol, elapsed, frame):
+        """Mark a request worth writing when a vendor call was slow or its answer changed."""
+        pending.log_io.append((symbol, elapsed))
+        if elapsed >= LOG_SLOW_IO_S:
+            pending.log_full = True
+        if "status" not in frame:
+            return
+        occurrence = pending.log_occurrences.get(symbol, 0)
+        pending.log_occurrences[symbol] = occurrence + 1
+        discrete = any(token in symbol for token in DISCRETE_OUTPUT_TOKENS)
+        values = frame.get("values")
+        volatile = LOG_VOLATILE_OUTPUTS.get(symbol)
+        if volatile and isinstance(values, list):
+            values = [value for index, value in enumerate(values) if index not in volatile]
+        outcome = (frame["status"], json.dumps(values) if discrete else None)
+        key = (pending.log_key, symbol, occurrence)
+        previous = self._log_outcomes.get(key)
+        self._log_outcomes[key] = outcome
+        if previous != outcome and (previous is not None or frame["status"] != 0):
+            pending.log_full = True
+
+    def _roll_log_window(self, now, *, force=False):
+        """Return the summary of a finished window (caller holds the log lock)."""
+        if not force and now - self._log_window_start < LOG_SUMMARY_S:
+            return None
+        summary = None
+        if self._log_summary_calls:
+            rounded = lambda stats: [stats[0], round(stats[1], 4), round(stats[2], 4)]
+            summary = self._record("summary", window_s=round(now - self._log_window_start, 1),
+                                   calls={key: rounded(stats) for key, stats in self._log_summary_calls.items()},
+                                   native_io={key: rounded(stats) for key, stats in self._log_summary_io.items()})
+        self._log_window_start = now
+        self._log_window_counts.clear()
+        self._log_summary_calls.clear()
+        self._log_summary_io.clear()
+        return summary
+
+    def _finish_request_log(self, pending, request_id, outcome, **fields):
+        """Write a request in full, or count a routine, fast, unchanged one in the summary."""
+        with self._state_lock:
+            if pending.log_done:
+                return
+            pending.log_done = True
+            records, streamed = pending.log, pending.log_streaming
+            pending.log = []
+        if self._log_path is None or self._logs_stop.is_set():
+            return
+        now = time.monotonic()
+        elapsed = now - pending.log_started
+        with self._log_lock:
+            summary = self._roll_log_window(now)
+            written = self._log_window_counts.get(pending.log_key, 0)
+            budget = LOG_FULL_READS_PER_WINDOW if pending.log_routine else LOG_FULL_CALLS_PER_WINDOW
+            counted = (outcome == "reply" and not pending.log_full and not streamed
+                       and elapsed < LOG_SLOW_REQUEST_S and written >= budget)
+            if counted:
+                for table, key, duration in ((self._log_summary_calls, pending.log_key, elapsed),
+                                             *((self._log_summary_io, symbol, seconds)
+                                               for symbol, seconds in pending.log_io)):
+                    stats = table.setdefault(key, [0, 0., 0.])
+                    stats[0] += 1
+                    stats[1] += duration
+                    stats[2] = max(stats[2], duration)
+            else:
+                self._log_window_counts[pending.log_key] = written + 1
+        if summary is not None:
+            self._emit(summary)
+        if not counted:
+            for record in records:
+                self._emit(record)
+            self._log(outcome, request=request_id, elapsed_s=round(elapsed, 4), **fields)
 
     def _write_logs(self):
         while True:
             try:
-                line, completion = self._logs.get(timeout=.1)
+                line, completion, path, expired = self._logs.get(timeout=.1)
             except queue.Empty:
                 if self._logs_stop.is_set():
                     return
                 continue
             try:
+                for old in expired:
+                    try:
+                        old.unlink()
+                    except FileNotFoundError:
+                        pass
                 if line is not None:
-                    self._log_path.parent.mkdir(parents=True, exist_ok=True)
-                    with self._log_path.open("a", encoding="utf-8") as stream:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with path.open("a", encoding="utf-8") as stream:
                         stream.write(line)
             except (OSError, ValueError) as exc:
                 self._log_write_error = str(exc)
@@ -278,7 +423,7 @@ class NativeWorkerProxy:
             return True
         complete = threading.Event()
         try:
-            self._logs.put_nowait((None, complete))
+            self._logs.put_nowait((None, complete, None, ()))
         except queue.Full:
             return False
         return complete.wait(max(0., timeout_s))
@@ -308,6 +453,10 @@ class NativeWorkerProxy:
             if not 0 < len(payload) <= MAX_FRAME:
                 raise ValueError("Native worker request exceeds frame size limit")
             pending = _Pending()
+            name = fields.get("method") if op == "call" else fields.get("name")
+            pending.log_key = f"{op}:{name}" if isinstance(name, str) else op
+            pending.log_routine = op == "getattr" or (op == "call" and isinstance(name, str)
+                                                      and name.startswith(ROUTINE_READ_PREFIXES))
             self._pending[request_id] = pending
             try:
                 self._writes.put_nowait(struct.pack("!I", len(payload)) + payload)
@@ -362,16 +511,17 @@ class NativeWorkerProxy:
                             if elapsed >= pending.io_timeout:
                                 pending.timeout_failure = f"{symbol} exceeded its native I/O deadline ({pending.io_timeout:g}s)"
                             pending.io_deadline = None
+                            self._note_native_outcome(pending, symbol, elapsed, response)
                         else:
                             raise ValueError("Invalid native I/O phase")
-                        self._log("native_io", request=response["id"], **{k: v for k, v in response.items()
-                                                                          if k not in {"id", "kind", "version"}})
+                        self._buffer_log(pending, "native_io", request=response["id"], **{
+                            k: v for k, v in response.items() if k not in {"id", "kind", "version"}})
                         continue
                     if response.get("kind") == "progress":
                         if "value" not in response:
                             raise ValueError("Missing native progress value")
                         pending.progress.append(decode(response["value"]))
-                        self._log("progress", request=response["id"], value=response.get("value"))
+                        self._buffer_log(pending, "progress", request=response["id"], value=response.get("value"))
                         continue
                     if response.get("kind") != "reply" or type(response.get("success")) is not bool:
                         raise ValueError("Invalid native worker reply")
@@ -427,7 +577,7 @@ class NativeWorkerProxy:
                 raise TimeoutError(f"{self.family} operation queue timed out")
             if self._request_lock.acquire(timeout=min(.05, remaining)):
                 break
-        request_id = None
+        request_id = pending = None
         try:
             if _cancel_event is not None and _cancel_event.is_set():
                 raise RuntimeError("Native operation cancelled before dispatch")
@@ -438,7 +588,8 @@ class NativeWorkerProxy:
             with self._state_lock:
                 self._active = request_id
                 self._active_method = fields.get("method")
-            self._log("request", request=request_id, operation=op, method=fields.get("method"), timeout_s=remaining)
+                self._buffer_log(pending, "request", first=True, request=request_id, operation=op,
+                                 method=fields.get("method"), timeout_s=remaining)
             completed = pending.event.wait(min(.05, remaining))
             def deliver_progress():
                 with self._state_lock:
@@ -460,6 +611,7 @@ class NativeWorkerProxy:
                 if _cancel_event is not None and _cancel_event.is_set():
                     self.cancel()
                     if not pending.event.wait(self._stop_grace_s):
+                        self._finish_request_log(pending, request_id, "timeout", error="cancelled operation remained blocked")
                         self.close(grace_s=0)
                         raise RuntimeError(self._failure_message("Cancelled native operation remained blocked; worker terminated"))
                     completed = True
@@ -471,10 +623,11 @@ class NativeWorkerProxy:
                 self.cancel()
                 pending.event.wait(self._stop_grace_s)
                 reason = pending.timeout_failure or f"{op} timed out after {timeout_s:g}s"
-                self._log("timeout", request=request_id, error=reason)
+                self._finish_request_log(pending, request_id, "timeout", error=reason)
                 self.close(grace_s=0)
                 raise TimeoutError(self._failure_message(f"{reason}; worker terminated"))
             if pending.failure is not None:
+                self._finish_request_log(pending, request_id, "failure", error=pending.failure)
                 self.close(grace_s=0)
                 raise RuntimeError(pending.failure)
             response = pending.response
@@ -483,7 +636,7 @@ class NativeWorkerProxy:
                 exception = getattr(builtins, error.get("kind", "RuntimeError"), RuntimeError)
                 if not isinstance(exception, type) or not issubclass(exception, Exception):
                     exception = RuntimeError
-                self._log("error", request=request_id, error=error)
+                self._finish_request_log(pending, request_id, "error", error=error)
                 failure = exception(error.get("message", "Native operation failed"))
                 failure.native_error_kind = error.get("kind", "RuntimeError")
                 if (isinstance(failure, TimeoutError) or "unusable" in str(failure).lower()
@@ -493,12 +646,14 @@ class NativeWorkerProxy:
                     failure = exception(self._failure_message(str(failure)))
                     failure.native_error_kind = error.get("kind", "RuntimeError")
                 raise failure
-            self._log("reply", request=request_id)
+            self._finish_request_log(pending, request_id, "reply")
             if self.lifecycle_attribute("_transport_poisoned"):
                 self.close(grace_s=0)
                 raise RuntimeError(self._failure_message("Controller retired its transport"))
             return pending.value
         finally:
+            if pending is not None:
+                self._finish_request_log(pending, request_id, "aborted")  # No-op once an outcome was logged.
             with self._state_lock:
                 self._pending.pop(request_id, None)
                 if self._active == request_id:
@@ -596,6 +751,10 @@ class NativeWorkerProxy:
                 except (OSError, ValueError):
                     pass
             if not self._logs_stop.is_set():
+                with self._log_lock:
+                    summary = self._roll_log_window(time.monotonic(), force=True)
+                if summary is not None:
+                    self._emit(summary)
                 self._log("close", exit=process.returncode, outputs_confirmed_off=False)
                 self._flush_logs()
                 self._logs_stop.set()

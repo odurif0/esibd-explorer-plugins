@@ -149,7 +149,7 @@ def probe(folder, surface, output):
         channels[0].active = True
         parent.loading = False
         parent._update_operator_panel()
-        spin = parent.amxPanelCards[0]["width"]
+        spin = parent.amxTimingRows[0]["width"]
     spin.setFocus()
     spin.selectAll()
     QTest.keyClicks(spin, "7")
@@ -185,9 +185,9 @@ def probe(folder, surface, output):
     assert hw.timing_writes == [], ("Old focused draft was applied on focus-out", hw.calls)
     if folder != "amx_hd":
         parent._update_operator_panel()
-        assert parent.amxPanelCards[0]["width"].value() == 1.
-        assert parent.amxPanelCards[0]["status"].text() == "REGISTERS APPLIED"
-        assert parent.amxPanelCards[1]["width"].value() == 0.
+        assert parent.amxTimingRows[0]["width"].value() == 1.
+        assert parent.amxTimingRows[0]["status"].text() == "REGISTERS APPLIED"
+        assert parent.amxTimingRows[1]["width"].value() == 0.
     window.grab().save(str(output / f"{folder}-{surface}-loaded.png"))
 
     # A later explicit edit goes through the real widget callbacks and driver.
@@ -205,7 +205,7 @@ def probe(folder, surface, output):
     QTest.keyClick(parent.frequencyWidget, QtCore.Qt.Key.Key_Return)
     QTest.qWait(400)
     assert hw.period == 398, hw.calls
-    assert hw.widths[0] == 48
+    assert hw.widths[0] + 2 == 100, "P0 keeps its 25 % duty in the longer period"
     window.close()
     return 0
 

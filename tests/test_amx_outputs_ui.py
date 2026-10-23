@@ -65,6 +65,8 @@ def probe(folder, output):
     for channel in parent.channels:
         channel.setHidden = lambda _: None
     controller._apply_snapshot(reference())
+    for channel in parent.channels[1:]:
+        channel.enabled = False  # As a config load leaves the unused pulsers.
     parent.loaded_config_text = "79:500kHz->SwitchSym+DIO0,Osc->DIO1 [memory]"
     parent.frequency_khz = oscillator_khz
     toolbar = QHBoxLayout()
@@ -98,13 +100,21 @@ def probe(folder, output):
     text = lambda row, key: table.item(row, column[key]).text()
     cell = lambda row, key: table.item(row, column[key])
     assert table.isVisible() and table.rowCount() == 4
-    assert not parent.amxPulserControls.isVisible()
+    # Operator view: outputs and one timing row per used pulser (P0 drives all four).
+    timing = parent.amxTimingTable
+    status_column = len(module._AMX_TIMING_COLUMNS) - 1
+    assert timing.isVisible() and timing.isColumnHidden(status_column)
+    assert [timing.isRowHidden(row) for row in range(timing.rowCount())] == [False] + [True] * (timing.rowCount() - 1)
+    assert parent.amxTimingHiddenNote.isVisible()
+    assert not parent.amxWaveformView.isVisible() and not parent.amxPanelNotice.isVisible()
     assert not parent.tree.isVisible()
     assert table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     assert all(text(i, "frequency") == frequency and text(i, "dwell") == dwell for i in range(4))
     assert [text(i, "relation") for i in range(4)] == ["Reference", "Opposite to CH0", "Same as CH0", "Opposite to CH0"]
-    assert "Voltages from linked PSUs" in " ".join(label.text() for label in host.findChildren(QLabel) if label.isVisible())
+    assert "Voltages from linked PSUs" in table.toolTip()
     assert all(text(i, "psu") == "—" and text(i, "levels") == "Vneg ↔ Vpos" for i in range(4))
+    # Without a linked PSU those two columns only repeat rail names.
+    assert all(table.isColumnHidden(column[key]) for key in ("levels", "psu"))
     assert "Hi-Z never implies a discharged output" in table.toolTip()
     assert all(table.horizontalHeaderItem(c).toolTip() for c in range(table.columnCount()))
     if hd:
@@ -118,16 +128,22 @@ def probe(folder, output):
         assert not notice.isVisible()
     assert table.verticalScrollBar().maximum() == 0
     assert table.horizontalScrollBar().maximum() == 0
-    # Inferred outputs keep plain text; the sketch draws the same four square waves.
+    # Inferred outputs keep plain text; the sketch (Advanced) draws the same four square waves.
     assert all(cell(i, "state").data(Qt.ItemDataRole.ForegroundRole) is None for i in range(4))
     view = parent.amxWaveformView
+    QTest.mouseClick(advanced, Qt.MouseButton.LeftButton)
+    QTest.qWait(50)
     assert view.isVisible() and view.message == ""
+    assert not timing.isColumnHidden(status_column) and not any(timing.isRowHidden(row) for row in range(4))
     assert [trace["kind"] for trace in view.model["traces"]] == ["wave"] * 4
     trace_color = QColor(module._amx_panel_color("trace", True))
     image = view.grab().toImage()
     drawn = sum(image.pixelColor(x, y) == trace_color
                 for x in range(0, image.width(), 2) for y in range(image.height()))
     assert drawn > 200, drawn
+    QTest.mouseClick(advanced, Qt.MouseButton.LeftButton)
+    QTest.qWait(50)
+    assert not view.isVisible() and timing.isRowHidden(1)
     # A selected config that is not in controller memory asks for Load now.
     pending = parent.amxPanelPendingValue
     assert not pending.isVisible()
@@ -152,8 +168,7 @@ def probe(folder, output):
         light.setColor(role, QColor(color))
     app.setPalette(light)
     parent.updateTheme()
-    title = next(label for label in host.findChildren(QLabel) if label.property("amxRole") == "title")
-    darkest, lightest = luminance_range(title)
+    darkest, lightest = luminance_range(parent.amxPanelSignalValue)
     assert lightest > 200 and darkest < 80, (darkest, lightest)
     assert view.dark is False
     window.grab().save(str(output / f"{folder}-outputs-light.png"))
@@ -183,6 +198,7 @@ def probe(folder, output):
     negative_pair.combo.setCurrentText(other.name)
     assert parent.psu_ch01 == psu.name and parent.psu_ch23 == other.name
     assert text(0, "levels") == "-120.5 V ↔ +123.4 V", "Settings change was not immediate"
+    assert not table.isColumnHidden(column["levels"]) and not table.isColumnHidden(column["psu"])
     saved = {key: parameter.value for key, parameter in settings.settings.items()}
     parent.psu_ch01 = parent.psu_ch23 = "None"
     for key, value in saved.items():
@@ -232,9 +248,9 @@ def probe(folder, output):
     # Merely viewing outputs / Advanced must never cause hardware writes.
     controller.device.calls.clear()
     QTest.mouseClick(advanced, Qt.MouseButton.LeftButton)
-    assert parent.tree.isVisible() and parent.amxPulserControls.isVisible()
+    assert parent.tree.isVisible() and not timing.isColumnHidden(status_column)
     QTest.mouseClick(advanced, Qt.MouseButton.LeftButton)
-    assert not parent.tree.isVisible() and not parent.amxPulserControls.isVisible()
+    assert not parent.tree.isVisible() and timing.isColumnHidden(status_column)
     assert controller.device.timing_writes == []
     window.resizeDocks([dock, graph], [370, 890], Qt.Orientation.Horizontal)
     QTest.qWait(50)

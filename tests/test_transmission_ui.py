@@ -719,6 +719,10 @@ def explorer_scenario(env):
         # The spray current must stay stable while optimizing: 10-30 nA by default.
         assert (dialog.spray_low.text(), dialog.spray_high.text()) == ("10", "30")
         dialog.spray_channel.setCurrentText("ESI_I")
+        # The spray current is read on the ESI, never on the DMMR; the detector is never the ESI's.
+        items = lambda combo: [combo.itemText(i) for i in range(combo.count())]
+        assert "ESI_I" in items(dialog.spray_channel) and "Collector" not in items(dialog.spray_channel)
+        assert "Collector" in items(dialog.detector_channel) and "ESI_I" not in items(dialog.detector_channel)
         watch, low, high = dialog.gauge_widgets["P_funnel"]
         watch.setChecked(True)
         low.setText("2")
@@ -977,6 +981,14 @@ def devices_scenario(env, ctx):
     assert "PSU_B: enable the PSU_B plugin (Plugin Manager), then restart Explorer" in message
     assert "ESI: turn it ON in the ESI plugin (never from Transmission)" in message
     assert esi.on_requests == []
+    # An ESI that is ON but not recording (lab, 2026-10-22) is not told to turn ON: its recording
+    # may start from here, which only reads it.
+    esi.on, esi.recording = True, False
+    psu.controller = NS(transitioning=False)
+    report = {e["name"]: e for e in scan.device_report(["Inlet"], ["ESI current", "A1"])}
+    assert report["ESI"]["state"] == "not recording" and report["ESI"]["fix"] == "start its recording"
+    assert scan._startable(report["ESI"]) and "turn it ON" not in report["ESI"]["fix"]
+    psu.controller = NS(transitioning=True)
     # 4. A PSU output gate OFF: shown, never switched from here, and refused by the run check.
     devices.remove(esi)
     psu.controller = NS(transitioning=False)

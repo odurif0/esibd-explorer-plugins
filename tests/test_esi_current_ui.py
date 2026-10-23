@@ -464,7 +464,7 @@ def probe(case, output):
                 controller.main_state = module._ESI_STOPPING
                 controller._on_discharge_progress({
                     "modules": {a: {"positive_v": 12.5, "negative_v": -11., "measured_a": 2.5e-9}
-                                for a in (1, 2)}, "consecutive": 0, "limit_v": 1.})
+                                for a in (1, 2)}, "consecutive": 0, "limit_v": 10.})
                 if case == "unconfirmed":
                     controller.main_state = "Shutdown unconfirmed"
             device._update_operator_panel()

@@ -1,4 +1,5 @@
 """Exercise the plugin OFF path with the actual discharge-checking runtime."""
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -127,3 +128,112 @@ def test_late_poll_after_confirmed_close_does_not_resurrect_on(control, esi_disc
     assert c.main_state == "Disconnected"
     assert c.device is None and not c.initialized
     assert control.parent.onAction.state is False
+
+
+def test_discharge_readings_are_reported_every_ten_seconds(control, esi_discharge_rig, monkeypatch):
+    # 2026-10-22: the check ran silently for up to a minute and looked stuck.
+    c = control.controller
+    clock = [100.]
+    monkeypatch.setattr(control.module.time, "monotonic", lambda: clock[0])
+    c.initializeValues(reset=True)  # As the shutdown does before the check.
+    c.main_state = control.module._ESI_STOPPING
+    c._discharge_outputs_off = True  # The first report has already been received.
+    c._discharge_started_at = c._discharge_reported_at = 100.
+    report = {"consecutive": 1, "limit_v": 10.0,
+              "modules": {1: {"positive_v": 4.9, "negative_v": -3.8, "measured_a": 1e-9},
+                          2: {"positive_v": float("nan"), "negative_v": -0.04, "measured_a": 0.}}}
+    before = len(control.messages)
+    clock[0] = 105.
+    c._on_discharge_progress(report)
+    assert len(control.messages) == before
+    clock[0] = 110.5
+    c._on_discharge_progress(report)
+    assert control.messages[-1] == ("ESI discharge check, 10 s: HV1 POS +4.9 V / NEG -3.8 V, "
+                                    "HV2 POS n/a V / NEG -0.0 V; 1 consecutive rounds <= 10 V so far.")
+    c._on_discharge_progress(report)
+    assert len(control.messages) == before + 1
+
+
+def test_unconfirmed_shutdown_reports_the_last_readings(control, esi_discharge_rig, monkeypatch):
+    # 2026-10-23: the check timed out with HV1 still at about 3 V, and the error gave no value.
+    report = {"consecutive": 0, "limit_v": 10.0,
+              "modules": {1: {"positive_v": 2.849, "negative_v": -2.712, "measured_a": 0.},
+                          2: {"positive_v": -0.045, "negative_v": -0.049, "measured_a": 0.}}}
+
+    def disconnect(timeout_s, on_discharge):
+        on_discharge(report)
+        raise RuntimeError("ESI discharge unconfirmed: fresh ADC voltages on both polarities "
+                           "did not remain below the discharge limit for consecutive rounds")
+
+    monkeypatch.setattr(esi_discharge_rig.driver, "disconnect", disconnect)
+    assert not control.controller.shutdownCommunication()
+    assert any(message.endswith("for consecutive rounds. Last readings: HV1 POS +2.8 V / NEG -2.7 V, "
+                                "HV2 POS -0.0 V / NEG -0.0 V.") for message in control.messages)
+
+
+def test_off_returns_to_off_once_outputs_are_verified_and_on_waits(control, esi_discharge_rig, monkeypatch):
+    # 2026-10-23: the operator waited for the whole discharge check with the button still ON.
+    c = control.controller
+    seen = []
+    original = c._on_discharge_progress
+
+    def progress(report):
+        original(report)
+        if not seen:
+            seen.append((c.main_state, control.parent.onAction.state))
+            control.parent.onAction.state = True  # The operator presses ON during the check.
+            c.toggleOn()
+            seen.append(control.parent.onAction.state)
+
+    monkeypatch.setattr(c, "_on_discharge_progress", progress)
+    assert c.shutdownCommunication()
+    assert seen == [(control.module._ESI_STOPPING, False), False]
+    assert control.parent._session_closed, "a refused ON is not recorded for a crash resume"
+    assert "ESI outputs OFF; the HV discharge check continues in the background." in control.messages
+    assert any("ON is possible once it ends" in message for message in control.messages)
+    assert control.messages[-1].startswith("ESI HV discharge verified after ")
+    assert control.statuses[-1] == ("Disconnected", False)
+    assert esi_discharge_rig.calls.count(("close",)) == 1
+    assert not c._discharge_outputs_off
+
+
+def test_explorer_closing_waits_for_the_background_check(control, esi_discharge_rig, monkeypatch):
+    c = control.controller
+    driver = esi_discharge_rig.driver
+    disconnect = driver.disconnect
+    checking, finish = threading.Event(), threading.Event()
+
+    def slow_disconnect(**kwargs):
+        on_discharge = kwargs["on_discharge"]
+
+        def progress(report):
+            on_discharge(report)
+            checking.set()
+            assert finish.wait(5.)
+        return disconnect(**{**kwargs, "on_discharge": progress})
+
+    monkeypatch.setattr(driver, "disconnect", slow_disconnect)
+    off = threading.Thread(target=c.shutdownCommunication)
+    off.start()
+    assert checking.wait(5.)
+    threading.Timer(.2, finish.set).start()
+    assert c.shutdownCommunication(), "closing must report the verdict of the running check"
+    off.join(5.)
+    assert c.main_state == "Disconnected" and c.device is None
+    assert not any("attempting to release communication" in message for message in control.messages)
+    assert esi_discharge_rig.calls.count(("close",)) == 1
+
+
+@pytest.mark.parametrize("outputs_off,expected", [(False, "Stopping: checking HV"), (True, "OFF: HV discharging")])
+def test_badge_tells_when_only_the_discharge_check_remains(control, outputs_off, expected):
+    class Label:
+        def setText(self, text):
+            self.text = text
+
+    device = SimpleNamespace(
+        main_state=control.module._ESI_STOPPING, statusBadgeLabel=Label(), statusSummaryLabel=Label(),
+        controller=SimpleNamespace(_discharge_outputs_off=outputs_off),
+        _status_summary_text=lambda: "", _status_badge_style=lambda: "",
+        _sync_load_config_action=lambda: None, _update_operator_panel=lambda: None)
+    control.module.ESIDevice._update_status_widgets(device)
+    assert device.statusBadgeLabel.text == expected

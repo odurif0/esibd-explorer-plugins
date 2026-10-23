@@ -453,21 +453,22 @@ def test_operator_panel_routes_edits_through_existing_channel_events():
         {
             "Enabled": EventParameter(True),
             "Value": EventParameter(500.0),
-            "Display": EventParameter(True),
+            "Keep": EventParameter("duty"),
         }
     )
     channel.enabledChanged = lambda: calls.append("enabled")
     channel.valueChanged = lambda: calls.append("value")
-    channel.displayChanged = lambda: calls.append("display")
+    channel.keepChanged = lambda: calls.append("keep")
     device._update_operator_panel = lambda: calls.append("panel")
 
     module.AMXDevice._panel_enabled_toggled(device, 0, False)
     module.AMXDevice._panel_width_changed(device, 0, 250.0)
-    module.AMXDevice._panel_display_toggled(device, 0, False)
+    module.AMXDevice._panel_duty_changed(device, 0, 25.0)  # 1 kHz: 250 µs
+    module.AMXDevice._panel_keep_changed(device, 0, "width")
 
     assert channel.enabled is False
     assert channel.value == 250.0
-    assert channel.display is False
+    assert channel.keep == "width"
     assert calls == [
         ("parameter", False),
         "enabled",
@@ -475,9 +476,11 @@ def test_operator_panel_routes_edits_through_existing_channel_events():
         ("parameter", 250.0),
         "value",
         "panel",
-        ("parameter", False),
-        "display",
+        ("parameter", 250.0),
+        "value",
         "panel",
+        ("parameter", "width"),
+        "keep",
     ]
 
 
@@ -556,7 +559,7 @@ def test_operator_panel_refresh_blocks_control_signals():
         "tooltip": "register tooltip",
     }
     device = object.__new__(module.AMXDevice)
-    device.amxPanelCards = {0: widgets}
+    device.amxTimingRows = {0: widgets}
     device.amxPanelSignalValue = FakeWidget()
     device.amxPanelFrequencyValue = FakeWidget()
     device.loaded_config_text = "9:Operate"

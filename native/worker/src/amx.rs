@@ -224,7 +224,7 @@ impl Controller {
             self.hardware_mutated = true;
         }
         let symbol = format!("COM_HVAMX4ED{}_{}", if self.hd { "H" } else { "" }, suffix);
-        let result = ctx.native_call(&symbol, None, || self.dll.call(&symbol, args));
+        let result = ctx.native_reply(&symbol, None, || self.dll.call(&symbol, args));
         if let Err(error) = &result
             && (error.kind == "TimeoutError" || error.kind == "ConnectionError")
         {

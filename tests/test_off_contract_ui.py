@@ -162,7 +162,7 @@ def probe(family, output):
         assert checking.is_set()
         for _ in range(20):
             app.processEvents()
-        check(True, module._ESI_STOPPING)
+        check(False, module._ESI_STOPPING)  # Outputs verified OFF; the discharge check continues.
         assert controller.device is backend and controller.initialized
         assert controller.discharge_readings[1]["negative_v"] == -12.
         assert "dispose" not in calls

@@ -6,6 +6,11 @@
         "args": [],
         "result": "int"
       },
+      "COM_AMPR_12_CloseDebugFile": {
+        "args": [],
+        "result": "int",
+        "verified_dll_sha256": "5482400935153b5923582b457a88281be6bbb55d37cf9f0c5c530d54aaa1f6c8"
+      },
       "COM_AMPR_12_DevicePurge": {
         "args": [
           {
@@ -740,6 +745,19 @@
           }
         ],
         "result": "int"
+      },
+      "COM_AMPR_12_OpenDebugFile": {
+        "args": [
+          {
+            "input": true,
+            "length": 4096,
+            "name": "FileName",
+            "pointer": true,
+            "type": "char"
+          }
+        ],
+        "result": "int",
+        "verified_dll_sha256": "5482400935153b5923582b457a88281be6bbb55d37cf9f0c5c530d54aaa1f6c8"
       },
       "COM_AMPR_12_Purge": {
         "args": [],

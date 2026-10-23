@@ -261,7 +261,7 @@ impl Controller {
             ));
         }
         let symbol = format!("COM_DMMR_8_{export}");
-        let reply = ctx.native_call(&symbol, None, || self.dll.call(&symbol, args));
+        let reply = ctx.native_reply(&symbol, None, || self.dll.call(&symbol, args));
         if let Err(error) = &reply
             && error.kind == "TimeoutError"
         {

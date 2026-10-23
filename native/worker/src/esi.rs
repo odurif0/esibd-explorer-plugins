@@ -29,6 +29,16 @@ const VOLTAGE_READY: u64 = 0x10;
 const CURRENT_READY: u64 = 0x40;
 const HEAT_READY: u64 = 1;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+// After an ADC polarity selection, conversions are discarded until both limits pass, as for the
+// electrospray readback. 2026-10-22 lab: the first conversion after each selection often read
+// k x 110.7 V (up to 1328 V, also on a never-enabled HV2), so a discharge was never confirmed.
+const DISCHARGE_SETTLE: Duration = Duration::from_secs(1);
+const DISCHARGE_SETTLE_CONVERSIONS: u64 = 2;
+// 2026-10-23 lab, HV1 off from 1000 V: 247 V after 10 s, 10 V after 41 s, 2.8 V after 66 s. The
+// output (~0.3 nF) bleeds only through the module, ever slower (time constant 5 s -> 22 s), so 1 V
+// took ~90 s and 60 s never confirmed. The operator then chose 10 V; the check runs in the background.
+const DISCHARGE_LIMIT_V: f64 = 10.0;
+const DISCHARGE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub const SUPPORTED_METHODS: &[&str] = &[
     "connect",
@@ -79,6 +89,8 @@ pub struct Controller {
     discharge_timeout: Duration,
     discharge_limit: f64,
     discharge_samples: usize,
+    discharge_settle: Duration,
+    discharge_settle_conversions: u64,
     discharge_deadline: Option<Instant>,
     error_codes: Value,
 }
@@ -164,9 +176,11 @@ impl Controller {
             measurement_requests: BTreeMap::new(),
             io_timeout: Duration::from_secs(5),
             default_timeout: Duration::from_secs(5),
-            discharge_timeout: Duration::from_secs(60),
-            discharge_limit: 1.0,
+            discharge_timeout: DISCHARGE_TIMEOUT,
+            discharge_limit: DISCHARGE_LIMIT_V,
             discharge_samples: 3,
+            discharge_settle: DISCHARGE_SETTLE,
+            discharge_settle_conversions: DISCHARGE_SETTLE_CONVERSIONS,
             discharge_deadline: None,
             error_codes: serde_json::from_str(crate::ERROR_CATALOG)
                 .map_err(|error| Error::runtime(format!("Invalid ESI error catalog: {error}")))?,
@@ -222,7 +236,7 @@ impl Controller {
         self.permission(ctx, cancellable)?;
         self.check_discharge_deadline()?;
         let start = Instant::now();
-        let reply = ctx.native_call(symbol, Some(self.io_timeout), || {
+        let reply = ctx.native_reply(symbol, Some(self.io_timeout), || {
             self.dll.call(symbol, args)
         });
         // Never continue a transaction or perform cleanup after a late native reply.
@@ -398,6 +412,9 @@ impl Controller {
     }
 
     fn hv_target(&mut self, address: u64, target: f64, ctx: &Context) -> Result<f64> {
+        // The module stores millivolts: 2026-10-22 a ramp step of 1090.4347826 V read back as
+        // 1090.435 V, failed verification and forced the output OFF.
+        let target = (target * 1000.0).round() / 1000.0;
         self.write(
             "COM_ESI_CTRL_SetHVsupplyTargetOutputVoltage",
             &[json!(address), json!(target)],
@@ -1310,15 +1327,18 @@ impl Controller {
             }
             while consecutive < self.discharge_samples {
                 for negative in [false, true] {
+                    let mut selected_at = [Instant::now(); 3];
                     for (&address, &(_, high)) in &saved {
                         if Instant::now() >= deadline {
                             return Err(Error::runtime(message));
                         }
                         self.select_ranges(address, (negative, high), ctx, true)?;
+                        selected_at[address as usize] = Instant::now();
                         self.discharge_data("COM_ESI_CTRL_GetHVsupplyOutputVoltage", address, ctx)?;
                         self.discharge_data("COM_ESI_CTRL_GetHVsupplyOutputCurrent", address, ctx)?;
                     }
                     let mut armed = [0_u64; 3];
+                    let mut settled = [0_u64; 3];
                     let mut pending = [true; 2];
                     while pending.iter().any(|pending| *pending) {
                         for address in HV_ADDRESSES {
@@ -1360,6 +1380,16 @@ impl Controller {
                                     return Err(Error::runtime(
                                         "ESI discharge unconfirmed: ADC response arrived after the discharge deadline",
                                     ));
+                                }
+                                let index = address as usize;
+                                if settled[index] < self.discharge_settle_conversions
+                                    || selected_at[index].elapsed() < self.discharge_settle
+                                {
+                                    // Discarded: wait for the next voltage conversion. Reading
+                                    // clears only the voltage-ready bit (lab log 223 -> 207).
+                                    settled[index] += 1;
+                                    armed[index] &= !VOLTAGE_READY;
+                                    continue;
                                 }
                                 if !valid_v
                                     || !valid_i
@@ -1814,6 +1844,8 @@ impl Backend for Controller {
             "DISCHARGE_TIMEOUT_S" => float(self.discharge_timeout.as_secs_f64()),
             "DISCHARGE_LIMIT_V" => float(self.discharge_limit),
             "DISCHARGE_SAMPLES" => json!(self.discharge_samples),
+            "DISCHARGE_SETTLE_S" => float(self.discharge_settle.as_secs_f64()),
+            "DISCHARGE_SETTLE_CONVERSIONS" => json!(self.discharge_settle_conversions),
             "NO_ERR" => json!(0),
             "DEVICE_TYPE" => json!(DEVICE_TYPE),
             "MODULE_HTCTRL_TYPE" => json!(HEAT_TYPE),
@@ -1908,9 +1940,9 @@ impl Backend for Controller {
             "DISCHARGE_TIMEOUT_S" => self.discharge_timeout = positive_duration(&value, name)?,
             "DISCHARGE_LIMIT_V" => {
                 let limit = input_number(&value, name)?;
-                if !limit.is_finite() || !(0.0..=1.0).contains(&limit) {
+                if !limit.is_finite() || !(0.0..=DISCHARGE_LIMIT_V).contains(&limit) {
                     return Err(Error::argument(
-                        "ESI discharge limit must be finite and between 0 and 1 V; native configuration cannot weaken the operational shutdown check",
+                        "ESI discharge limit must be finite and between 0 and 10 V; native configuration cannot weaken the operational shutdown check",
                     ));
                 }
                 self.discharge_limit = limit;
@@ -1925,6 +1957,35 @@ impl Backend for Controller {
                         )
                     })?;
                 self.discharge_samples = samples as usize;
+            }
+            // Only fault-test builds may shorten the settling; deployments cannot.
+            "DISCHARGE_SETTLE_S" => {
+                let settle = input_number(&value, name)?;
+                if !settle.is_finite()
+                    || settle < 0.0
+                    || (settle < DISCHARGE_SETTLE.as_secs_f64() && !cfg!(feature = "test-backend"))
+                    || settle > 10.0
+                {
+                    return Err(Error::argument(
+                        "ESI discharge ADC settling must be between 1 and 10 s; native configuration cannot weaken the operational shutdown check",
+                    ));
+                }
+                self.discharge_settle = Duration::from_secs_f64(settle);
+            }
+            "DISCHARGE_SETTLE_CONVERSIONS" => {
+                let conversions = value
+                    .as_u64()
+                    .filter(|conversions| {
+                        *conversions <= 100
+                            && (*conversions >= DISCHARGE_SETTLE_CONVERSIONS
+                                || cfg!(feature = "test-backend"))
+                    })
+                    .ok_or_else(|| {
+                        Error::argument(
+                            "ESI discharge ADC settling must discard 2 to 100 conversions; native configuration cannot weaken the operational shutdown check",
+                        )
+                    })?;
+                self.discharge_settle_conversions = conversions;
             }
             "com" | "baudrate" => {
                 if self.connected || self.port_claimed {
