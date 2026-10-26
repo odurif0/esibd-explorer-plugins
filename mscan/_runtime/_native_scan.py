@@ -21,6 +21,12 @@ import time
 from threading import Event
 
 
+
+def _manual(channel):
+    """Operator-set: active, or without an equation (Explorer evaluates only inactive channels that have one)."""
+    return bool(channel.active) or not str(getattr(channel, 'equation', '') or '').strip()
+
+
 def _encode(value):
     """Encode non-finite telemetry for an explicitly raw-JSON RPC."""
     if isinstance(value, float) and not math.isfinite(value):
@@ -107,6 +113,7 @@ class NativeScanAdapter:
                     time_step_s=float(getattr(scan, 'time_step_s', math.nan)),
                     sweep_rate=float(getattr(scan, 'sweep_rate', math.nan)),
                     offset_factor=float(getattr(scan, 'offset_factor', math.nan)),
+                    passes=int(scan._passes()) if hasattr(scan, '_passes') else 1,
                     metadata=copy.deepcopy(self._plan.get('metadata', {})))
 
     def _bind(self):
@@ -159,7 +166,7 @@ class NativeScanAdapter:
                 identity=self._source_identity(channel, device, ctrl, token),
                 device_identity=_identity(device), name=channel.name, number=channel.channel_number(),
                 registered=registered, real=bool(channel.real), enabled=bool(channel.enabled),
-                active=bool(channel.active), initialized=bool(channel.initialized and ctrl.initialized and ctrl.device is not None),
+                active=_manual(channel), initialized=bool(channel.initialized and ctrl.initialized and ctrl.device is not None),
                 on=bool(device.isOn()), busy=_busy(ctrl, _PSU_BUSY), shutdown=bool(token.is_set()),
                 unit=channel.unit, use_monitors=bool(channel.useMonitors),
                 readback_status=str(channel.readback_status), revision=int(channel.voltage_request_revision),
@@ -193,7 +200,7 @@ class NativeScanAdapter:
             offset = dict(identity=self._source_identity(channel, device, ctrl, ctrl._setpoint_cancel)
                           + ':' + str(channel.module_address()) + ':' + str(channel.channel_number()),
                           name=channel.name, registered=self._registered(channel) and scan._plugin(device.name) is device,
-                          real=bool(channel.real), enabled=bool(channel.enabled), active=bool(channel.active),
+                          real=bool(channel.real), enabled=bool(channel.enabled), active=_manual(channel),
                           initialized=bool(ctrl.initialized and ctrl.device is not None), on=bool(device.isOn()),
                           busy=_busy(ctrl, _AMPR_BUSY), shutdown=bool(ctrl._setpoint_cancel.is_set()),
                           state=state, value=float(channel.value), monitor=float(channel.monitor), min=low, max=high)
@@ -226,8 +233,8 @@ class NativeScanAdapter:
     def _validate_data_model(self, steps, observation):
         self._require_current('before native data validation')
         scan = self.scan
-        if len(scan.inputChannels) != 1 or len(scan.outputChannels) != 1:
-            raise RuntimeError('MScan requires one amplitude axis and one DMMR output')
+        if len(scan.inputChannels) != 1 or len(scan.outputChannels) != 1 + len(self._plan.get('extra_detectors', [])):
+            raise RuntimeError('MScan requires one amplitude axis, the reference DMMR output and one per extra module')
         actual = scan.inputChannels[0].recordingData
         if len(actual) != len(steps) or any(not math.isclose(float(a), b, rel_tol=1e-12, abs_tol=1e-12)
                                           for a, b in zip(actual, steps)):
@@ -241,8 +248,8 @@ class NativeScanAdapter:
             raise RuntimeError('Explorer validation/data arrays differ from the native point count')
         if any(len(row) != len(observation['rails']) for key in ('rail_v', 'rail_i') for row in scan._validation[key]):
             raise RuntimeError('Explorer voltage/current arrays differ from the native rail count')
-        if any(len(row) != 1 for key in ('samples', 'finite_samples') for row in scan._validation[key]):
-            raise RuntimeError('Explorer sample arrays differ from the native detector count')
+        if any(len(row) != len(scan.outputChannels) for key in ('samples', 'finite_samples') for row in scan._validation[key]):
+            raise RuntimeError('Explorer sample arrays differ from the DMMR output count')
 
     def cancel(self):
         self._cancel_token.set()
@@ -320,6 +327,12 @@ class NativeScanAdapter:
                     validation[key][index] = point[key]
                 validation['samples'][index, 0] = point['samples']
                 validation['finite_samples'][index, 0] = point['finite_samples']
+                # Other enabled DMMR modules, over the reference module's window (same time axis).
+                extras = (scan._extra_values(point['window_start'], point['window_end'])
+                          if self._plan.get('extra_detectors') else [])
+                for j, (mean, count, finite) in enumerate(extras, start=1):
+                    scan.outputChannels[j].recordingData[index] = mean
+                    validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
                 validation['point_status'][index] = point['status']
                 if point.get('offset') is not None:
                     validation['offset_v'][index], validation['offset_target'][index] = point['offset']
@@ -450,6 +463,11 @@ class NativeScanAdapter:
             for key, value in list(validation.items()):
                 if isinstance(value, list) and key != 'point_status':
                     validation[key] = np.asarray(value)
+            previous = self.scan._validation
+            for key in ('samples', 'finite_samples') if self._plan.get('extra_detectors') else ():
+                # The native engine counts the reference module; keep the extra modules' columns.
+                reference = np.asarray(validation[key]).reshape(len(result['data']), -1)[:, :1]
+                validation[key] = np.column_stack([reference, np.asarray(previous[key])[:, 1:]]).astype(reference.dtype)
             if 'continuous' in validation:
                 for key, value in validation['continuous'].items():
                     validation['continuous'][key] = np.asarray(value)

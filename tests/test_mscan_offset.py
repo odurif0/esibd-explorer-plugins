@@ -38,7 +38,7 @@ def test_offset_is_coefficient_times_amplitude_at_every_point_then_restored(msca
 
 
 def test_default_coefficient_is_0_2(mscan_module, monkeypatch):
-    monkeypatch.setattr(mscan_module, 'PARAMETERTYPE', NS(COMBO='COMBO', FLOAT='FLOAT', INT='INT', LABEL='LABEL'))
+    monkeypatch.setattr(mscan_module, 'PARAMETERTYPE', NS(COMBO='COMBO', FLOAT='FLOAT', INT='INT', LABEL='LABEL', TEXT='TEXT'))
     settings = mscan_module.MScan.getDefaultSettings(NS(**{k: getattr(mscan_module.MScan, k) for k in dir(mscan_module.MScan) if k.isupper()},
                                                    _offset_changed=None, _signal_changed=None, _setup_changed=None,
                                                    _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None))
@@ -93,7 +93,7 @@ def test_offset_changed_or_failed_outside_the_scan_aborts(mscan_rig, change):
         if change == 'ampr-off':
             mscan_rig.offset.controller._setpoint_cancel.set()
         if change == 'equation':
-            channel.active = False
+            channel.active, channel.equation = False, '2 * 3'
     mscan_rig.on_pause = pause_hook
     prepare(mscan_rig)
     mscan_rig.scan.runScan(lambda: True)
@@ -105,7 +105,7 @@ def test_offset_changed_or_failed_outside_the_scan_aborts(mscan_rig, change):
 
 @pytest.mark.parametrize(('change', 'message'), [
     ('range', 'exceeds allowed'), ('rating', 'exceeds allowed'), ('restoration', 'restoration'),
-    ('off', 'switch the AMPR offset channel ON'), ('equation', 'manual'), ('ampr', 'turn the AMPR ON'),
+    ('off', 'switch the AMPR offset channel ON'), ('equation', 'driven by its equation'), ('ampr', 'turn the AMPR ON'),
     ('unconfirmed', 'not confirmed'), ('monitor', 'Monitor'), ('missing', 'unavailable'), ('old-ampr', 'update MScan and AMPR'),
 ])
 
@@ -122,7 +122,7 @@ def test_preflight_blocks_before_any_command(mscan_rig, change, message):
     if change == 'off':
         channel.enabled = False
     if change == 'equation':
-        channel.active = False
+        channel.active, channel.equation = False, '2 * 3'
     if change == 'ampr':
         mscan_rig.offset.device.isOn = lambda: False
     if change == 'unconfirmed':

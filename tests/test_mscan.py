@@ -116,6 +116,8 @@ def test_selected_pair_only_commands_its_two_psu_rails(mscan_rig):
 
 def test_preflight_rejects_invalid_rail(mscan_rig, attr, value):
     setattr(mscan_rig.psus[0].channels[1], attr, value)
+    if attr == 'active':
+        mscan_rig.psus[0].channels[1].equation = 'PSU_A_CH0'  # Explorer drives it, not the operator
     with pytest.raises(mscan_rig.module.ScanError):
         mscan_rig.scan._prepare()
     assert mscan_rig.psus[0].writes == []
@@ -224,3 +226,92 @@ def test_queued_gui_command_is_discarded_after_stop(mscan_module, monkeypatch):
     assert not t.is_alive()
     app.processEvents()
     assert result == []
+
+
+def test_recorder_ticks_without_a_reading_are_skipped(mscan_rig):
+    # 2026-10-26 lab: DMMR records NaN at each tick without a new reading (about 5 of 66
+    # samples per point); requiring every sample finite left every point of every scan NaN.
+    ticks = iter(range(10_000))
+    mscan_rig.current = lambda: np.nan if next(ticks) % 3 == 0 else 2e-12
+    mscan_rig.scan.runScan(lambda: True)
+    validation = mscan_rig.scan._validation
+    assert validation['status'] == 'completed'
+    assert mscan_rig.scan.outputChannels[0].recordingData == pytest.approx([2e-12] * 3)
+    assert validation['point_status'] == ['acquired'] * 3
+    assert (validation['finite_samples'] < validation['samples']).any()
+
+
+def test_an_infinite_reading_invalidates_its_point(mscan_rig):
+    mscan_rig.current = lambda: np.inf if mscan_rig.psus[0].channels[0].value == 10 else 0.
+    mscan_rig.scan.runScan(lambda: True)
+    assert np.isnan(mscan_rig.scan.outputChannels[0].recordingData[0])
+    assert mscan_rig.scan._validation['point_status'][0] == 'invalid detector data'
+
+
+def test_other_enabled_dmmr_modules_are_recorded_over_the_reference_windows(mscan_rig):
+    # 2026-10-26: record every active DMMR module, not only the selected one.
+    s, r = mscan_rig.scan, mscan_rig
+    extra = NS(name='DMMR_M05', real=True, unit='A', module_address=lambda: 5, enabled=True, initialized=True,
+               acquiring=True, values=History(), getDevice=lambda: r.detector_device)
+    extra.getValues = lambda **kw: extra.values.get()
+    extra.values.data.append(np.nan)  # Same recorder ticks as the reference module.
+    r.on_pause = lambda: extra.values.data.append(np.nan if len(extra.values.data) % 4 == 0 else 3 * r.current())
+    s._plan['extra_detectors'] = [extra]
+    s.outputChannels.append(NS(name='DMMR_M05', recordingData=np.full(3, np.nan)))
+    for key in ('samples', 'finite_samples'):
+        s._validation[key] = np.zeros((3, 2), dtype=int)
+    s.runScan(lambda: True)
+    v = s._validation
+    assert v['status'] == 'completed'
+    assert s.outputChannels[1].recordingData == pytest.approx(3 * s.outputChannels[0].recordingData)
+    assert (v['finite_samples'][:, 1] > 0).all() and (v['finite_samples'][:, 1] <= v['samples'][:, 1]).all()
+    assert v['point_status'] == ['acquired'] * 3
+
+
+def test_an_extra_module_without_readings_never_invalidates_the_reference(mscan_rig):
+    s, r = mscan_rig.scan, mscan_rig
+    silent = NS(name='DMMR_M06', getDevice=lambda: r.detector_device, getValues=lambda **kw: np.array([]))
+    s._plan['extra_detectors'] = [silent]
+    s.outputChannels.append(NS(name='DMMR_M06', recordingData=np.full(3, np.nan)))
+    for key in ('samples', 'finite_samples'):
+        s._validation[key] = np.zeros((3, 2), dtype=int)
+    s.runScan(lambda: True)
+    assert s._validation['point_status'] == ['acquired'] * 3
+    assert np.isnan(s.outputChannels[1].recordingData).all()
+    assert (s._validation['samples'][:, 1] == 0).all()
+
+
+def test_an_inactive_rail_without_equation_is_operator_set(mscan_rig):
+    # Explorer evaluates only inactive channels that have an equation (AMPR shows the flag as
+    # "Manual"); on 2026-10-26 every AMPR channel had it unticked with no equation.
+    mscan_rig.psus[0].channels[1].active = False
+    mscan_rig.psus[0].channels[1].equation = ''
+    assert len(mscan_rig.scan._prepare()['rails']) == 2
+
+
+def test_passes_repeat_the_sweep_in_both_modes(mscan_rig):
+    # User requests 2026-10-26: the same sweep N times in one file, Continuous included.
+    s = mscan_rig.scan
+    s.passes = 3
+    assert s._scan_steps().tolist() == [10., 20., 30.] * 3
+    s.scan_mode, s.time_step_s, s.sweep_rate = s.CONTINUOUS, .04, 250.
+    assert s._passes() == 3 and s._scan_steps().tolist() == [10., 20., 30.] * 3
+    s.scan_mode, s.passes = s.STEPPED, 0
+    with pytest.raises(mscan_rig.module.ScanError, match='Passes'):
+        s._scan_steps()
+
+
+def test_a_multipass_reference_scan_measures_every_pass(mscan_rig):
+    s = mscan_rig.scan
+    s.passes = 2
+    s._plan = s._prepare()
+    s._plan['detectors'] = [mscan_rig.detector]
+    s.inputChannels[0].recordingData = s._scan_steps()
+    s.outputChannels[0].recordingData = np.full(6, np.nan)
+    s._validation.update(point_status=['not acquired'] * 6, rail_v=np.full((6, 2), np.nan), rail_i=np.full((6, 2), np.nan),
+                         window_start=np.full(6, np.nan), window_end=np.full(6, np.nan),
+                         samples=np.zeros((6, 1), dtype=int), finite_samples=np.zeros((6, 1), dtype=int))
+    s.runScan(lambda: True)
+    assert s._validation['status'] == 'completed'
+    assert s.outputChannels[0].recordingData.tolist() == [10., 20., 30.] * 2
+    assert s._plan['metadata']['passes'] == 2 and s._plan['metadata']['points_per_pass'] == 3

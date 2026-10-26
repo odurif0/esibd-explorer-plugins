@@ -20,9 +20,10 @@ def test_running_refresh_tolerates_a_plan_restored_from_file(mscan_module):
     scan = NS(loading=False, settingsMgr=NS(loading=False), pluginManager=NS(loading=False, closing=False),
               finished=False, recording=True, _plan={'metadata': {}}, _sync_dmmr_interval=lambda: None,
               _refresh_completion=lambda rails, running: calls.append((rails, running)),
+              _refresh_readback=lambda rails: calls.append((rails, 'readback')),
               _refresh_offset_readback=lambda running: None, _layout_readonly_fields=lambda: None)
     mscan_module.MScan._refresh_interface(scan)
-    assert calls == [([], True)]
+    assert calls == [([], True), ([], 'readback')]
 
 
 @pytest.mark.parametrize('outcome', ['error', 'raised-error', 'transport-error', 'stopped', 'raised-stopped', 'completed'])
@@ -143,6 +144,43 @@ def test_native_adapter_completion_owner_preserves_point_updates(mscan_module, m
     expected = [('recording', False), ('update', True)] if emit_completion is None else []
     assert notifications == expected
     assert not adapter._running.is_set()
+
+
+def test_native_updates_and_completion_keep_the_extra_dmmr_modules(mscan_module, monkeypatch):
+    # 2026-10-26: every enabled DMMR module is recorded; the native engine counts the reference only.
+    from threading import Event
+    import numpy as np
+
+    windows = []
+    def extra_values(start, end):
+        windows.append((start, end))
+        return [(7e-12, 3, 2)]
+    scan = NS(_cancel=Event(), _plan={'metadata': {}, 'extra_detectors': ['DMMR_M05']},
+              _validation=dict(status='running', error='', point_status=['not acquired'] * 2,
+                               rail_v=np.full((2, 1), np.nan), rail_i=np.full((2, 1), np.nan),
+                               window_start=np.full(2, np.nan), window_end=np.full(2, np.nan),
+                               samples=np.zeros((2, 2), dtype=int), finite_samples=np.zeros((2, 2), dtype=int)),
+              outputChannels=[NS(recordingData=np.full(2, np.nan)), NS(recordingData=np.full(2, np.nan))],
+              _extra_values=extra_values, _gui=lambda action, **kwargs: action(),
+              signalComm=NS(updateRecordingSignal=NS(emit=lambda value: None), scanUpdateSignal=NS(emit=lambda value: None)))
+    adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, lambda *a: None, emit_completion=False)
+    adapter._bind()
+    adapter._apply_updates(dict(state='acquiring', status='running', updates=[
+        dict(index=0, mean=13e-12, rail_v=[10.], rail_i=[.1], window_start=1., window_end=2.,
+             samples=5, finite_samples=4, status='acquired')]))
+    assert windows == [(1., 2.)]
+    assert scan.outputChannels[1].recordingData[0] == 7e-12
+    assert scan._validation['samples'][0].tolist() == [5, 3]
+    assert scan._validation['finite_samples'][0].tolist() == [4, 2]
+    monkeypatch.setattr(adapter, 'start', adapter._running.set)
+    monkeypatch.setattr(adapter, 'step', adapter._running.clear)
+    monkeypatch.setattr(adapter, 'export_result', lambda: dict(data=[13e-12, 15e-12], metadata={},
+        validation=dict(status='completed', error='', point_status=['acquired'] * 2,
+                        samples=[[5], [6]], finite_samples=[[4], [6]])))
+    adapter.run()
+    assert scan._validation['samples'].tolist() == [[5, 3], [6, 0]]
+    assert scan._validation['finite_samples'].tolist() == [[4, 2], [6, 0]]
+    assert scan.outputChannels[1].recordingData[0] == 7e-12
 
 
 @pytest.mark.parametrize(('native_confirmation', 'native_revision', 'python_confirmation'),
@@ -597,9 +635,10 @@ def test_native_command_dispatch_still_expires_without_late_write(mscan_module, 
     ('interface', '1.5'), ('legacy-ini', '1'), ('legacy-hdf', '1'), ('native-start', '1'),
     ('readiness', '1'), ('readiness', '1.5'), ('local-stop', '1'),
     ('limits', '1'), ('limits', '1.5'), ('current-limit', '1'), ('foldback', '1'), ('auto-save', '1'), ('dock', '1'),
+    ('multi-dmmr', '1'), ('multipass', '1'),
     ('edge-delays', '1'), ('edge-delays', '1.5'), ('edge-change', '1'),
     ('windows-settings', '1'), ('windows-save', '1'), ('windows-bom', '1'),
-    ('continuous', '1'), ('continuous', '1.5'), ('continuous-stop', '1'),
+    ('continuous', '1'), ('continuous', '1.5'), ('continuous-stop', '1'), ('continuous-multipass', '1'),
     ('continuous-ilim', '1'), ('continuous-deadline', '1'), ('display-close', '1'),
     ('cadence', '1'), ('cadence', '1.5'),
     ('setpoint-stepped', '1'), ('setpoint-continuous', '1'),
@@ -643,11 +682,13 @@ def run(scenario, target, app_holder=None):
     app.setStyleSheet('QWidget { background: #20232a; color: #eeeeee; }'
                      'QHeaderView::section { background: #41464f; color: #eeeeee; }'
                      'QAbstractItemView { alternate-background-color: #30343c; }')
-    errors = []
+    errors, warnings = [], []
     def log(**kw):
         print('LOG', kw)
         if kw.get('flag') == core.PRINT.ERROR:
             errors.append(kw.get('message'))
+        if kw.get('flag') == core.PRINT.WARNING:
+            warnings.append(kw.get('message'))
     class Manager(NS):
         def __getattr__(self, name):
             return getattr(plugins, name, None)
@@ -771,6 +812,13 @@ def run(scenario, target, app_holder=None):
     detector_device.channels.append(detector)
     detector.initGUI({'Name': 'DMMR_M03', 'Module': '3'})
     detector.values = core.DynamicNp(max_size=100000)
+    if scenario == 'multi-dmmr':
+        # A second enabled module of the same DMMR, recorded over the reference module's windows.
+        second = dmmr.DMMRChannel(detector_device, detector_device.tree)
+        detector_device.tree.addTopLevelItem(second)
+        detector_device.channels.append(second)
+        second.initGUI({'Name': 'DMMR_M05', 'Module': '5'})
+        second.values = core.DynamicNp(max_size=100000)
     detector_device.loading = False
     if scenario.startswith(('dmmr-', 'rate-')):
         # The real global Setting, including the native intervalChanged event,
@@ -919,6 +967,8 @@ def run(scenario, target, app_holder=None):
     scan.sweep_rate = 25.
     scan.settling_s = .025
     scan.integration_s, scan.settle_timeout, scan.voltage_tolerance = .055, 1., 1.
+    passes = 2 if scenario == 'multipass' else 1  # The same sweep repeated (user request 2026-10-26).
+    scan.passes = passes
     scan.loading = False
     scan._refresh_interface()
     measured = scan.settingsMgr.settings[scan.DETECTOR]
@@ -1067,7 +1117,7 @@ def run(scenario, target, app_holder=None):
             toolbar = display.titleBar
             navigation_actions = list(display.navToolBar.actions())
             assert any(action in toolbar.actions() for action in navigation_actions)
-            assert any(action.text() == 'Data to Clipboard.' for action in toolbar.actions())
+            assert any(action.text().startswith('Data to Clipboard') for action in toolbar.actions())
             display.closeGUI()
             assert not toolbar.actions()  # clipboard too, not only Matplotlib navigation
             for widget in ((display, toolbar) if cycle % 2 else (toolbar, display)):
@@ -1341,8 +1391,8 @@ def run(scenario, target, app_holder=None):
         assert 'Module 5 — DMMR_M05' in measured.items, (measured.items, other.name, scan.finished, scan.recording,
             scan.loading, scan.settingsMgr.loading, manager.loading, [c.name for c in dm.channels()])
         assert measured.value == 'Module 3 — DMMR_M03'
-        # The second *available* detector deliberately has no sample history.
-        # It must not be acquired just because it is a choice in the combo.
+        # Being a choice in the combo acquires nothing before a scan; during a scan every
+        # enabled module is recorded over the reference module's windows.
         assert len(other.values.get()) == 0
         detector_device.recording = False
         assert not scan.initScan() and 'recording' in scan.scan_status
@@ -1637,6 +1687,7 @@ def run(scenario, target, app_holder=None):
         assert scan.settingsMgr.settings[scan.RATE].value == 25.
         assert scan.settingsMgr.settings[scan.RATE].text(0) == 'Sweep rate (V/s)'
         assert scan.settingsMgr.settings[scan.STEP].isHidden()
+        assert not scan.settingsMgr.settings[scan.PASSES].isHidden()  # Continuous multipass (2026-10-26)
         assert scan._scan_steps().tolist() == [60., 70., 80.]
         assert scan.scan_status == 'Ready to scan', scan.scan_status
         scan.saveSettings(file=target / 'continuous.ini')
@@ -1662,6 +1713,9 @@ def run(scenario, target, app_holder=None):
                     time.sleep(.85)  # Qt callback arrives too late: no stale command permitted.
                 return original(targets, latest=latest, **kwargs)
             scan._command = late_callback
+        completed = scenario in ('continuous', 'continuous-multipass')
+        passes = 2 if scenario == 'continuous-multipass' else 1  # Continuous multipass (user request 2026-10-26).
+        scan.passes = passes
         QTest.mouseClick(start_button, Qt.MouseButton.LeftButton)
         thread = scan.runThread
         assert thread is not None and start_button.text() == 'Stop scan'
@@ -1687,14 +1741,17 @@ def run(scenario, target, app_holder=None):
         assert scan.finished and scan.file in exports, (scan.scan_status, exports)
         validation = scan._validation
         print('CONTINUOUS_RESULT', validation['status'], validation['error'], hw.calls)
-        expected = 'completed' if scenario == 'continuous' else 'stopped' if scenario == 'continuous-stop' else 'error'
+        expected = 'completed' if completed else 'stopped' if scenario == 'continuous-stop' else 'error'
         assert validation['status'] == expected, validation
         assert hw.outputs == (True, True) and hw.enabled
         assert not any(call[0] == 'current' for call in hw.calls)
         assert start_button.text() == 'Start scan'
-        if scenario == 'continuous':
+        if completed:
             assert hw.voltages == {0: 100., 1: 110.}
             assert np.isfinite(scan.outputChannels[0].recordingData).all()
+            assert len(scan.outputChannels[0].recordingData) == 3 * passes
+            assert scan._plan['metadata']['passes'] == passes and scan._plan['metadata']['points_per_pass'] == 3
+            assert validation['point_status'] == ['acquired during sweep'] * 3 * passes
             assert not errors, errors
         else:
             assert not any(call[0] == 'voltage' and call[2] in (80., 100., 110.) for call in hw.calls), hw.calls
@@ -1710,6 +1767,7 @@ def run(scenario, target, app_holder=None):
             assert f['MScan/Settings/Scan mode'].attrs['Value'] == scan.CONTINUOUS
             assert f['MScan/Settings/Time step (s)'].attrs['Value'] == .4
             assert f['MScan/Validation'].attrs['status'] == expected
+            assert f['MScan/Input Channels/Amplitude'][:].tolist() == [60., 70., 80.] * passes
             raw = f['MScan/Validation/Continuous']
             times, currents = raw['detector_time'][:], raw['detector_current'][:]
             assert len(times) == len(currents) and len(times) > 0
@@ -1725,7 +1783,7 @@ def run(scenario, target, app_holder=None):
         assert np.array_equal(scan.outputChannels[0].recordingData, values, equal_nan=True)
         scan.plot(done=True)
         QTest.qWait(30)
-        assert scan.display.axes[0].get_xlabel() == 'Commanded amplitude A (V)'
+        assert scan.display.axes[0].get_xlabel() == 'PSU A, commanded (V)'
         assert scan.settingsMgr.settings[scan.MODE].getWidget().isEnabled()
         window.grab().save(str(target / 'continuous-result.png'))
         sources_widget.hide()
@@ -1742,10 +1800,10 @@ def run(scenario, target, app_holder=None):
         assert scan.settingsMgr.settings[scan.SETTLING].text(0) == scan.SETTLING
         assert scan.time_step_s == .4
         # This chosen continuous schedule is slower, not an automatic fast mode.
-        assert float(scan.scantime.split()[0]) < 1.25
+        assert float(scan.scantime.split()[0]) < 1.25 * passes
         # Changing the next scan's mode must not relabel the loaded data.
         scan.plot(done=True)
-        assert scan.display.axes[0].get_xlabel() == 'Commanded amplitude A (V)'
+        assert scan.display.axes[0].get_xlabel() == 'PSU A, commanded (V)'
         assert np.array_equal(scan.outputChannels[0].recordingData, values, equal_nan=True)
         if scenario == 'continuous':
             import configparser
@@ -1819,7 +1877,9 @@ def run(scenario, target, app_holder=None):
         scan._refresh_interface()
         assert scan.scan_status == running_status and start_button.isEnabled()
         detector_device.recording = True
-    assert [c.name for c in scan.outputChannels] == ['DMMR_M03']
+    # Every enabled module of the DMMR is recorded, the selected reference first (2026-10-26).
+    assert [c.name for c in scan.outputChannels] == (['DMMR_M03', 'DMMR_M05'] if scenario in ('multi-dmmr', 'interface')
+                                                   else ['DMMR_M03'])
     assert scan.channelTree is None and scan.inputChannelGroupItem is None
     assert 'PSU_A' in scan.settingsMgr.settings[scan.SUPPLIES].value
     assert 'CH0 = CH1 = A' in scan.settingsMgr.settings[scan.SUPPLIES].value
@@ -1833,10 +1893,20 @@ def run(scenario, target, app_holder=None):
         scan.loadSettings(useDefaultFile=True)
         assert scan.settingsMgr.settings == before_settings
         assert scan.step == 10.
-    interrupted = False
+    interrupted = closing_refused = False
     deadline = time.monotonic() + 12
     while thread.is_alive() and time.monotonic() < deadline:
         app.processEvents()
+        if scenario == 'auto-save' and not closing_refused and np.isfinite(scan.outputChannels[0].recordingData[0]):
+            # Live: the acquired point is drawn, in pA, inside the view.
+            ydata = np.asarray(scan.display.ms.get_ydata(), dtype=float)
+            (y0, y1) = scan.display.axes[0].get_ylim()
+            assert ydata[0] == pytest.approx(scan.outputChannels[0].recordingData[0] * 1e12)
+            assert min(y0, y1) <= ydata[0] <= max(y0, y1), (ydata, y0, y1)
+            # 2026-10-26 lab: closing the plot during a scan was refused but dropped its label
+            # axis; every later update raised and the last one never saved scan 012.
+            scan.display.closeGUI()
+            closing_refused = True
         if scenario in ('stop', 'local-stop', 'off', 'current-limit', 'foldback', 'edge-change') and not interrupted and np.isfinite(scan.outputChannels[0].recordingData[0]):
             if scenario == 'edge-change':
                 amx_snapshot['switches'][0]['trigger_delay']['rise'] += 1
@@ -1869,6 +1939,17 @@ def run(scenario, target, app_holder=None):
         assert native_completions == [(True, True, True)], native_completions
         assert native_saves == [True], native_saves
         assert exports.count(scan.file) == 1
+        assert closing_refused and scan.labelAxis is scan.display.axes[0]
+        # Autoscale follows the data; an operator zoom switches it to manual, a click back.
+        ax = scan.display.axes[0]
+        assert scan.display.autoscaleAction.state
+        ax.set_xlim(65, 75)
+        assert not scan.display.autoscaleAction.state
+        scan.plot(update=True)
+        assert ax.get_xlim() == (65, 75)
+        scan.display.autoscaleAction.trigger()
+        assert scan.display.autoscaleAction.state
+        assert ax.get_xlim()[0] < 60 and ax.get_xlim()[1] > 80, ax.get_xlim()
     print('RESULT', scan._validation, 'HW', hw.calls)
     assert start_button.text() == 'Start scan'
     assert start_button.isEnabled() == (scenario == 'auto-save')  # wait until the file has been saved
@@ -1893,8 +1974,25 @@ def run(scenario, target, app_holder=None):
             assert scan._validation['point_status'][1] == 'invalid detector data'
         else:
             assert scan.outputChannels[0].recordingData == pytest.approx(
-                [math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
+                [math_value(v) for v in (60, 70, 80)] * passes, rel=1e-6, abs=1e-20)
         assert (scan._validation['samples'] > 0).all()
+        if scenario == 'multipass':
+            assert scan._plan['metadata']['passes'] == 2 and scan._plan['metadata']['points_per_pass'] == 3
+            scan.plot(done=True)
+            assert list(scan.display.ms.get_xdata()) == [60., 70., 80.]
+            assert scan.display.ms.get_ydata() == pytest.approx(
+                [math_value(v) * 1e12 for v in (60, 70, 80)], rel=1e-6)
+            assert len(scan.display.pass_lines) == 2 and scan.display.ms.get_label() == 'DMMR_M03 (mean of 2)'
+            assert scan.display.pass_lines[1].get_color() == scan.display.ms.get_color()
+        if scenario == 'multi-dmmr':
+            assert scan.outputChannels[1].recordingData == pytest.approx(2 * scan.outputChannels[0].recordingData, rel=1e-6)
+            assert scan._validation['samples'].shape == scan._validation['finite_samples'].shape == (3, 2)
+            assert (scan._validation['finite_samples'] > 0).all()
+            scan.plot(done=True)
+            assert [line.get_label() for line in (scan.display.ms, *scan.display.extra_lines)] == ['DMMR_M03', 'DMMR_M05']
+            assert scan.display.axes[0].get_legend() is not None
+            assert scan.display.axes[0].get_ylabel() == 'Current (pA)'
+    assert not any('Plot not updated' in str(message) for message in warnings), warnings
     assert not any(call[0] in ('outputs', 'device', 'range') for call in hw.calls), hw.calls
     assert 'valid /' in scan.settingsMgr.settings[scan.SAMPLES].value
     if scenario != 'auto-save':
@@ -1904,10 +2002,15 @@ def run(scenario, target, app_holder=None):
         if scenario == 'auto-save':
             assert {'DMMR module', 'Settling time (s)', 'Measurement time (s)'} <= set(f['MScan/Settings'])
             assert not {'Notes', 'Display', 'Wait', 'Wait long', 'Average', 'Large step', 'Channel'} & set(f['MScan/Settings'])
-        assert f['MScan/Input Channels/Amplitude'][:].tolist() == [60, 70, 80]
+        assert f['MScan/Input Channels/Amplitude'][:].tolist() == [60, 70, 80] * passes
         assert np.array_equal(f['MScan/Output Channels/DMMR_M03'][:], scan.outputChannels[0].recordingData, equal_nan=True)
         assert f['MScan/Validation'].attrs['status'] == scan._validation['status']
         assert np.array_equal(f['MScan/Validation/rail_i'][:], scan._validation['rail_i'], equal_nan=True)
+        assert f['MScan/Validation'].attrs['reference_channel'] == 'DMMR_M03'
+        if scenario == 'multi-dmmr':
+            assert np.array_equal(f['MScan/Output Channels/DMMR_M05'][:], scan.outputChannels[1].recordingData, equal_nan=True)
+            assert f['MScan/Validation'].attrs['extra_channels'] == '["DMMR_M05"]'
+            assert f['MScan/Validation/samples'].shape == (3, 2)
     scan.plot(done=True)
     QTest.qWait(30)
     status_label = scan.settingsMgr.settings[scan.STATUS].label
@@ -1915,7 +2018,8 @@ def run(scenario, target, app_holder=None):
         Qt.TextFlag.TextWordWrap, status_label.text())
     assert status_label.height() >= status_bounds.height(), (status_label.text(), status_label.size(), status_bounds)
     assert scan.display.ms.get_marker() == '.'  # isolated valid points must remain visible beside NaNs
-    assert np.array_equal(scan.display.ms.get_ydata(), scan.outputChannels[0].recordingData, equal_nan=True)
+    shown = scan.outputChannels[0].recordingData.reshape(passes, -1).mean(axis=0) * 1e12  # mean of passes, pA
+    assert np.allclose(scan.display.ms.get_ydata(), shown, equal_nan=True, rtol=1e-12, atol=0)
     window.grab().save(str(target / f'mscan-{scenario}.png'))
     if scenario not in ('stop', 'local-stop', 'off', 'invalid', 'current-limit', 'foldback', 'edge-change'):
         original = scan.outputChannels[0].recordingData.copy()
@@ -1943,12 +2047,9 @@ def run(scenario, target, app_holder=None):
             assert [c.name for c in scan.outputChannels] == ['DMMR_M03', 'Former_detector']
             assert np.isnan(scan._validation['rail_i']).all()
             scan.plot(done=True)
-            scan.display.displayComboBox.setCurrentText('Former_detector')
-            app.processEvents()
-            assert np.array_equal(scan.display.ms.get_ydata(), original * 2), (
-                scan.getOutputIndex(), scan.display.displayComboBox.currentText(),
-                scan.recording, scan.loading, scan.initializing, scan.settingsMgr.loading,
-                scan.display.ms.get_ydata(), scan.outputChannels[1].recordingData, original * 2)
+            # Every recorded output is plotted, the first one being the reference module.
+            assert [line.get_label() for line in scan.display.extra_lines] == ['Former_detector']
+            assert np.array_equal(scan.display.extra_lines[0].get_ydata(), original * 2 * 1e12)
             scan._refresh_interface()
             assert scan.displayDefault == 'DMMR_M03'
             assert len(scan.outputChannels) == 2
@@ -1962,7 +2063,8 @@ def run(scenario, target, app_holder=None):
         assert not errors, errors
     scan.finished = True
     scan._refresh_interface()
-    assert scan.scantime == '0.265 s + ramping/data delays', scan.scantime
+    # Every pass settles and measures each point again (2 × 3 × (0.025 + 0.055) + 0.025 s).
+    assert scan.scantime == ('0.505' if passes == 2 else '0.265') + ' s + ramping/data delays', scan.scantime
     assert scan.settingsMgr.settings[scan.TIMEOUT].isHidden()
     scan.toggleAdvanced(advanced=True)
     assert not scan.settingsMgr.settings[scan.TIMEOUT].isHidden()
@@ -2079,14 +2181,18 @@ def run(scenario, target, app_holder=None):
         timer.stop()
         app.processEvents()
         assert not worker.is_alive() and scan._validation['status'] == 'completed', scan._validation
-        assert [c.name for c in scan.outputChannels] == ['DMMR_Renamed']
+        # The new reference first, then the other enabled module, each with its own current.
+        assert [c.name for c in scan.outputChannels] == ['DMMR_Renamed', 'DMMR_M03']
         assert scan.outputChannels[0].recordingData == pytest.approx(
             [2 * math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
+        assert scan.outputChannels[1].recordingData == pytest.approx(
+            [math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
         assert scan._plan['metadata']['detector'] == dict(device='DMMR', module=5, channel='DMMR_Renamed',
                                                        interval_ms=detector_device.interval)
         scan.saveData(target / 'module-5.mscan.h5')
         with h5py.File(target / 'module-5.mscan.h5') as f:
-            assert list(f['MScan/Output Channels']) == ['DMMR_Renamed']
+            assert sorted(f['MScan/Output Channels']) == ['DMMR_M03', 'DMMR_Renamed']
+            assert f['MScan/Validation'].attrs['reference_channel'] == 'DMMR_Renamed'
         scan.finished = True
     if scenario == 'dock':
         from PyQt6.QtWidgets import QMainWindow

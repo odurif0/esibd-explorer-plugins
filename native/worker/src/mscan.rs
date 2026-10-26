@@ -50,6 +50,14 @@ const POLL_S: f64 = 0.05;
 fn missing_number() -> f64 {
     f64::NAN
 }
+fn one_pass() -> u64 {
+    1
+}
+
+// Multipass (user request 2026-10-26): the same sweep N times in one file, in Step by step mode.
+const MAX_PASSES: u64 = 1000;
+const MAX_POINTS: u64 = 1_000_000;
+
 fn stepped() -> String {
     STEPPED.to_owned()
 }
@@ -155,6 +163,8 @@ struct Settings {
     sweep_rate: f64,
     #[serde(default = "missing_number", deserialize_with = "read_number")]
     offset_factor: f64,
+    #[serde(default = "one_pass")]
+    passes: u64,
     #[serde(default)]
     metadata: Value,
 }
@@ -196,7 +206,23 @@ impl Settings {
 
     fn steps(&self) -> Result<Vec<f64>> {
         let step = self.command_step()?;
-        amplitude_steps(self.start, self.stop, step)
+        let sweep = amplitude_steps(self.start, self.stop, step)?;
+        if !(1..=MAX_PASSES).contains(&self.passes) {
+            return Err(Error::argument("Passes must be between 1 and 1000."));
+        }
+        if sweep.len() as u64 * self.passes > MAX_POINTS {
+            return Err(Error::argument(
+                "Passes × points must not exceed 1,000,000.",
+            ));
+        }
+        // Step by step: each pass returns to the start like any other step. Continuous: each pass
+        // ends like a single sweep, then approaches its start and settles again (Run::after_sweep).
+        Ok(sweep
+            .iter()
+            .copied()
+            .cycle()
+            .take(sweep.len() * self.passes as usize)
+            .collect())
     }
 
     fn validate(&self) -> Result<Vec<f64>> {
@@ -852,6 +878,8 @@ impl Run {
             json!({})
         };
         metadata["mode"] = json!(settings.mode);
+        metadata["passes"] = json!(settings.passes);
+        metadata["points_per_pass"] = json!(steps.len() as u64 / settings.passes);
         metadata["command_step_v"] = json!(settings.command_step()?);
         metadata["requested_rate_v_s"] = if settings.mode == CONTINUOUS {
             json!(settings.sweep_rate.copysign(settings.stop - settings.start))
@@ -1265,8 +1293,11 @@ impl Run {
     fn store(&mut self, window: Pending, samples: &[f64], continuous: bool) {
         let count = samples.len();
         let valid = samples.iter().filter(|v| v.is_finite()).count();
-        let mean = if count > 0 && valid == count {
-            samples.iter().sum::<f64>() / count as f64
+        // DMMR records NaN at each recorder tick without a new reading (2026-10-26 lab: about 5 of
+        // 66 samples per point, so every point was NaN): average the readings present. An infinite
+        // value is a wrong reading, not a missing one, and invalidates the point.
+        let mean = if valid > 0 && !samples.iter().any(|v| v.is_infinite()) {
+            samples.iter().filter(|v| v.is_finite()).sum::<f64>() / valid as f64
         } else {
             f64::NAN
         };
@@ -1476,7 +1507,7 @@ impl Run {
                 }
                 if self.phase == Phase::Draining {
                     if self.pending.is_empty() {
-                        self.issue(obs, true, None, None)?;
+                        self.after_sweep(obs)?;
                     }
                 } else if obs.mono >= self.deadline {
                     if !ready || !self.ready_seen {
@@ -1492,7 +1523,8 @@ impl Run {
                     let mut previous = self.pending(obs);
                     obs.detector
                         .cadence(obs.wall, duration, Some(previous.start))?;
-                    if self.index + 1 < self.steps.len() {
+                    let per_pass = self.steps.len() / self.settings.passes.max(1) as usize;
+                    if !(self.index + 1).is_multiple_of(per_pass) {
                         self.index += 1;
                         self.issue(obs, false, Some(previous), Some(self.deadline + duration))?;
                     } else {
@@ -1507,7 +1539,7 @@ impl Run {
                         self.phase = Phase::Draining;
                         self.finish_windows(watermark);
                         if self.pending.is_empty() {
-                            self.issue(obs, true, None, None)?;
+                            self.after_sweep(obs)?;
                         }
                     }
                 }
@@ -1515,6 +1547,18 @@ impl Run {
             Phase::AwaitCommand | Phase::Finished => {}
         }
         Ok(())
+    }
+
+    /// End of a continuous sweep: restore after the last pass, otherwise approach the next pass's
+    /// first amplitude without a cadence deadline and settle, exactly like the first pass.
+    fn after_sweep(&mut self, obs: &Observation) -> Result<()> {
+        if self.index + 1 < self.steps.len() {
+            self.index += 1;
+            self.cutoff = None;
+            self.issue(obs, false, None, None)
+        } else {
+            self.issue(obs, true, None, None)
+        }
     }
 
     fn terminate(&mut self, status: &str, message: &str, obs: Option<&Observation>) {

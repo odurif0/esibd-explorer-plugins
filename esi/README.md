@@ -228,7 +228,10 @@ the UI or a replacement connection. Failed activations are never replayed.
 
 After a CGC receive/protocol error (`-7` through `-14`, or `-100`), the next serialized
 I/O operation first uses the manufacturer's `Purge` recovery routine. The failed
-command is not retried. Successful readback resets the consecutive-error count;
+command is not retried, except within the OFF discharge check: a measurement step
+(ADC selection, ready flags or ADC read, never an output command) that gets a
+receive error (-10/-11/-12) is purged and repeated once. On 2026-10-26 a single -10
+to an ADC selection left an OFF unconfirmed. Successful readback resets the consecutive-error count;
 persistent errors close communication. Output requests are logged with their
 module, ON/OFF state and target so future failures can be correlated with HT clicks.
 
@@ -242,6 +245,8 @@ three consecutive fresh measurement rounds** before the port closes; the console
 reports `ESI HV discharge verified after N s`. The check has a 120-second deadline; a
 blocked DLL is handled by the transport watchdog. ON is refused until the check ends.
 Explorer closing waits for its verdict (at most about 2 min) instead of interrupting it.
+**Close communication** clicked during the check returns at once: the check closes the port
+itself (2026-10-26: waiting for it there froze Explorer for 33 s).
 Repeated communication-release requests cannot close the same owner twice.
 The log records the start of shutdown, and errors identify the failed ADC operation
 and module. A cleanup failure cannot hide the original discharge error. ADC

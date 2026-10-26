@@ -49,8 +49,12 @@ routine experimental use. These checks do not certify physical shutdown.
    and retained in the scan metadata; their exact phase is not inferred.
    Changing them during a scan aborts it. Update AMX and MScan together.
 3. Select **DMMR module**, shown as its physical number and channel name.
-   Choose the module wired to the ion collector after the quadrupole.
-   Only this module's current is acquired; no placeholder `Detector` is used.
+   Choose the module wired to the ion collector after the quadrupole. It is the
+   **reference**: its samples define each point's window, cadence and validity.
+   Every other **enabled** module of the same DMMR is also recorded and plotted,
+   averaged over the same windows (all modules share the DMMR time axis); such a
+   module never stops the scan, and a point it cannot read stays NaN for it only.
+   No placeholder `Detector` is used.
    **DMMR interval (ms)** edits the live DMMR acquisition/recording setting,
    shared by **all** its modules. It does not change the ADC configuration.
 4. Set **Amplitude from / to (V)** within **Allowed amplitude (V)**.
@@ -103,8 +107,8 @@ The **msScan** settings list belongs to this scan; Explorer's global
   follows From/To. For example, 5 V/s and 0.2 s give increments of 1 V.
   Changing Time step preserves the requested speed, not the old voltage step.
   **Amplitude step** is hidden and ignored in this mode, but retained for stepped
-  scans. **Initial/final settling** applies at the first amplitude and on return,
-  not between scan points. New amplitudes are requested at Time step intervals;
+  scans. **Initial/final settling** applies at the first amplitude of each pass and
+  on return, not between scan points. New amplitudes are requested at Time step intervals;
   DMMR samples are averaged over each actual interval, **including transitions**.
   The last amplitude also gets a full interval before returning.
 - This continuous mode is **PC-timed increments, not a hardware analogue ramp**.
@@ -139,20 +143,26 @@ The **msScan** settings list belongs to this scan; Explorer's global
   ADC conversion rate remains unconfirmed.
 - **Minimum duration** is a lower bound. Step by step: all settling and
   measurement windows plus final settling. Continuous: one time step per
-  amplitude plus initial/final settling. Approach/return, communication,
+  amplitude plus one settling per pass and the final settling. Approach/return, communication,
   scheduling and waiting for the last DMMR sample add time. **Continuous is not
   inherently faster**: duration depends on voltage step and timing.
-- Only samples timestamped inside the measurement window contribute. No
-  samples, invalid samples or unacquired points remain NaN, never invented
-  zeroes or averages hiding invalid data. No background subtraction is applied.
+- Only samples timestamped inside the measurement window contribute. The DMMR
+  records NaN at each recorder tick without a new reading; those are skipped and
+  the point is the mean of the readings present, with **valid / total** samples
+  saved per point (2026-10-26 lab: about 5 of 66 samples per point were such
+  ticks, and requiring every sample finite left every point NaN). A window with
+  no reading, an infinite reading or an unacquired point stays NaN, never an
+  invented zero. No background subtraction is applied.
 
 Amplitude **A** means **Vpos = +A, Vneg = −A**, relative to the PSU reference,
 not peak-to-peak voltage. Both PSU setpoints are positive magnitudes.
 Other outputs sharing these supplies are affected; external offsets are not
 included. The AMX frequency, duty cycle and routing stay unchanged.
 
-The result is **current versus amplitude**, not a calibrated m/z axis.
-In continuous mode, the axis explicitly says **Commanded amplitude A (V)**:
+The result is **current versus amplitude**, not a calibrated m/z axis. The plot
+shows every recorded module in **pA** with a legend (files keep amperes); the
+x axis names the driven supply, e.g. **PSU D (V)**. In continuous mode it says
+**PSU D, commanded (V)**:
 there is no claim of simultaneous voltage/current measurement or interpolation
 of voltage through a transition. Check peak positions and widths against
 stepped acquisition on the real setup before relying on a continuous spectrum.
@@ -203,11 +213,41 @@ ranges/limits or calling DLLs. Equations cannot control the same PSU channels
 during a scan. Rail updates are coordinated, not electrically simultaneous.
 Controls are locked until acquisition and saving finish.
 
+## Plot, readback and files
+
+- **Passes**: the same sweep is repeated this many times in one file, in both modes.
+  Step by step: each pass returns to the start like any other step (commanded, settled,
+  measured). Continuous: each pass ends like a single sweep (last window closed and
+  drained), then the PSU returns to the first amplitude without a timed deadline and
+  settles for `Initial/final settling` before the next timed sweep; detector samples
+  between passes stay in the raw arrays but belong to no point. Every point of every
+  pass is kept, the plot shows each pass faintly and the mean of the passes per module
+  (`(mean of N)` in the legend), and the duration estimate includes every pass.
+  `Validation/setup` records `passes` and `points_per_pass`; the arrays hold the passes
+  one after the other.
+- **Autoscale** (title bar of the plot): the view follows the data, also during a
+  scan. Zooming or panning switches to manual scale; a click follows the data again.
+  **Data to Clipboard** copies the amplitude and each current in pA.
+- **PSU readback** shows each driven rail live: measured voltage (Monitor) and the
+  setpoint confirmed by the PSU.
+- Each scan is saved to `<Data path>/MScan/<YYYY-MM-DD>/` as
+  `<date>_<time>[_<File name>]_PSU-<X>_<from>-<to>V.h5`, for example
+  `2026-10-26_14-46-27_essai1_PSU-D_0-150V.h5`. **File name** is optional; letters,
+  digits, `-` and `_` are kept. Nothing comes from Explorer's session fields
+  (substrate, molecule, session type, measurement number), and an existing file is
+  never overwritten (`_2` is added).
+- Explorer refuses to close the plot while a scan runs. On 2026-10-26 that refused
+  close still broke every later plot update, the last one before saving included,
+  and the scan was lost. The plot now changes nothing on a refused close, and a
+  plot fault never prevents the save.
+
 ## Files and upgrades
 
-The `.mscan.h5` file retains planned amplitudes, current averages, sample counts,
+The scan file retains planned amplitudes, current averages, sample counts,
 NaN gaps, acquisition windows, point status, PSU voltage/current readbacks,
-limits, return setpoints, AMX waveform and DMMR module identity. Continuous scans
+limits, return setpoints, AMX waveform and DMMR module identity. **Validation**
+names the reference module (`reference_channel`) and the other recorded modules
+(`extra_channels`); `samples` and `finite_samples` have one column per module. Continuous scans
 also retain the detector cadence used for preflight, requested sweep speed,
 computed voltage step and configured DMMR interval. Device
 configurations are also archived using Explorer's normal mechanism. Continuous
@@ -231,7 +271,7 @@ Old MScan settings are converted: `Display` becomes the selected DMMR module,
 never silently replaced. The former **CH0-CH3** selection blocks Start until
 one physical pair is explicitly selected; it never silently changes the wiring.
 Old data files, including multiple saved signals,
-remain viewable; select their curves below the plot. Importing an old settings
+remain viewable; every saved signal is plotted. Importing an old settings
 file does not rewrite it. Notes are metadata, not a scan control.
 INI settings are read and written as UTF-8, including files with a Windows BOM;
 module names and saved selections do not depend on the Windows locale.

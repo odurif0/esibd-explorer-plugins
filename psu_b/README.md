@@ -118,16 +118,23 @@ Each step adds its serial round trips, so the actual rate is below step / interv
 Reconfiguration retains the disable/verification sequence, and range switching
 still requires measured discharge. A failed check triggers output-disable recovery.
 
+**Link CH1 to CH0.** The check box above the channel cards (also the advanced setting
+`Link CH1 to CH0`, kept between sessions) makes CH1's `Vset` and `Ilim` follow CH0:
+ticking it sends CH0's values to CH1, then a value validated on CH0 is sent to both
+channels, and CH1's fields are greyed. Outputs and ranges stay separate. A settings load
+never sends anything; only a tick in the panel does.
+
 **Last values.** While connected, the plugin remembers the `Vset` and `Ilim` the
 PSU holds (`<Explorer config path>/PSU_B_last_setpoints.json`, with the COM port).
-At the next connection in manual mode (`Operating config` `-1`), a channel whose
-output is OFF and whose PSU now holds other values (0 V after the shutdown, which
-zeroes `Vset` and `Ilim`, or after a power cycle) gets its last values **proposed**
-in the panel, in italics, and its `Vset` in the channel table: nothing is sent
-until you validate the field or turn the output ON, which applies the panel. A
-stored config, a live output, another PSU on this COM port or values outside the
-channel limits are never proposed; a setpoint requested by a scan, Transmission or
-UCM, a config load or a disconnection drops the proposal. After an Explorer crash,
+At the next connection, also in a new Explorer session and with an `Operating config`
+selected (it is applied only when loaded), a channel whose output is OFF and whose
+PSU now holds other values (0 V after the shutdown, which zeroes `Vset` and `Ilim`,
+or after a power cycle) gets its last values **proposed** in the panel, in italics,
+and its `Vset` in the channel table: nothing is sent until you validate the field or
+turn the output ON, which applies the panel. A live output, another PSU on this COM
+port or values outside the channel limits are never proposed; a setpoint requested
+by a scan, Transmission or UCM, a config load (button or PSU ON with a config) or a
+disconnection drops the proposal. After an Explorer crash,
 the PSU is adopted as it runs instead (see the main README).
 
 ## PSU Semantics

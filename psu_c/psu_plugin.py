@@ -1268,6 +1268,7 @@ class PSUDevice(Device):
     OUTPUTS = "Outputs"
     AVAILABLE_CONFIGS = "Available configs"
     INTERLOCK_MONITORING = "Interlock monitoring"
+    LINK_CHANNELS = "Link CH1 to CH0"
     RAMP_STEP = "Ramp step (V)"
     RAMP_STEP_INTERVAL = "Ramp step interval (s)"
 
@@ -1765,6 +1766,9 @@ class PSUDevice(Device):
         )
         self._cancel_manual_panel_apply()
         state = {"setpoints_only": True, key: {channel_index: target}}
+        if channel_index == 0 and self._channels_linked():
+            state[key][1] = target
+            self._show_linked_value(field, target)
         self._submit_manual_panel_state(state)
         # Reflect any coercion by the standard Channel's user-defined limits,
         # including on Enter (which keeps focus in the validated field).
@@ -1774,6 +1778,52 @@ class PSUDevice(Device):
                 widget.setValue(channel.value)
             finally:
                 widget.blockSignals(blocked)
+
+    def _channels_linked(self) -> bool:
+        return _coerce_bool(getattr(self, "link_channels", False), False)
+
+    def _show_linked_value(self, field: str, value: float) -> None:
+        widget = (getattr(self, "manualPanelControls", {}) or {}).get(1, {}).get(field)
+        if widget is not None:
+            blocked = widget.blockSignals(True)
+            try:
+                widget.setValue(value)
+            finally:
+                widget.blockSignals(blocked)
+
+    def _link_box_toggled(self, checked: bool) -> None:
+        """Only an operator tick sends CH0's setpoints to CH1, never a settings load."""
+        if getattr(self, "_linkSyncing", False):
+            return
+        self.link_channels = bool(checked)
+        self._update_manual_panel()
+        if checked and self._manual_controls_ready()[0]:
+            ch0, controls = self._channel_by_number(0), self.manualPanelControls
+            if ch0 is None:
+                return
+            state: dict[str, Any] = {"setpoints_only": True}
+            for field, key, readback in (
+                ("voltage", "voltage_values", ch0.value),
+                ("current_limit", "current_limit_values", self.controller.current_limit_values.get(0)),
+            ):
+                widget = controls[0][field]
+                value = self._manual_setpoint_value(
+                    widget, readback, edited=getattr(widget, "_psu_setpoint_edited", False))
+                state[key] = {1: value}
+                self._show_linked_value(field, value)
+            self._submit_manual_panel_state(state)
+            self.print(f"CH1 linked to CH0: Vset {state['voltage_values'][1]:g} V and "
+                       f"Ilim {state['current_limit_values'][1]:g} A sent to CH1.")
+
+    def _link_setting_changed(self) -> None:
+        box = getattr(self, "linkChannelsBox", None)
+        if box is not None and box.isChecked() != self._channels_linked():
+            self._linkSyncing = True
+            try:
+                box.setChecked(self._channels_linked())
+            finally:
+                self._linkSyncing = False
+        self._update_manual_panel()
 
     def _submit_manual_panel_state(self, state: dict[str, Any]) -> None:
         controller = self.controller
@@ -1855,13 +1905,6 @@ class PSUDevice(Device):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _manual_mode(self) -> bool:
-        """No stored PSU config is selected: the panel values are the operator's."""
-        try:
-            return self._config_setting_value("operating_config") < 0
-        except Exception:  # noqa: BLE001 - settings unavailable (bare test objects)
-            return _coerce_int(getattr(self, "operating_config", -1), -1) < 0
-
     def _setpoints_observed(self, controller: Any, *, busy: bool) -> None:
         """After a housekeeping read (GUI thread): decide the prefill once per connection, then
         remember the setpoints the PSU holds. Fields still proposed are not overwritten."""
@@ -1907,9 +1950,10 @@ class PSUDevice(Device):
                 pass
 
     def _decide_setpoint_prefill(self, controller: Any, observed: dict[int, tuple[float, float]]) -> None:
+        # Also with an Operating config selected: it is applied only when loaded, so the panel would
+        # otherwise show the zeroes of the last shutdown (2026-10-26 lab: PSU_D/E with config 20 always
+        # restarted from Vset = Ilim = 0). Loading a config drops the proposal.
         self._pending_setpoints = {}
-        if not self._manual_mode():
-            return  # A stored PSU config decides the setpoints.
         memory = self._load_setpoint_memory()
         if memory.get("com") != str(getattr(self, "com", "")):
             return  # Another PSU on this plugin: nothing to propose.
@@ -2504,6 +2548,15 @@ class PSUDevice(Device):
                 "voltage": voltage_widget,
                 "current_limit": current_widget,
             }
+        link_box = QCheckBox("Link CH1 to CH0 (Vset and Ilim)")
+        link_box.setToolTip(
+            "Ticking it sends CH0's Vset and Ilim to CH1; then a value validated on CH0 is sent to both "
+            "channels. CH1's fields follow CH0. Outputs and ranges stay separate."
+        )
+        link_box.setChecked(self._channels_linked())
+        link_box.toggled.connect(self._link_box_toggled)
+        self.linkChannelsBox = link_box
+        layout.addWidget(link_box)
         layout.addWidget(cards_row)
 
         diag_frame = QFrame()
@@ -2869,10 +2922,11 @@ class PSUDevice(Device):
                     ready
                     and _coerce_bool(full_range_supported.get(channel_index, False), False)
                 )
+            follows = channel_index == 1 and self._channels_linked()
             for widget_name in ("voltage", "current_limit"):
                 widget = widgets.get(widget_name)
                 if widget is not None and hasattr(widget, "setEnabled"):
-                    widget.setEnabled(ready)
+                    widget.setEnabled(ready and not follows)
         for widget_name in (
             "manualPanelSaveSlotSpin",
             "manualPanelSaveNameEdit",
@@ -3687,6 +3741,17 @@ class PSUDevice(Device):
             attr="interlock_monitoring",
             advanced=True,
             event=self._interlock_monitoring_changed,
+        )
+        settings[f"{self.name}/{self.LINK_CHANNELS}"] = parameterDict(
+            value=False,
+            toolTip=(
+                "CH1 Vset and Ilim follow CH0: a value validated on CH0 is sent to both channels. "
+                "Outputs and ranges stay separate. Also a check box above the channel cards."
+            ),
+            parameterType=PARAMETERTYPE.BOOL,
+            attr="link_channels",
+            advanced=True,
+            event=self._link_setting_changed,
         )
         settings[f"{self.name}/{self.RAMP_STEP}"] = parameterDict(
             value=_PSU_VOLTAGE_RAMP_STEP_V,
@@ -6294,6 +6359,9 @@ class PSUController(DeviceController):
                         return
                     startup_kwargs = self._startup_kwargs()
                     if startup_kwargs:
+                        drop = getattr(self.controllerParent, "_drop_pending_setpoints", None)
+                        if callable(drop):
+                            drop()  # The loaded config decides the setpoints, not the last values.
                         device.initialize(timeout_s=timeout_s, cancel=cancel, **startup_kwargs)
                         self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
                         loaded_config = _coerce_int(
