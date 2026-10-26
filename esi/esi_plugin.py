@@ -150,6 +150,16 @@ def _finish_spinbox_edit(widget: Any) -> bool:
     return True
 
 
+def _on_gui_thread() -> bool:
+    try:
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        return False
+    app = QApplication.instance()
+    return app is not None and QThread.currentThread() == app.thread()
+
+
 def _invoke_gui_callback(callback: Any) -> None:
     """Run on the GUI thread; use a direct fallback only without a Qt app."""
     if not callable(callback):
@@ -2007,6 +2017,14 @@ class ESIDevice(Device):
             controller.closeCommunication()
         super().closeCommunication()
 
+    def closeGUI(self) -> None:
+        # Explorer closing: wait for a running HV discharge check, or switch OFF a connected ESI,
+        # before the process ends. Elsewhere the GUI thread never waits for the check.
+        controller = getattr(self, "controller", None)
+        if controller is not None and getattr(self.pluginManager, "closing", False):
+            controller.closeCommunication()
+        super().closeGUI()
+
 
 class ESIChannel(Channel):
     """An output control or a read-only HV current measurement."""
@@ -3351,6 +3369,13 @@ class ESIController(DeviceController):
         self._stop_local_acquisition()
         wait = 1.
         if self.main_state == _ESI_STOPPING and hasattr(self, "_discharge_started_at"):
+            closing = bool(getattr(getattr(self.controllerParent, "pluginManager", None), "closing", False))
+            if _on_gui_thread() and not closing:
+                # 2026-10-26 lab: Close communication, clicked during the check, waited here on the
+                # GUI thread and then ran a second OFF there: Explorer froze for 33 s. The running
+                # check closes the port itself; only Explorer closing waits for it (closeGUI).
+                self.print("The ESI HV discharge check is still running; communication closes when it ends.")
+                return False
             # The check owns the ADC and is bounded by its own deadline: wait for its verdict.
             wait = max(1., self._discharge_started_at + _ESI_DISCHARGE_WAIT_S - time.monotonic())
             self.print(f"Waiting up to {wait:.0f} s for the ESI HV discharge check to finish.")

@@ -82,6 +82,7 @@ pub struct Controller {
     transport_poisoned: bool,
     transport_error: Option<String>,
     communication_error: Option<String>,
+    last_status: i64,
     inventory: BTreeMap<u64, Value>,
     measurement_requests: BTreeMap<u64, (bool, bool)>,
     io_timeout: Duration,
@@ -172,6 +173,7 @@ impl Controller {
             transport_poisoned: false,
             transport_error: None,
             communication_error: None,
+            last_status: 0,
             inventory: BTreeMap::new(),
             measurement_requests: BTreeMap::new(),
             io_timeout: Duration::from_secs(5),
@@ -269,6 +271,7 @@ impl Controller {
     }
 
     fn check_status(&mut self, status: i64, symbol: &str) -> Result<()> {
+        self.last_status = status;
         if status == 0 {
             return Ok(());
         }
@@ -329,6 +332,30 @@ impl Controller {
 
     fn format_status(&self, status: i64) -> String {
         format!("{status} ({})", self.describe_error(status))
+    }
+
+    /// A measurement-only step of the discharge check (ADC selection, ready flags, ADC reads): after
+    /// one CGC receive error, purge the port and do this step once more. 2026-10-26 lab: a single -10
+    /// (no reply within 1.5 s) to SetHVsupplyMeasRanges left an OFF unconfirmed. Output commands are
+    /// never repeated this way.
+    fn measurement<T>(
+        &mut self,
+        ctx: &Context,
+        mut step: impl FnMut(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        match step(self) {
+            Err(error)
+                if [-10, -11, -12].contains(&self.last_status) && !self.transport_poisoned =>
+            {
+                eprintln!(
+                    "ESI discharge check: {error}; purging and repeating this measurement once"
+                );
+                self.recover(ctx, true)?;
+                self.last_status = 0;
+                step(self)
+            }
+            other => other,
+        }
     }
 
     fn recover(&mut self, ctx: &Context, cancellable: bool) -> Result<()> {
@@ -1323,7 +1350,10 @@ impl Controller {
         let message = "ESI discharge unconfirmed: fresh ADC voltages on both polarities did not remain below the discharge limit for consecutive rounds";
         let result = (|| {
             for address in HV_ADDRESSES {
-                saved.insert(address, self.ranges(address, ctx, true)?);
+                saved.insert(
+                    address,
+                    self.measurement(ctx, |this| this.ranges(address, ctx, true))?,
+                );
             }
             while consecutive < self.discharge_samples {
                 for negative in [false, true] {
@@ -1332,10 +1362,18 @@ impl Controller {
                         if Instant::now() >= deadline {
                             return Err(Error::runtime(message));
                         }
-                        self.select_ranges(address, (negative, high), ctx, true)?;
+                        self.measurement(ctx, |this| {
+                            this.select_ranges(address, (negative, high), ctx, true)
+                        })?;
                         selected_at[address as usize] = Instant::now();
-                        self.discharge_data("COM_ESI_CTRL_GetHVsupplyOutputVoltage", address, ctx)?;
-                        self.discharge_data("COM_ESI_CTRL_GetHVsupplyOutputCurrent", address, ctx)?;
+                        for symbol in [
+                            "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
+                            "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
+                        ] {
+                            self.measurement(ctx, |this| {
+                                this.discharge_data(symbol, address, ctx)
+                            })?;
+                        }
                     }
                     let mut armed = [0_u64; 3];
                     let mut settled = [0_u64; 3];
@@ -1349,33 +1387,40 @@ impl Controller {
                             if Instant::now() >= deadline {
                                 return Err(Error::runtime(message));
                             }
-                            let flags = self.read(
-                                "COM_ESI_CTRL_GetModuleDataReadyFlags",
-                                &[json!(address), json!(0)],
-                                1,
-                                ctx,
-                                true,
-                            )?;
+                            let flags = self.measurement(ctx, |this| {
+                                this.read(
+                                    "COM_ESI_CTRL_GetModuleDataReadyFlags",
+                                    &[json!(address), json!(0)],
+                                    1,
+                                    ctx,
+                                    true,
+                                )
+                            })?;
                             let flags = unsigned(&flags[0])?;
                             let mask = VOLTAGE_READY | CURRENT_READY;
                             armed[address as usize] |= !flags & mask;
                             if flags & armed[address as usize] & mask == mask {
-                                if self.ranges(address, ctx, true)? != (negative, saved[&address].1)
+                                if self.measurement(ctx, |this| this.ranges(address, ctx, true))?
+                                    != (negative, saved[&address].1)
                                 {
                                     return Err(Error::runtime(format!(
                                         "ESI ADC polarity changed on module {address}"
                                     )));
                                 }
-                                let (valid_v, voltage) = self.discharge_data(
-                                    "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
-                                    address,
-                                    ctx,
-                                )?;
-                                let (valid_i, current) = self.discharge_data(
-                                    "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
-                                    address,
-                                    ctx,
-                                )?;
+                                let (valid_v, voltage) = self.measurement(ctx, |this| {
+                                    this.discharge_data(
+                                        "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
+                                        address,
+                                        ctx,
+                                    )
+                                })?;
+                                let (valid_i, current) = self.measurement(ctx, |this| {
+                                    this.discharge_data(
+                                        "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
+                                        address,
+                                        ctx,
+                                    )
+                                })?;
                                 if Instant::now() >= deadline {
                                     return Err(Error::runtime(
                                         "ESI discharge unconfirmed: ADC response arrived after the discharge deadline",
@@ -1413,28 +1458,34 @@ impl Controller {
                                 if flags & VOLTAGE_READY != 0
                                     && armed[address as usize] & VOLTAGE_READY == 0
                                 {
-                                    self.discharge_data(
-                                        "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
-                                        address,
-                                        ctx,
-                                    )?;
+                                    self.measurement(ctx, |this| {
+                                        this.discharge_data(
+                                            "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
+                                            address,
+                                            ctx,
+                                        )
+                                    })?;
                                 }
                                 if flags & CURRENT_READY != 0
                                     && armed[address as usize] & CURRENT_READY == 0
                                 {
-                                    self.discharge_data(
-                                        "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
-                                        address,
-                                        ctx,
-                                    )?;
+                                    self.measurement(ctx, |this| {
+                                        this.discharge_data(
+                                            "COM_ESI_CTRL_GetHVsupplyOutputCurrent",
+                                            address,
+                                            ctx,
+                                        )
+                                    })?;
                                 }
-                                let flags = self.read(
-                                    "COM_ESI_CTRL_GetModuleDataReadyFlags",
-                                    &[json!(address), json!(0)],
-                                    1,
-                                    ctx,
-                                    true,
-                                )?;
+                                let flags = self.measurement(ctx, |this| {
+                                    this.read(
+                                        "COM_ESI_CTRL_GetModuleDataReadyFlags",
+                                        &[json!(address), json!(0)],
+                                        1,
+                                        ctx,
+                                        true,
+                                    )
+                                })?;
                                 armed[address as usize] |= !unsigned(&flags[0])? & mask;
                             }
                         }

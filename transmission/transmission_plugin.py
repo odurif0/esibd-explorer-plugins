@@ -117,6 +117,13 @@ DEVICE_BUSY = {"initializing": "initialization", "transitioning": "ON/OFF transi
                "_hv_config_loading": "HV configuration loading"}
 
 
+def manual_control(channel) -> bool:
+    """Set by its operator, never by Explorer: Explorer evaluates only inactive channels that have an
+    equation. AMPR shows this flag as "Manual"; on 2026-10-26 every AMPR channel had it unticked, with
+    no equation, and "Entry_IF1: enable it as an active real channel" blocked every start."""
+    return bool(channel.active) or not str(getattr(channel, "equation", "") or "").strip()
+
+
 def device_on(device):
     """ON for a device with an ON/OFF button; connected for any other device."""
     if getattr(device, "useOnOffLogic", False):
@@ -540,8 +547,11 @@ class ExplorerInstrument(_engine.Instrument):
             device = channel.getDevice()
             if not device_on(device):
                 raise _engine.InstrumentError(f"{device.name} is OFF (driven channel {name})")
-            if not (channel.enabled and channel.active and channel.real):
-                raise _engine.InstrumentError(f"{name}: enable it as an active real channel in {device.name}")
+            if not (channel.enabled and channel.real):
+                raise _engine.InstrumentError(f"{name}: enable this real channel in {device.name}")
+            if not manual_control(channel):
+                raise _engine.InstrumentError(f"{name}: driven by its equation in {device.name}; "
+                                              "tick Manual there or clear the equation")
             if output_off(channel):
                 raise _engine.InstrumentError(f"{name}: output OFF in {device.name}; turn it ON in the {device.name} panel")
             controller = getattr(device, "controller", None)

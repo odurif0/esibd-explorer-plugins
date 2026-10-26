@@ -260,6 +260,35 @@ must now be printed (`got no reply within …`) and the start must succeed; keep
 `<Data path>/logs/ampr_a/` (native log and `ampr_startup_com*_*.log` DLL traces) of every
 occurrence, to tell a busy controller (CTS inactive) from a reply lost on the line.
 
+**MScan scans and files (2026-10-26):** scans 011 and 013 were "completed" but every point
+was NaN (any NaN recorder tick invalidated a point), and closing the plot during scan 012 lost
+it. With DMMR M00 and M02 enabled at 150 ms, run a stepped scan 0–150 V on PSU_D: points must
+appear live in pA, both modules in the legend, x axis `PSU D (V)`, and `Samples at last point`
+about `61 valid / 66 total`. Click the plot's close button during the scan: refused, the scan
+continues and is saved. Zoom during the scan: the scale stays manual; click Autoscale: it follows
+the data again. `PSU readback` must follow the PSU Monitor. The file must be
+`<Data path>/MScan/<date>/<date_time>[_<File name>]_PSU-D_0-150V.h5`, with both modules.
+Then set `Passes` to 3 on a short range: the status shows `pass k/3`, the plot each pass
+faintly and the mean; the file holds 3 × the points and `passes = 3` in its setup. Repeat in
+Continuous with `Passes` 2: after each sweep the PSU returns to the start, settles, then sweeps
+again; no `time step missed` error between passes, and both passes are in the file.
+
+**PSU link and last values (2026-10-26):** with `Operating config` 20 selected but not loaded,
+set CH0 to e.g. 100 V / 1 mA with the output OFF, close Explorer, restart, connect: the panel
+proposes 100 V and 1 mA in italics (it showed zeros because a selected config disabled the
+proposal); `Load config` drops the proposal. Tick `Link CH1 to CH0`: CH1 receives CH0's Vset
+and Ilim and its fields grey out; a value validated on CH0 reaches both channels; outputs
+stay separate. The tick is kept after a restart and sends nothing then.
+
+**Transmission and MScan with AMPR channels (2026-10-26):** every AMPR channel had `Manual`
+unticked with no equation, and Transmission refused `Entry_IF1`. A channel without equation
+is now accepted; one driven by an equation is refused with `driven by its equation; tick
+Manual`.
+
+**ESI Close communication during the check (2026-10-26):** right after an ESI OFF, click
+the ESI `Close communication` (square) button while the check runs: Explorer must stay
+responsive and print that communication closes when the check ends.
+
 ## Transmission optimizer
 
 - **Simulation first:** tick **Simulation**, run the total ion current, then a selected

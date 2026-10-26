@@ -15,14 +15,14 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | Scope | Implementation | Integration | Local validation | Hardware validation |
 | --- | --- | --- | --- | --- |
 | IPC, supervision, ABI, build | Implemented | Implemented | 36 real-process fault tests; all deployment targets built | Not applicable |
-| ESI | Implemented | Implemented | 67 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
+| ESI | Implemented | Implemented | 69 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
 | PSU A/B/C/D/E | Implemented | Implemented | 52 controller tests; isolated recovery checks | Not tested |
 | AMX A/B | Implemented | Implemented | 43 combined AMX/HD controller tests; 60 adapter tests | Not tested |
 | AMX HD | Implemented | Implemented | Same combined suite; independent HD ABI and process | Not tested |
 | AMPR A/B | Implemented | Implemented | 29 controller tests; isolated recovery checks | Not tested |
 | DMMR | Implemented | Implemented | 38 controller tests; isolated recovery checks | Not tested |
 | TPG366 | Implemented | Implemented | 17 Rust + 36 adapter/PTY tests; 30 Explorer 1.0.2 Qt cases | Not tested |
-| MScan | Implemented | Implemented | 39 native tests; 36 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
+| MScan | Implemented | Implemented | 43 native tests; 36 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
 | Transmission | Implemented | Implemented | 25 engine tests; 19 packaged lifecycle tests; 15 Explorer 1.0.2 Qt cases | Not tested |
 
 The local target-host environment is isolated from the owner's installed Explorer.
@@ -32,8 +32,52 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`bb62e016942e80955e05b7879b99e31b71c60aa44c79bc1a21b79833785dad58`
-(v0.5.3 below).
+`1a62ffda5efd160944f07a5411b70644700e17a6ce96ccd14438952c3519f82f`
+(v0.5.4 below).
+
+## v0.5.4 Update (2026-10-26)
+
+The lab runs of v0.5.3 (logs of 2026-10-26) led to these fixes and to requests from
+the operator. None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **MScan data:** scans 011 and 013 were "completed" with every point NaN, because the
+  DMMR records NaN at each recorder tick without a new reading and any NaN invalidated
+  the point; a point is now the mean of its finite samples, and an infinite sample
+  still invalidates it. Closing the plot during scan 012 was refused but dropped the
+  axis labels, so every later plot failed and the scan was lost; the close is now
+  refused without any change.
+- **MScan plot and files:** every enabled DMMR module is recorded and plotted (the
+  selected one stays the reference), the y axis is in pA, the x axis reads `PSU X (V)`,
+  an Autoscale toggle follows the data, and a `PSU readback` row shows the driven rails.
+  Scans are saved to `<Data path>/MScan/<date>/<date>_<time>[_<File name>]_PSU-<X>_<from>-<to>V.h5`
+  and never overwrite a file; the Explorer session fields are no longer in the name.
+- **MScan passes:** the same sweep is repeated N times in one file, in both modes. In
+  Continuous each pass ends like a single sweep, then the PSU returns to the start and
+  settles before the next timed sweep. Every pass is kept; the plot shows each pass
+  faintly and their mean; `passes` and `points_per_pass` are recorded.
+- **Transmission, MScan:** a channel that is inactive with no equation (AMPR `Manual`
+  unticked, as every AMPR channel was in the lab) is operator-set and accepted;
+  Transmission had refused to start on `Entry_IF1`. A channel driven by an equation is
+  refused with the device to fix.
+- **PSU:** the last values are proposed in a new session also when an `Operating config`
+  is selected but not loaded (PSU_D/E had config 20 and showed zeros). `Link CH1 to CH0`
+  makes CH1's `Vset` and `Ilim` follow CH0; outputs and ranges stay separate.
+- **ESI:** `Close communication` clicked during the OFF check returns at once (it
+  waited on the GUI thread and froze Explorer for 33 s). A single receive error
+  (-10/-11/-12) on a measurement step of the check (ADC selection, ready flags or ADC
+  read, never an output command) is purged and repeated once; one -10 had left an OFF
+  unconfirmed. This is the second replay exception in `native/CONTRACT.md`.
+
+All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1;
+Linux for TPG366, MScan and Transmission). The Rust suite passes 324 tests; Clippy
+(`-D warnings`), formatting and the ABI/source/family/worker checks pass. The release
+validation (`pytest -q --all-siblings` on Explorer 1.0.2) passed 5719 tests with 8
+skipped and no failure; the MScan and documentation tests (342) were run again on the
+final text. All nine Windows workers pass the constructor-only Wine checks (all six
+vendor DLLs load) and the three Linux workers the Linux ones; no instrument is opened.
+The archive `esibd-explorer-plugins-v0.5.4.zip` is built from the release commit and
+passes `tests/test_release_archive_integrity.py`; the v0.5.4 tag message gives its file
+count and SHA-256. Hardware validation is still pending.
 
 ## v0.5.3 Update (2026-10-23)
 

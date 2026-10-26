@@ -1002,6 +1002,16 @@ def devices_scenario(env, ctx):
         instrument.check()
     ctx["knobs"]["Inlet"].output_state = "ON"
     instrument.check()
+    # Explorer drives an inactive channel only through its equation (AMPR shows the flag as
+    # "Manual"): on 2026-10-26 every AMPR channel was unticked, with no equation, and
+    # "Entry_IF1: enable it as an active real channel" refused every start.
+    knob = ctx["knobs"]["Inlet"]
+    knob.active, knob.equation = False, ""
+    instrument.check()
+    knob.equation = "Funnel_exit * 2"
+    with pytest.raises(module._engine.InstrumentError, match="Inlet: driven by its equation in PSU_SIM"):
+        instrument.check()
+    knob.active, knob.equation = True, ""
     timer.stop()
     return 0
 

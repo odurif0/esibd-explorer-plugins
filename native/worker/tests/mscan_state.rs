@@ -464,6 +464,46 @@ fn window_is_open_on_start_closed_on_end_and_needs_a_closing_sample() {
     assert_eq!(result["validation"]["samples"][0], json!([2]));
 }
 
+// 2026-10-26 lab: DMMR records NaN at each tick without a new reading (about 5 of 66 samples per
+// point), and requiring every sample finite left every point of every scan NaN.
+#[test]
+fn recorder_ticks_without_a_reading_are_skipped_but_an_infinite_reading_invalidates() {
+    for (values, mean, status) in [
+        (
+            [1000.0, f64::NAN, 2.0, f64::NAN, 4.0],
+            json!(3.0),
+            "acquired",
+        ),
+        (
+            [1000.0, 2.0, f64::INFINITY, 4.0, 4.0],
+            codec::float(f64::NAN),
+            "invalid detector data",
+        ),
+    ] {
+        let mut r = Rig::new("Step by step");
+        r.start();
+        r.until("acquiring");
+        let start = r.obs["wall"].as_f64().unwrap();
+        let begin_mono = r.obs["mono"].as_f64().unwrap();
+        r.obs["detector"]["times"] = json!([
+            start - 0.001,
+            start + 0.003,
+            start + 0.006,
+            start + 0.009,
+            start + 0.012
+        ]);
+        r.obs["detector"]["values"] = values.iter().map(|v| codec::float(*v)).collect();
+        r.record = false;
+        r.obs["wall"] = json!(start + 0.02);
+        r.obs["mono"] = json!(begin_mono + 0.02);
+        r.step().unwrap();
+        let result = call(&mut r.controller, "result", &[]).unwrap();
+        assert_eq!(result["data"][0], mean);
+        assert_eq!(result["validation"]["samples"][0], json!([4]));
+        assert_eq!(result["validation"]["point_status"][0], status);
+    }
+}
+
 #[test]
 fn invalid_samples_are_not_zero_or_nanmean_and_zero_is_valid() {
     for (sample, mean, status) in [
@@ -938,4 +978,85 @@ fn lifecycle_attributes_and_unsupported_operations_do_not_succeed_as_stubs() {
     );
     call(&mut r.controller, "reset", &[]).unwrap();
     assert_eq!(r.controller.get_attribute("state").unwrap(), json!("idle"));
+}
+
+// Multipass (user requests 2026-10-26): the same sweep N times in one file, in both modes.
+#[test]
+fn passes_repeat_the_sweep_in_both_modes() {
+    let mut c = Controller::new(&json!({})).unwrap();
+    let mut stepped = settings("Step by step");
+    stepped["passes"] = json!(3);
+    assert_eq!(
+        call(&mut c, "scan_steps", &[stepped]).unwrap(),
+        json!([10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.0, 20.0, 30.0])
+    );
+    let mut continuous = settings("Continuous");
+    continuous["passes"] = json!(2);
+    assert_eq!(
+        call(&mut c, "scan_steps", &[continuous]).unwrap(),
+        json!([10.0, 20.0, 30.0, 10.0, 20.0, 30.0])
+    );
+    let mut none = settings("Step by step");
+    none["passes"] = json!(0);
+    assert!(call(&mut c, "scan_steps", &[none]).is_err());
+}
+
+#[test]
+fn a_multipass_scan_measures_every_pass_and_records_the_layout() {
+    let mut r = Rig::new("Step by step");
+    r.settings["passes"] = json!(2);
+    let result = r.run();
+    assert_eq!(result["validation"]["status"], "completed");
+    assert_eq!(result["data"].as_array().unwrap().len(), 6);
+    assert_eq!(result["metadata"]["passes"], json!(2));
+    assert_eq!(result["metadata"]["points_per_pass"], json!(3));
+    let statuses = result["validation"]["point_status"].as_array().unwrap();
+    assert!(statuses.iter().all(|s| s == "acquired"), "{statuses:?}");
+}
+
+#[test]
+fn a_continuous_multipass_scan_ends_each_sweep_then_settles_at_the_start_again() {
+    let mut r = Rig::new("Continuous");
+    r.settings["passes"] = json!(2);
+    let result = r.run();
+    assert_eq!(result["validation"]["status"], "completed");
+    assert_eq!(
+        result["validation"]["point_status"],
+        json!(vec!["acquired during sweep"; 6])
+    );
+    assert_eq!(result["metadata"]["passes"], json!(2));
+    assert_eq!(result["metadata"]["points_per_pass"], json!(3));
+    // Pass 2 starts with an untimed approach to the first amplitude, like pass 1; one restore.
+    let sent: Vec<_> = r
+        .writes
+        .iter()
+        .map(|(restore, t)| (*restore, t[0]))
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            (false, 10.0),
+            (false, 20.0),
+            (false, 30.0),
+            (false, 10.0),
+            (false, 20.0),
+            (false, 30.0),
+            (true, 40.0)
+        ]
+    );
+    let starts = result["validation"]["window_start"].as_array().unwrap();
+    let ends = result["validation"]["window_end"].as_array().unwrap();
+    for j in [0, 1, 3, 4] {
+        assert_eq!(ends[j], starts[j + 1]);
+    }
+    // The settling between passes (settling_s = 0.004 s) belongs to no point.
+    assert!(starts[3].as_f64().unwrap() - ends[2].as_f64().unwrap() >= 0.004 - 1e-10);
+    let raw = call(&mut r.controller, "raw", &[]).unwrap();
+    let commands = raw["data"]["command_start"].as_array().unwrap();
+    assert!(
+        commands
+            .iter()
+            .all(|t| t.as_f64().is_some_and(f64::is_finite)),
+        "{commands:?}"
+    );
 }

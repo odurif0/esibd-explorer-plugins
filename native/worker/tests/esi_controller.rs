@@ -2048,12 +2048,15 @@ fn discharge_failure_restores_mux_unless_communication_failed_or_native_reply_wa
     assert_eq!(rig.state.lock().unwrap().ranges, original);
     rig.state.lock().unwrap().voltage_valid = true;
     rig.clear_calls();
-    rig.inject(
-        "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
-        1,
-        -10,
-        vec![json!(false), json!(0)],
-    );
+    // One receive error is purged and repeated once; the repeated read fails too.
+    for nth in [1, 2] {
+        rig.inject(
+            "COM_ESI_CTRL_GetHVsupplyOutputVoltage",
+            nth,
+            -10,
+            vec![json!(false), json!(0)],
+        );
+    }
     assert!(rig.call("disconnect", &[], json!({})).is_err());
     assert_eq!(
         rig.calls().last().unwrap().0,
@@ -2308,4 +2311,31 @@ fn malformed_hv_activation_reply_is_not_retried_as_a_vendor_error() {
     );
     assert_eq!(rig.count("COM_ESI_CTRL_GetHVsupplyParamsPWM"), 1);
     assert_eq!(rig.count("COM_ESI_CTRL_SetEnable"), 0);
+}
+
+// 2026-10-26 lab: a single -10 (no reply within 1.5 s) to SetHVsupplyMeasRanges during the
+// discharge check left an OFF unconfirmed. A measurement step is purged and repeated once.
+#[test]
+fn one_receive_error_on_a_discharge_measurement_is_purged_and_repeated_once() {
+    let mut rig = Rig::connected(false);
+    rig.inject("COM_ESI_CTRL_SetHVsupplyMeasRanges", 1, -10, vec![]);
+    assert_eq!(rig.call("disconnect", &[], json!({})).unwrap(), json!(true));
+    let calls = rig.calls();
+    let failed = calls
+        .iter()
+        .position(|(name, _)| name == "COM_ESI_CTRL_SetHVsupplyMeasRanges")
+        .unwrap();
+    assert_eq!(calls[failed + 1].0, "COM_ESI_CTRL_Purge");
+    assert_eq!(calls[failed + 2], calls[failed]);
+    assert_eq!(rig.count("COM_ESI_CTRL_Close"), 1);
+}
+
+#[test]
+fn a_second_receive_error_on_the_same_measurement_still_leaves_off_unconfirmed() {
+    let mut rig = Rig::connected(false);
+    rig.inject("COM_ESI_CTRL_SetHVsupplyMeasRanges", 1, -10, vec![]);
+    rig.inject("COM_ESI_CTRL_SetHVsupplyMeasRanges", 2, -10, vec![]);
+    let error = rig.call("disconnect", &[], json!({})).unwrap_err();
+    assert!(error.message.contains("-10"), "{}", error.message);
+    assert_eq!(rig.count("COM_ESI_CTRL_Close"), 0);
 }

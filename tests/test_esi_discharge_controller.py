@@ -1,5 +1,6 @@
 """Exercise the plugin OFF path with the actual discharge-checking runtime."""
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -197,8 +198,13 @@ def test_off_returns_to_off_once_outputs_are_verified_and_on_waits(control, esi_
     assert not c._discharge_outputs_off
 
 
-def test_explorer_closing_waits_for_the_background_check(control, esi_discharge_rig, monkeypatch):
+@pytest.mark.parametrize("caller", ["explorer-closing", "worker-thread", "gui-click"])
+def test_only_explorer_closing_waits_on_the_gui_thread_for_the_check(control, esi_discharge_rig, monkeypatch, caller):
+    # 2026-10-26 lab: Close communication, clicked during the check, waited on the GUI thread and
+    # then ran a second OFF there: Explorer froze for 33 s.
     c = control.controller
+    monkeypatch.setattr(control.module, "_on_gui_thread", lambda: caller != "worker-thread")
+    control.parent.pluginManager = SimpleNamespace(closing=caller == "explorer-closing")
     driver = esi_discharge_rig.driver
     disconnect = driver.disconnect
     checking, finish = threading.Event(), threading.Event()
@@ -217,7 +223,13 @@ def test_explorer_closing_waits_for_the_background_check(control, esi_discharge_
     off.start()
     assert checking.wait(5.)
     threading.Timer(.2, finish.set).start()
-    assert c.shutdownCommunication(), "closing must report the verdict of the running check"
+    started = time.monotonic()
+    if caller == "gui-click":
+        assert not c.shutdownCommunication()
+        assert time.monotonic() - started < .1, "the GUI thread must not wait for the check"
+        assert "communication closes when it ends" in control.messages[-1]
+    else:
+        assert c.shutdownCommunication(), "closing must report the verdict of the running check"
     off.join(5.)
     assert c.main_state == "Disconnected" and c.device is None
     assert not any("attempting to release communication" in message for message in control.messages)
@@ -237,3 +249,19 @@ def test_badge_tells_when_only_the_discharge_check_remains(control, outputs_off,
         _sync_load_config_action=lambda: None, _update_operator_panel=lambda: None)
     control.module.ESIDevice._update_status_widgets(device)
     assert device.statusBadgeLabel.text == expected
+
+
+@pytest.mark.parametrize("closing", [True, False])
+def test_explorer_closing_closes_communication_before_the_gui(control, monkeypatch, closing):
+    calls = []
+    monkeypatch.setattr(control.module.Device, "closeGUI", lambda self: calls.append("gui"), raising=False)
+
+    class Closing(control.module.ESIDevice):
+        def __init__(self):  # noqa: D107 - no Explorer plugin setup is needed here
+            pass
+
+    device = Closing()
+    device.controller = SimpleNamespace(closeCommunication=lambda: calls.append("communication"))
+    device.pluginManager = SimpleNamespace(closing=closing)
+    device.closeGUI()
+    assert calls == (["communication", "gui"] if closing else ["gui"])

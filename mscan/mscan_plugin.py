@@ -19,11 +19,12 @@ from threading import Event
 import sys
 import time
 from typing import Any, Callable
+import warnings
 
 import h5py
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QAbstractSpinBox, QComboBox, QFileDialog, QHeaderView, QSizePolicy
+from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHeaderView, QSizePolicy
 
 from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
@@ -58,6 +59,13 @@ class ScanError(RuntimeError):
 
 class ScanStopped(ScanError):
     pass
+
+
+def manual_control(channel) -> bool:
+    """Set by its operator, never by Explorer: Explorer only evaluates inactive channels that have
+    an equation. AMPR shows this flag as "Manual"; on 2026-10-26 every AMPR channel had it unticked,
+    with no equation, and an offset or a sweep on them was refused although nothing else drove them."""
+    return bool(channel.active) or not str(getattr(channel, 'equation', '') or '').strip()
 
 
 def amplitude_steps(start: float, stop: float, step: float) -> np.ndarray:
@@ -294,6 +302,7 @@ class MScan(Scan):
     START = 'Amplitude from (V)'
     STOP = 'Amplitude to (V)'
     STEP = 'Amplitude step (V)'
+    PASSES = 'Passes'
     MODE = 'Scan mode'
     STEPPED = 'Step by step'
     CONTINUOUS = 'Continuous'
@@ -307,6 +316,9 @@ class MScan(Scan):
     SAMPLES = 'Samples at last point'
     SCANTIME = 'Minimum duration'
     SUPPLIES = 'Driven PSU'
+    SUPPLY_READBACK = 'PSU readback'
+    FILE_LABEL = 'File name'
+    FOLDER = 'MScan'  # <Data path>/MScan/<YYYY-MM-DD>/, never Explorer's session fields (user choice 2026-10-26)
     FREQUENCY = 'Fixed frequency'
     AMPLITUDE_LIMITS = 'Allowed amplitude (V)'
     FINAL_VOLTAGES = 'After completion'
@@ -323,10 +335,17 @@ class MScan(Scan):
     VALIDATION = 'Validation'
     PAIRS = {'CH0-CH1': (0, 1), 'CH2-CH3': (2, 3)}
     POLL_S = .05
+    PICOAMPERE = 1e12  # Plot unit; files keep amperes.
 
     class Display(Scan.Display):
         def closeGUI(self):
-            if self.scan.finished and self.titleBar is not None:
+            if not self.scan.finished:
+                # Explorer refuses to close during a scan. Change nothing: on 2026-10-26 this
+                # method first dropped the file-label axis, so every later plot update raised
+                # IndexError, the last one before saving too, and scan 012 was lost.
+                super().closeGUI()
+                return
+            if self.titleBar is not None:
                 # Detach every action while both owners are alive: navigation
                 # belongs to navToolBar, Data to Clipboard belongs to Display.
                 # Leaving either attached can crash Qt during their destruction.
@@ -341,8 +360,31 @@ class MScan(Scan):
         def initGUI(self):
             super().initGUI()
             self.titleBarLabel.setText(self.scan.TITLE)
-            self.addAction(event=lambda: self.copyLineDataClipboard(line=self.ms),
-                           toolTip='Data to Clipboard.', icon=self.dataClipboardIcon, before=self.copyAction)
+            self.addAction(event=self.copy_data, toolTip='Data to Clipboard (amplitude and each current in pA).',
+                           icon=self.dataClipboardIcon, before=self.copyAction)
+            self.autoscaleAction = self.addStateAction(event=self.autoscale_changed,
+                toolTipFalse='Manual scale: zoom and pan are kept. Click to follow the data again.',
+                iconFalse=self.makeCoreIcon('scaleX_manual.png'),
+                toolTipTrue='Automatic scale: the plot follows the data. Zooming or panning switches to manual.',
+                iconTrue=self.makeCoreIcon('scaleX_auto.png'), before=self.copyAction, restore=False)
+            self.autoscaleAction.state = True
+
+        def autoscale_changed(self):
+            if self.autoscaleAction.state:
+                self.scan.plot(update=True)
+
+        def limits_changed(self, _ax=None):
+            # A zoom or pan by the operator, not a redraw by plot(), switches to manual scale.
+            if not self.scan._rescaling and getattr(self, 'autoscaleAction', None) is not None:
+                self.autoscaleAction.state = False
+
+        def copy_data(self):
+            lines = [self.ms, *self.extra_lines]
+            x = np.asarray(self.ms.get_xdata(), dtype=float)
+            header = '\t'.join([self.axes[0].get_xlabel(), *[f'{line.get_label()} (pA)' for line in lines]])
+            rows = ['\t'.join(f'{value:.12g}' for value in values)
+                    for values in zip(x, *[np.asarray(line.get_ydata(), dtype=float) for line in lines])]
+            QApplication.clipboard().setText('\n'.join([header, *rows]))
 
         def provideDock(self):
             created = super().provideDock()
@@ -354,13 +396,18 @@ class MScan(Scan):
 
         def initFig(self):
             super().initFig()
+            self.extra_lines, self.pass_lines = [], []
             if self.fig and self.canvas:
                 self.axes.append(self.fig.add_subplot(111))
                 self.ms = self.axes[0].plot([], [], marker='.', markersize=4)[0]
                 self.scan.labelAxis = self.axes[0]
+                self.axes[0].callbacks.connect('xlim_changed', self.limits_changed)
+                self.axes[0].callbacks.connect('ylim_changed', self.limits_changed)
                 # No MZCalculator: these abscissae are volts, not calibrated m/z.
 
     def __init__(self, **kwargs):
+        self._plot_fault_reported = False
+        self._rescaling = False
         self._cancel = Event()
         self._plan = None
         self._validation = {}
@@ -369,7 +416,7 @@ class MScan(Scan):
         self.displayDefault = ''  # Plot selection only; never an acquisition setting.
         self.notes = ''
         super().__init__(**kwargs)
-        self.useDisplayChannel = True
+        self.useDisplayChannel = False  # Every recorded DMMR module is plotted, with a legend.
         self._bridge = _GuiBridge(self)
 
     def getDefaultSettings(self):
@@ -405,6 +452,12 @@ class MScan(Scan):
             toolTip='Continuous only: positive requested sweep speed in V/s. Direction follows Amplitude from/to. '
                     'Command increment = Sweep rate × Time step; the stepped-mode Amplitude step is ignored. '
                     'PC-timed, sequential PSU writes, not a verified analogue slew rate or synchronized ramp.')
+        settings[self.PASSES] = parameterDict(value=1, minimum=1, maximum=1000,
+            parameterType=PARAMETERTYPE.INT, attr='passes', event=self.estimateScanTime, instantUpdate=False,
+            toolTip='The same sweep is repeated this many times in one file. Each pass is kept; the plot shows '
+                    'every pass faintly and their mean. Step by step: each pass returns to the start like any '
+                    'other step. Continuous: each pass ends like a single sweep, then returns to the start and '
+                    'settles (Initial/final settling) before sweeping again.')
         settings[self.DMMR_INTERVAL] = parameterDict(value=1000, minimum=100, maximum=10000,
             parameterType=PARAMETERTYPE.INT, event=self._dmmr_interval_changed,
             instantUpdate=False, restore=False, unit='ms',
@@ -433,7 +486,8 @@ class MScan(Scan):
                 'are required. This observed software bound does not certify an ADC conversion rate or future timing.'),
             (self.SAMPLES, 'Not acquired', None, 'Number of finite/total DMMR samples used at the last acquired point.'),
             (self.SCANTIME, 'Unavailable', 'scantime', 'Step by step: all settling and measurement windows plus final settling. '
-                'Continuous: one time step per amplitude, including the last, plus initial/final settling. '
+                'Continuous: one time step per amplitude, including the last, plus one settling per pass '
+                'and the final settling. '
                 'Approach/return, communication and waiting for DMMR data add time. Neither mode is inherently faster.'),
         ):
             settings[key] = parameterDict(value=value, parameterType=PARAMETERTYPE.LABEL,
@@ -452,6 +506,13 @@ class MScan(Scan):
             indicator=True, restore=False,
             toolTip='Both listed PSU setpoints follow A. Physical rails are -A / +A relative to the PSU reference. '
                     'All AMX connectors sharing a listed PSU are affected. This display never commands a device.')
+        settings[self.SUPPLY_READBACK] = parameterDict(value='Select an AMX', parameterType=PARAMETERTYPE.LABEL,
+            indicator=True, restore=False,
+            toolTip='Live readback of each driven PSU rail: measured voltage (Monitor) and the setpoint confirmed by the PSU. '
+                    'Display only; it never commands a device.')
+        settings[self.FILE_LABEL] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='file_label',
+            toolTip='Optional name added to each scan file: <Data path>/MScan/<date>/<date_time>_<name>_PSU-<X>_<from>-<to>V.h5. '
+                    'Letters, digits, - and _ are kept; other characters become -.')
         settings[self.FREQUENCY] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False, toolTip='Read from AMX. Frequency, duty cycle and routing stay fixed; change them in AMX, not here.')
         for key, tooltip in (
@@ -484,8 +545,10 @@ class MScan(Scan):
             indicator=True, restore=False,
             toolTip='Offset channel readback: AMPR Monitor (measured) and its setpoint. During a scan: scan target, '
                     'Monitor and whether the AMPR confirmed the target. Display only, never a command.')
-        order = (self.AMX, self.OUTPUTS, self.SUPPLIES, self.FREQUENCY, self.DETECTOR, self.DMMR_INTERVAL,
-                 self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.RATE,
+        order = (self.FILE_LABEL, self.AMX, self.OUTPUTS, self.SUPPLIES, self.SUPPLY_READBACK, self.FREQUENCY,
+                 self.DETECTOR, self.DMMR_INTERVAL,
+                 self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.PASSES,
+                 self.RATE,
                  self.OFFSET, self.OFFSET_FACTOR, self.OFFSET_READBACK, self.FINAL_VOLTAGES,
                  self.SETTLING, self.INTEGRATION, self.TIME_STEP, self.CADENCE, self.SAMPLES,
                  self.SCANTIME, self.STATUS, self.TIMEOUT, self.TOLERANCE)
@@ -588,7 +651,8 @@ class MScan(Scan):
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
         for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
-                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK):
+                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK,
+                    self.SUPPLY_READBACK):
             label = self.settingsMgr.settings[key].label
             label.setMaximumHeight(16777215)
             label.setWordWrap(True)
@@ -617,7 +681,8 @@ class MScan(Scan):
 
     def _layout_readonly_fields(self):
         for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
-                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK):
+                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK,
+                    self.SUPPLY_READBACK):
             label = self.settingsMgr.settings[key].label
             self._fit_readonly_label(label)
         self.settingsTree.scheduleDelayedItemsLayout()
@@ -651,6 +716,31 @@ class MScan(Scan):
         if len(matches) != 1:
             raise ScanError(f'DMMR module {selection} is unavailable or ambiguous. Check DMMR discovery and selection.')
         return matches[0]
+
+    def _extra_detectors(self, detector):
+        """The other enabled modules of the same DMMR, recorded over the reference module's windows."""
+        device = detector.getDevice()
+        return sorted((c for c in self.pluginManager.DeviceManager.channels()
+                       if self._is_dmmr(c) and c is not detector and c.getDevice() is device and c.enabled),
+                      key=lambda c: (c.module_address(), c.name))
+
+    def _extra_values(self, start, end):
+        """Average each extra module over the reference window (start, end].
+
+        All DMMR modules share the device time axis, so the window holds the same recorder ticks.
+        An extra module never stops the scan: an unreadable history gives NaN for that point.
+        """
+        results = []
+        for c in (self._plan or {}).get('extra_detectors', []):
+            try:
+                times = np.asarray(c.getDevice().time.get(), dtype=float)
+                values = np.asarray(c.getValues(subtractBackground=False), dtype=float)
+                n = min(len(times), len(values))
+                lo, hi = np.searchsorted(times[:n], (start, end), side='right')
+                results.append(self._average_samples(values[lo:hi]))
+            except (AttributeError, TypeError, ValueError):
+                results.append((np.nan, 0, 0))
+        return results
 
     @staticmethod
     def _is_ampr(channel):
@@ -709,8 +799,8 @@ class MScan(Scan):
             raise ScanError(f'{c.name}: update MScan and AMPR plugins together; setpoint confirmation required.')
         if not c.enabled:
             raise ScanError(f'{c.name}: switch the AMPR offset channel ON.')
-        if not c.active:
-            raise ScanError(f'{c.name}: use manual (not equation) control for the offset.')
+        if not manual_control(c):
+            raise ScanError(f'{c.name}: driven by its equation; tick Manual in {device.name} or clear the equation.')
         if not device.isOn() or not ctrl.initialized or ctrl.device is None:
             raise ScanError(f'{c.name}: turn the AMPR ON.')
         if any(bool(getattr(ctrl, flag, False)) for flag in ('initializing', 'transitioning', 'ramping')):
@@ -761,7 +851,7 @@ class MScan(Scan):
         self._registered(c)
         if (c.name != o['name'] or self._plugin(device.name) is not device or device.controller is not ctrl
                 or ctrl.device is not o['backend'] or ctrl._setpoint_cancel is not o['token'] or o['token'].is_set()
-                or not device.isOn() or not ctrl.initialized or not c.enabled or not c.active or not c.real):
+                or not device.isOn() or not ctrl.initialized or not c.enabled or not manual_control(c) or not c.real):
             raise ScanError(f'{o["name"]}: offset source changed or was stopped.')
         if not math.isclose(float(c.value), o['expected'], rel_tol=1e-10, abs_tol=1e-9):
             raise ScanError(f'{c.name}: offset changed outside the scan '
@@ -815,7 +905,7 @@ class MScan(Scan):
             steps = self._scan_steps()
             mode, duration = self._timing()
             if mode == self.CONTINUOUS:
-                self.scantime = f'{len(steps) * duration + 2 * self.settling_s:g} s + control/data delays'
+                self.scantime = f'{len(steps) * duration + (self._passes() + 1) * self.settling_s:g} s + control/data delays'
             else:
                 self.scantime = f'{len(steps) * (self.settling_s + duration) + self.settling_s:g} s + ramping/data delays'
         except (ScanError, AttributeError):
@@ -1045,6 +1135,31 @@ class MScan(Scan):
             setting.value = text
         setting.label.setToolTip(f'{text}\n\n{setting.toolTip}')
 
+    def _readback_text(self, rails):
+        lines = []
+        for r in rails:
+            c, sign = r['channel'], '+' if r['number'] == 0 else '−'
+            try:
+                monitor = self._number(c, 'monitor', 'voltage readback')
+                measured = f'{sign}{monitor:.2f} V'
+            except ScanError:
+                measured = 'no readback'
+            try:
+                setpoint = f'{sign}{self._number(c, "voltage_setpoint_readback", "Vset readback"):g} V'
+            except ScanError:
+                setpoint = 'unconfirmed'
+            lines.append(f'{r["name"]}: {measured} (set {setpoint})')
+        return '\n'.join(lines) or 'Select an AMX'
+
+    def _refresh_readback(self, rails):
+        try:
+            text = self._readback_text(rails)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            text = 'Unavailable'
+        setting = self.settingsMgr.settings[self.SUPPLY_READBACK]
+        if setting.value != text:
+            setting.value = text
+
     def _refresh_offset_readback(self, *, running=False):
         try:
             text = self._offset_readback_text(running=running)
@@ -1063,6 +1178,7 @@ class MScan(Scan):
             # the return voltage must stay the initial target captured by the plan.
             # A plan restored from a saved file holds only its metadata (loadDataInternal).
             self._refresh_completion((self._plan or {}).get('rails', []), running=True)
+            self._refresh_readback((self._plan or {}).get('rails', []))
             self._refresh_offset_readback(running=True)
             self._layout_readonly_fields()
             return
@@ -1181,6 +1297,7 @@ class MScan(Scan):
         self.settingsMgr.settings[self.AMPLITUDE_LIMITS].label.setToolTip(limit_help)
         self.settingsMgr.settings[self.AMPLITUDE_LIMITS].setToolTip(0, limit_help)
         self._refresh_completion(rails)
+        self._refresh_readback(rails)
         self._refresh_offset_readback()
         # Same preflight as Start, but do not initialize data, bind a plan, log
         # warnings or touch a device. Keep the last outcome (including save errors).
@@ -1243,7 +1360,15 @@ class MScan(Scan):
                 and 0 < span and span / step + 1e-10 < 1):
             raise ScanError(f'Sweep rate × Time step gives {step:g} V per command, exceeding the {span:g} V scan span. '
                             'Reduce Sweep rate or Time step.')
-        return amplitude_steps(start, stop, step)
+        return np.tile(amplitude_steps(start, stop, step), self._passes())
+
+    def _passes(self):
+        """Repeated sweeps, in both modes."""
+        passes = getattr(self, 'passes', 1)
+        passes = 1 if passes is None else int(passes)
+        if not 1 <= passes <= 1000:
+            raise ScanError('Passes must be between 1 and 1000.')
+        return passes
 
     def addInputChannels(self):
         try:
@@ -1262,13 +1387,15 @@ class MScan(Scan):
     def addOutputChannels(self):
         if not self.inputChannels:
             return
-        data = np.full(len(self.inputChannels[0].recordingData), np.nan, dtype=np.float64)
         try:
             source = self._detector()
         except ScanError:
             return  # No synthetic or unavailable channel in the data model.
         self.displayDefault = source.name
-        self.addOutputChannel(name=source.name, unit='A', recordingData=data)
+        # The reference module first, then every other enabled module of the same DMMR.
+        for channel in (source, *self._extra_detectors(source)):
+            self.addOutputChannel(name=channel.name, unit='A',
+                                  recordingData=np.full(len(self.inputChannels[0].recordingData), np.nan, dtype=np.float64))
 
     def addOutputChannel(self, name, unit='', recordingData=None, recordingBackground=None):
         channel = _Signal(parentPlugin=self, name=name, unit=unit, inout=INOUT.OUT,
@@ -1284,11 +1411,13 @@ class MScan(Scan):
         plan = self._prepare()
         self._check_detectors([detector])
         plan['detectors'] = [detector]
+        plan['extra_detectors'] = self._extra_detectors(detector)
         plan['detector_identity'] = (detector.getDevice(), detector.module_address(), detector.name)
         self._cadence_epoch(detector.getDevice())
         plan['detector_interval_ms'] = float(detector.getDevice().interval)
         plan['metadata']['detector'] = dict(device=detector.getDevice().name, module=detector.module_address(), channel=detector.name,
                                           interval_ms=plan['detector_interval_ms'])
+        plan['metadata']['extra_detectors'] = [dict(module=c.module_address(), channel=c.name) for c in plan['extra_detectors']]
         if plan['mode'] == self.CONTINUOUS:
             plan['metadata']['detector_cadence'] = self._require_time_step(detector, plan['average'])
         return plan
@@ -1311,10 +1440,11 @@ class MScan(Scan):
             self.toggleDisplay(visible=True)
             self.updateFile()
             self.populateDisplayChannel()
-            configured = [name]
+            configured = [name, *[c.name for c in self._plan['extra_detectors']]]
             if [c.name for c in self.outputChannels] != configured:
                 raise ScanError(f'Measured signal {name} must be available and recording.')
-            self._plan['detectors'] = [c.sourceChannel for c in self.outputChannels]
+            self._plan['detectors'] = [self.outputChannels[0].sourceChannel]
+            self._plan['extra_detectors'] = [c.sourceChannel for c in self.outputChannels[1:]]
             self._check_detectors()
             n, rails, outputs = len(self.inputChannels[0].recordingData), len(self._plan['rails']), len(configured)
             self._validation = dict(status='running', error='', point_status=['not acquired'] * n,
@@ -1331,6 +1461,32 @@ class MScan(Scan):
             self.print(f'Cannot start: {exc}', flag=PRINT.WARNING)
             self._plan = None
             return False
+
+    def _file_label(self):
+        text = '-'.join(str(getattr(self, 'file_label', '') or '').split())
+        text = ''.join(char if char.isalnum() or char in '-_' else '-' for char in text).strip('-_')
+        return text[:60]
+
+    def _scan_file(self, now=None):
+        """<Data path>/MScan/<date>/<date_time>[_<name>]_PSU-<X>_<from>-<to>V.h5 (user choice 2026-10-26)."""
+        now = time.localtime() if now is None else now
+        folder = Path(self.pluginManager.Settings.dataPath) / self.FOLDER / time.strftime('%Y-%m-%d', now)
+        span = f'{float(self.start):g}-{float(self.stop):g}V'
+        parts = [time.strftime('%Y-%m-%d_%H-%M-%S', now), self._file_label(), self._psu_tag(separator='-').replace(' ', '-'), span]
+        stem = '_'.join(part for part in parts if part)
+        candidate, n = folder / f'{stem}.h5', 2
+        while candidate.exists():
+            candidate, n = folder / f'{stem}_{n}.h5', n + 1
+        return candidate
+
+    def updateFile(self):
+        if self._dummy_initialization:
+            self.file = Path()
+        else:
+            self.file = self._scan_file()
+            self.file.parent.mkdir(parents=True, exist_ok=True)
+        if self.displayActive() and self.display:
+            self.display.file = self.file
 
     def _plugin(self, name):
         matches = [p for p in self.pluginManager.plugins if p.name == name]
@@ -1462,8 +1618,8 @@ class MScan(Scan):
                 raise ScanError(f'{c.name}: update MScan and PSU plugins together; numeric limits/current and command tracking required.')
             if not c.enabled:
                 raise ScanError(f'{c.name}: enable the PSU channel.')
-            if not c.active:
-                raise ScanError(f'{c.name}: use manual (not equation) control.')
+            if not manual_control(c):
+                raise ScanError(f'{c.name}: driven by its equation; tick Manual in {psu.name} or clear the equation.')
             if not c.initialized or not psu.isOn():
                 raise ScanError(f'{c.name}: turn the PSU ON.')
             if any(bool(getattr(ctrl, flag, False)) for flag in
@@ -1495,7 +1651,8 @@ class MScan(Scan):
             expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),
             tolerance=float(self.voltage_tolerance), average=duration, wait=float(self.settling_s), mode=mode,
             metadata=dict(amx=amx.name, outputs=self.amx_outputs, waveform=json.loads(waveform), links=links,
-                mode=mode, settling_s=float(self.settling_s), measurement_s=duration,
+                mode=mode, passes=self._passes(), points_per_pass=len(self._scan_steps()) // self._passes(),
+                settling_s=float(self.settling_s), measurement_s=duration,
                 time_step_s=duration if mode == self.CONTINUOUS else None,
                 command_step_v=self._command_step(),
                 requested_rate_v_s=math.copysign(float(self.sweep_rate), self.stop - self.start)
@@ -1534,7 +1691,7 @@ class MScan(Scan):
             if (c.name != rail['name'] or self._plugin(psu.name) is not psu or psu.controller is not ctrl
                     or ctrl.device is not rail['backend'] or ctrl._output_cancel is not rail['token']
                     or rail['token'].is_set() or not psu.isOn() or not ctrl.initialized
-                    or not c.enabled or not c.active or not c.real):
+                    or not c.enabled or not manual_control(c) or not c.real):
                 raise ScanError(f'{rail["name"]}: source changed or was stopped.')
             if c.voltage_request_revision != rail['request_revision']:
                 raise ScanError(f'{c.name}: setpoint changed outside the scan '
@@ -1667,8 +1824,12 @@ class MScan(Scan):
 
     @staticmethod
     def _average_samples(samples):
-        valid = int(np.isfinite(samples).sum())
-        mean = float(np.mean(samples)) if len(samples) and valid == len(samples) else np.nan
+        # DMMR records NaN at each recorder tick without a new reading: average the readings
+        # present (2026-10-26: requiring all finite left every point NaN). Infinity is a wrong reading.
+        samples = np.asarray(samples, dtype=float)
+        finite = np.isfinite(samples)
+        valid = int(finite.sum())
+        mean = float(np.mean(samples[finite])) if valid and not np.isinf(samples).any() else np.nan
         return mean, len(samples), valid
 
     def _read_window(self, start, end, baselines):
@@ -1734,6 +1895,7 @@ class MScan(Scan):
             self._pause()
 
     def _store_point(self, index, start, end, volts, currents, values, *, continuous=False, offset=None):
+        values = [*values, *self._extra_values(start, end)]
         validation = self._validation
         validation['window_start'][index], validation['window_end'][index] = start, end
         validation['rail_v'][index], validation['rail_i'][index] = volts, currents
@@ -1743,18 +1905,22 @@ class MScan(Scan):
             self.outputChannels[j].recordingData[index] = mean
             validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
         validation['point_status'][index] = (('acquired during sweep' if continuous else 'acquired')
-            if all(math.isfinite(v[0]) for v in values) else 'invalid detector data')
+            if math.isfinite(values[0][0]) else 'invalid detector data')  # The reference module decides.
         self.signalComm.scanUpdateSignal.emit(False)
+
+    def _pass_label(self, index, count):
+        passes = int(((self._plan or {}).get('metadata') or {}).get('passes') or 1)
+        return f'pass {index // (count // passes) + 1}/{passes}, ' if passes > 1 else ''
 
     def _run_stepped(self, steps):
         p = self._plan
         for index, amplitude in enumerate(steps):
             if self._cancel.is_set():
                 raise ScanStopped('Scan stopped.')
-            self._bridge.status.emit(f'{index + 1}/{len(steps)}: settling at {amplitude:g} V')
+            self._bridge.status.emit(f'{self._pass_label(index, len(steps))}{index + 1}/{len(steps)}: settling at {amplitude:g} V')
             self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails']), offset=self._offset_target(a)))
             self._settle(p['wait'])
-            self._bridge.status.emit(f'{index + 1}/{len(steps)}: acquiring at {amplitude:g} V')
+            self._bridge.status.emit(f'{self._pass_label(index, len(steps))}{index + 1}/{len(steps)}: acquiring at {amplitude:g} V')
             self._store_point(index, *self._measure(), offset=self._offset_snapshot())
 
     def _continuous_command(self, amplitude, latest=None, *, window_start=None):
@@ -1797,85 +1963,97 @@ class MScan(Scan):
             detector_time=[], detector_current=[], psu_time=[], psu_v=[], psu_i=[], psu_target=[], psu_ready=[],
             **(dict(offset_v=[], offset_target=[]) if p.get('offset') else {}))
         pending = deque()
-        origin = baselines = cutoff = None
+        clock = dict(origin=None, origin_mono=None, baselines=None, cutoff=None)
+        passes = int((p.get('metadata') or {}).get('passes') or 1)
+        per_pass = len(steps) // passes
         try:
-            self._bridge.status.emit(f'Initial settling at {steps[0]:g} V')
-            raw['command_start'][0], raw['command_end'][0] = self._gui(lambda: self._continuous_command(steps[0]))
-            self._settle(p['wait'])
-            # Define the wall/monotonic origin together, on the same Qt callback
-            # that establishes the detector-history identity and baseline.
-            (origin, baselines), origin_mono = self._gui(lambda: (self._history_start(), time.monotonic()))
-            index, begin, ready_seen = 0, origin, True
-            last_command = origin_mono
-            duration = p['average']
-            next_deadline = origin_mono + duration
-            while index < len(steps) or pending:
-                ready, volts, currents, wall = self._gui(self._observation)
-                now = time.monotonic()
-                if abs((wall - origin) - (now - origin_mono)) > .5:
-                    raise ScanError('System clock changed during continuous acquisition.')
-                raw['psu_time'].append(wall)
-                raw['psu_v'].append(volts.copy())
-                raw['psu_i'].append(currents.copy())
-                raw['psu_target'].append(list(p['expected']))
-                raw['psu_ready'].append(bool(ready))
-                offset_now = self._offset_snapshot()
-                if offset_now is not None:
-                    raw['offset_v'].append(offset_now[0])
-                    raw['offset_target'].append(offset_now[1])
-                if ready_seen and not ready:
-                    raise self._not_ready('PSU readback became invalid or left tolerance after reaching the continuous target.')
-                # A first ready observation arriving after the deadline cannot
-                # prove that the PSU kept up, even if it has caught up by now.
-                ready_seen |= ready and now <= next_deadline
-                if not ready and now - last_command >= p['timeout']:
-                    raise self._not_ready('PSU voltage settling timed out during continuous acquisition.')
-                # A delayed closing timestamp can finalize an earlier window,
-                # but a new command requires a valid sample in the current one.
-                watermark = self._capture_continuous(raw, origin, cutoff if cutoff is not None else wall, baselines)
-                self._continuous_windows(pending, raw, watermark)
-                if pending and wall - pending[0][2] > p['timeout']:
-                    raise ScanError('Fresh detector data timed out during continuous acquisition.')
-                deadline = next_deadline
-                now = time.monotonic()
-                if index < len(steps) and now >= deadline:
-                    if not ready or not ready_seen:
-                        raise self._not_ready('PSU target was not confirmed within the continuous time step. '
-                                              'Increase Time step; point not acquired and no next command sent.')
-                    if now >= deadline + duration:
-                        raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
-                    if index + 1 < len(steps):
-                        command = self._gui(lambda: self._continuous_command(
-                            steps[index + 1], deadline + duration, window_start=begin))
-                        raw['command_start'][index + 1], raw['command_end'][index + 1] = command
-                        end = command[0]
-                        last_command, ready_seen = time.monotonic(), False
-                        # Never shorten the next interval to make up for PC
-                        # jitter. Actual command intervals are saved as measured.
-                        next_deadline = last_command + duration
-                    else:
-                        self._gui(lambda: self._require_time_step(p['detectors'][0], duration, begin))
-                        end = cutoff = time.time()
-                    if end <= begin:
-                        raise ScanError('System clock moved backwards during continuous acquisition.')
-                    pending.append((index, begin, end, volts.copy(), currents.copy(), offset_now))
-                    index += 1
-                    begin = end
-                    if index < len(steps):
-                        self._bridge.status.emit(f'{index + 1}/{len(steps)}: continuous at {steps[index]:g} V')
-                if index < len(steps) or pending:
-                    self._pause(min(self.POLL_S, max(0., next_deadline - time.monotonic()))
-                        if index < len(steps) else self.POLL_S)
+            # Each pass is a complete sweep: initial command and settling, timed commands, drained windows.
+            for first in range(0, len(steps), per_pass):
+                self._continuous_pass(steps, first, first + per_pass, raw, pending, clock)
         finally:
             # Keep available raw samples from an interrupted window, but never
             # present that incomplete window as an acquired spectrum point.
+            origin, origin_mono = clock['origin'], clock['origin_mono']
             if origin is not None and abs((time.time() - origin) - (time.monotonic() - origin_mono)) <= .5:
                 try:
-                    watermark = self._capture_continuous(raw, origin, cutoff if cutoff is not None else time.time(),
-                                                        baselines, cancel=False)
+                    watermark = self._capture_continuous(raw, origin, clock['cutoff'] if clock['cutoff'] is not None
+                                                        else time.time(), clock['baselines'], cancel=False)
                     self._continuous_windows(pending, raw, watermark)
                 except Exception:
                     pass  # retain the original failure; no fabricated replacement samples
+
+    def _continuous_pass(self, steps, first, last, raw, pending, clock):
+        p = self._plan
+        label = self._pass_label(first, len(steps))
+        self._bridge.status.emit(f'{label}Initial settling at {steps[first]:g} V')
+        raw['command_start'][first], raw['command_end'][first] = self._gui(lambda: self._continuous_command(steps[first]))
+        self._settle(p['wait'])
+        # Define the wall/monotonic origin together, on the same Qt callback
+        # that establishes the detector-history identity and baseline.
+        (origin, baselines), origin_mono = self._gui(lambda: (self._history_start(), time.monotonic()))
+        clock.update(origin=origin, origin_mono=origin_mono, baselines=baselines, cutoff=None)
+        index, begin, ready_seen = first, origin, True
+        last_command = origin_mono
+        duration = p['average']
+        next_deadline = origin_mono + duration
+        while index < last or pending:
+            ready, volts, currents, wall = self._gui(self._observation)
+            now = time.monotonic()
+            if abs((wall - origin) - (now - origin_mono)) > .5:
+                raise ScanError('System clock changed during continuous acquisition.')
+            raw['psu_time'].append(wall)
+            raw['psu_v'].append(volts.copy())
+            raw['psu_i'].append(currents.copy())
+            raw['psu_target'].append(list(p['expected']))
+            raw['psu_ready'].append(bool(ready))
+            offset_now = self._offset_snapshot()
+            if offset_now is not None:
+                raw['offset_v'].append(offset_now[0])
+                raw['offset_target'].append(offset_now[1])
+            if ready_seen and not ready:
+                raise self._not_ready('PSU readback became invalid or left tolerance after reaching the continuous target.')
+            # A first ready observation arriving after the deadline cannot
+            # prove that the PSU kept up, even if it has caught up by now.
+            ready_seen |= ready and now <= next_deadline
+            if not ready and now - last_command >= p['timeout']:
+                raise self._not_ready('PSU voltage settling timed out during continuous acquisition.')
+            # A delayed closing timestamp can finalize an earlier window,
+            # but a new command requires a valid sample in the current one.
+            cutoff = clock['cutoff']
+            watermark = self._capture_continuous(raw, origin, cutoff if cutoff is not None else wall, baselines)
+            self._continuous_windows(pending, raw, watermark)
+            if pending and wall - pending[0][2] > p['timeout']:
+                raise ScanError('Fresh detector data timed out during continuous acquisition.')
+            deadline = next_deadline
+            now = time.monotonic()
+            if index < last and now >= deadline:
+                if not ready or not ready_seen:
+                    raise self._not_ready('PSU target was not confirmed within the continuous time step. '
+                                          'Increase Time step; point not acquired and no next command sent.')
+                if now >= deadline + duration:
+                    raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
+                if index + 1 < last:
+                    command = self._gui(lambda: self._continuous_command(
+                        steps[index + 1], deadline + duration, window_start=begin))
+                    raw['command_start'][index + 1], raw['command_end'][index + 1] = command
+                    end = command[0]
+                    last_command, ready_seen = time.monotonic(), False
+                    # Never shorten the next interval to make up for PC
+                    # jitter. Actual command intervals are saved as measured.
+                    next_deadline = last_command + duration
+                else:
+                    self._gui(lambda: self._require_time_step(p['detectors'][0], duration, begin))
+                    end = clock['cutoff'] = time.time()
+                if end <= begin:
+                    raise ScanError('System clock moved backwards during continuous acquisition.')
+                pending.append((index, begin, end, volts.copy(), currents.copy(), offset_now))
+                index += 1
+                begin = end
+                if index < last:
+                    self._bridge.status.emit(f'{label}{index + 1}/{len(steps)}: continuous at {steps[index]:g} V')
+            if index < last or pending:
+                self._pause(min(self.POLL_S, max(0., next_deadline - time.monotonic()))
+                    if index < last else self.POLL_S)
 
     def _run_scan_python_reference(self, recording):
         """Retained reference for cross-language tests, never a production fallback."""
@@ -2017,23 +2195,110 @@ class MScan(Scan):
 
     @plotting
     def plot(self, update=False, done=False, **kwargs):
-        if self.outputChannels and self.inputChannels:
-            self.display.ms.set_data(self.inputChannels[0].getRecordingData(),
-                                     self.outputChannels[self.getOutputIndex()].getRecordingData())
-            if not update:
-                output = self.outputChannels[self.getOutputIndex()]
-                self.display.axes[0].set_ylabel(f'{output.name} ({output.unit})')
-        else:
-            self.display.ms.set_data([], [])
-        self.display.axes[0].set_xlabel(self._axis_label())
-        self.display.axes[0].relim()
-        self.setLabelMargin(self.display.axes[0], .15)
+        try:
+            self._plot(update=update)
+        except Exception as exc:  # noqa: BLE001
+            # A display fault must never stop the scan or the save that follows its last update.
+            if not self._plot_fault_reported:
+                self._plot_fault_reported = True
+                self.print(f'Plot not updated: {exc}', flag=PRINT.WARNING)
+
+    def _plot(self, update=False):
+        display = self.display
+        if display is None or not getattr(display, 'axes', None) or getattr(display, 'ms', None) is None:
+            return
+        ax = display.axes[0]
+        outputs = self.outputChannels if self.inputChannels else []
+        x = np.asarray(self.inputChannels[0].getRecordingData() if outputs else [], dtype=float)
+        passes = int(((self._plan or {}).get('metadata') or {}).get('passes') or 1)
+        if passes < 1 or len(x) % passes:
+            passes = 1  # Older files: one sweep.
+        n = len(x) // passes
+        suffix = f' (mean of {passes})' if passes > 1 else ''
+        names = [f'{c.name}{suffix}' for c in outputs]
+        if [line.get_label() for line in display.extra_lines] != names[1:]:
+            for line in display.extra_lines:
+                line.remove()
+            display.extra_lines = [ax.plot([], [], marker='.', markersize=4, label=name)[0] for name in names[1:]]
+        display.ms.set_label(names[0] if names else '_primary')
+        means = [display.ms, *display.extra_lines]
+        if len(display.pass_lines) != (passes * len(outputs) if passes > 1 else 0):
+            for line in display.pass_lines:
+                line.remove()
+            display.pass_lines = [ax.plot([], [], linewidth=.8, alpha=.35, color=means[j].get_color(),
+                                          label='_pass')[0]
+                                  for j in range(len(outputs)) for _ in range(passes)] if passes > 1 else []
+        for j, (line, channel) in enumerate(zip(means, outputs)):
+            data = np.asarray(channel.getRecordingData(), dtype=float).reshape(passes, n) * self.PICOAMPERE
+            with np.errstate(all='ignore'), warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)  # A point not yet measured in any pass.
+                line.set_data(x[:n], np.nanmean(data, axis=0) if passes > 1 else data[0])
+            for k, pass_line in enumerate(display.pass_lines[j * passes:(j + 1) * passes]):
+                pass_line.set_data(x[:n], data[k])
+        if not outputs:
+            display.ms.set_data([], [])
+        legend = ax.get_legend()
+        if len(outputs) > 1 or passes > 1:
+            # Below the file label, which uses the top margin reserved by setLabelMargin.
+            ax.legend(loc='upper left', bbox_to_anchor=(0, .87), fontsize='small')
+        elif legend is not None:
+            legend.remove()
+        ax.set_ylabel('Current (pA)')
+        ax.set_xlabel(self._axis_label())
+        autoscale = getattr(display, 'autoscaleAction', None)
+        if autoscale is None or autoscale.state:
+            self._rescaling = True
+            try:
+                ax.relim()
+                self.setLabelMargin(ax, .15)
+                ax.get_xlim()  # Resolve any deferred autoscale now, not as a later "user" change.
+            finally:
+                self._rescaling = False
         self.updateToolBar(update=update)
         self.defaultLabelPlot()
 
+    def defaultLabelPlot(self):
+        if len(self.outputChannels) > 1:
+            self.labelPlot(self.file.name if self.file else '')  # The legend names each module.
+        else:
+            super().defaultLabelPlot()
+
+    def labelPlot(self, label):
+        # Label only the live display: a closed figure has no renderer left (2026-10-26:
+        # 'FigureCanvasBase' object has no attribute 'get_renderer'), and an empty axis list
+        # raised IndexError at every update.
+        display = self.display if self.displayActive() else None
+        axes = getattr(display, 'axes', None)
+        canvas = getattr(getattr(display, 'fig', None), 'canvas', None)
+        if not axes or not hasattr(canvas, 'get_renderer'):
+            return
+        self.labelAxis = axes[0]
+        self._rescaling = True
+        try:
+            super().labelPlot(label)
+        finally:
+            self._rescaling = False
+
+    def _psu_names(self):
+        rails = ((self._plan or {}).get('metadata') or {}).get('rails') or []
+        names = [str(r.get('psu', '')) for r in rails]
+        if not any(names):
+            try:
+                amx = self._plugin(self.amx_name)
+                selected = self._selected_outputs()
+                names = [str(getattr(amx, attr)) for attr, first in (('psu_ch01', 0), ('psu_ch23', 2)) if first in selected]
+            except (ScanError, AttributeError, KeyError, TypeError, ValueError):
+                names = []
+        return [name for name in dict.fromkeys(names) if name and name != 'None']
+
+    def _psu_tag(self, separator=', '):
+        letters = [name[4:] if name.upper().startswith('PSU_') else name for name in self._psu_names()]
+        return ('PSU ' + separator.join(letters)) if letters else ''
+
     def _axis_label(self):
         metadata = (self._plan or {}).get('metadata', {})
-        return 'Commanded amplitude A (V)' if metadata.get('mode') == self.CONTINUOUS else 'Amplitude A (V)'
+        axis = self._psu_tag() or 'Amplitude A'
+        return f'{axis}, commanded (V)' if metadata.get('mode') == self.CONTINUOUS else f'{axis} (V)'
 
     def saveData(self, file):
         super().saveData(file)
@@ -2046,6 +2311,12 @@ class MScan(Scan):
             group.attrs['status'] = self._validation['status']
             group.attrs['error'] = self._validation['error']
             group.attrs['setup'] = json.dumps(self._plan['metadata'], allow_nan=False)
+            group.attrs['reference_channel'] = self.outputChannels[0].name if self.outputChannels else ''
+            group.attrs['extra_channels'] = json.dumps([c.name for c in self.outputChannels[1:]])
+            group.attrs['channels'] = ('The reference DMMR module defines each window and its validity; the other enabled '
+                'modules are averaged over the same windows (start, end] and never stop the scan. Samples and '
+                'finite_samples have one column per output channel. NaN samples are recorder ticks without a new '
+                'reading and are skipped; an infinite sample invalidates its point.')
             for key in ('rail_v', 'rail_i', 'window_start', 'window_end', 'samples', 'finite_samples'):
                 group.create_dataset(key, data=self._validation[key])
             group.create_dataset('point_status', data=self._validation['point_status'], dtype=h5py.string_dtype('utf-8'))
@@ -2115,9 +2386,19 @@ class MScan(Scan):
         return loaded
 
     def pythonPlotCode(self):
+        passes = int(((self._plan or {}).get('metadata') or {}).get('passes') or 1)
         return '''fig, ax = plt.subplots(constrained_layout=True)
-ax.plot(inputChannels[0].recordingData, outputChannels[output_index].recordingData, marker='.', markersize=4)
+passes = PASSES  # the same sweep repeated in this file
+x = np.asarray(inputChannels[0].recordingData)
+n = len(x) // passes
+for output in outputChannels:  # The reference DMMR module first, in A in the file.
+    y = np.asarray(output.recordingData).reshape(passes, n) * 1e12
+    line, = ax.plot(x[:n], np.nanmean(y, axis=0), marker='.', markersize=4, label=output.name)
+    for single in y if passes > 1 else ():
+        ax.plot(x[:n], single, linewidth=.8, alpha=.35, color=line.get_color())
 ax.set_xlabel(AXIS_LABEL)
-ax.set_ylabel(f'{outputChannels[output_index].name} ({outputChannels[output_index].unit})')
+ax.set_ylabel('Current (pA)')
+if len(outputChannels) > 1 or passes > 1:
+    ax.legend()
 plt.show()
-'''.replace('AXIS_LABEL', repr(self._axis_label()))
+'''.replace('AXIS_LABEL', repr(self._axis_label())).replace('PASSES', str(passes))

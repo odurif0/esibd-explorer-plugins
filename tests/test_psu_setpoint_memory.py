@@ -71,14 +71,12 @@ def test_validating_in_the_panel_drops_only_the_applied_fields(psu):
     assert parent._pending_setpoints == {}  # Turning an output ON applies the whole panel.
 
 
-@pytest.mark.parametrize("case", ["output on", "stored config", "other port", "crash resume", "busy"])
-def test_nothing_is_proposed_when_the_psu_or_a_config_decides(psu, case):
+@pytest.mark.parametrize("case", ["output on", "other port", "crash resume", "busy"])
+def test_nothing_is_proposed_when_the_psu_decides(psu, case):
     module, parent, controller, path = psu
     path.write_text(json.dumps({"com": "5", "channels": {"0": {"vset": 300.0, "ilim": 0.001}}}), encoding="utf-8")
     if case == "output on":
         controller.output_enabled_by_channel = {0: True, 1: False}
-    elif case == "stored config":
-        parent.operating_config = 3
     elif case == "other port":
         parent.com = 6
     if case == "busy":
@@ -159,3 +157,17 @@ if __name__ == "__main__":
     import sys
     from pathlib import Path
     raise SystemExit(probe(sys.argv[1], Path(sys.argv[2])))
+
+
+def test_a_selected_config_that_is_not_loaded_still_gets_the_last_values(psu):
+    # 2026-10-26 lab: PSU_D/E had Operating config 20 selected, never loaded at the start, and
+    # always restarted from Vset = Ilim = 0 instead of the proposed last values.
+    module, parent, controller, path = psu
+    path.write_text(json.dumps({"com": "5", "channels": {"0": {"vset": 300.0, "ilim": 0.001}}}), encoding="utf-8")
+    parent.operating_config = 20
+    _connect(parent, controller, {0: 0.0, 1: 0.0}, {0: 0.0005, 1: 0.0005})
+    assert parent._pending_setpoints == {0: {"voltage": 300.0, "current_limit": 0.001}}
+    loads = []
+    parent.controller = types.SimpleNamespace(loadOperatingConfigNowFromThread=lambda parallel=True: loads.append(parallel))
+    parent.loadOperatingConfigNow()
+    assert loads == [True] and parent._pending_setpoints == {}  # The loaded config decides.

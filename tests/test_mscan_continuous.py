@@ -28,9 +28,40 @@ def test_continuous_uses_fixed_cadence_and_only_initial_final_settling(mscan_con
     assert v['window_end'] - v['window_start'] == pytest.approx(np.full(3, s.time_step_s), abs=1e-6)
     assert v['window_end'][:-1] == pytest.approx(v['window_start'][1:])
     assert s._plan['metadata']['requested_rate_v_s'] == pytest.approx((-1 if descending else 1) * s.step / s.time_step_s)
-    assert s._axis_label() == 'Commanded amplitude A (V)'
+    assert s._axis_label() == 'PSU A, commanded (V)'
     assert r.rig.psus[0].writes[-2:] == [(0, 40), (1, 50)]
     assert r.rig.psus[1].writes == []
+
+
+def test_multipass_ends_each_sweep_then_settles_at_the_start_again(mscan_continuous):
+    # User request 2026-10-26: Continuous repeats the sweep like Step by step does.
+    r, s = mscan_continuous, mscan_continuous.scan
+    s.passes = 2
+    s.inputChannels[0].recordingData = s._scan_steps()
+    s.outputChannels[0].recordingData = np.full(6, np.nan)
+    s._plan = s._preflight()
+    s._validation.update(point_status=['not acquired'] * 6, rail_v=np.full((6, 2), np.nan), rail_i=np.full((6, 2), np.nan),
+                         window_start=np.full(6, np.nan), window_end=np.full(6, np.nan),
+                         samples=np.zeros((6, 1), dtype=int), finite_samples=np.zeros((6, 1), dtype=int))
+    calls, settle = [], s._settle
+    def tracked(seconds):
+        calls.append(seconds)
+        return settle(seconds)
+    s._settle = tracked
+    shown = []
+    s._bridge.status.emit = shown.append
+    v = run(r)
+    assert v['status'] == 'completed', v['error']
+    assert calls == [s.settling_s] * 3  # before each pass, then after the restore
+    assert s.outputChannels[0].recordingData == pytest.approx([10., 20., 30.] * 2)
+    assert v['point_status'] == ['acquired during sweep'] * 6
+    assert v['window_end'][[0, 1, 3, 4]] == pytest.approx(v['window_start'][[1, 2, 4, 5]])
+    # The approach and settling between passes belong to no point.
+    assert v['window_start'][3] - v['window_end'][2] >= s.settling_s - 1e-9
+    assert np.isfinite(v['continuous']['command_start']).all()
+    assert [w for w in r.rig.psus[0].writes if w[0] == 0] == [(0, a) for a in (10, 20, 30, 10, 20, 30, 40)]
+    assert shown[:2] == ['pass 1/2, Initial settling at 10 V', 'pass 1/2, 2/6: continuous at 20 V'], shown
+    assert 'pass 2/2, Initial settling at 10 V' in shown and 'pass 2/2, 6/6: continuous at 30 V' in shown, shown
 
 
 def test_measurement_duration_does_not_silently_control_continuous_cadence(mscan_continuous):
@@ -356,6 +387,6 @@ def test_continuous_archive_roundtrip_preserves_raw_data_and_axis(mscan_continuo
         assert 'no background' in raw['detector_current'].attrs['Unit']
     original = v['continuous']['command_start'].copy()
     s.loadDataInternal()
-    assert s._axis_label() == 'Commanded amplitude A (V)'
-    assert 'Commanded amplitude' in s.pythonPlotCode()
+    assert s._axis_label() == 'PSU A, commanded (V)'
+    assert 'commanded (V)' in s.pythonPlotCode()
     assert s._validation['continuous']['command_start'] == pytest.approx(original)
