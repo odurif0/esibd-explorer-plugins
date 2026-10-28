@@ -220,6 +220,24 @@ def test_disabling_interlock_on_a_closed_loop_leaves_outputs_alone(setup):
     assert not any(call[0] == "outputs" for call in device.calls)
 
 
+def test_interlock_loop_inputs_are_read_also_while_monitoring_is_off(setup):
+    # GetPSUState words logged in the lab on 2026-10-22, monitoring off (bits 8 and 9):
+    # PSU_D 0x7f9735 (output loop closed), PSU_E 0x3f9735 (open); BNC open on both.
+    _module, controller, _device, messages = setup
+    controller._update_interlock_inputs("0x7f9735")
+    assert (controller.interlock_out_closed, controller.interlock_bnc_closed) == (True, False)
+    assert not messages  # The first reading is a state, not a change.
+    controller._update_interlock_inputs("0x3f9735")
+    assert controller.interlock_out_closed is False
+    assert messages == ["PSU interlock loop at the output connector opened."]
+    controller._update_interlock_inputs(hex(0x3f9735 | 1 << 23))
+    assert controller.interlock_bnc_closed is True and messages[-1] == "PSU interlock loop at the BNC closed."
+    controller._update_interlock_inputs(None)
+    assert (controller.interlock_out_closed, controller.interlock_bnc_closed) == (None, None)
+    controller._update_interlock_inputs("0x7f9735")
+    assert len(messages) == 2  # Unknown in between: nothing to compare.
+
+
 def test_interlock_stays_enabled_when_outputs_are_not_confirmed_off(setup):
     _module, controller, device, messages = setup
     _tripped_interlock(controller, device, outputs=(True, False))

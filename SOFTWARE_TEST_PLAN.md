@@ -292,6 +292,15 @@ Manual`.
 the ESI `Close communication` (square) button while the check runs: Explorer must stay
 responsive and print that communication closes when the check ends.
 
+**Interlock loops (2026-10-28):** the 2026-10-22 logs show both PSUs with monitoring off,
+the output-connector loop closed on PSU_D and open on PSU_E, the BNC loop open on both.
+With every output OFF, connect each PSU: its panel `Interlock` row reads `Off (not
+monitored) · loop: output …, BNC …`. Unplug the AMX output cable fed by that PSU: if the
+`output` loop changes and the log prints `PSU interlock loop at the output connector
+opened`, the AMX connector's pins 3 and 5 reach that PSU; plug it back (`closed`). Connect
+the AMX HD: the `Loaded config` line and the log give `interlock function ON|OFF` for the
+loaded config (OFF expected with the CGC configs).
+
 ## Transmission optimizer
 
 - **Simulation first:** tick **Simulation**, run the total ion current, then a selected

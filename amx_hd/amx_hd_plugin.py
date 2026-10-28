@@ -1000,6 +1000,12 @@ def _format_config_option(
     return label
 
 
+def _interlock_function_text(function: bool | None) -> str:
+    if function is None:
+        return "n/a"
+    return "ON" if function else "OFF (interlock input ignored)"
+
+
 def _format_loaded_config_text(status: dict[str, Any]) -> str:
     """Format the config currently reported in AMX controller memory."""
     index = _coerce_int(status.get("memory_config"), -1)
@@ -1806,6 +1812,9 @@ class AMXHDDevice(Device):
         lines = [
             "AMX config currently reported in controller memory.",
             f"Loaded: {getattr(self, 'loaded_config_text', '') or 'n/a'}",
+            "Interlock function: "
+            f"{_interlock_function_text(getattr(getattr(self, 'controller', None), 'interlock_function', None))}"
+            " (InterlockFunct of the loaded config, read only; pins 3 and 5 of the output connectors)",
         ]
         available = str(getattr(self, "available_configs_text", "") or "").strip()
         if available:
@@ -2273,6 +2282,7 @@ class AMXHDDevice(Device):
                 f"Controller: {getattr(controller, 'controller_state_summary', '') or 'n/a'}",
                 f"Configs: {getattr(self, 'available_configs_text', '') or 'n/a'}",
                 f"Loaded: {getattr(self, 'loaded_config_text', '') or 'n/a'}",
+                f"Interlock function: {_interlock_function_text(getattr(controller, 'interlock_function', None))}",
             )
         )
         return "\n".join(lines)
@@ -3036,7 +3046,9 @@ class AMXHDDevice(Device):
         signal_label = getattr(self, "amxPanelSignalValue", None)
         if signal_label is not None:
             edited = " · timing edited since load" if getattr(self, "_timing_edited", False) else ""
-            signal_label.setText(f"Loaded config: {loaded_config}{edited}")
+            function = getattr(controller, "interlock_function", None) if connected else None
+            interlock = "" if function is None else f" · interlock function {'ON' if function else 'OFF'}"
+            signal_label.setText(f"Loaded config: {loaded_config}{interlock}{edited}")
             signal_label.setToolTip(self._loaded_config_tooltip_text())
         pending_label = getattr(self, "amxPanelPendingValue", None)
         if pending_label is not None:
@@ -4428,6 +4440,7 @@ class AMXHDController(DeviceController):
         self.available_configs: list[dict[str, Any]] = []
         self.available_configs_text = "n/a"
         self.loaded_config_text = "n/a"
+        self.interlock_function: bool | None = None
         self.initialized = False
         self._initial_open_close_requested = False
         self.transitioning = False
@@ -4802,6 +4815,32 @@ class AMXHDController(DeviceController):
 
         self._loaded_config_index = _coerce_int(status.get("memory_config"), -1)
         self.loaded_config_text = _format_loaded_config_text(status)
+        self._refresh_interlock_function(device)
+
+    def _refresh_interlock_function(self, device: Any) -> None:
+        """Read the loaded config's InterlockFunct (GetInterlockFunct); the plugin never writes it.
+
+        It belongs to each config. OFF: the controller ignores the interlock input
+        (pins 3 and 5 of the output connectors).
+        """
+        try:
+            result = self._device_call(device, "get_interlock_funct")
+        except (AttributeError, NotImplementedError, TypeError, ValueError):
+            result = None  # A getter missing from an older facade: unknown, not a transport fault.
+        except Exception as exc:  # noqa: BLE001
+            if (self._retire_failed_native_worker()
+                    or (self._native_backend(device) is not None and self._native_cancel_event.is_set())):
+                raise
+            self.print(f"Could not read the AMX HD interlock function: {self._format_exception(exc)}",
+                       flag=PRINT.WARNING)
+            result = None
+        function = (bool(result[1]) if isinstance(result, (tuple, list)) and len(result) == 2
+                    and _coerce_int(result[0], -1) == 0 else None)
+        if function is not None and function != self.interlock_function:
+            self.print("AMX HD interlock function ON in the loaded config." if function else
+                       "AMX HD interlock function OFF in the loaded config: the interlock input "
+                       "(pins 3 and 5 of the output connectors) is ignored.")
+        self.interlock_function = function
 
     def _selected_operating_config_index(self) -> int:
         parent = self.controllerParent
@@ -5963,6 +6002,7 @@ class AMXHDController(DeviceController):
         self.available_configs_text = "n/a"
         self.loaded_config_text = "n/a"
         self._loaded_config_index = -1
+        self.interlock_function = None
         self._discard_pending_runtime_applies()
         if self._dispose_device() is False:
             return
@@ -6112,6 +6152,7 @@ class AMXHDController(DeviceController):
         self.available_configs = []
         self.available_configs_text = self.loaded_config_text = "n/a"
         self._loaded_config_index = -1
+        self.interlock_function = None
         self._discard_pending_runtime_applies()
         self.initializeValues(reset=True)
         try:

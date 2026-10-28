@@ -97,6 +97,12 @@ Each PSU channel card exposes:
 - full-range state (`Full` / `Half`)
 - `Display` checkbox used by Explorer plots
 
+Below the cards, the `Interlock` row shows the monitoring state, then
+`loop: output closed|open, BNC closed|open`: the interlock inputs of the output
+connector and of the BNC read from the PSU (`GetPSUState` bits 22 and 23), also while
+`Interlock monitoring` is off. A change of either loop is logged. The PSU cuts its
+outputs on an open loop only while `Interlock monitoring` is on.
+
 The manual panel lets the operator:
 
 - enable/disable each output
@@ -213,8 +219,9 @@ Crashes and hung DLL calls are isolated to this plugin's worker. OFF/close can
 cancel, terminate and reap an unresponsive child without stopping other workers.
 After retirement, a fresh explicit ON starts a new worker without requiring an
 Explorer restart. Process termination does not prove outputs are OFF or
-discharged: use the hardware interlock/front panel when shutdown cannot be
-verified, and treat the displayed uncertainty separately from port ownership.
+discharged: when shutdown cannot be verified, check the front panel or switch the
+PSU off at its power switch (the interlock cuts the outputs only with `Interlock
+monitoring` on), and treat the displayed uncertainty separately from port ownership.
 
 ## Portability Note
 

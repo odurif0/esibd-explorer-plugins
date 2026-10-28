@@ -100,6 +100,8 @@ class NativeProxy:
         elif method == "get_status":
             result = dict(connected=self.connected, memory_config=79,
                           memory_config_name="Stored signal", memory_config_source="memory")
+        elif method == "get_interlock_funct" and self.family == "amx_hd":
+            result = (0, False)  # Read-only: the CGC configs have InterlockFunct OFF.
         elif method in {"collect_housekeeping", "collect_state_snapshot"}:
             result = self.snapshot()
         elif method == "set_device_enabled":
@@ -245,7 +247,9 @@ def test_constructor_requires_native_backend_and_data_path_logs_without_output_c
         native_backend=True,
         log_dir=Path(case.parent.pluginManager.Settings.dataPath) / "logs" / case.parent.name.lower(),
     )]
-    assert [call[0] for call in proxy.calls] == ["connect", "list_configs", "get_status", "collect_housekeeping"]
+    reads = ["get_interlock_funct"] if proxy.family == "amx_hd" else []
+    assert [call[0] for call in proxy.calls] == ["connect", "list_configs", "get_status", *reads,
+                                                 "collect_housekeeping"]
     assert case.successes == [True] and case.resumes == []
     assert proxy.enabled, "transport connection must not silently change running hardware"
 

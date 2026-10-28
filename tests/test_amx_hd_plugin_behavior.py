@@ -846,3 +846,36 @@ def test_hd_controller_lock_section_logs_slow_lock_acquisition(monkeypatch):
             plugin.PRINT.WARNING,
         )
     ]
+
+
+def test_loaded_config_status_reads_the_interlock_function_without_writing_it():
+    """InterlockFunct belongs to each config: read with the loaded config, logged on change, never set."""
+    plugin = load_plugin("amx_hd")
+    controller = plugin.AMXHDController(controllerParent=types.SimpleNamespace(name="AMX_HD"))
+    messages, calls = [], []
+    controller.print = lambda text, **kw: messages.append(text)
+    replies = iter([(0, False), (0, False), (0, True), (5, True)])
+
+    class Device:
+        def get_status(self):
+            calls.append("get_status")
+            return {"memory_config": 79}
+
+        def get_interlock_funct(self):
+            calls.append("get_interlock_funct")
+            return next(replies)
+
+    controller.device = Device()
+    controller._refresh_loaded_config_status()
+    assert controller.interlock_function is False
+    assert messages == ["AMX HD interlock function OFF in the loaded config: the interlock input "
+                        "(pins 3 and 5 of the output connectors) is ignored."]
+    controller._refresh_loaded_config_status()  # Same value: nothing new.
+    assert len(messages) == 1
+    controller._refresh_loaded_config_status()
+    assert controller.interlock_function is True and messages[-1] == "AMX HD interlock function ON in the loaded config."
+    controller._refresh_loaded_config_status()  # A nonzero DLL status leaves it unknown.
+    assert controller.interlock_function is None and len(messages) == 2
+    assert set(calls) == {"get_status", "get_interlock_funct"}
+    assert plugin._interlock_function_text(False) == "OFF (interlock input ignored)"
+    assert plugin._interlock_function_text(None) == "n/a"
