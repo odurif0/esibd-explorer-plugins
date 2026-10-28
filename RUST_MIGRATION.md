@@ -33,7 +33,28 @@ HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
 `1a62ffda5efd160944f07a5411b70644700e17a6ce96ccd14438952c3519f82f`
-(v0.5.4 below).
+(v0.5.4 below; v0.5.5 changes no Rust source or worker).
+
+## v0.5.5 Update (2026-10-28)
+
+Python plugin changes only: the 15 workers, their manifests and the source archive are
+those of v0.5.4. None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **PSU link:** with `Link CH1 to CH0` ticked, the `ON` box or the `Range` of either
+  channel sets both channels in one transaction (a range change still waits for the
+  measured discharge). The tick itself never switches an output or a range, which would
+  restart CH0's ramp; it says when they differ.
+- **PSU interlock loops:** the panel `Interlock` row adds `loop: output closed|open, BNC
+  closed|open`, the raw inputs of `GetPSUState` (bits 22 and 23), also while `Interlock
+  monitoring` is off, and a change is logged. In the 2026-10-22 logs, with monitoring off
+  on both PSUs, the output loop was closed on PSU_D and open on PSU_E.
+- **AMX HD interlock function:** `InterlockFunct` of the loaded config is read (never
+  written) at connection and after each config load, shown in the `Loaded config` line
+  and the status tooltip, and logged when it changes. OFF means the controller ignores
+  the interlock input.
+- **AMX documentation:** the output connector pins (1 and 4 ground, 2 RF2, 3 and 5
+  interlock, 6 RF1), what each plugin can see of the interlock, and a shutdown advice that
+  no longer suggests the plugin's interlock can confirm OFF.
 
 ## v0.5.4 Update (2026-10-26)
 

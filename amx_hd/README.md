@@ -211,6 +211,18 @@ timers the outputs actually use. Each timer channel exposes:
 - measured duty-cycle monitor
 - width and burst readbacks
 
+## Output Connector and Interlock
+
+Output connector pins (AMX and AMX HD): 1 ground, 2 RF2, 3 interlock, 4 ground,
+5 interlock, 6 RF1. The AMX HD DLL reports no live state of the loop on pins 3 and 5.
+It only has `InterlockFunct`, stored in each config: OFF, the controller ignores the
+interlock input. The CGC configuration file `config_swA.cfg` sets it OFF in all its
+178 configs. The plugin reads it at connection and after each config load, shows
+`interlock function ON|OFF` in the `Loaded config` line and the status tooltip, logs a
+change, and never writes it. If the loop reaches the interlock input of a PSU, the PSU
+plugin's `Interlock` row shows it (also with monitoring off); that PSU cuts its outputs
+on an open loop only while its `Interlock monitoring` setting is on (off by default).
+
 ## Connection Failures
 
 A failed or timed-out connection is never reused. A returned failed initial
@@ -226,8 +238,9 @@ Crashes and hung DLL calls are isolated to this plugin's worker. OFF/close can
 cancel, terminate and reap an unresponsive child without stopping other workers.
 After retirement, a fresh explicit ON starts a new worker without requiring an
 Explorer restart. Process termination does not prove outputs are OFF or
-discharged: use the hardware interlock/front panel when shutdown cannot be
-verified, and treat the displayed uncertainty separately from port ownership.
+discharged: when shutdown cannot be verified, switch the AMX HD and the PSUs that
+feed it off at their power switches (the plugin can neither see nor trip an
+interlock), and treat the displayed uncertainty separately from port ownership.
 
 ## Portability Note
 

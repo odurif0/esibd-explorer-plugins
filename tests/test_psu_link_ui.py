@@ -48,7 +48,9 @@ def probe(folder, output):
             return {
                 "main_state": {"name": "ST_ON" if self.enabled else "ST_OFF"},
                 "device_enabled": self.enabled, "output_enabled": self.outputs,
-                "psu_state": {"psu_enabled_actual": self.enabled, "interlock_active": True},
+                "psu_state": {"psu_enabled_actual": self.enabled, "interlock_active": True,
+                              "interlock_out_disabled": True, "interlock_bnc_disabled": True,
+                              "hex": hex(0x339f | 1 << 22)},
                 "channels": [dict(channel=ch, enabled=self.outputs[ch],
                     voltage={"set_v": self.voltages[ch], "measured_v": self.get_channel_measured_voltage(ch)},
                     current={"set_a": self.currents[ch], "measured_a": .0001},
@@ -97,6 +99,9 @@ def probe(folder, output):
         drain()
 
     assert not link.isChecked() and controls[1]["voltage"].isEnabled()
+    # Not monitored, but the loop inputs are still shown.
+    assert parent.channelPanelGlobalDiagnostics["interlock"].text() == (
+        "Off (not monitored) · loop: output closed, BNC open")
     # Ticking the link sends CH0's setpoints to CH1, nothing else.
     hw.calls.clear()
     QTest.mouseClick(link, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(8, link.height() // 2))

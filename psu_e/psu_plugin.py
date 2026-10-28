@@ -164,6 +164,10 @@ _PSU_VOLTAGE_RAMP_STEP_V = 100.0
 _PSU_VOLTAGE_RAMP_STEP_S = 0.05
 _PSU_TEMPERATURE_WARN_C = 55.0
 _PSU_TEMPERATURE_ERROR_C = 70.0
+# GetPSUState interlock inputs (COM-HVPSU2D.h ST_ILOCK_OUT / ST_ILOCK_BNC), set while the
+# loop is closed (ST_ILOCK_*_ACT = input | disabled); readable also with monitoring off.
+_PSU_ST_ILOCK_OUT = 1 << 22
+_PSU_ST_ILOCK_BNC = 1 << 23
 _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V = 0.01
 _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A = 0.001
 _PSU_SETPOINT_VERIFY_REL_TOLERANCE = 0.01
@@ -2649,6 +2653,11 @@ class PSUDevice(Device):
         ilock_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         ilock_value = QLabel("n/a")
         ilock_value.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
+        ilock_value.setToolTip(
+            "Interlock monitoring, then the loop inputs read from the PSU (output connector and BNC; "
+            "closed = loop bridged), also while monitoring is off. A change is logged. The PSU cuts "
+            "its outputs on an open loop only while Interlock monitoring is on."
+        )
         diag_layout.addWidget(ilock_name, ilock_row, 0)
         diag_layout.addWidget(ilock_value, ilock_row, 1, 1, col_offset - 1)
         diag_widgets["interlock"] = ilock_value
@@ -3154,17 +3163,21 @@ class PSUDevice(Device):
                 ilock_active = getattr(controller, "interlock_active", None)
                 ilock_out_dis = getattr(controller, "interlock_out_disabled", False)
                 ilock_bnc_dis = getattr(controller, "interlock_bnc_disabled", False)
+                loops = [f"{name} {'closed' if closed else 'open'}" for name, closed in (
+                    ("output", getattr(controller, "interlock_out_closed", None)),
+                    ("BNC", getattr(controller, "interlock_bnc_closed", None))) if closed is not None]
+                loops_text = f" · loop: {', '.join(loops)}" if loops else ""
                 if ilock_active is None:
                     ilock_widget.setText("n/a")
                     ilock_widget.setStyleSheet(_PSU_PANEL_METRIC_VALUE_STYLE)
                 elif ilock_out_dis and ilock_bnc_dis:
-                    ilock_widget.setText("Off (not monitored)")
+                    ilock_widget.setText(f"Off (not monitored){loops_text}")
                     ilock_widget.setStyleSheet(_psu_feedback_style("warn"))
                 elif ilock_active:
-                    ilock_widget.setText("OK")
+                    ilock_widget.setText(f"OK{loops_text}")
                     ilock_widget.setStyleSheet(_psu_feedback_style("ok"))
                 else:
-                    ilock_widget.setText("ERROR — check cable")
+                    ilock_widget.setText(f"ERROR — check cable{loops_text}")
                     ilock_widget.setStyleSheet(_psu_feedback_style("error"))
             psu_enb_widget = global_diag.get("psu_enabled")
             if psu_enb_widget is not None and hasattr(psu_enb_widget, "setText"):
@@ -4803,6 +4816,21 @@ class PSUController(DeviceController):
                 f"requested={(enabled, enabled)}, actual={actual}."
             )
 
+    def _update_interlock_inputs(self, state_hex: Any) -> None:
+        """Raw loop inputs, shown also while monitoring is off; a change is logged."""
+        try:
+            word = int(str(state_hex), 16)
+        except (TypeError, ValueError):
+            inputs = (None, None)
+        else:
+            inputs = (bool(word & _PSU_ST_ILOCK_OUT), bool(word & _PSU_ST_ILOCK_BNC))
+        for name, attr, closed in zip(("output connector", "BNC"),
+                                      ("interlock_out_closed", "interlock_bnc_closed"), inputs):
+            before = getattr(self, attr, None)
+            if before is not None and closed is not None and before != closed:
+                self.print(f"PSU interlock loop at the {name} {'closed' if closed else 'opened'}.")
+            setattr(self, attr, closed)
+
     def _interlock_tripped(self) -> bool:
         """Whether the last readback did not show a closed interlock loop."""
         return (
@@ -5656,6 +5684,7 @@ class PSUController(DeviceController):
         self.psu_enabled_actual = _coerce_bool(psu_state_data.get("psu_enabled_actual"), False)
         self.interlock_out_disabled = _coerce_bool(psu_state_data.get("interlock_out_disabled"), False)
         self.interlock_bnc_disabled = _coerce_bool(psu_state_data.get("interlock_bnc_disabled"), False)
+        self._update_interlock_inputs(psu_state_data.get("hex"))
         self.adc_temperatures = adc_temperatures
         self.dropout_values = dropout_values
         self.rail_summaries = rail_summaries
@@ -6705,7 +6734,7 @@ class PSUController(DeviceController):
             "Communication with the PSU high-voltage supply was lost. OUTPUTS MAY "
             "REMAIN ENERGIZED AT THEIR LAST SETPOINT because the device can no "
             "longer be commanded to disable them. Manually verify all outputs are "
-            "OFF via the front panel / hardware interlock before approaching the device.",
+            "OFF (front panel, or the PSU power switch) before approaching the device.",
             flag=PRINT.ERROR,
         )
         self._cancel_output_commands()
@@ -6780,6 +6809,7 @@ class PSUController(DeviceController):
         self.psu_enabled_actual = None
         self.interlock_out_disabled = None
         self.interlock_bnc_disabled = None
+        self.interlock_out_closed = self.interlock_bnc_closed = None
         self.current_limit_active = None
         self.device_enabled = None
         if device is None:

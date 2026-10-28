@@ -234,6 +234,16 @@ Switch topology and routing remain managed by the saved AMX controller
 configurations. The plugin focuses on the runtime timing adjustments typically
 changed between experiments.
 
+## Output Connector and Interlock
+
+Output connector pins (AMX and AMX HD): 1 ground, 2 RF2, 3 interlock, 4 ground,
+5 interlock, 6 RF1. The AMX DLL (`COM-HVAMX4ED`) has no interlock function and no
+state bit for it: the plugin cannot read the loop on pins 3 and 5, nor act on it,
+and nothing in its panel tells whether it is closed. If that loop reaches the
+interlock input of a PSU, the PSU plugin's `Interlock` row shows it (also with
+monitoring off); that PSU cuts its outputs on an open loop only while its
+`Interlock monitoring` setting is on (off by default).
+
 ## Connection Failures
 
 A failed or timed-out connection is never reused. A returned failed initial
@@ -249,8 +259,9 @@ Crashes and hung DLL calls are isolated to this plugin's worker. OFF/close can
 cancel, terminate and reap an unresponsive child without stopping other workers.
 After retirement, a fresh explicit ON starts a new worker without requiring an
 Explorer restart. Process termination does not prove outputs are OFF or
-discharged: use the hardware interlock/front panel when shutdown cannot be
-verified, and treat the displayed uncertainty separately from port ownership.
+discharged: when shutdown cannot be verified, switch the AMX and the PSUs that
+feed it off at their power switches (the plugin can neither see nor trip an
+interlock), and treat the displayed uncertainty separately from port ownership.
 
 ## Portability Note
 
