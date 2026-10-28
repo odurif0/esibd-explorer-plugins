@@ -1,4 +1,5 @@
-"""Real Qt: "Link CH1 to CH0" sends CH0's Vset and Ilim to both channels (user request 2026-10-26)."""
+"""Real Qt: "Link CH1 to CH0" sends CH0's Vset and Ilim to both channels (user request 2026-10-26)
+and sets both outputs and ranges from either channel's ON box or Range (2026-10-28)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -78,6 +79,15 @@ def probe(folder, output):
         QTest.qWait(40)
         assert not controller._manual_apply_worker_running and controller.errorCount == 0, messages
 
+    def click(box):
+        QTest.mouseClick(box, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         QPoint(8, box.height() // 2))
+        drain()
+
+    def select(box, text):
+        box.setCurrentText(text)
+        drain()
+
     def validate(field, value):
         spin = controls[0][field]
         spin.setFocus()
@@ -95,7 +105,7 @@ def probe(folder, output):
     assert parent.link_channels is True, parent.link_channels
     assert hw.voltages == {0: 100., 1: 100.} and hw.currents == {0: .002, 1: .002}, (hw.voltages, hw.currents)
     assert {call[1] for call in hw.calls} == {1}, hw.calls
-    assert any("CH1 linked to CH0" in message for message in messages)
+    assert any("CH1 linked to CH0" in message and "differ" not in message for message in messages)
     assert not controls[1]["voltage"].isEnabled() and not controls[1]["current_limit"].isEnabled()
     # A value validated on CH0 is sent to both channels.
     validate("voltage", 80)
@@ -105,12 +115,45 @@ def probe(folder, output):
     assert hw.currents == {0: .003, 1: .003}, hw.currents
     assert hw.outputs == (True, True) and hw.enabled
     window.grab().save(str(output / f"{folder}-linked.png"))
+    # Either ON box switches both outputs, in one transaction.
+    hw.calls.clear()
+    click(controls[0]["output_enabled"])
+    assert hw.outputs == (False, False) and not hw.enabled, (hw.outputs, hw.enabled)
+    assert [call for call in hw.calls if call[0] == "outputs"] == [("outputs", False, False)], hw.calls
+    assert not controls[1]["output_enabled"].isChecked()
+    click(controls[1]["output_enabled"])
+    assert hw.outputs == (True, True) and hw.enabled, (hw.outputs, hw.enabled)
+    assert hw.voltages == {0: 80., 1: 80.}, hw.voltages
+    assert controls[0]["output_enabled"].isChecked()
+    # Either Range sets both channels, in one transaction.
+    hw.calls.clear()
+    select(controls[0]["full_range"], "Full")
+    assert hw.ranges == (True, True) and hw.outputs == (True, True), (hw.ranges, hw.outputs)
+    assert [call for call in hw.calls if call[0] == "range"] == [("range", True, True)], hw.calls
+    assert controls[1]["full_range"].currentText() == "Full"
+    select(controls[1]["full_range"], "Half")
+    assert hw.ranges == (False, False) and controls[0]["full_range"].currentText() == "Half", hw.ranges
     # Unlinked: CH0 alone again.
     QTest.mouseClick(link, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(8, link.height() // 2))
     app.processEvents()
     assert parent.link_channels is False and controls[1]["voltage"].isEnabled()
     validate("voltage", 90)
     assert hw.voltages == {0: 90., 1: 80.}, hw.voltages
+    click(controls[0]["output_enabled"])
+    select(controls[0]["full_range"], "Full")
+    assert hw.outputs == (False, True) and hw.ranges == (True, False), (hw.outputs, hw.ranges)
+    # Relinking with different outputs and ranges switches none of them; the next change sets both.
+    hw.calls.clear()
+    click(link)
+    assert hw.outputs == (False, True) and hw.ranges == (True, False), (hw.outputs, hw.ranges)
+    assert not [c for c in hw.calls if c[0] in ("outputs", "global", "range")], hw.calls
+    assert any("Outputs differ (CH0 OFF, CH1 ON)" in message and "Ranges differ (CH0 Full, CH1 Half)" in message
+               for message in messages), messages
+    click(controls[1]["output_enabled"])
+    assert hw.outputs == (False, False), hw.outputs
+    select(controls[1]["full_range"], "Full")
+    assert hw.ranges == (True, True), hw.ranges
+    click(link)
     # Leave the field before closing: its focus-out would start an apply during Qt teardown.
     QTest.mouseClick(other, Qt.MouseButton.LeftButton)
     drain()

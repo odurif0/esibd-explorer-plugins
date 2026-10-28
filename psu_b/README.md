@@ -121,8 +121,11 @@ still requires measured discharge. A failed check triggers output-disable recove
 **Link CH1 to CH0.** The check box above the channel cards (also the advanced setting
 `Link CH1 to CH0`, kept between sessions) makes CH1's `Vset` and `Ilim` follow CH0:
 ticking it sends CH0's values to CH1, then a value validated on CH0 is sent to both
-channels, and CH1's fields are greyed. Outputs and ranges stay separate. A settings load
-never sends anything; only a tick in the panel does.
+channels, and CH1's fields are greyed. While linked, the `ON` box and the `Range` of
+either channel set both channels together, in one transaction (a range change still
+waits for the measured discharge). The tick itself never switches an output or a range:
+if they differ, the message says so and the next `ON` click or `Range` change sets both.
+A settings load never sends anything; only a tick in the panel does.
 
 **Last values.** While connected, the plugin remembers the `Vset` and `Ilim` the
 PSU holds (`<Explorer config path>/PSU_B_last_setpoints.json`, with the COM port).

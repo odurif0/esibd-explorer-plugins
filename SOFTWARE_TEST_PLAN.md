@@ -277,8 +277,11 @@ again; no `time step missed` error between passes, and both passes are in the fi
 set CH0 to e.g. 100 V / 1 mA with the output OFF, close Explorer, restart, connect: the panel
 proposes 100 V and 1 mA in italics (it showed zeros because a selected config disabled the
 proposal); `Load config` drops the proposal. Tick `Link CH1 to CH0`: CH1 receives CH0's Vset
-and Ilim and its fields grey out; a value validated on CH0 reaches both channels; outputs
-stay separate. The tick is kept after a restart and sends nothing then.
+and Ilim and its fields grey out; a value validated on CH0 reaches both channels. With the
+link ticked, CH0's `ON` box switches both outputs OFF then both ON (one ramp), and so does
+CH1's; a `Range` change on either channel switches both (after the discharge); untick it and
+CH0's `ON` box and `Range` act on CH0 alone. The tick is kept after a restart and sends
+nothing then.
 
 **Transmission and MScan with AMPR channels (2026-10-26):** every AMPR channel had `Manual`
 unticked with no equation, and Transmission refused `Entry_IF1`. A channel without equation
