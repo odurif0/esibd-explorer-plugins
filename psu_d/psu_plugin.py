@@ -1726,6 +1726,29 @@ class PSUDevice(Device):
             return float(readback)
         return value
 
+    def _manual_output_toggled(self, channel_index: int, checked: bool) -> None:
+        self._mirror_linked_control(channel_index, "output_enabled", checked)
+        self._manual_panel_changed(debounce=False, finish_edits=checked)
+
+    def _manual_range_changed(self, channel_index: int, index: int) -> None:
+        self._mirror_linked_control(channel_index, "full_range", index)
+        self._manual_panel_changed(debounce=False)
+
+    def _mirror_linked_control(self, channel_index: int, name: str, value: Any) -> None:
+        """Linked, the ON box and the Range of either channel set both channels, in one transaction."""
+        if (not self._channels_linked() or getattr(self, "_manualPanelSyncing", False)
+                or not self._manual_controls_ready()[0]):
+            return
+        widget = (getattr(self, "manualPanelControls", {}) or {}).get(1 - channel_index, {}).get(name)
+        if name == "output_enabled":
+            self._set_control_checked(widget, value)
+        elif widget is not None:
+            blocked = widget.blockSignals(True)
+            try:
+                widget.setCurrentIndex(value)
+            finally:
+                widget.blockSignals(blocked)
+
     def _manual_panel_changed(self, *_args: Any, debounce: bool = False, finish_edits: bool = True) -> None:
         if getattr(self, "_manualPanelSyncing", False):
             return
@@ -1792,7 +1815,10 @@ class PSUDevice(Device):
                 widget.blockSignals(blocked)
 
     def _link_box_toggled(self, checked: bool) -> None:
-        """Only an operator tick sends CH0's setpoints to CH1, never a settings load."""
+        """Only an operator tick sends CH0's setpoints to CH1, never a settings load.
+
+        The tick never switches an output or a range: that would also restart CH0's ramp.
+        """
         if getattr(self, "_linkSyncing", False):
             return
         self.link_channels = bool(checked)
@@ -1812,8 +1838,18 @@ class PSUDevice(Device):
                 state[key] = {1: value}
                 self._show_linked_value(field, value)
             self._submit_manual_panel_state(state)
+            differ = ""
+            for label, attr, words, change in (
+                ("Outputs", "output_enabled_by_channel", ("OFF", "ON"), "ON/OFF click"),
+                ("Ranges", "full_range_by_channel", ("Half", "Full"), "Range change"),
+            ):
+                states = getattr(self.controller, attr, {}) or {}
+                ch0, ch1 = (bool(states.get(ch, False)) for ch in _PSU_CHANNEL_IDS)
+                if ch0 != ch1:
+                    differ += f" {label} differ (CH0 {words[ch0]}, CH1 {words[ch1]}): the next {change} sets both."
             self.print(f"CH1 linked to CH0: Vset {state['voltage_values'][1]:g} V and "
-                       f"Ilim {state['current_limit_values'][1]:g} A sent to CH1.")
+                       f"Ilim {state['current_limit_values'][1]:g} A sent to CH1; "
+                       f"ON/OFF and Range now set both channels.{differ}")
 
     def _link_setting_changed(self) -> None:
         box = getattr(self, "linkChannelsBox", None)
@@ -2465,7 +2501,7 @@ class PSUDevice(Device):
             from PyQt6.QtCore import Qt
             output_box.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             output_box.toggled.connect(
-                lambda checked: self._manual_panel_changed(debounce=False, finish_edits=checked)
+                lambda checked, ch=channel_index: self._manual_output_toggled(ch, checked)
             )
             range_label = QLabel("Range")
             range_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
@@ -2475,7 +2511,7 @@ class PSUDevice(Device):
                 "Full range enables maximum voltage. Half range lowers voltage capability and allows higher current."
             )
             range_box.currentIndexChanged.connect(
-                lambda _index: self._manual_panel_changed(debounce=False)
+                lambda index, ch=channel_index: self._manual_range_changed(ch, index)
             )
             voltage_label = QLabel("Vset")
             voltage_label.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
@@ -2548,10 +2584,11 @@ class PSUDevice(Device):
                 "voltage": voltage_widget,
                 "current_limit": current_widget,
             }
-        link_box = QCheckBox("Link CH1 to CH0 (Vset and Ilim)")
+        link_box = QCheckBox("Link CH1 to CH0 (Vset, Ilim, ON/OFF and Range)")
         link_box.setToolTip(
             "Ticking it sends CH0's Vset and Ilim to CH1; then a value validated on CH0 is sent to both "
-            "channels. CH1's fields follow CH0. Outputs and ranges stay separate."
+            "channels. CH1's fields follow CH0. The ON box and the Range of either channel set both "
+            "channels. The tick never switches an output or a range."
         )
         link_box.setChecked(self._channels_linked())
         link_box.toggled.connect(self._link_box_toggled)
@@ -3746,7 +3783,8 @@ class PSUDevice(Device):
             value=False,
             toolTip=(
                 "CH1 Vset and Ilim follow CH0: a value validated on CH0 is sent to both channels. "
-                "Outputs and ranges stay separate. Also a check box above the channel cards."
+                "The ON box and the Range of either channel set both channels. "
+                "Also a check box above the channel cards."
             ),
             parameterType=PARAMETERTYPE.BOOL,
             attr="link_channels",
