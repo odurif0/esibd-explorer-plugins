@@ -246,7 +246,10 @@ reports `ESI HV discharge verified after N s`. The check has a 120-second deadli
 blocked DLL is handled by the transport watchdog. ON is refused until the check ends.
 Explorer closing waits for its verdict (at most about 2 min) instead of interrupting it.
 **Close communication** clicked during the check returns at once: the check closes the port
-itself (2026-10-26: waiting for it there froze Explorer for 33 s).
+itself (2026-10-26: waiting for it there froze Explorer for 33 s). The general **Close
+communication** of the Device Manager works as the OFF button: the ESI stops on a worker
+thread and the other devices close at once (2026-10-30: the check ran on the GUI thread,
+Explorer froze for 53 s and the PSUs stopped only after it).
 Repeated communication-release requests cannot close the same owner twice.
 The log records the start of shutdown, and errors identify the failed ADC operation
 and module. A cleanup failure cannot hide the original discharge error. ADC

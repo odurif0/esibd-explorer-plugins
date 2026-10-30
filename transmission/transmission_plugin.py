@@ -302,6 +302,7 @@ class ExplorerInstrument(_engine.Instrument):
     DEVICE_BUSY = DEVICE_BUSY
     # A PSU setpoint is applied by its own worker: wait for it before the next setpoint (as MScan).
     APPLYING = ("_manual_apply_active", "_manual_apply_worker_running")
+    QUANTIZATION_V = 0.05  # Beyond it, a PSU setpoint readback is not the rounding of the request.
 
     def __init__(self, plugin, config, cancel):
         self.plugin, self.config, self.cancel = plugin, config, cancel
@@ -315,6 +316,7 @@ class ExplorerInstrument(_engine.Instrument):
         self.measured = {name: self._resolve(manager, name) for name in config.measured_channels}
         self.switches = self._amx_switches(plugin, config)
         self.expected = {}
+        self.revisions = {}
         self.log = None
         self._latency = []
         self._window_details = {}
@@ -484,6 +486,7 @@ class ExplorerInstrument(_engine.Instrument):
                 channel.value = float(value)
                 # Keep what the channel stored (possibly rounded) to detect later outside edits.
                 self.expected[name] = float(channel.value)
+                self.revisions[name] = getattr(channel, "voltage_request_revision", None)
         self._gui(write)
 
     def readbacks(self, channels):
@@ -563,8 +566,15 @@ class ExplorerInstrument(_engine.Instrument):
                 # A rail at its current limit: short, discharge or overload. As MScan, no HV OFF from here.
                 raise _engine.InstrumentError(f"{name}: output current {float(current) * 1000:g} mA reached Ilim "
                                               f"{float(ilim) * 1000:g} mA in {device.name}")
-            expected = self.expected.get(name)
-            if expected is not None and not math.isclose(float(channel.value), expected, rel_tol=1e-9, abs_tol=1e-9):
+            expected, revision = self.expected.get(name), self.revisions.get(name)
+            if revision is None:
+                changed = expected is not None and not math.isclose(float(channel.value), expected, rel_tol=1e-9, abs_tol=1e-9)
+            else:
+                # A PSU publishes its quantized setpoint on the channel (2026-10-30 lab: 89.25315 V reads
+                # back 89.25 V and stopped the run). As in MScan, only a new request is an outside edit.
+                changed = (channel.voltage_request_revision != revision
+                           or abs(float(channel.value) - expected) > self.QUANTIZATION_V)
+            if changed:
                 raise _engine.InstrumentError(f"{name}: setpoint changed outside the optimizer ({expected:g} -> {float(channel.value):g})")
         for name, device in self.switches.items():
             # Without its AMX switching, the rails reach no electrode: the RF amplitude would not exist.
@@ -734,7 +744,7 @@ class _BeamlineDialog(QDialog):
         row.addWidget(self.detector_position, 1)
         layout.addLayout(row)
         spray_intro = QLabel("<b>Spray current</b> — the electrospray current must be stable while optimizing "
-                             "(typically 10–30 nA). Every averaging window is measured again until the spray lies in "
+                             "(30–60 nA by default). Every averaging window is measured again until the spray lies in "
                              "this range and fluctuates by at most 20 %; after 2 min without a stable spray the "
                              "optimization stops and returns to the stage start.")
         spray_intro.setWordWrap(True)
@@ -1213,6 +1223,8 @@ class Transmission(Scan):
     small steps that wait for the readbacks; the best point is adopted only after
     paired A/B measurements show a significant gain.
     """
+
+    FOLDER = "Transmission"  # <Data path>/Transmission/<YYYY-MM-DD>/, never Explorer's session fields, as MScan.
 
     documentation = """Optimizes the ion transmission through the beamline apertures, stage by stage.
     1. Configure the beamline once (which channel drives each element, the detector channel and its position).
@@ -2130,6 +2142,25 @@ class Transmission(Scan):
                     raise _engine.ConfigError(problem)
         return text, config
 
+    def _scan_file(self, now=None):
+        """<Data path>/Transmission/<date>/<date_time>[_simulation]_transmission.h5 (user choice 2026-10-30)."""
+        now = time.localtime() if now is None else now
+        folder = Path(self.pluginManager.Settings.dataPath) / self.FOLDER / time.strftime("%Y-%m-%d", now)
+        stem = time.strftime("%Y-%m-%d_%H-%M-%S", now) + ("_simulation" if self._simulated_run else "")
+        candidate, n = folder / f"{stem}_transmission.h5", 2
+        while candidate.exists():
+            candidate, n = folder / f"{stem}_{n}_transmission.h5", n + 1
+        return candidate
+
+    def updateFile(self):
+        if self._dummy_initialization:
+            self.file = Path()
+        else:
+            self.file = self._scan_file()
+            self.file.parent.mkdir(parents=True, exist_ok=True)
+        if self.displayActive() and self.display:
+            self.display.file = self.file
+
     def initScan(self):
         if self._dummy_initialization:
             return False
@@ -2231,9 +2262,17 @@ class Transmission(Scan):
                             for c, v in optimizer.initial.items())
             result = self._result or {}
             self._decided = (unchanged or self._closing or not self._native_available(optimizer)
-                             or result.get("status") in ("error", "instrument error", "configuration error"))
+                             or result.get("status") in ("error", "configuration error"))
             if self._decided:
                 self._retire_native_optimizer(optimizer)
+            if result.get("status") == "instrument error" and not unchanged and not self._closing:
+                # An instrument error sends no further command: say what stayed moved
+                # (2026-10-30 lab: PSU_E was left at 89.25 V instead of 85 V without a word).
+                moved = ", ".join(f"{c} {optimizer.commanded[c]:g} (start {v:g})" for c, v in optimizer.initial.items()
+                                  if not math.isclose(optimizer.commanded.get(c, v), v, rel_tol=1e-9, abs_tol=1e-9))
+                self.print(f"Stopped with settings moved: {moved}. "
+                           + ("Set them back by hand." if self._decided else "Keep or Revert them in the panel."),
+                           flag=PRINT.WARNING)
             summary = self.result_summary()
             self._run_log.write("summary", status=result.get("status"), reason=result.get("reason"), line=summary,
                                 stages=result.get("stages"), checks=result.get("checks"), target=result.get("target"),

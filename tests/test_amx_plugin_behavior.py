@@ -2025,15 +2025,15 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
         "off or unresponsive. The AMX instance is now marked unusable."
     )
     guidance1 = controller._init_failure_guidance(fatal_exc)
-    assert "RESTART ESIBD Explorer" in guidance1
+    assert "does not need a restart" in guidance1
     assert controller._poisoned_com == 10  # recorded for later retries
 
     # Attempt 2: device now ON, fresh instance, but the port is still locked
     # in-process -> open_port returns -2 immediately.
     retry_exc = RuntimeError("AMX open_port failed: -2 (Error opening port)")
     guidance2 = controller._init_failure_guidance(retry_exc)
-    assert "RESTART ESIBD Explorer" in guidance2
-    assert "locked the COM port" in guidance2
+    assert "no longer holds the port" in guidance2
+    assert "timed out" in guidance2
     assert controller._poisoned_com == 10  # not clobbered by the non-fatal retry
 
 

@@ -865,6 +865,10 @@ class _AMPRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMPRBase):
             self.logger.error(f"Error setting PSU enable: {e}")
             raise
 
+    def take_receive_errors(self, timeout_s: Optional[float] = None) -> list:
+        """Drain the replies the native worker did not get in time; only the worker records them."""
+        return []
+
     def get_state(self, timeout_s: Optional[float] = None):
         """Get main state with logging."""
         timeout_s = self._resolve_io_timeout(timeout_s)

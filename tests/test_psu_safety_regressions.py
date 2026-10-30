@@ -238,6 +238,22 @@ def test_interlock_loop_inputs_are_read_also_while_monitoring_is_off(setup):
     assert len(messages) == 2  # Unknown in between: nothing to compare.
 
 
+def test_a_poll_overtaken_by_off_is_not_a_read_fault(setup):
+    # 2026-10-28 lab, PSU_C: "Failed to read PSU housekeeping: RuntimeError: release unlocked lock"
+    # right after "PSU shutdown sequence completed".
+    _module, controller, device, messages = setup
+
+    def closed_meanwhile(**kwargs):
+        controller.device, controller.initialized = None, False
+        raise RuntimeError("release unlocked lock")
+
+    device.collect_housekeeping = closed_meanwhile
+    controller._housekeeping_refresh_due = lambda now: True
+    errors = controller.errorCount = 0
+    controller.readNumbers()
+    assert controller.errorCount == errors and not any("Failed to read" in message for message in messages)
+
+
 def test_interlock_stays_enabled_when_outputs_are_not_confirmed_off(setup):
     _module, controller, device, messages = setup
     _tripped_interlock(controller, device, outputs=(True, False))

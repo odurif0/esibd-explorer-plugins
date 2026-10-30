@@ -195,6 +195,19 @@ def probe(folder, output, configuration="bootstrap"):
         assert channels[0].monitor == expected - .25
         assert parent.manualPanelControls[0]["voltage"].value() == expected
 
+    # 2026-10-30 lab: the DAC rounds 89.25315 V to 89.25 V. The channel then shows the setpoint
+    # the PSU holds, but no new request exists: Transmission and MScan rely on this difference.
+    written = hw.set_channel_voltage
+    hw.set_channel_voltage = lambda ch, value, **kwargs: written(ch, round(value, 2), **kwargs)
+    channels[0].value = 89.25315
+    revisions = [c.voltage_request_revision for c in channels]  # Read as Transmission does, right after writing.
+    drain()
+    controller._update_state()
+    app.processEvents()
+    assert hw.voltages[0] == 89.25 and channels[0].value == 89.25, (hw.voltages, channels[0].value)
+    assert [c.voltage_request_revision for c in channels] == revisions
+    hw.set_channel_voltage = written
+
     # Real panel + real hidden Channels. Stale fields on the other card must
     # never become commands when this card's Vset or Ilim is validated.
     parent._hide_channel_table()

@@ -72,3 +72,51 @@ def test_explorer_1_0_1_automatic_save_and_restore(dmmr_history_rig, monkeypatch
     np.testing.assert_array_equal(ch.values.get(), expected[0])
     np.testing.assert_array_equal(ch.range_history.get(), expected[1])
     assert ch.values.size == ch.range_history.size == dmmr_history_rig.device.time.size == 20
+
+
+def test_hourly_store_survives_samples_arriving_during_the_export(dmmr_history_rig, monkeypatch, tmp_path):
+    # 2026-10-30 lab: the hourly store runs on its own thread while the GUI thread appends, and
+    # each history is read after the previous one. "DMMR range history is not aligned" aborted the
+    # stores of 10:37 (DMMR_M00) and 11:37 (DMMR_M01).
+    ns = dict(np=np, Path=Path, h5py=dmmr_history_rig.h5py, PRINT=dmmr_history_rig.module.PRINT,
+              cast=lambda kind, value: value, INPUTCHANNELS='Input Channels',
+              OUTPUTCHANNELS='Output Channels', UNIT='Unit')
+    exec(compile_definition(HOST, 'appendOutputData', 'Device'), ns)
+    host_append = ns['appendOutputData']
+    first, second = dmmr_history_rig.add(), dmmr_history_rig.add()
+    for channel in (first, second):
+        channel.getRecordedParameters = lambda: []
+    dmmr_history_rig.record(20)
+    device = dmmr_history_rig.device
+    device.liveDisplay.livePlotWidgets = []
+
+    def appended_meanwhile(self, h5file, useAllHistory=False):
+        host_append(self, h5file, useAllHistory)
+        dmmr_history_rig.record(2)  # Arrived after the histories were read by the host.
+
+    monkeypatch.setattr(dmmr_history_rig.module.Device, 'appendOutputData', appended_meanwhile)
+    with dmmr_history_rig.h5py.File(tmp_path / 'store.h5', 'w') as h5file:
+        device.appendOutputData(h5file, True)
+    with dmmr_history_rig.h5py.File(tmp_path / 'store.h5', 'r') as h5file:
+        group = h5file[device.name]
+        for channel in (first, second):
+            ranges = group[dmmr_history_rig.module._DMMR_RANGE_GROUP][channel.name]
+            assert ranges.shape == group['Output Channels'][channel.name].shape == (20,)
+            np.testing.assert_array_equal(ranges[:], channel.range_history.get()[:20])
+
+
+def test_a_real_range_misalignment_is_still_refused(dmmr_history_rig, monkeypatch, tmp_path):
+    ns = dict(np=np, Path=Path, h5py=dmmr_history_rig.h5py, PRINT=dmmr_history_rig.module.PRINT,
+              cast=lambda kind, value: value, INPUTCHANNELS='Input Channels',
+              OUTPUTCHANNELS='Output Channels', UNIT='Unit')
+    exec(compile_definition(HOST, 'appendOutputData', 'Device'), ns)
+    monkeypatch.setattr(dmmr_history_rig.module.Device, 'appendOutputData', ns['appendOutputData'])
+    channel = dmmr_history_rig.add()
+    channel.getRecordedParameters = lambda: []
+    dmmr_history_rig.record(20)
+    device = dmmr_history_rig.device
+    device.liveDisplay.livePlotWidgets = []
+    channel.range_history = type(channel.values)(initialData=np.zeros(5, dtype=np.float32),
+                                                 max_size=channel.values.max_size)
+    with pytest.raises(ValueError, match="not aligned"), dmmr_history_rig.h5py.File(tmp_path / 'bad.h5', 'w') as h5file:
+        device.appendOutputData(h5file, True)

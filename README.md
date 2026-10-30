@@ -14,7 +14,9 @@ panel, PSU values kept after a shutdown, a non-blocking ESI OFF and compact nati
 v0.5.4 makes MScan record every enabled DMMR module in pA with readable file names and
 repeated passes, lets Transmission and MScan use AMPR channels without equation, links
 two PSU channels and keeps an ESI OFF check from freezing Explorer; v0.5.5 also links
-their ON/OFF and Range, and shows the PSU interlock loops and the AMX HD interlock function.
+their ON/OFF and Range, and shows the PSU interlock loops and the AMX HD interlock function;
+v0.5.6 keeps Explorer responsive during the general Close communication, lets Transmission
+move PSU amplitudes, and fixes what the lab logs of 2026-10-28/30 showed.
 Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
 no Explorer fork, external Python, private interpreter or shared device process
 is needed. **Real-hardware qualification is pending.** Local software, simulated
@@ -44,7 +46,7 @@ hardware checks; qualify the devices before routine experimental use.
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.5.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.6.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -86,7 +88,7 @@ To optimize the transmission through the inlet, funnel and quadrupoles, see
 ion current or a mass selected by a quadrupole (peak picked on an MScan spectrum or a
 quick sweep, in volts), choose the stages, then Optimize. It drives only the mapped
 channels, in small verified steps, measures only while the spray current is stable
-(typically 10–30 nA), and can run on a built-in simulated beamline.
+(30–60 nA by default), and can run on a built-in simulated beamline.
 
 ## Host fixes and hardware validation
 
@@ -217,9 +219,9 @@ python3 -m pytest -q --all-siblings      # release validation: every sibling cop
 ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
 
-Use the v0.5.5 native archive for release checks, selected explicitly with
+Use the v0.5.6 native archive for release checks, selected explicitly with
 `ESIBD_RELEASE_ZIP`. The historical v0.4.2 ZIP is intentionally unchanged and
-cannot validate the native bundle. The v0.5.5 tag message gives the archive's
+cannot validate the native bundle. The v0.5.6 tag message gives the archive's
 SHA-256; earlier packaging-test evidence is recorded in
 [RUST_MIGRATION.md](RUST_MIGRATION.md).
 

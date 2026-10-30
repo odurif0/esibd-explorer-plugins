@@ -28,6 +28,8 @@ const MAX_STAGE_POINTS: usize = 256;
 const MAX_TOTAL_POINTS: usize = 4096;
 const MAX_CHANNELS: usize = 128;
 const MAX_ACTIONS: u64 = 2_000_000;
+// A window edge is computed from the start value: start + (max - start) can round just above max.
+const LIMIT_ROUNDING: f64 = 1e-9;
 
 fn config_error(message: impl Into<String>) -> Error {
     Error::new("ConfigError", message)
@@ -1956,13 +1958,15 @@ impl Controller {
             Reply::MoveChecked(movement, point) => {
                 let channels: Vec<_> = point.keys().cloned().collect();
                 let limits = Self::limits(value, &channels)?;
-                for (n, v) in &point {
+                let mut point = point;
+                for (n, v) in point.iter_mut() {
                     let [lo, hi] = limits[n];
-                    if !v.is_finite() || *v < lo || *v > hi {
+                    if !v.is_finite() || *v < lo - LIMIT_ROUNDING || *v > hi + LIMIT_ROUNDING {
                         return Err(instrument_error(format!(
                             "{n}: {v} outside device limits [{lo}, {hi}]"
                         )));
                     }
+                    *v = v.clamp(lo, hi);
                 }
                 self.tasks.push(Task::Request(
                     "command",
@@ -2267,7 +2271,7 @@ impl Controller {
             }
         }
         self.log("stage_start",json!({"stage":stage.name,"knobs":stage.knobs.iter().map(|k| (k.name.clone(),k.channels.clone())).collect::<BTreeMap<_,_>>(),
-            "lower":lower,"upper":upper,"start":start,"steps":steps,"budget":stage.budget(),"aperture":stage.aperture,"downstream":stage.downstream,
+            "limits":limits,"lower":lower,"upper":upper,"start":start,"steps":steps,"budget":stage.budget(),"aperture":stage.aperture,"downstream":stage.downstream,
             "normalize_by":stage.normalize_by,"peak":stage.peak,"strategy":self.config.options.strategy,"peak_measure":if stage.peak {Some(self.peak_measure(&stage))} else {None}}));
         self.emit(
             "stage",

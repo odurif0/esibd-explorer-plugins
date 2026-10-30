@@ -23,6 +23,7 @@ from esibd.core import (
     DeviceController,
     Parameter,
     ToolButton,
+    getTestMode,
     parameterDict,
 )
 from esibd.plugins import Device, Plugin
@@ -48,6 +49,7 @@ _CHANNELS_PER_MODULE_OPTIONS = {2, 4}
 _AMPR_ABS_VOLTAGE_LIMIT = 1000.0
 _AMPR_MIN_ROW_HEIGHT = 28
 _AMPR_RAMP_STEP_S = 0.1
+_AMPR_EXIT_WAIT_S = 30.0  # Explorer exit: the shutdown of a background OFF, ramp skipped.
 _AMPR_MONITOR_INTERVAL_S = 1.0
 # A poll pauses this long between modules when a setpoint write is queued, so
 # the writer takes the controller lock instead of waiting for the whole cycle.
@@ -141,24 +143,19 @@ def _transport_failure_is_fatal(exc: Exception) -> bool:
     )
 
 
-# A timed-out open_port poisons the COM port for the lifetime of the ESIBD
-# Explorer process: the blocked vendor-DLL call keeps an exclusive OS handle, so
-# no new instance can reopen it and every later retry fails with ERR_OPEN (-2)
-# even once the device is powered on. The operator-facing guidance below makes
-# that explicit instead of letting the user loop on a confusing
-# 'Error opening port' message while the hardware is actually fine.
+# A call that times out stops the plugin's native worker, which releases the COM
+# port, and the next explicit ON starts a fresh worker (2026-10-28 lab: AMX_B
+# reopened COM11 a minute after a blocked Open, in the same Explorer session).
+# The guidance below says so; it used to ask for an Explorer restart.
 _AMPR_POISONED_PORT_RECOVERY = (
-    "The COM port is now locked inside this ESIBD Explorer process: the timed-out "
-    "attempt left a blocked vendor-DLL call holding an exclusive handle to the port. "
-    "This instance can no longer reopen it, so every later retry will keep failing "
-    "with 'Error opening port' (-2) even once the device is powered on. Power the "
-    "device on, then RESTART ESIBD Explorer to release the port before trying again."
+    "The native worker that held the COM port was stopped, which released the port: "
+    "Explorer does not need a restart. Check that the device is powered and connected, "
+    "then retry ON."
 )
 _AMPR_POISONED_PORT_RETRY = (
-    "This retry is failing because an earlier timed-out connection attempt locked "
-    "the COM port inside this ESIBD Explorer process. The device may well be powered "
-    "on now, but the port cannot be reopened from this instance. RESTART ESIBD "
-    "Explorer to release the port and retry."
+    "An earlier connection attempt on this port timed out and its worker was stopped, "
+    "so this Explorer no longer holds the port. Check that the device is powered and "
+    "connected, and that no other program has the port open."
 )
 
 
@@ -170,11 +167,8 @@ def _ampr_poisoned_port_guidance(
 ) -> str:
     """Return operator guidance for a failed AMPR init, or "" when none applies.
 
-    A timed-out open_port poisons the COM port for the lifetime of the process
-    (the blocked vendor-DLL thread keeps an exclusive OS handle), so no new
-    instance can reopen it and every retry fails with ERR_OPEN (-2). Surface
-    that instead of letting the operator loop on a confusing 'Error opening
-    port' while the hardware is actually fine.
+    A timed-out call stops the native worker, which releases the port. Say what
+    to check instead of leaving the operator on a bare 'Error opening port'.
     """
     if _transport_failure_is_fatal(exc):
         return _AMPR_POISONED_PORT_RECOVERY
@@ -224,6 +218,25 @@ def _finish_channel_edit(channel: Any) -> None:
                 widget.interpretText()
             finally:
                 widget.blockSignals(blocked)
+
+
+def _on_gui_thread() -> bool:
+    try:
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        return False
+    app = QApplication.instance()
+    return app is not None and QThread.currentThread() == app.thread()
+
+
+def _process_gui_events() -> None:
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        return
+    if QApplication.instance() is not None and _on_gui_thread():
+        QApplication.processEvents()
 
 
 def _invoke_gui_callback(callback: Any) -> None:
@@ -1520,6 +1533,14 @@ class AMPRDevice(Device):
             return
 
         if controller and getattr(controller, "initialized", False) and not forced_close_state:
+            manager = getattr(self, "pluginManager", None)
+            if (hasattr(self, "onAction") and manager is not None and not manager.closing
+                    and _on_gui_thread() and not getTestMode()):
+                # 2026-10-30 lab: the general Close communication held the GUI thread for the 1.8 s
+                # of the shutdown call and skipped the ramp-down. This is the OFF button's path;
+                # closeGUI still waits for it when Explorer really exits.
+                self.setOn(False)
+                return
             self.shutdownCommunication()
             return
 
@@ -1537,6 +1558,13 @@ class AMPRDevice(Device):
             controller.closeCommunication(**close_kwargs)
         self.recording = False
         self._sync_acquisition_controls()
+
+    def closeGUI(self) -> None:
+        # Explorer closing: never exit during a shutdown running on a worker thread.
+        controller = getattr(self, "controller", None)
+        if controller is not None and getattr(self.pluginManager, "closing", False):
+            controller.finish_off_before_exit()
+        super().closeGUI()
 
     def shutdownCommunication(self) -> None:
         """Run the full AMPR hardware shutdown sequence from the toolbar action."""
@@ -2183,7 +2211,7 @@ class AMPRController(DeviceController):
         self._native_shutdown_unconfirmed = False
         self._consecutive_transport_failures = 0
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
-        # earlier in this session and is therefore still locked in-process.
+        # earlier in this session.
         self._poisoned_com: int | None = None
 
     def initializeValues(self, reset: bool = False) -> None:
@@ -2287,9 +2315,7 @@ class AMPRController(DeviceController):
         """Operator guidance appended to an init-failure message, or "" if none.
 
         Tracks whether a transport was poisoned by a timed-out DLL call earlier
-        in this session so that later retries explain why they still fail (the
-        COM port is locked in-process) instead of looping on a bare
-        'Error opening port' (-2) while the hardware is actually responsive.
+        in this session so that a later failed retry says what to check.
         """
         if self._initial_open_incomplete():
             return (
@@ -3588,6 +3614,17 @@ class AMPRController(DeviceController):
                 return False
             # The previous worker may have just relinquished ownership.
             return True
+
+    def finish_off_before_exit(self) -> None:
+        """Skip what is left of a ramp-down and wait, GUI alive, for the verified shutdown."""
+        self._request_fast_off()
+        deadline = time.monotonic() + _AMPR_EXIT_WAIT_S
+        while getattr(self, "transitioning", False) and time.monotonic() < deadline:
+            _process_gui_events()
+            time.sleep(.02)
+        if getattr(self, "transitioning", False):
+            self.print(f"AMPR shutdown still running after {_AMPR_EXIT_WAIT_S:.0f} s; Explorer exits anyway. "
+                       "Verify the hardware state.", flag=PRINT.ERROR)
 
     def _check_ramp_cancelled(self) -> None:
         if getattr(self, "_cancel_ramp", False):

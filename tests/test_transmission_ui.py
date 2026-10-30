@@ -716,8 +716,10 @@ def explorer_scenario(env):
         # One detector: its current channel and where it sits (after Q4 by default).
         assert dialog.detector_position.currentData() == "after_q4"
         dialog.detector_channel.setCurrentText("Collector")
-        # The spray current must stay stable while optimizing: 10-30 nA by default.
-        assert (dialog.spray_low.text(), dialog.spray_high.text()) == ("10", "30")
+        # The spray current must stay stable while optimizing: 30-60 nA by default.
+        assert (dialog.spray_low.text(), dialog.spray_high.text()) == ("30", "60")
+        dialog.spray_low.setText("10")  # The simulated spray is 20 nA.
+        dialog.spray_high.setText("30")
         dialog.spray_channel.setCurrentText("ESI_I")
         # The spray current is read on the ESI, never on the DMMR; the detector is never the ESI's.
         items = lambda combo: [combo.itemText(i) for i in range(combo.count())]
@@ -910,6 +912,9 @@ def explorer_scenario(env):
         end = next(e for e in events if e["event"] == "run_end")
         assert end["status"] == "instrument error" and "InstrumentError" in end["traceback"]
         assert progress().startswith("Instrument error:"), progress()
+        # Nothing moved back by itself: the panel offers the decision (2026-10-30 lab).
+        assert panel.keep.isVisible() and panel.revert.isVisible()
+        panel.keep.click()
     elif scenario == "explorer-interlock":
         assert result["status"] == "interlock" and "P_funnel" in result["reason"], result
         assert all(abs(knobs[c].value - start[c]) < 1e-9 for c in ("Inlet", "Funnel_exit")), "stage start restored"

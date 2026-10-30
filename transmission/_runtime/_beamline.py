@@ -2,7 +2,7 @@
 
 The description maps each element setting (inlet, funnel, Q1-Q4) to Explorer
 channels, names the single detector (its current channel and where it sits),
-the electrospray current that must stay stable (typically 10-30 nA) and
+the electrospray current that must stay stable (30-60 nA by default) and
 optional gauges with soft pressure limits. Windows and steps come from
 defaults per kind of setting, scaled by the exploration level. Amplitudes are
 in volts, like MScan; the m/z calibration belongs to MScan.
@@ -71,7 +71,7 @@ LABEL = {key: f"{element} {label if label.isupper() or label.split()[0].isupper(
          for key, element, label, _ in KNOBS}  # "Q2 RF amplitude", "Funnel DC gradient", "Inlet voltage".
 RF_KEYS = tuple(key for key, _, _, kind in KNOBS if kind == "rf")
 PAIRS = ("CH0-CH1", "CH2-CH3")  # AMX output pairs, each fed by one PSU: CH0 = Vpos, CH1 = Vneg.
-SPRAY_RANGE_NA = (10.0, 30.0)  # A stable electrospray for the optimization (nA, magnitude).
+SPRAY_RANGE_NA = (30.0, 60.0)  # A stable electrospray for the optimization (nA, magnitude).
 
 
 def empty():

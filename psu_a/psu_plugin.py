@@ -200,24 +200,19 @@ def _transport_failure_is_fatal(exc: Exception) -> bool:
     )
 
 
-# A timed-out open_port poisons the COM port for the lifetime of the ESIBD
-# Explorer process: the blocked vendor-DLL call keeps an exclusive OS handle, so
-# no new instance can reopen it and every later retry fails with ERR_OPEN (-2)
-# even once the device is powered on. The operator-facing guidance below makes
-# that explicit instead of letting the user loop on a confusing
-# 'Error opening port' message while the hardware is actually fine.
+# A call that times out stops the plugin's native worker, which releases the COM
+# port, and the next explicit ON starts a fresh worker (2026-10-28 lab: AMX_B
+# reopened COM11 a minute after a blocked Open, in the same Explorer session).
+# The guidance below says so; it used to ask for an Explorer restart.
 _PSU_POISONED_PORT_RECOVERY = (
-    "The COM port is now locked inside this ESIBD Explorer process: the timed-out "
-    "attempt left a blocked vendor-DLL call holding an exclusive handle to the port. "
-    "This instance can no longer reopen it, so every later retry will keep failing "
-    "with 'Error opening port' (-2) even once the device is powered on. Power the "
-    "device on, then RESTART ESIBD Explorer to release the port before trying again."
+    "The native worker that held the COM port was stopped, which released the port: "
+    "Explorer does not need a restart. Check that the device is powered and connected, "
+    "then retry ON."
 )
 _PSU_POISONED_PORT_RETRY = (
-    "This retry is failing because an earlier timed-out connection attempt locked "
-    "the COM port inside this ESIBD Explorer process. The device may well be powered "
-    "on now, but the port cannot be reopened from this instance. RESTART ESIBD "
-    "Explorer to release the port and retry."
+    "An earlier connection attempt on this port timed out and its worker was stopped, "
+    "so this Explorer no longer holds the port. Check that the device is powered and "
+    "connected, and that no other program has the port open."
 )
 
 
@@ -229,11 +224,8 @@ def _psu_poisoned_port_guidance(
 ) -> str:
     """Return operator guidance for a failed PSU init, or "" when none applies.
 
-    A timed-out open_port poisons the COM port for the lifetime of the process
-    (the blocked vendor-DLL thread keeps an exclusive OS handle), so no new
-    instance can reopen it and every retry fails with ERR_OPEN (-2). Surface
-    that instead of letting the operator loop on a confusing 'Error opening
-    port' while the hardware is actually fine.
+    A timed-out call stops the native worker, which releases the port. Say what
+    to check instead of leaving the operator on a bare 'Error opening port'.
     """
     if _transport_failure_is_fatal(exc):
         return _PSU_POISONED_PORT_RECOVERY
@@ -4578,7 +4570,7 @@ class PSUController(DeviceController):
         self._hv_readback_invalidated_at = 0.0
         self._hv_config_loading = False
         # COM port (if any) whose transport was poisoned by a timed-out DLL call
-        # earlier in this session and is therefore still locked in-process.
+        # earlier in this session.
         self._poisoned_com: int | None = None
 
     def _invalidate_hv_readback(self) -> None:
@@ -4995,9 +4987,7 @@ class PSUController(DeviceController):
         """Operator guidance appended to an init-failure message, or "" if none.
 
         Tracks whether a transport was poisoned by a timed-out DLL call earlier
-        in this session so that later retries explain why they still fail (the
-        COM port is locked in-process) instead of looping on a bare
-        'Error opening port' (-2) while the hardware is actually responsive.
+        in this session so that a later failed retry says what to check.
         """
         if self._initial_open_incomplete():
             return (
@@ -5396,6 +5386,11 @@ class PSUController(DeviceController):
             self._invalidate_hv_readback()
             return
         except Exception as exc:  # noqa: BLE001
+            if self.device is None or not getattr(self, "initialized", False):
+                # 2026-10-28 lab: OFF finished under this poll ("release unlocked lock",
+                # "PSU device is not connected"): a closed connection is not a read fault.
+                self.initializeValues(reset=True)
+                return
             self.errorCount += 1
             self.print(
                 f"Failed to read PSU housekeeping: {self._format_exception(exc)}",
