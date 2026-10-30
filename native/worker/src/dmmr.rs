@@ -1173,14 +1173,24 @@ impl Controller {
             match self.verify_running(recovery.automatic, &recovery.ranges, &mut incident, ctx) {
                 Ok(_) => (),
                 Err(error) if error.kind == "ReceiveError" => {
-                    self.resynchronize(&mut incident, ctx)?;
-                    self.recovery_write(
-                        "SetAutomaticCurent",
-                        vec![json!(false)],
-                        &mut incident,
-                        ctx,
-                    )?;
-                    self.verify_running(false, &recovery.ranges, &mut incident, ctx)?;
+                    // One more pass: a reply lost here is as transient as the one that led here
+                    // (2026-10-30 lab: -13, then -10 on the seventh range, and 56 min without DMMR).
+                    for retry in [true, false] {
+                        self.resynchronize(&mut incident, ctx)?;
+                        self.recovery_write(
+                            "SetAutomaticCurent",
+                            vec![json!(false)],
+                            &mut incident,
+                            ctx,
+                        )?;
+                        match self.verify_running(false, &recovery.ranges, &mut incident, ctx) {
+                            Err(error) if retry && error.kind == "ReceiveError" => (),
+                            other => {
+                                other?;
+                                break;
+                            }
+                        }
+                    }
                     let mut emptied = false;
                     for count in 0..1024 {
                         self.active(ctx)?;

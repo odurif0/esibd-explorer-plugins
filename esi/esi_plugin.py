@@ -22,6 +22,7 @@ from esibd.core import (
     Channel,
     DeviceController,
     Parameter,
+    getTestMode,
     parameterDict,
 )
 from esibd.plugins import Device, LiveDisplay, Plugin
@@ -2013,6 +2014,15 @@ class ESIDevice(Device):
     def closeCommunication(self) -> None:
         _session_clear(self)  # A disconnection or Explorer closing is never resumed.
         controller = getattr(self, "controller", None)
+        manager = getattr(self, "pluginManager", None)
+        if (controller is not None and getattr(controller, "initialized", False) and manager is not None
+                and not manager.closing and controller.main_state != _ESI_STOPPING
+                and _on_gui_thread() and not getTestMode()):
+            # 2026-10-30 lab: the general Close communication ran the whole discharge check on the GUI
+            # thread: Explorer froze for 53 s and the PSUs stopped only after it. This is the OFF
+            # button's path; closeGUI still waits for the check when Explorer really exits.
+            self.setOn(False)
+            return
         if controller is not None:
             controller.closeCommunication()
         super().closeCommunication()

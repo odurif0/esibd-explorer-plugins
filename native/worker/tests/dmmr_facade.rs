@@ -673,6 +673,59 @@ fn framing_failure_allows_one_purge_restores_baud_drains_fifo_and_restarts_only_
 }
 
 #[test]
+fn a_reply_lost_while_verifying_gets_one_more_resynchronization_then_stops() {
+    let flush = || {
+        step(
+            "GetCurent",
+            1,
+            vec![json!(0), json!(0.0), json!(0), json!(0.0)],
+        )
+    };
+    let resync = || {
+        vec![
+            step("Purge", 0, vec![]),
+            step("SetBaudRate", 0, vec![json!(230400)]),
+            step("SetAutomaticCurent", 0, vec![]),
+        ]
+    };
+    let lost = |steps: &mut Vec<_>| {
+        steps.extend(verify(false, &[]));
+        steps.push(step(
+            "GetModuleMeasRange",
+            -10,
+            vec![json!(0), json!(false)],
+        ));
+    };
+    // 2026-10-30 lab: -13 on GetState, then -10 on a range while verifying.
+    let mut steps = connect_steps();
+    steps.push(step("GetState", -13, vec![json!(0)]));
+    steps.extend(resync());
+    lost(&mut steps);
+    steps.extend(resync());
+    steps.extend(verify(false, &[(0, 2, false)]));
+    steps.push(flush());
+    let (mut c, script) = controller(steps);
+    call(&mut c, "connect", vec![]).unwrap();
+    configure(&mut c, json!({"0":[2,false]}), false);
+    let incident = call(&mut c, "recover_read", vec![json!(-13), json!("get_state")]).unwrap();
+    assert_eq!(incident["verified"], json!(true));
+    completed(&script);
+
+    // Bounded: a third lost reply stops the reading.
+    let mut steps = connect_steps();
+    steps.push(step("GetState", -13, vec![json!(0)]));
+    steps.extend(resync());
+    lost(&mut steps);
+    steps.extend(resync());
+    lost(&mut steps);
+    let (mut c, script) = controller(steps);
+    call(&mut c, "connect", vec![]).unwrap();
+    configure(&mut c, json!({"0":[2,false]}), false);
+    assert!(call(&mut c, "recover_read", vec![json!(-13), json!("get_state")]).is_err());
+    completed(&script);
+}
+
+#[test]
 fn bad_state_range_gate_and_baud_readback_never_trigger_reenable_or_reconnect() {
     for failure in ["state", "enabled", "range", "baud"] {
         let mut steps = connect_steps();

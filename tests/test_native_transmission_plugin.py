@@ -609,3 +609,43 @@ def test_the_spray_current_is_read_on_the_esi_never_on_the_dmmr(module, tmp_path
                 scan._configuration()
         else:
             assert scan._configuration()[1].spray.channel == spray
+
+
+def test_only_a_new_psu_request_is_an_outside_edit(rig):
+    # 2026-10-30 lab: PSU_E asked for 89.25315 V reads back 89.25 V; the PSU plugin publishes that
+    # on the channel, and the run stopped on "setpoint changed outside the optimizer".
+    device = NS(name="PSU_E", useOnOffLogic=True, isOn=lambda: True, controller=None)
+    channel = NS(name="PSU_E_CH0", value=89.25315, voltage_request_revision=7, enabled=True, real=True,
+                 active=True, equation="", getDevice=lambda: device)
+    plain = NS(name="Entry_IF1", value=130.0, enabled=True, real=True, active=True, equation="",
+               getDevice=lambda: device)
+    instrument = rig.module.ExplorerInstrument.__new__(rig.module.ExplorerInstrument)
+    instrument.driven, instrument.switches, instrument.measured = {"psu": channel, "ampr": plain}, {}, {}
+    instrument.expected = {"psu": 89.25315, "ampr": 130.0}
+    instrument.revisions = {"psu": 7, "ampr": None}
+    channel.value = 89.25  # Quantized echo, same request.
+    instrument._check()
+    channel.value, channel.voltage_request_revision = 88.0, 8  # An operator edit.
+    with pytest.raises(rig.module._engine.InstrumentError, match="changed outside the optimizer"):
+        instrument._check()
+    channel.value, channel.voltage_request_revision = 95.0, 7  # Beyond any rounding: a hardware change.
+    with pytest.raises(rig.module._engine.InstrumentError, match="changed outside the optimizer"):
+        instrument._check()
+    channel.value, channel.voltage_request_revision = 89.25, 7
+    plain.value = 130.0001  # Without a revision the channel must stay exactly as written.
+    with pytest.raises(rig.module._engine.InstrumentError, match="^ampr:"):
+        instrument._check()
+
+
+def test_files_go_to_their_dated_folder_without_session_fields_and_never_overwrite(rig):
+    # 2026-10-30 lab: runs were saved to data/None/GroEL/2026-05-29_13-27_None_GroEL_MS/.
+    scan, now = rig.scan, time.struct_time((2026, 10, 30, 14, 44, 6, 4, 303, 0))
+    scan._simulated_run = False
+    data = Path(scan.pluginManager.Settings.dataPath)
+    first = scan._scan_file(now)
+    assert first == data / "Transmission" / "2026-10-30" / "2026-10-30_14-44-06_transmission.h5"
+    first.parent.mkdir(parents=True)
+    first.touch()
+    assert scan._scan_file(now).name == "2026-10-30_14-44-06_2_transmission.h5"
+    scan._simulated_run = True
+    assert scan._scan_file(now).name == "2026-10-30_14-44-06_simulation_transmission.h5"

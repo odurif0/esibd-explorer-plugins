@@ -52,7 +52,7 @@ The panel has three steps, then **▶ Optimize**.
 1. **Beamline** — **Configure…** once: which channel drives each setting (inlet
    voltage; funnel RF amplitude, DC gradient and exit; offset and RF amplitude of
    Q1–Q4), the **detector** (its current channel and its position), the **spray
-   current** (the ESI HV current of the emitter, and its accepted range, 10–30 nA by
+   current** (the ESI HV current of the emitter, and its accepted range, 30–60 nA by
    default) and optionally which gauges to watch with their pressure range. The spray
    current is always read on the ESI, never on the DMMR: only ESI currents are offered
    for it, and they are not offered as the detector. The detector normally sits
@@ -85,7 +85,7 @@ pressures ON **and recording**. Read the detector at **5–10 Hz** while optimiz
 interval 100–200 ms, set in the DMMR plugin): each 2 s averaging window then holds
 10–20 samples, against two at the DMMR default of 1 s. A slower detector is flagged
 on the Devices line. The spray current must be **stable** during the optimization
-(typically 10–30 nA): every averaging window is measured again, without any move,
+(30–60 nA by default): every averaging window is measured again, without any move,
 until the spray lies in its range and fluctuates by at most 20 % within the window
 (`max_spread`); after 2 min (`wait_s`) without a stable spray the optimization stops
 and returns to the stage start. The ESI is read at 1 Hz or faster; it stays ON and
@@ -109,7 +109,9 @@ measurement count, the best gain so far and an upper bound of the time left; **�
 requests a return to the start of the stage in progress while the worker and
 devices remain responsive. At the end, one line sums it up (for
 example `Collector: 210 pA → 820 pA (×3.9). 5/6 stage(s) improved`): **Keep** the
-new settings or **Revert** to the settings before the run, step by step.
+new settings or **Revert** to the settings before the run, step by step. An instrument
+error sends no further command: the settings stay where they were, the log lists them,
+and **Keep** and **Revert** are offered too.
 
 **Simulation** runs the same steps on a built-in simulated beamline (three species,
 a Q2 mass filter, noise and drift) without touching any device. In Explorer's test mode,
@@ -122,7 +124,11 @@ The choices are kept in Explorer's configuration folder (`Transmission.beamline.
 ## Philosophy
 
 - **Start from what works.** Each stage starts from the current setpoints and only
-  explores a window around them, clipped to the channel Min/Max of the device plugin.
+  explores a window around them, clipped to the channel Min/Max of the device plugin
+  (for a PSU, also to 0 and to its hardware limit). Every step reads Min/Max again: a
+  value outside them stops the run before any command, so a limit lowered during a run
+  applies at the next step. A start value outside its limits refuses the stage. The
+  run log records the limits of each stage.
 - **Small verified steps.** Every move is split into steps no larger than the setting's
   `max_step`; each step waits until the readback reaches the setpoint.
 - **Beam order.** Stages follow the beam (funnel, Q1, …, Q4); the final stage refines
@@ -266,7 +272,7 @@ P_funnel = [2.0, 6.0]
 
 [spray]                   # optional: every averaging window waits for a stable spray
 channel = "ESI_HV1_I"     # the ESI HV current of the emitter (measured, never driven)
-range = [1e-8, 3e-8]      # A: accepted |spray current| (10–30 nA)
+range = [3e-8, 6e-8]      # A: accepted |spray current| (30–60 nA)
 # max_spread = 0.2        # largest relative standard deviation within a window
 # wait_s = 120.0          # then stop and return to the stage start
 
@@ -309,7 +315,8 @@ crosses, verification points as stars), the selected peak before/after (or the s
 positions of the current stage), the detector current (and, in an advanced
 configuration measuring an aperture, the current on it) and the pressures.
 
-Each run is saved in the session folder (`…_transmission.h5`): the configuration, the
+Each run is saved to `<Data path>/Transmission/<date>/<date>_<time>[_simulation]_transmission.h5`,
+never over an existing file and without the Explorer session fields: the configuration, the
 beamline description and the result (JSON, with the spectra and the before/after
 currents) as attributes, and for each stage the measurement index, time, kind
 (`initial`, `probe`, `explore`, `reference`, `verify`), validity and reason, criterion

@@ -265,3 +265,29 @@ def test_explorer_closing_closes_communication_before_the_gui(control, monkeypat
     device.pluginManager = SimpleNamespace(closing=closing)
     device.closeGUI()
     assert calls == (["communication", "gui"] if closing else ["gui"])
+
+
+@pytest.mark.parametrize("state", ["ST_ON", "stopping", "closing", "worker-thread"])
+def test_general_close_uses_the_off_path_and_never_waits_on_the_gui_thread(control, monkeypatch, state):
+    # 2026-10-30 lab: the general Close communication ran the discharge check on the GUI thread:
+    # Explorer froze for 53 s and PSU_D and PSU_E stopped only after it.
+    calls = []
+    monkeypatch.setattr(control.module, "_on_gui_thread", lambda: state != "worker-thread")
+    monkeypatch.setattr(control.module, "getTestMode", lambda: False)
+    monkeypatch.setattr(control.module.Device, "closeCommunication", lambda self: calls.append("base"), raising=False)
+    monkeypatch.setattr(control.module, "_session_clear", lambda device: None)
+
+    class Closing(control.module.ESIDevice):
+        def __init__(self):  # noqa: D107 - no Explorer plugin setup is needed here
+            pass
+
+        def setOn(self, on=None):
+            calls.append(("setOn", on))
+
+    device = Closing()
+    device.controller = SimpleNamespace(
+        initialized=True, main_state=control.module._ESI_STOPPING if state == "stopping" else "ST_ON",
+        closeCommunication=lambda: calls.append("controller"))
+    device.pluginManager = SimpleNamespace(closing=state == "closing")
+    device.closeCommunication()
+    assert calls == ([("setOn", False)] if state == "ST_ON" else ["controller", "base"])

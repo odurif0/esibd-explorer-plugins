@@ -131,7 +131,7 @@ class Spray:
     """The electrospray current, measured in every averaging window and never driven.
 
     A window counts only if the magnitude of its mean lies within ``[minimum, maximum]``
-    (A; 10-30 nA is typical) and its relative standard deviation within the window is at
+    (A; 30-60 nA by default) and its relative standard deviation within the window is at
     most ``max_spread``. Otherwise the window is measured again; after ``wait_s`` without
     a stable spray the run stops as a soft interlock (the stage start is restored).
     """
@@ -458,7 +458,7 @@ def template(knob_channels=(), current_channels=(), pressure_channels=()):
         "# Optional: measure every window again until the spray current is stable; stop after wait_s.",
         "# [spray]",
         f'# channel = "{sprays[0]}"',
-        "# range = [1e-8, 3e-8]     # A: accepted |spray current| (10-30 nA)",
+        "# range = [3e-8, 6e-8]     # A: accepted |spray current| (30-60 nA)",
         "# max_spread = 0.2         # largest relative standard deviation within an averaging window",
         "# wait_s = 120.0           # then stop and restore the stage start",
         "",

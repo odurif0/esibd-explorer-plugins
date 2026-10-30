@@ -146,8 +146,9 @@ An unavailable capture is explicitly reported, not silently omitted.
 ## Read Errors
 
 Returned receive errors (`−10` to `−13`) are logged before recovery. The driver
-checks the controller, acquisition mode and ranges, with at most one serial
-purge if needed. The failed reading is missing data, never a reused value.
+checks the controller, acquisition mode and ranges, with a serial purge if needed,
+and one more purge if a reply is lost during that check (2026-10-30: `-13` then `-10`
+stopped the reading for 56 min). The failed reading is missing data, never a reused value.
 A second error before valid replies from all modules, or a fourth incident
 within 60 seconds, stops acquisition. A blocked DLL is never retried or closed
 concurrently. This checks new replies, not fresh ADC conversions.

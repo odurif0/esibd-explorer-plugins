@@ -2233,13 +2233,19 @@ class DMMRDevice(Device):
                 selection = slice(i_min, i_max)
         group = h5file[self.name].require_group(_DMMR_RANGE_GROUP)
         group.attrs["Description"] = "CGC range index returned with each current; NaN means unknown or no measurement."
+        # The hourly store runs on its own thread while samples keep arriving, and each history is
+        # read after the previous one: they share their start, not their end. Only that difference
+        # is accepted (2026-10-30 lab: this check aborted the stores of 10:37 and 11:37).
+        saved = h5file[time_path].size
+        arrived = max(self.time.size - saved, 0) + 1 if selection == slice(None) else 0
         for channel in self.getDataChannels():
             if channel.name in existing:
                 continue
             data = channel._range_buffer().get()[selection]
             current = h5file[output_path][channel.name]
-            if data.shape != current.shape or data.size != h5file[time_path].size:
+            if abs(data.size - current.size) > arrived or abs(current.size - saved) > arrived:
                 raise ValueError(f"DMMR range history is not aligned for {channel.name}.")
+            data = np.concatenate((data[:current.size], np.full(max(current.size - data.size, 0), np.nan)))
             dataset = group.create_dataset(channel.name, data=data, dtype=np.float32)
             dataset.attrs["Current dataset"] = current.name
             dataset.attrs["Time dataset"] = time_path

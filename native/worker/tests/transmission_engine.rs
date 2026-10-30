@@ -780,6 +780,45 @@ fn relative_grouped_knob_preserves_gain_and_limits() {
     );
 }
 
+#[test]
+fn a_move_to_a_device_limit_is_never_above_it_and_rounding_does_not_stop_the_run() {
+    // 10.021 + (14.813 - 10.021) = 14.813000000000002: "outside device limits" stopped 2 runs of 40.
+    for seed in 0..12 {
+        let mut config = configuration("bayesian");
+        config["options"]["seed"] = json!(seed);
+        let mut c = Controller::new(&config).unwrap();
+        let mut i = Instrument::new();
+        i.values.insert("X".into(), 10.021);
+        i.limits.insert("X".into(), [0.0, 14.813]);
+        i.optimum = 40.0;
+        let t = drive(&mut c, &mut i, "run", &[], |_, _| {});
+        assert_eq!(t.result["status"], "completed", "{}", t.result);
+        assert!(i.commands.iter().all(|p| p["X"] <= 14.813), "seed {seed}");
+    }
+}
+
+#[test]
+fn a_limit_lowered_during_the_run_still_stops_the_next_step() {
+    let mut c = Controller::new(&configuration("coordinate")).unwrap();
+    let mut i = Instrument::new();
+    i.values.insert("X".into(), 10.0);
+    i.limits.insert("X".into(), [0.0, 100.0]);
+    let mut events = 0;
+    let t = drive(&mut c, &mut i, "run", &[], |instrument, _| {
+        events += 1;
+        if events == 4 {
+            instrument.limits.insert("X".into(), [0.0, 1.0]);
+        }
+    });
+    assert_eq!(t.result["status"], "instrument error", "{}", t.result);
+    assert!(
+        t.result["reason"]
+            .as_str()
+            .unwrap()
+            .contains("outside device limits")
+    );
+}
+
 fn target_configuration(peak: bool) -> Value {
     let mut config = configuration("coordinate");
     config["target"] = json!({"channels":{"F":1.0},"center":10.0,"width":1.0,"measure":["D"],"max_step":0.5,"points":5,"track":2.0,"spectrum_points":5});

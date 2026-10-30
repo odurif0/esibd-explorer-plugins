@@ -701,3 +701,16 @@ def qt_probe(folder, scenario, output):
 
 if __name__ == "__main__":
     raise SystemExit(qt_probe(*sys.argv[1:]))
+
+
+def test_a_poll_cancelled_by_off_is_not_a_read_fault(case):
+    # 2026-10-28 lab, AMX_B: "Failed to read AMX housekeeping: Operation cancelled" at each such OFF.
+    proxy = case.proxies[0]
+    case.controller.initializeCommunication()
+    case.controller.initialized = True
+    errors = case.controller.errorCount
+    proxy.failures["collect_housekeeping"] = (RuntimeError("Operation cancelled"), False)
+    case.controller._native_cancel_event.set()
+    case.controller.readNumbers()
+    assert case.controller.errorCount == errors
+    assert not any("Failed to read" in str(message) for message in case.messages)

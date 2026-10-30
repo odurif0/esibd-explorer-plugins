@@ -301,6 +301,24 @@ opened`, the AMX connector's pins 3 and 5 reach that PSU; plug it back (`closed`
 the AMX HD: the `Loaded config` line and the log give `interlock function ON|OFF` for the
 loaded config (OFF expected with the CGC configs).
 
+**General Close communication (2026-10-30):** with the ESI ON, an AMPR ON and the PSUs ON,
+click the Device Manager's `Close communication`: Explorer stays responsive at once, the AMPR
+logs its ramp-down, the PSUs stop within seconds, and the ESI discharge check goes on in the
+console until `ESI HV discharge verified`. Then restart, turn the same devices ON, and close
+Explorer itself: it waits for the check and the AMPR shutdown before it exits.
+
+**Logs of 2026-10-28/30:** after an AMPR ON, a lost reply on the first setpoint now appears in
+the console as a warning (`got no reply within 1.56 s`, nothing sent again). At each hour of a
+long DMMR recording, `Stored data in dmmr.h5` appears without `range history is not aligned`.
+A PSU or AMX OFF during a poll leaves no `Failed to read … housekeeping` error. A blocked `Open`
+says that the worker released the port and that Explorer needs no restart: retry ON.
+
+**Transmission with a PSU RF amplitude (2026-10-30):** optimize a stage with an RF amplitude:
+the first RF step no longer stops on `setpoint changed outside the optimizer`; editing that PSU
+by hand during a run does. After an instrument error the log lists the settings left moved,
+and `Keep` and `Revert` appear. A new beamline proposes a spray window of 30–60 nA (a saved
+one keeps its own). Runs are saved to `<Data path>/Transmission/<date>/`.
+
 ## Transmission optimizer
 
 - **Simulation first:** tick **Simulation**, run the total ion current, then a selected
@@ -308,7 +326,7 @@ loaded config (OFF expected with the CGC configs).
   display, the saved `…_transmission.h5`, **Keep** and **Revert**. No device is touched.
 - **Beamline:** in **Configure…**, map each setting, the detector (its current
   channel and position), the spray current and the gauges; the panel must show
-  "✓ n settings · detector after Q4 · spray 10–30 nA · n gauges". Give each driven
+  "✓ n settings · detector after Q4 · spray 30–60 nA · n gauges". Give each driven
   channel realistic Min/Max in its device plugin: the windows are clipped to them.
   For each RF amplitude choose its AMX output only: the two PSU rails linked to it
   must move together (Vpos = Vneg = A) and are never offered as separate settings.

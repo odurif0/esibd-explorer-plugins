@@ -20,10 +20,10 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | AMX A/B | Implemented | Implemented | 43 combined AMX/HD controller tests; 60 adapter tests | Not tested |
 | AMX HD | Implemented | Implemented | Same combined suite; independent HD ABI and process | Not tested |
 | AMPR A/B | Implemented | Implemented | 29 controller tests; isolated recovery checks | Not tested |
-| DMMR | Implemented | Implemented | 38 controller tests; isolated recovery checks | Not tested |
+| DMMR | Implemented | Implemented | 39 controller tests; isolated recovery checks | Not tested |
 | TPG366 | Implemented | Implemented | 17 Rust + 36 adapter/PTY tests; 30 Explorer 1.0.2 Qt cases | Not tested |
 | MScan | Implemented | Implemented | 43 native tests; 36 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
-| Transmission | Implemented | Implemented | 25 engine tests; 19 packaged lifecycle tests; 15 Explorer 1.0.2 Qt cases | Not tested |
+| Transmission | Implemented | Implemented | 27 engine tests; 19 packaged lifecycle tests; 15 Explorer 1.0.2 Qt cases | Not tested |
 
 The local target-host environment is isolated from the owner's installed Explorer.
 Passing Python-reference tests do not validate native hardware communication.
@@ -32,8 +32,39 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`1a62ffda5efd160944f07a5411b70644700e17a6ce96ccd14438952c3519f82f`
-(v0.5.4 below; v0.5.5 changes no Rust source or worker).
+`4464783ed93e272b426b62608d4139bac5a8de5bf2dc467d85e85a60810c0976`
+(v0.5.6 below).
+
+## v0.5.6 Update (2026-10-30)
+
+The lab runs of 2026-10-28/30 (v0.5.4 and v0.5.5) led to these fixes. None is validated on
+hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **General Close communication:** the ESI ran its whole discharge check on the GUI thread
+  (53 s frozen, the PSUs stopped only after it) and the AMPR its 1.8 s shutdown, without
+  ramp-down. Both now follow their OFF button on a worker thread; closing Explorer still
+  waits for them.
+- **Transmission:** a PSU rounds its setpoint (89.25315 V reads back 89.25 V) and publishes it
+  on the channel, which stopped the run as an outside edit; as in MScan, only a new request
+  counts. After an instrument error the log lists the settings left moved, and `Keep` and
+  `Revert` are offered. A move to Min or Max could round 2e-15 V beyond it and stop the run:
+  the value is now brought back inside the limits before the command, and each stage logs its
+  limits. The default spray window is 30–60 nA. Files go to
+  `<Data path>/Transmission/<date>/`, without the Explorer session fields.
+- **DMMR:** the hourly store runs beside the acquisition and stopped on `range history is not
+  aligned` (10:37, 11:37); the histories share their start, not their end. A reply lost during
+  read recovery gets one more resynchronization: `-13` then `-10` had stopped the reading for 56 min.
+- **AMPR:** the recovered lost replies never reached the console, because the facade asked the
+  worker for an attribute instead of a method.
+- **PSU, AMX:** a poll overtaken by OFF is no longer reported as a read fault. After a blocked
+  `Open`, the message no longer asks for an Explorer restart: the stopped worker released the
+  port (AMX_B reopened COM11 a minute later, in the same session).
+
+All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux
+for TPG366, MScan and Transmission). The Rust suite passes 327 tests; Clippy (`-D warnings`),
+formatting and the ABI/source/family/worker checks pass. All nine Windows workers pass the
+constructor-only Wine checks and the three Linux workers the Linux ones; no instrument is
+opened. Hardware validation is still pending.
 
 ## v0.5.5 Update (2026-10-28)
 
