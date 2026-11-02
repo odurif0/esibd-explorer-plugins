@@ -4358,9 +4358,12 @@ class AMXController(DeviceController):
         if self._initial_open_close_requested:
             self.initializing = False
             return
-        if self._dispose_device() is False:
+        # False without a device only means that the last OFF was not confirmed: no port is held, so
+        # the operator may reconnect (2026-11-02 lab: ON did nothing after "Communication lost").
+        if self._dispose_device() is False and self.device is not None:
             self.initializing = False
-            return  # The previous connection still owns its native port.
+            self.print("AMX connection refused: the previous connection still owns its port.", flag=PRINT.WARNING)
+            return
         self.initialized = False
         try:
             if self._initial_open_close_requested:

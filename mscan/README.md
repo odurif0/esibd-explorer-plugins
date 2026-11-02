@@ -64,11 +64,10 @@ routine experimental use. These checks do not certify physical shutdown.
 5. Optional: **Quadrupole offset, pair 1 (AMPR)** and **pair 2 (AMPR)** select the
    AMPR channels (module and channel) of the two rod pairs; **None** (default)
    leaves them alone. During the scan, at every amplitude and together with the PSU
-   rails, pair 1 is set to **Fixed offset (V)** + **Offset coefficient (U/V)** × A
-   and pair 2 to **Fixed offset** − U/V × A: a fixed part common to both pairs, and a
-   variable part of opposite sign. U/V defaults to 0.2 (negative allowed), the fixed
-   offset to 0 V. U is the variable DC part and V the RF amplitude, here the scanned
-   amplitude A. Pair 2 alone is refused; pair 1 alone works as before. **Offset
+   rails, the pairs are set to **Fixed offset (V)** ± max(**Minimum U (V)**, **Offset
+   coefficient (U/V)** × A − **Resolution offset δ (V)**), + for pair 1 and − for pair 2.
+   U/V defaults to 0.2 (negative swaps the pairs, 0 is RF-only), the two offsets to 0 V and
+   Minimum U to 0.5 V. Pair 2 alone is refused; pair 1 alone works as before. **Offset
    readback** shows each channel's AMPR Monitor and setpoint; during a scan, its
    target and whether the AMPR confirmed it. See *Quadrupole offset* below.
 6. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
@@ -81,8 +80,8 @@ routine experimental use. These checks do not certify physical shutdown.
 ## Quadrupole offset
 
 Each offset channel is an ordinary AMPR channel: switch it ON, in manual (not
-equation) control, with its AMPR ON. Start is refused if its target, fixed ± U/V × the
-requested amplitude span, leaves that channel's Min/Max or the AMPR module rating,
+equation) control, with its AMPR ON. Start is refused if its target over the requested
+amplitude span leaves that channel's Min/Max or the AMPR module rating,
 if its initial value could not be restored there, or if its current setpoint is
 not confirmed by the AMPR. At each amplitude, the rails are commanded first, then
 the offset (rounded to the AMPR channel's display precision). No point is
@@ -92,10 +91,29 @@ within **Voltage tolerance**; a small offset step is not "confirmed" by toleranc
 alone. An offset edited or failing outside the scan, an AMPR OFF or a switch to
 equation control aborts the scan; a settling timeout names the channel not ready, with
 its Monitor and target. Normal completion restores each initial offset with the PSU
-setpoints; Stop/error holds the last values. The HDF5 file keeps the coefficient, the
-fixed offset and each pair's channel, sign and initial value in the setup, and per point
+setpoints; Stop/error holds the last values. The HDF5 file keeps the coefficient, both
+offsets and each pair's channel, sign and initial value in the setup, and per point
 the commanded offsets (`offset_target`) and their Monitors (`offset_v`), one column per
 pair; continuous scans also keep them in the raw observations.
+
+Only the part of opposite sign filters masses. **Fixed offset** is the potential of the
+axis, so it sets the ion energy: keep it at the value the rods hold outside a scan. U/V
+sets the line in the stability diagram: for an ideal 50 % square wave nothing passes above
+about 0.215, and the resolution m/Δm is about 0.157 / (0.2153 − U/V), so about 10 at 0.20
+and 30 at 0.21. These values assume that the amplitude on the rods equals A: raise U/V until
+the signal disappears at U/V = c to measure the ratio, c / 0.2153. With δ = 0, peaks widen
+in proportion to A; with U/V at that limit, they keep about the same width, about 6.4 × δ in
+A. δ must stay small: it is not the fixed offset, and adding it with the wrong sign closes the
+filter. As on commercial instruments, set U/V and δ on a light and a heavy known ion: the straight
+line only approaches the ideal curve between them.
+
+**Minimum U** keeps the DC from reaching zero: at zero DC every heavy ion would pass, so a spectrum
+would start with a wide plateau. Commercial instruments do the same ("Zero Blast Suppression" in
+the SRS RGA manual). Peaks whose tip lies below (Minimum U + δ) / (U/V) are not filtered reliably,
+and a small signal can remain at the start of a scan, where ions are not filtered as in theory.
+
+Explorer's own msScan has no such formula: it sweeps one channel, and any DC follows
+through channel equations, without confirmation. MScan refuses a channel driven by an equation.
 
 There is no Input/Output table or generic channel selector to configure.
 The **msScan** settings list belongs to this scan; Explorer's global

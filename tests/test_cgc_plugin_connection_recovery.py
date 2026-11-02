@@ -4,6 +4,8 @@ The eleven runtimes are covered through their family's controller; sibling
 entrypoint equivalence is enforced separately by the family parity tests.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -86,3 +88,30 @@ def test_disposal_does_not_discard_a_runtime_poisoned_after_open(cgc_plugin, cgc
         assert hw.count('open') == 1 and hw.count('close') == 0
     finally:
         release.set()
+
+
+@pytest.mark.parametrize('state', ['Communication lost', 'Shutdown unconfirmed'])
+def test_a_released_port_reconnects_after_a_lost_or_unconfirmed_session(cgc_plugin, cgc_rig, state):
+    # 2026-11-02 lab, PSU_A and PSU_E at 15:47: after "Communication lost" the port was closed, but
+    # ON did nothing and said nothing until Explorer restarted: no device means no port to wait for.
+    c = cgc_plugin.controller
+    c.device, c.main_state = None, state
+    c.initializeCommunication()
+    assert [c.device] == cgc_plugin.created, cgc_plugin.messages
+    assert cgc_plugin.successes == [True], cgc_plugin.messages
+    assert cgc_rig.hw.count('open') == 1
+    if cgc_rig.family in ('psu', 'ampr'):
+        assert c.main_state == 'Connecting', 'a stale state would hide every readback of the new session'
+    assert cgc_rig.disconnect(c.device) is True
+
+
+def test_a_port_still_held_is_refused_with_a_message(cgc_plugin, cgc_rig):
+    c = cgc_plugin.controller
+    if cgc_rig.family == 'esi':
+        pytest.skip('ESI retains its pending connection through its own path')
+    held = SimpleNamespace(connected=True, _dll_port_claimed=True, disconnect=lambda **kw: False)
+    c.device, c.main_state = held, 'Shutdown unconfirmed'
+    c.initializing = True
+    c.runInitialization()
+    assert c.device is held and not cgc_plugin.created and not c.initializing
+    assert any('still owns its port' in str(message) for message in cgc_plugin.messages), cgc_plugin.messages

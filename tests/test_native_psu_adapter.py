@@ -312,3 +312,13 @@ def test_unconfirmed_native_shutdown_keeps_backend_available_for_explicit_recove
     assert device.connected and device.outputs == (True, False)
     assert not any(call[0] == "disconnect" for call in device.calls)
     assert any("could not be confirmed" in message for message in messages)
+
+
+def test_a_resynchronized_read_is_reported_once_as_a_warning(native_case):
+    # 2026-11-02 lab, 15:47: a reply lost at connection; the worker now reads again.
+    _, controller, _, _, _, messages = native_case
+    controller._apply_snapshot(dict(read_recovery="GetConfigName failed with vendor status -10"))
+    assert ["reply lost" in str(message) and "-10" in str(message) for message in messages] == [True]
+    messages.clear()
+    controller._apply_snapshot({})
+    assert not messages

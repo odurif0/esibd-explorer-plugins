@@ -4917,9 +4917,12 @@ class PSUController(DeviceController):
         if cancel.is_set():
             self.initializing = False
             return
-        if self._dispose_device() is False:
+        # False without a device only means that the last OFF was not confirmed: no port is held, so
+        # the operator may reconnect (2026-11-02 lab: ON did nothing after "Communication lost").
+        if self._dispose_device() is False and self.device is not None:
             self.initializing = False
-            return  # The previous connection still owns its native port.
+            self.print("PSU connection refused: the previous connection still owns its port.", flag=PRINT.WARNING)
+            return
         try:
             if cancel.is_set():
                 return
@@ -4931,6 +4934,8 @@ class PSUController(DeviceController):
                 native_backend=True,
                 log_dir=Path(self.controllerParent.pluginManager.Settings.dataPath) / "logs" / self.controllerParent.name.lower(),
             )
+            if self.main_state in (_PSU_SHUTDOWN_UNCONFIRMED_STATE, _PSU_COMMUNICATION_LOST_STATE):
+                self.main_state = "Connecting"  # That state would hide the readbacks of the new session.
             backend_reason = str(
                 getattr(self.device, "_process_backend_disabled_reason", "")
             ).strip()
@@ -5583,6 +5588,9 @@ class PSUController(DeviceController):
     ) -> None:
         if self.main_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE:
             return  # A status poll cannot confirm that the port has closed.
+        if snapshot.get("read_recovery"):
+            self.print(f"PSU reply lost, port resynchronized and read again: {snapshot['read_recovery']}",
+                       flag=PRINT.WARNING)
         self.hardware_main_state = str(
             snapshot.get("main_state", {}).get("name", "Unknown")
         )

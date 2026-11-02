@@ -17,8 +17,8 @@ two PSU channels and keeps an ESI OFF check from freezing Explorer; v0.5.5 also 
 their ON/OFF and Range, and shows the PSU interlock loops and the AMX HD interlock function;
 v0.5.6 keeps Explorer responsive during the general Close communication, lets Transmission
 move PSU amplitudes, and fixes what the lab logs of 2026-10-28/30 showed; v0.5.7 fixes what
-the first run of the AMX HD on the instrument showed; v0.5.8 recovers AMX reads after a lost
-reply, keeps the AMX and PSU config lists in place while they are open, and lets MScan drive both
+the first run of the AMX HD on the instrument showed; v0.5.8 recovers AMX and PSU reads after a lost
+reply, reconnects after `Communication lost` without restarting Explorer, keeps the AMX and PSU config lists in place while they are open, and lets MScan drive both
 quadrupole rod pairs with a fixed offset.
 Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
 no Explorer fork, external Python, private interpreter or shared device process

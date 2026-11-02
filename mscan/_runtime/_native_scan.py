@@ -114,6 +114,8 @@ class NativeScanAdapter:
                     sweep_rate=float(getattr(scan, 'sweep_rate', math.nan)),
                     offset_factor=float(getattr(scan, 'offset_factor', math.nan)),
                     offset_fixed=float(getattr(scan, 'offset_fixed', 0.)),
+                    offset_resolution=float(getattr(scan, 'offset_resolution', 0.)),
+                    offset_minimum=float(getattr(scan, 'offset_minimum', .5)),
                     passes=int(scan._passes()) if hasattr(scan, '_passes') else 1,
                     metadata=copy.deepcopy(self._plan.get('metadata', {})))
 

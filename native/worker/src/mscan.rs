@@ -15,8 +15,10 @@
 //! Settings: start/stop, mode ("Step by step" or "Continuous"), settling_s,
 //! settle_timeout (> settling_s), voltage_tolerance. Stepped uses step and
 //! integration_s; continuous uses sweep_rate * time_step_s and ignores step.
-//! AMPR offsets (quadrupole rod pairs 1 and 2) use offset_fixed + sign × offset_factor × A,
-//! sign + for pair 1 and − for pair 2 (user request 2026-11-02). All active numbers are finite.
+//! AMPR offsets (quadrupole rod pairs 1 and 2) use offset_fixed ± max(offset_minimum,
+//! offset_factor × A − offset_resolution), + for pair 1 and − for pair 2 (user decision
+//! 2026-11-02). A negative offset_factor swaps the pairs and 0 is RF-only. All active numbers
+//! are finite.
 //! Observation fields are described by Amx/Rail/Detector/Offset below; identities
 //! must include Explorer object/controller/backend/token identities and names.
 //! Detector histories include un-subtracted currents, including NaN/Inf slots.
@@ -57,8 +59,13 @@ fn one_pass() -> u64 {
 fn no_fixed_offset() -> f64 {
     0.0
 }
+fn half_a_volt() -> f64 {
+    0.5
+}
 
-/// Quadrupole rod pairs: pair 1 = fixed + U/V × A, pair 2 = fixed − U/V × A.
+/// Quadrupole rod pairs: pair 1 = fixed + max(U_min, U/V × A − δ), pair 2 = fixed − the same
+/// term. U_min > 0: at zero DC every heavy ion would pass, and commercial instruments keep the DC
+/// from reaching zero for the same reason.
 const MAX_OFFSETS: usize = 2;
 fn offset_sign(pair: usize) -> f64 {
     if pair == 0 { 1.0 } else { -1.0 }
@@ -175,6 +182,10 @@ struct Settings {
     offset_factor: f64,
     #[serde(default = "no_fixed_offset", deserialize_with = "read_number")]
     offset_fixed: f64,
+    #[serde(default = "no_fixed_offset", deserialize_with = "read_number")]
+    offset_resolution: f64,
+    #[serde(default = "half_a_volt", deserialize_with = "read_number")]
+    offset_minimum: f64,
     #[serde(default = "one_pass")]
     passes: u64,
     #[serde(default)]
@@ -184,7 +195,12 @@ struct Settings {
 impl Settings {
     /// The DC target of rod pair `pair` (0 or 1) at amplitude A.
     fn offset_target(&self, pair: usize, amplitude: f64) -> f64 {
-        self.offset_fixed + offset_sign(pair) * self.offset_factor * amplitude
+        if self.offset_factor == 0.0 {
+            return self.offset_fixed; // RF-only: no DC between the pairs.
+        }
+        let variable = (self.offset_factor.abs() * amplitude - self.offset_resolution)
+            .max(self.offset_minimum);
+        self.offset_fixed + offset_sign(pair) * variable.copysign(self.offset_factor)
     }
     fn duration(&self) -> Result<f64> {
         let v = match self.mode.as_str() {
@@ -883,6 +899,14 @@ impl Run {
             }
             finite(settings.offset_factor, "Offset coefficient U/V")?;
             finite(settings.offset_fixed, "Fixed offset")?;
+            finite(settings.offset_resolution, "Resolution offset")?;
+            if settings.offset_resolution < 0.0 {
+                return Err(Error::argument("Resolution offset must not be negative."));
+            }
+            finite(settings.offset_minimum, "Minimum U")?;
+            if settings.offset_minimum <= 0.0 {
+                return Err(Error::argument("Minimum U must be above 0 V."));
+            }
             o.bounds(settings.offset_target(pair, low))?;
             o.bounds(settings.offset_target(pair, high))?;
             o.bounds(o.value)?;

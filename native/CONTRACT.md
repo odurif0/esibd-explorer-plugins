@@ -94,7 +94,8 @@ is read back and sent once more only if it was not applied, and the ESI discharg
 purges and repeats one measurement step (ADC selection or read, never an output command). An
 AMX housekeeping, config-list or AMX HD single-register read (routing, timers, checks before a
 write), which commands nothing, purges and reads once more after a receive error (-10 to -13), also
-when the read returned that status as a value. JSON NaN/Infinity tokens are forbidden; nonfinite readings use tagged
+when the read returned that status as a value. PSU polling and config-list reads do the same, except
+for the reads whose status selects a firmware fallback. JSON NaN/Infinity tokens are forbidden; nonfinite readings use tagged
 values. Request and output queues are bounded (8 and 64). A reply waits up to 10 s for room in
 the output queue and a native I/O trace frame up to 2 s (Explorer can hold its reader that long);
 a closed queue, or a full one after that, ends the worker (exit 75).

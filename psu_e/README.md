@@ -206,6 +206,13 @@ points at or above Ilim. It does not change ranges, Ilim or output enables.
 
 ## Connection Failures
 
+A reply lost during a polling read or while reading the config list leaves the serial link out of
+step: the plugin purges the port, restores the baud rate and reads once more, then logs `PSU reply
+lost, port resynchronized and read again`. These reads command nothing, and a write is never repeated.
+
+After `Communication lost`, or a shutdown that stayed unconfirmed once the port is released, ON
+reconnects without restarting Explorer. This does not confirm that the outputs were OFF.
+
 A failed or timed-out connection is never reused. A returned failed initial
 Open is cleaned up without output commands; `Connection pending` remains until
 port cleanup or worker retirement is confirmed. `Disconnected` confirms
