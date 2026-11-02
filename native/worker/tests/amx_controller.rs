@@ -540,7 +540,12 @@ fn batch_call_counts_define_outer_deadlines_independently_of_per_dll_watchdogs()
             rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
             assert_eq!(
                 state.lock().unwrap().calls.len(),
-                if hd { 6 + 3 * timers as usize } else { 46 }
+                // Burst registers on the first 2 timers only; the module counts are read once.
+                if hd {
+                    6 + 2 * timers as usize + 2 + usize::from(timers == 2)
+                } else {
+                    46
+                }
             );
         }
         state.lock().unwrap().calls.clear();
@@ -1697,6 +1702,39 @@ fn cancellation_during_shutdown_keeps_the_link_and_completes_a_fresh_disable_con
         assert!(!state.lock().unwrap().names().contains(&"Close".to_owned()));
         assert_eq!(device.get_attribute("connected").unwrap(), true);
     }
+}
+
+#[test]
+fn hd_reads_the_burst_register_only_on_timers_that_have_one() {
+    // 2026-11-02 lab: 16 timers, 8 with a burst register. The 8 others never answered: 12.4 s per
+    // housekeeping under the controller lock, and every operator action timed out on that lock.
+    let (mut device, state) = case(true);
+    connect(device.as_mut());
+    state.lock().unwrap().timer_count = 4;
+    let calls = state.lock().unwrap().calls.len();
+    for _ in 0..2 {
+        let snapshot = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+        let bursts: Vec<_> = snapshot["pulsers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["burst"].clone())
+            .collect();
+        assert_eq!(bursts, [json!(0), json!(0), Value::Null, Value::Null]);
+    }
+    let state = state.lock().unwrap();
+    let read = |name: &str| {
+        state.calls[calls..]
+            .iter()
+            .filter(|(symbol, _)| symbol.ends_with(name))
+            .count()
+    };
+    assert_eq!(read("GetTimerBurst"), 4);
+    assert_eq!(
+        read("GetHwType"),
+        1,
+        "the module counts do not change during a connection"
+    );
 }
 
 #[test]

@@ -187,6 +187,12 @@ notebook, or on a normal AMX will exist on this HD controller.
 
 Important points:
 
+- `Operating config` covers every slot, 0 to 499. The numbers are those of the
+  controller: `Configuration256` in CGC's `config_swA.cfg` is slot 255.
+- `Freq` drives oscillator 0 and the widths its timers, computed for the 100 MHz
+  clock. When the loaded config keeps the oscillator or the timers off, or runs them
+  on another clock (for example PLL0), the fields are greyed, the panel says why and
+  an edit is refused: use the CH0–CH3 table for the decoded timing.
 - `Operating config` is effectively required to bring the HD to `STATE_ON`
   (`0x0001`). Note: `0x0000` is `STATE_STANDBY` on HD (not ON as on the normal
   AMX).

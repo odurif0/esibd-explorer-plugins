@@ -89,7 +89,7 @@ class RegisterDevice:
 
     def collect_state_snapshot(self, timeout_s=None):
         return dict(device_enabled=self.enabled, main_state={"name": "STATE_ON"},
-                    device_state={"flags": []}, controller_state={"flags": []})
+                    device_state={"flags": []}, controller_state={"flags": ["ST_ENB_TIMER", "ST_ENB_OSC0"]})
 
     def collect_housekeeping(self, timeout_s=None):
         self.calls.append(("read",))

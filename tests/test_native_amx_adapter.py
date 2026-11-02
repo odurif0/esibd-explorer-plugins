@@ -62,7 +62,8 @@ class NativeProxy:
     def snapshot(self):
         return dict(
             main_state={"name": "STATE_ON" if self.enabled else "STATE_STANDBY"},
-            device_enabled=self.enabled, device_state={"flags": []}, controller_state={"flags": []},
+            device_enabled=self.enabled, device_state={"flags": []},
+            controller_state={"flags": ["ST_ENB_TIMER", "ST_ENB_OSC0"]},
             oscillator={"period": 198, "frequency_hz": 500e3},
             pulsers=[dict(pulser=p, width_ticks=98 if p == 0 else 0, delay_ticks=7, burst=0)
                      for p in range(2 if self.family == "amx_hd" else 4)],
@@ -714,3 +715,47 @@ def test_a_poll_cancelled_by_off_is_not_a_read_fault(case):
     case.controller.readNumbers()
     assert case.controller.errorCount == errors
     assert not any("Failed to read" in str(message) for message in case.messages)
+
+
+def test_a_config_load_cancelled_by_off_is_not_a_failure(case):
+    # 2026-11-02 lab, AMX_HD: "Failed to load AMX config 199: Operation cancelled" after OFF.
+    controller = case.controller
+    controller.initializeCommunication()
+    case.parent.operating_config = 79
+    case.parent.recording = False
+    controller.initialized = True
+    errors = controller.errorCount
+
+    def cancelled(**kwargs):
+        controller._native_cancel_event.set()
+        raise RuntimeError("Operation cancelled")
+
+    controller._start_operating_mode = cancelled
+    controller._retire_failed_native_worker = lambda *a, **kw: False
+    controller.loadOperatingConfigNow()
+    assert controller.errorCount == errors
+    assert not any("Failed to load" in str(message) for message in case.messages)
+    assert any("not loaded: OFF was requested" in str(message) for message in case.messages)
+
+
+@pytest.mark.parametrize("recording", [True, False])
+def test_a_failed_load_resumes_polling_and_the_recording(case, monkeypatch, recording):
+    # 2026-11-02 lab: no readback between 10:57:09 and 10:57:51 after "Failed to load AMX config 0".
+    controller, parent = case.controller, case.parent
+    controller.initializeCommunication()
+    parent.operating_config, parent.recording = 79, recording
+    controller.initialized = True
+    restarted, toggled = [], []
+
+    def failed(**kwargs):
+        raise RuntimeError("did not reach STATE_ON")
+
+    controller._start_operating_mode = failed
+    controller._restart_acquisition_after_transition = lambda: restarted.append(True)
+    controller._retire_failed_native_worker = lambda *a, **kw: False
+    parent.toggleRecording = lambda on=None, manual=True: toggled.append((on, manual))
+    monkeypatch.setattr(case.module, "_invoke_gui_callback", lambda callback: callback())
+    controller.loadOperatingConfigNow()
+    assert any("Failed to load" in str(message) for message in case.messages)
+    assert restarted == [True]
+    assert toggled == ([(True, False)] if recording else [])

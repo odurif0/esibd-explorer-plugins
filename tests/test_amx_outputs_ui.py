@@ -121,11 +121,15 @@ def probe(folder, output):
         notice = parent.amxPanelClockNotice
         assert not notice.isVisible()
         controller.hd_routing["clock_sources"][0] = 4  # PLL0
+        controller._controller_flags = ["ST_ENB_TIMER", "ST_ENB_OSC0"]
+        controller.oscillator_period = 9998
         parent._update_operator_panel()
         assert notice.isVisible() and "PLL0" in notice.text()
+        assert "Clock 0 is PLL0" in parent.amxPanelFrequencyValue.text()
         controller.hd_routing["clock_sources"][0] = 3
         parent._update_operator_panel()
         assert not notice.isVisible()
+        assert "Oscillator 0: requested" in parent.amxPanelFrequencyValue.text()
     assert table.verticalScrollBar().maximum() == 0
     assert table.horizontalScrollBar().maximum() == 0
     # Inferred outputs keep plain text; the sketch (Advanced) draws the same four square waves.

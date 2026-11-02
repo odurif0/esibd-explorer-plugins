@@ -4987,6 +4987,7 @@ class AMXController(DeviceController):
             return
 
         self._discard_pending_runtime_applies()
+        recording = bool(getattr(self.controllerParent, "recording", False))
         self._stop_acquisition_for_transition()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
@@ -5001,6 +5002,10 @@ class AMXController(DeviceController):
             self._retire_failed_native_worker()
         except Exception as exc:  # noqa: BLE001
             self._retire_failed_native_worker()
+            if self._native_cancel_event.is_set():
+                # OFF during the load ("Operation cancelled"): not a failure.
+                self.print(f"AMX config {config_index} not loaded: OFF was requested.")
+                return
             self.errorCount += 1
             self.print(
                 f"Failed to load AMX config {config_index}: {self._format_exception(exc)}",
@@ -5011,6 +5016,7 @@ class AMXController(DeviceController):
                     and self._native_backend(self.device) is not None):
                 self.shutdownCommunication()
             self._end_transition()
+            self._resume_after_load(recording)
             self._sync_status_to_gui()
 
     def _apply_channel_timing(self, channel: AMXChannel, timeout_s: float) -> None:
@@ -5192,6 +5198,15 @@ class AMXController(DeviceController):
             self._global_apply_pending = False
         with self._channel_apply_state_lock:
             self._channel_apply_pending.clear()
+
+    def _resume_after_load(self, recording: bool) -> None:
+        """A load stops polling and recording: both resume, after a failed load too, unless OFF came."""
+        if self.device is None or not getattr(self, "initialized", False) or not self.controllerParent.isOn():
+            return
+        if not self.acquiring:
+            self._restart_acquisition_after_transition()  # 2026-11-02 lab: 30 s frozen after a failed load.
+        if recording:
+            _invoke_gui_callback(lambda: self.controllerParent.toggleRecording(on=True, manual=False))
 
     def _stop_acquisition_for_transition(self) -> None:
         """Stop acquisition before an ON/OFF transition without spurious lock errors.

@@ -280,6 +280,9 @@ _HD_CLOCK_SOURCES = (
 _HD_CLOCK_SOURCE_HZ = {1: 2e6, 2: 10e6, 3: 100e6}
 _HD_CLOCK_100M = 3
 _HD_BURST_TIMERS_DEFAULT = 8
+# COM_HVAMX4EDH_MAX_CONFIG slots. The setting clamps silently: at 255, choosing a config above it
+# loaded config 255 (2026-11-02 lab).
+_HD_MAX_CONFIG_INDEX = 499
 
 
 def _hd_signal_text(value: Any) -> str:
@@ -2572,7 +2575,8 @@ class AMXHDDevice(Device):
                 "Readbacks come from AMX HD controller registers; they do not prove the physical waveform.",
             )
         )
-        controls_enabled = channel is not None and not busy
+        controls_enabled = channel is not None and not busy and not (
+            connected and controller.timing_block_reason(pulser))
         outputs = (getattr(controller, "pulser_outputs", None) or {}) if connected else {}
         if not connected or (not outputs and getattr(controller, "output_rows", None) is None):
             drives_text = "n/a"
@@ -3064,6 +3068,10 @@ class AMXHDDevice(Device):
         frequency_label = getattr(self, "amxPanelFrequencyValue", None)
         if frequency_label is not None:
             known = connected and np.isfinite(frequency_readback)
+            blocked = controller.timing_block_reason() if connected else ""
+            frequency_widget = getattr(self, "frequencyWidget", None)
+            if frequency_widget is not None and hasattr(frequency_widget, "setEnabled"):
+                frequency_widget.setEnabled(not blocked)
             clock_hz, osc_offset, _, _ = self._timing_constants()
             expected_period = _expected_oscillator_period(
                 frequency_request, clock_hz=clock_hz, oscillator_offset=osc_offset)
@@ -3080,8 +3088,10 @@ class AMXHDDevice(Device):
                 parts.append(f"register {frequency_readback:.3f} kHz (not applied)")
             elif known:
                 parts.append("applied")
+            if blocked:
+                parts = [f"Oscillator 0: {blocked}; Freq has no effect"]
             frequency_label.setText(" · ".join(parts))
-            _amx_set_role(frequency_label, "warning" if differs else "value")
+            _amx_set_role(frequency_label, "warning" if differs or blocked else "value")
             frequency_label.setToolTip(
                 "Requested oscillator-0 frequency, the frequency it runs on the clock grid and "
                 "whether the controller period register holds it, assuming Clock 0 = 100 MHz."
@@ -3091,11 +3101,11 @@ class AMXHDDevice(Device):
             routing = getattr(controller, "hd_routing", None) if connected else None
             clock_sources = list((routing or {}).get("clock_sources") or []) if isinstance(routing, dict) else []
             clock0 = _optional_nonnegative_int(clock_sources[0]) if clock_sources else None
-            mismatch = clock0 is not None and clock0 != _HD_CLOCK_100M
+            mismatch = clock0 is not None and clock0 & 0x0F != _HD_CLOCK_100M
             clock_notice.setVisible(mismatch)
             clock_notice.setText(
-                f"Clock 0 is {_hd_clock_text(clock0)}, not CLK100M: the Freq setting and the "
-                "µs/duty conversions assume 100 MHz. Use the CH0–CH3 table for the decoded timing."
+                f"Clock 0 is {_hd_clock_text(clock0)}, not CLK100M: Freq and the widths on this clock "
+                "cannot be edited here. Use the CH0–CH3 table for the decoded timing."
                 if mismatch else ""
             )
 
@@ -3443,7 +3453,7 @@ class AMXHDDevice(Device):
         settings[f"{self.name}/{self.OPERATING_CONFIG}"] = parameterDict(
             value=-1,
             minimum=-1,
-            maximum=255,
+            maximum=_HD_MAX_CONFIG_INDEX,
             toolTip=(
                 "AMX config used for normal operation. Use -1 to connect "
                 "without enabling the AMX until a valid config is selected."
@@ -3549,6 +3559,9 @@ class AMXHDDevice(Device):
         self._timing_basis_khz = current
         if previous is None or previous == current or getattr(self, "loading", False):
             return  # Loaded settings and configs already belong together.
+        controller = getattr(self, "controller", None)
+        if controller is not None and controller.timing_block_reason():
+            return  # Refused at the apply: the widths must not follow it.
         self._timing_edited = True
         self._keep_duty_cycles(previous, current)
 
@@ -4467,6 +4480,7 @@ class AMXHDController(DeviceController):
         # _collect_hd_routing. None means "not read since the last transition".
         self.hd_routing: dict[str, Any] | None = None
         self._hd_routing_time = 0.0
+        self._controller_flags: list[str] | None = None
         self._hd_hardware: tuple[Any, ...] | None = None
 
     def initializeValues(self, reset: bool = False) -> None:
@@ -4496,6 +4510,7 @@ class AMXHDController(DeviceController):
             self.frequency_readback_khz = np.nan
             self.output_rows = None
             self.hd_routing = None
+            self._controller_flags = None
 
     def initializeCommunication(self) -> None:
         if getattr(self, "initializing", False):
@@ -4854,10 +4869,33 @@ class AMXHDController(DeviceController):
         name = str(entry.get("name", "") or "").strip().lower()
         return bool(name) and "standby" in name
 
-    def _operating_config_is_standby(self) -> bool:
-        """Return True if the currently selected Operating config is a standby slot."""
-        entry = self._config_entry_by_index(self._selected_operating_config_index())
-        return self._config_entry_is_standby_like(entry)
+    def timing_block_reason(self, pulser: int | None = None) -> str:
+        """Why a frequency (no pulser) or width edit cannot act on the loaded config, or "".
+
+        Frequency and widths are computed for the 100 MHz clock. Decoded from the last readback;
+        before the first one nothing is known and the edit goes through, ON reloads the config.
+        """
+        flags = self._controller_flags
+        if flags is None:
+            return ""
+        if pulser is None:
+            if "ST_ENB_OSC0" not in flags or not self.oscillator_period:
+                return "the loaded config keeps oscillator 0 off"
+            clock = 0
+        else:
+            if "ST_ENB_TIMER" not in flags:
+                return "the loaded config keeps the timers off"
+            clock = _hd_timer_clock(pulser)
+        sources = (self.hd_routing or {}).get("clock_sources") or []
+        code = _optional_nonnegative_int(sources[clock]) if clock < len(sources) else None
+        if code is None or code & 0x0F == _HD_CLOCK_100M:
+            return ""
+        return f"Clock {clock} is {_hd_clock_text(code)}, not CLK100M"
+
+    def _operating_config_is_standby(self, config_index: int | None = None) -> bool:
+        """Return True if this config, by default the selected Operating config, is a standby slot."""
+        index = self._selected_operating_config_index() if config_index is None else config_index
+        return self._config_entry_is_standby_like(self._config_entry_by_index(index))
 
     def _device_active(self) -> bool:
         """Return True when the device is in its expected operating state.
@@ -4870,7 +4908,10 @@ class AMXHDController(DeviceController):
         state = getattr(self, "main_state", "")
         if _state_is_on(state):
             return True
-        return self._operating_config_is_standby() and _state_is_standby(state)
+        # The selector may already show the next config: a standby in memory is expected too.
+        return _state_is_standby(state) and (self._operating_config_is_standby()
+                                             or self._operating_config_is_standby(
+                                                 getattr(self, "_loaded_config_index", -1)))
 
     def _operating_config_ready(self) -> tuple[bool, str, int]:
         config_index = self._selected_operating_config_index()
@@ -4918,7 +4959,9 @@ class AMXHDController(DeviceController):
         if period < 0 or any(widths.get(ch.pulser_number(), -1) < 0 for ch in channels):
             raise RuntimeError("Loaded AMX config timing readback is incomplete.")
         clock_hz = float(_safe_device_attr(device, "CLOCK", 100e6))
-        frequency_khz = clock_hz / (period + _safe_device_attr(device, "OSC_OFFSET", 2)) / 1000.0
+        # Without a running oscillator on the 100 MHz clock, the config has no frequency to adopt.
+        frequency_khz = (None if self.timing_block_reason()
+                         else clock_hz / (period + _safe_device_attr(device, "OSC_OFFSET", 2)) / 1000.0)
         width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2)
         self._pending_config_snapshot = snapshot
         self._delay_anchors.clear()  # The config's delays are the new origin.
@@ -4937,9 +4980,10 @@ class AMXHDController(DeviceController):
                 getter = getattr(parent, "_setting", None)
                 if callable(getter):
                     setting = getter(parent.FREQUENCY_KHZ)
-                _set_config_parameter(parent, "frequency_khz", setting, frequency_khz)
-                _set_config_spinbox(getattr(parent, "frequencyWidget", None), frequency_khz)
-                parent._timing_basis_khz = frequency_khz  # The adopted widths belong to it.
+                if frequency_khz is not None:
+                    _set_config_parameter(parent, "frequency_khz", setting, frequency_khz)
+                    _set_config_spinbox(getattr(parent, "frequencyWidget", None), frequency_khz)
+                    parent._timing_basis_khz = frequency_khz  # The adopted widths belong to it.
                 parent._timing_edited = False
                 for channel in channels:
                     ticks = widths[channel.pulser_number()]
@@ -4986,13 +5030,14 @@ class AMXHDController(DeviceController):
         # stall the ON transition for many seconds.
         return self._device_call(device, "collect_state_snapshot", timeout_s=self._startup_snapshot_timeout_s())
 
-    def _startup_snapshot_ready(self, snapshot: dict[str, Any]) -> bool:
+    def _startup_snapshot_ready(self, snapshot: dict[str, Any], config_index: int | None = None) -> bool:
+        """The config being loaded decides, not the selector, which may change during the wait."""
         state = str(snapshot.get("main_state", {}).get("name", "") or "")
         if bool(snapshot.get("device_enabled", False)) and _state_is_on(state):
             return True
         # A standby operating config keeps the device in STATE_STANDBY (HV not
         # applied); that is the expected outcome, not a startup failure.
-        if self._operating_config_is_standby() and _state_is_standby(state):
+        if self._operating_config_is_standby(config_index) and _state_is_standby(state):
             return True
         return False
 
@@ -5039,7 +5084,7 @@ class AMXHDController(DeviceController):
         flags = snapshot.get("device_state", {}).get("flags", [])
         flags_text = ", ".join(str(flag) for flag in flags) if flags else "n/a"
         device_enabled = "ON" if bool(snapshot.get("device_enabled", False)) else "OFF"
-        expected = "STATE_STANDBY" if self._operating_config_is_standby() else "STATE_ON"
+        expected = "STATE_STANDBY" if self._operating_config_is_standby(config_index) else "STATE_ON"
         return (
             f"AMX did not reach {expected} after loading config {config_index}: "
             f"state={state}, device={device_enabled}, flags={flags_text}."
@@ -5060,7 +5105,7 @@ class AMXHDController(DeviceController):
             snapshot = self._collect_startup_snapshot()
             latest_snapshot = snapshot
             self._apply_snapshot(snapshot)
-            if self._startup_snapshot_ready(snapshot):
+            if self._startup_snapshot_ready(snapshot, config_index):
                 self._print_if_slow(
                     f"AMX startup reached {self._startup_snapshot_summary(snapshot)}",
                     started_s,
@@ -5119,6 +5164,8 @@ class AMXHDController(DeviceController):
             )
             # Keep the readiness poll lightweight, then read timing once.
             snapshot = self._device_call(device, "collect_housekeeping", timeout_s=self._startup_snapshot_timeout_s())
+            self.hd_routing = None  # A poll may have read the previous config just before this load.
+            self._refresh_hd_routing(device, snapshot)
             self._apply_snapshot(snapshot)
             self._sync_loaded_config_to_gui(snapshot)
             return snapshot
@@ -5228,6 +5275,7 @@ class AMXHDController(DeviceController):
             return
 
         self._discard_pending_runtime_applies()
+        recording = bool(getattr(self.controllerParent, "recording", False))
         self._stop_acquisition_for_transition()
         timeout_s = float(getattr(self.controllerParent, "startup_timeout_s", 10.0))
         try:
@@ -5242,6 +5290,10 @@ class AMXHDController(DeviceController):
             self._retire_failed_native_worker()
         except Exception as exc:  # noqa: BLE001
             self._retire_failed_native_worker()
+            if self._native_cancel_event.is_set():
+                # OFF during the load (2026-11-02 lab: "Operation cancelled"): not a failure.
+                self.print(f"AMX config {config_index} not loaded: OFF was requested.")
+                return
             self.errorCount += 1
             self.print(
                 f"Failed to load AMX config {config_index}: {self._format_exception(exc)}",
@@ -5252,6 +5304,7 @@ class AMXHDController(DeviceController):
                     and self._native_backend(self.device) is not None):
                 self.shutdownCommunication()
             self._end_transition()
+            self._resume_after_load(recording)
             self._sync_status_to_gui()
 
     def _apply_channel_timing(self, channel: AMXHDChannel, timeout_s: float) -> None:
@@ -5298,6 +5351,10 @@ class AMXHDController(DeviceController):
                 if (device is None or getattr(self, "transitioning", False)
                         or getattr(self, "_pending_config_snapshot", None) is not None
                         or not self.controllerParent.isOn()):
+                    return
+                reason = self.timing_block_reason()
+                if reason:
+                    self.print(f"AMX frequency not applied: {reason}.", flag=PRINT.WARNING)
                     return
                 self.output_rows = None
                 self._sync_status_to_gui()
@@ -5434,6 +5491,15 @@ class AMXHDController(DeviceController):
         with self._channel_apply_state_lock:
             self._channel_apply_pending.clear()
 
+    def _resume_after_load(self, recording: bool) -> None:
+        """A load stops polling and recording: both resume, after a failed load too, unless OFF came."""
+        if self.device is None or not getattr(self, "initialized", False) or not self.controllerParent.isOn():
+            return
+        if not self.acquiring:
+            self._restart_acquisition_after_transition()  # 2026-11-02 lab: 30 s frozen after a failed load.
+        if recording:
+            _invoke_gui_callback(lambda: self.controllerParent.toggleRecording(on=True, manual=False))
+
     def _stop_acquisition_for_transition(self) -> None:
         """Stop acquisition before an ON/OFF transition without spurious lock errors.
 
@@ -5458,9 +5524,7 @@ class AMXHDController(DeviceController):
         """Restart acquisition after a transition without joining the old thread.
 
         The base ``startAcquisition`` joins the old acquisition thread with a 5s
-        timeout.  But ``collect_housekeeping`` can take 20-60s on the HD device,
-        so the join always fails and logs ``Data reading thread did not
-        complete``.  Instead, just set ``acquiring = True`` and start a new
+        timeout, and a poll may still be running.  Instead, just set ``acquiring = True`` and start a new
         thread only if the old one is dead.  If the old thread is still alive
         (in ``collect_housekeeping``), it will see ``acquiring = True`` at the
         top of the next iteration and continue polling.
@@ -5695,6 +5759,7 @@ class AMXHDController(DeviceController):
         self.controller_state_summary = (
             ", ".join(str(flag) for flag in controller_flags) if controller_flags else "OK"
         )
+        self._controller_flags = list(controller_flags) if isinstance(controller_flags, (list, tuple)) else None
 
         oscillator_period = _coerce_int(
             snapshot.get("oscillator", {}).get("period"),
@@ -5712,7 +5777,9 @@ class AMXHDController(DeviceController):
             np.nan,
         )
         self.frequency_readback_khz = (
-            snapshot_frequency_hz / 1000.0
+            np.nan  # Period 0 would read 50 MHz (2026-11-02 lab: 86 of the 178 CGC configs).
+            if self.timing_block_reason()
+            else snapshot_frequency_hz / 1000.0
             if np.isfinite(snapshot_frequency_hz)
             else clock_hz / total_ticks / 1000.0
             if total_ticks > 0
@@ -5776,6 +5843,10 @@ class AMXHDController(DeviceController):
                 if (device is None or getattr(self, "transitioning", False)
                         or getattr(self, "_pending_config_snapshot", None) is not None
                         or not self.controllerParent.isOn()):
+                    return
+                reason = self.timing_block_reason(channel.pulser_number())
+                if reason:
+                    self.print(f"AMX P{channel.pulser_number()} not applied: {reason}.", flag=PRINT.WARNING)
                     return
                 self._apply_channel_timing(channel, timeout_s)
         except TimeoutError:
@@ -6174,6 +6245,7 @@ class AMXHDController(DeviceController):
     def _dispose_device(self, *, initial_open_only: bool = False) -> bool:
         self.output_rows = None
         self.hd_routing = None
+        self._controller_flags = None
         self.pulser_outputs = {}
         self._hd_hardware = None
         device = self.device

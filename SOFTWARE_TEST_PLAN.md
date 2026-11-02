@@ -319,6 +319,16 @@ by hand during a run does. After an instrument error the log lists the settings 
 and `Keep` and `Revert` appear. A new beamline proposes a spray window of 30–60 nA (a saved
 one keeps its own). Runs are saved to `<Data path>/Transmission/<date>/`.
 
+**AMX HD (2026-11-02):** select a config above 255 and press `Load now`: the log names that
+config, not 255. Right after ON, change the frequency and a width: no `Could not acquire lock`,
+and the panel follows within a second (the native log shows `collect_housekeeping` well under
+1 s, against 12.4 s). Press `Load now` on config 0 and change the selector at once: the standby
+config loads without `did not reach STATE_ON`. OFF during a load prints `not loaded: OFF was
+requested`, not an error. Load a config without oscillator (state `0x801`): `Freq` is greyed,
+the panel reads `Oscillator 0: the loaded config keeps oscillator 0 off`, no 50 MHz appears.
+Load a config on PLL0: `Clock 0 is PLL0, not CLK100M`, `Freq` and its widths are greyed. With
+AMX recording ON, `Load now` keeps it ON. After a failed load, the readbacks go on (AMX A/B too).
+
 ## Transmission optimizer
 
 - **Simulation first:** tick **Simulation**, run the total ion current, then a selected

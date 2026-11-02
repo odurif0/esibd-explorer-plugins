@@ -17,7 +17,7 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | IPC, supervision, ABI, build | Implemented | Implemented | 36 real-process fault tests; all deployment targets built | Not applicable |
 | ESI | Implemented | Implemented | 69 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
 | PSU A/B/C/D/E | Implemented | Implemented | 52 controller tests; isolated recovery checks | Not tested |
-| AMX A/B | Implemented | Implemented | 43 combined AMX/HD controller tests; 60 adapter tests | Not tested |
+| AMX A/B | Implemented | Implemented | 44 combined AMX/HD controller tests; 60 adapter tests | Not tested |
 | AMX HD | Implemented | Implemented | Same combined suite; independent HD ABI and process | Not tested |
 | AMPR A/B | Implemented | Implemented | 29 controller tests; isolated recovery checks | Not tested |
 | DMMR | Implemented | Implemented | 39 controller tests; isolated recovery checks | Not tested |
@@ -32,8 +32,35 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`4464783ed93e272b426b62608d4139bac5a8de5bf2dc467d85e85a60810c0976`
-(v0.5.6 below).
+`963f36a482e751c60e8986080d64375e4079899ac32aab19b1c8d68cd9f672f4`
+(v0.5.7 below).
+
+## v0.5.7 Update (2026-11-02)
+
+The first run of the AMX HD on the instrument, on 2026-11-02, led to these fixes. None is
+validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **Configs above 255:** `Operating config` stopped at 255 and clamped silently, while the HD has
+  500 slots: choosing a higher config loaded config 255. It now reaches 499.
+- **Housekeeping:** the worker read `GetTimerBurst` on all 16 timers, but only the 8 given by
+  `GetHwType` have that register. Each of the others cost a 1.54 s receive timeout, so a poll took
+  12.4 s and held the controller lock: this caused `Could not acquire lock to apply AMX frequency`
+  and the waits of up to 10 s before a load. The worker now reads only the burst timers.
+- **Configs without oscillator or on another clock:** a period of 0 read as 50 MHz and was adopted
+  as the requested frequency (86 of the 178 CGC configs have no oscillator), and frequency and widths
+  assumed 100 MHz whatever the clock source. When an edit cannot act, its fields are greyed, the
+  panel says why and the edit is refused. The frequency field no longer adopts such a config.
+- **Loading:** the startup wait judges the config being loaded, not the selector, which refused a
+  correct standby. A failed load resumes polling, and `Load now` resumes the recording (AMX A/B
+  too). OFF during a load is no longer an error. The routing is read again right after a load, and
+  a standby in memory counts as active when the selector has moved on.
+
+All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux
+for TPG366, MScan and Transmission). The Rust suite passes 328 tests; Clippy (`-D warnings`),
+formatting and the ABI/source/family/worker checks pass. The release validation
+(`pytest -q --all-siblings` on Explorer 1.0.2) passed 5751 tests with 9 skipped and no failure. All
+nine Windows workers pass the constructor-only Wine checks and the three Linux workers the Linux
+ones; no instrument is opened. Hardware validation is still pending.
 
 ## v0.5.6 Update (2026-10-30)
 
