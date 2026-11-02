@@ -88,7 +88,8 @@ sources are refused. Restart Explorer; no instrument is opened by the installer.
   crash), check with independent meters that the outputs stay unchanged, restart
   Explorer: each device must reconnect by itself with "Resumed after an Explorer
   crash … adopted", show the running values, restart recording, and no output may
-  change (no ramp, no zeroing, no config load). Then close Explorer normally and
+  change (no ramp, no zeroing, no config load). The AMX HD must show its running
+  waveform, without `timing readback is incomplete`. Then close Explorer normally and
   restart it: nothing may reconnect by itself.
 - **Explorer 1.0.2 data files:** save ESI and DMMR data (Ctrl+S and on closing)
   and reopen them; the ESI export failed with Explorer 1.0.1 before v0.3.0. Check that
@@ -328,6 +329,12 @@ requested`, not an error. Load a config without oscillator (state `0x801`): `Fre
 the panel reads `Oscillator 0: the loaded config keeps oscillator 0 off`, no 50 MHz appears.
 Load a config on PLL0: `Clock 0 is PLL0, not CLK100M`, `Freq` and its widths are greyed. With
 AMX recording ON, `Load now` keeps it ON. After a failed load, the readbacks go on (AMX A/B too).
+In MScan, select Q2_DC_1 as pair 1 and Q2_DC_2 as pair 2, a fixed offset of a few volts and
+U/V 0.2 at low amplitude: each AMPR channel reads fixed ± 0.2 × A at every point (pair 2 with the
+minus sign), both are restored at the end, and the file has two offset columns. Copy the MScan plot
+to the clipboard (dark theme), then start a second scan with another range: the plot follows the new
+data. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
+(copy a plot, open a large file) while the AMX polls: no AMX worker stops with `exit=75`.
 In MScan, select the AMX HD while it holds its standby config: the message names `CH0: Not enabled`
 and the state, not `AMX waveform readback is unavailable`. On the AMX HD, `Reading the AMX HD config names` appears at connection and timing is enabled about
 6 s later. Open the config list with the AMX ON and scroll to the end: it stays there, and a config above 255

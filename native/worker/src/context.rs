@@ -150,7 +150,9 @@ impl Context {
 
     fn emit(&self, message: Value) -> Result<()> {
         if let Some(sender) = &self.progress {
-            let until = Instant::now() + Duration::from_millis(50).min(self.remaining());
+            // Explorer can hold the Python reader for a few seconds (2026-11-02 lab): 50 ms was
+            // too short and a trace frame then failed the request.
+            let until = Instant::now() + Duration::from_secs(2).min(self.remaining());
             let mut message = message;
             loop {
                 match sender.try_send(message) {

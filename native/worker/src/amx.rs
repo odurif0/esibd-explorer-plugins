@@ -114,7 +114,7 @@ pub struct Controller {
     recording: bool,
     errors: Value,
     burst_timers: Option<u32>,
-    receive_fault: bool,
+    receive_fault: Option<String>,
     pending_recovery: Option<String>,
 }
 
@@ -177,7 +177,7 @@ impl Controller {
             recording: false,
             errors,
             burst_timers: None,
-            receive_fault: false,
+            receive_fault: None,
             pending_recovery: None,
         })
     }
@@ -243,7 +243,9 @@ impl Controller {
             }
         }
         let reply = result?;
-        self.receive_fault |= (-13..=-10).contains(&reply.status);
+        if (-13..=-10).contains(&reply.status) && self.receive_fault.is_none() {
+            self.receive_fault = Some(Error::status(reply.status, suffix).message);
+        }
         if suffix == "LoadCurrentConfig" && reply.status == 0 {
             // The hardware has changed even if cancellation prevents the
             // facade's subsequent metadata/name reads from completing.
@@ -422,26 +424,51 @@ impl Controller {
 
     /// A read that lost a reply leaves the port out of step: every later read then gets the wrong
     /// reply (2026-11-02 lab: -10, then -13 at each poll until communication closed). Only reads
-    /// come here, they command nothing: purge, restore the baud rate and read once more. The next
-    /// snapshot reports the recovery.
-    fn read_with_recovery<T>(
+    /// come here, they command nothing: purge, restore the baud rate and read once more. A lost
+    /// reply counts even when the read tolerated it or returned the vendor status as a value
+    /// (2026-11-02 lab: GetTimerTriggerSource -10, then GetTimerCount -13 failed the poll). The
+    /// next snapshot reports the recovery.
+    pub(crate) fn read_with_recovery<T>(
         &mut self,
-        read: impl Fn(&mut Self, &Context) -> Result<T>,
+        mut read: impl FnMut(&mut Self, &Context) -> Result<T>,
         ctx: &Context,
     ) -> Result<T> {
-        self.receive_fault = false;
-        let error = match read(self, ctx) {
-            Err(error) if self.receive_fault && !self.poisoned && !ctx.is_cancelled() => error,
-            other => return other,
+        self.begin_read();
+        let first = read(self, ctx);
+        let Some(lost) = self.resynchronize_after_lost_reply(ctx)? else {
+            return first;
         };
+        let value = read(self, ctx)?;
+        self.pending_recovery = Some(lost);
+        Ok(value)
+    }
+
+    pub(crate) fn begin_read(&mut self) {
+        self.receive_fault = None;
+    }
+
+    /// The reply lost since `begin_read`, once the port is resynchronized for one more read;
+    /// None when no reply was lost, or the transport is poisoned or cancelled.
+    pub(crate) fn resynchronize_after_lost_reply(
+        &mut self,
+        ctx: &Context,
+    ) -> Result<Option<String>> {
+        let Some(lost) = self.receive_fault.take() else {
+            return Ok(None);
+        };
+        if self.poisoned || ctx.is_cancelled() {
+            return Ok(None);
+        }
         self.write("Purge", &[], ctx)?;
         let baud = self.read("SetBaudRate", &[json!(self.baudrate)], 1, ctx)?;
         if baud[0] != json!(self.baudrate) {
             return Err(Error::runtime("Baud rate not restored after purge"));
         }
-        let value = read(self, ctx)?;
-        self.pending_recovery = Some(error.message);
-        Ok(value)
+        Ok(Some(lost))
+    }
+
+    pub(crate) fn note_read_recovery(&mut self, lost: String) {
+        self.pending_recovery = Some(lost);
     }
 
     fn recovered_snapshot(

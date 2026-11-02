@@ -19,6 +19,29 @@ use serde_json::{Value, json};
 // The 4EDH signal bus exposes Mapping0-Out0 .. Mapping3-Out3: four engines.
 const MAPPING_ENGINE_MAX: u32 = 3;
 
+/// Reads the plugin makes one register at a time (routing every 5 s, checks before a write). They
+/// command nothing, so a lost reply resynchronizes the port and the read is made once more
+/// (2026-11-02 lab: GetTimerTriggerSource -10, then GetTimerCount -13 failed the poll and MScan).
+const RECOVERABLE_READS: &[&str] = &[
+    "get_hw_type",
+    "get_interlock_funct",
+    "get_clock_source",
+    "get_oscillator_period",
+    "get_switch_trigger_source",
+    "get_switch_enable_source",
+    "get_switch_delay",
+    "get_switch_rise_delay_fine",
+    "get_switch_fall_delay_fine",
+    "get_timer_count",
+    "get_timer_delay",
+    "get_timer_width",
+    "get_timer_burst",
+    "get_timer_trigger_source",
+    "get_timer_stop_source",
+    "get_frequency_khz",
+    "get_pulser_delay_ticks",
+];
+
 pub struct Controller {
     inner: amx::Controller,
 }
@@ -41,6 +64,23 @@ impl Controller {
         let status = reply.status;
         outputs(reply, pointer_count)?;
         Ok(json!(status))
+    }
+
+    fn read_with_recovery(
+        &mut self,
+        method: &str,
+        args: &[Value],
+        kwargs: &Value,
+        ctx: &Context,
+    ) -> Result<Value> {
+        self.inner.begin_read();
+        let first = self.call_hd(method, args, kwargs, ctx);
+        let Some(lost) = self.inner.resynchronize_after_lost_reply(ctx)? else {
+            return first;
+        };
+        let value = self.call_hd(method, args, kwargs, ctx)?;
+        self.inner.note_read_recovery(lost);
+        Ok(value)
     }
 
     fn timer_index(&mut self, value: &Value, ctx: &Context) -> Result<u32> {
@@ -607,7 +647,11 @@ impl Backend for Controller {
     ) -> Result<Value> {
         self.inner.begin_call();
         ctx.check_cancelled()?;
-        let result = self.call_hd(method, args, kwargs, ctx);
+        let result = if RECOVERABLE_READS.contains(&method) {
+            self.read_with_recovery(method, args, kwargs, ctx)
+        } else {
+            self.call_hd(method, args, kwargs, ctx)
+        };
         self.inner.finish_call(result, ctx)
     }
 

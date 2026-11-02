@@ -332,6 +332,7 @@ def test_amx_resume_loads_no_config_and_changes_no_setting(loader, monkeypatch):
     snapshot = {"main_state": {"name": "STATE_ON"}, "device_enabled": True}
     controller._controller_lock_section = lambda *args, **kwargs: contextlib.nullcontext()
     controller._collect_startup_snapshot = record("snapshot", snapshot)
+    controller._collect_resume_snapshot = record("snapshot", snapshot)
     controller._apply_snapshot = record("apply")
     controller._refresh_loaded_config_status = record("loaded_config")
     controller._sync_loaded_config_to_gui = record("gui")

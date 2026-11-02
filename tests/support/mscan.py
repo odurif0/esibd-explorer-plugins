@@ -197,12 +197,12 @@ class Request:
 class OffsetChannel:
     """AMPR channel: the value cell rounds to 2 decimals and queues a request, like the AMPR plugin."""
 
-    def __init__(self, device, module=2, number=3):
+    def __init__(self, device, module=2, number=3, name='Q_offset', value=5.):
         self.device, self.module, self.number = device, module, number
-        self.name, self.unit = 'Q_offset', 'V'
+        self.name, self.unit = name, 'V'
         self.real = self.enabled = self.active = True
         self.min, self.max = -100., 100.
-        self._value = self.monitor = 5.
+        self._value = self.monitor = value
         self.writes = []
 
     def getDevice(self):
@@ -228,22 +228,32 @@ class OffsetChannel:
             ctrl._latest_setpoints[(self.module, self.number)] = Request(self, value)
 
 
-def add_offset(r, factor=.2, monitor_error=0., confirm=True):
-    """Add an AMPR offset channel to the shared rig; each pause confirms its latest request."""
+def add_offset(r, factor=.2, monitor_error=0., confirm=True, pair=1, fixed=0.):
+    """Add the AMPR offset channel of rod pair 1 (or 2) to the shared rig; each pause confirms its latest request.
+
+    Both pairs share one AMPR, as in the lab (Q2_DC_1, Q2_DC_2): pair 2 reuses pair 1's device.
+    """
     s = r.scan
-    ctrl = NS(initialized=True, device=object(), _setpoint_lock=Lock(), _setpoint_cancel=Event(),
-              _latest_setpoints={}, transitioning=False, ramping=False, initializing=False,
-              _module_voltage_limit=lambda module: 500.)
-    device = NS(name='AMPR_A', controller=ctrl, isOn=lambda: True)
-    channel = OffsetChannel(device)
+    first = getattr(r, 'offset', None) if pair == 2 else None
+    if first is None:
+        ctrl = NS(initialized=True, device=object(), _setpoint_lock=Lock(), _setpoint_cancel=Event(),
+                  _latest_setpoints={}, transitioning=False, ramping=False, initializing=False,
+                  _module_voltage_limit=lambda module: 500.)
+        device = NS(name='AMPR_A', controller=ctrl, isOn=lambda: True)
+        s.pluginManager.plugins.append(device)
+    else:
+        ctrl, device = first.controller, first.device
+    channel = (OffsetChannel(device) if pair == 1
+               else OffsetChannel(device, module=3, number=1, name='Q_offset_2', value=-4.))
     r.all_channels.append(channel)
-    s.pluginManager.plugins.append(device)
-    s.offset_channel, s.offset_factor = s._offset_label(channel), factor
+    setattr(s, 'offset_channel' if pair == 1 else 'offset_channel_2', s._offset_label(channel))
+    s.offset_factor, s.offset_fixed = factor, fixed
 
     def settle_ampr():
         for request in ctrl._latest_setpoints.values():
             if confirm:
                 request.state = 'confirmed'
-                channel.monitor = request.target + monitor_error
-    r.offset = NS(channel=channel, controller=ctrl, device=device, settle=settle_ampr)
+                request.channel.monitor = request.target + monitor_error
+    namespace = NS(channel=channel, controller=ctrl, device=device, settle=settle_ampr)
+    setattr(r, 'offset' if pair == 1 else 'offset2', namespace)
     return channel

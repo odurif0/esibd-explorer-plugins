@@ -206,7 +206,7 @@ def test_native_prewrite_rejects_hardware_change_after_point_update(mscan_rig, n
     adapter = mscan_rig.module._load_native_runtime('_native_scan').NativeScanAdapter(scan, forbidden, emit_completion=False)
     adapter._bind()
     action = dict(session=7, action_id=2, expected_revisions=[1, 1], restore=False,
-                  index=1, targets=[20., 20.], latest_mono=None, offset=None)
+                  index=1, targets=[20., 20.], latest_mono=None, offsets=[])
     adapter._status = dict(session=7, state='await_command', status='running', error='', action=action,
                            revisions=[native_revision] * 2, confirmed_vset=[native_confirmation] * 2,
                            updates=[dict(index=0, mean=10., rail_v=[10., 10.], rail_i=[.002, .002],
@@ -1956,6 +1956,8 @@ def run(scenario, target, app_holder=None):
     if scenario in ('stop', 'local-stop', 'off', 'current-limit', 'foldback', 'edge-change'):
         assert interrupted
         assert scan._validation['status'] == ('stopped' if scenario in ('stop', 'local-stop') else 'error')
+        # One point carries the terminal status, the one the scan stopped on (2026-11-02 lab: two).
+        assert scan._validation['point_status'].count(scan._validation['status']) == 1, scan._validation['point_status']
         if scenario == 'current-limit':
             assert 'reached/exceeded Ilim' in scan._validation['error']
             assert hw.currents == {0: .001, 1: .001}
@@ -2220,6 +2222,45 @@ def run(scenario, target, app_holder=None):
         assert scan.display.canvas.isVisible() and scan.display.canvas._has_drawn
         dock_window.grab().save(str(target / 'native-docks.png'))
         dock_window.hide()
+    if scenario in ('auto-save', 'edge-change'):
+        # 2026-11-02 lab: during the second scan, after an aborted one, the plot was not displayed.
+        if scenario == 'auto-save':
+            # Explorer's image copy rebuilds the figure and restores its limits: in dark mode this
+            # switched MScan to manual scale, and a later scan stayed out of view.
+            from esibd import plugins as esibd_plugins
+            dark, clipboard = esibd_plugins.getDarkMode, esibd_plugins.getClipboardTheme
+            esibd_plugins.getDarkMode, esibd_plugins.getClipboardTheme = (lambda: True), (lambda: False)
+            try:
+                scan.display.copyClipboard()
+            finally:
+                esibd_plugins.getDarkMode, esibd_plugins.getClipboardTheme = dark, clipboard
+            assert scan.display.autoscaleAction.state, 'an image copy is not an operator zoom'
+        scan.display.axes[0].set_xlim(65, 75)  # An operator zoom: the next scan follows its data again.
+        assert not scan.display.autoscaleAction.state
+        draws = []
+        scan.display.canvas.mpl_connect('draw_event', draws.append)
+        timer.start(8)
+        QTest.qWait(30)
+        assert start_button.isEnabled(), scan.scan_status
+        QTest.mouseClick(start_button, Qt.MouseButton.LeftButton)
+        thread = scan.runThread
+        assert start_button.text() == 'Stop scan', scan.scan_status
+        assert scan.display.autoscaleAction.state, 'a new scan follows its data'
+        live = False
+        deadline = time.monotonic() + 12
+        while thread.is_alive() and time.monotonic() < deadline:
+            QTest.qWait(5)
+            if not live and np.isfinite(scan.outputChannels[0].recordingData[0]):
+                QTest.qWait(60)
+                ydata = np.asarray(scan.display.ms.get_ydata(), dtype=float)
+                (y0, y1) = scan.display.axes[0].get_ylim()
+                print('SECOND', ydata, (y0, y1), len(draws), scan.display.canvas.isVisible())
+                assert ydata[0] == pytest.approx(scan.outputChannels[0].recordingData[0] * 1e12), ydata
+                assert min(y0, y1) <= ydata[0] <= max(y0, y1), (ydata, y0, y1)
+                live = True
+        thread.join(.5)
+        timer.stop()
+        assert live and draws, (live, len(draws))
     scan.closeGUI()
     assert not scan._interface_timer.isActive()
     window.close()

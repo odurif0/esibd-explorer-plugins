@@ -234,10 +234,13 @@ on an open loop only while its `Interlock monitoring` setting is on (off by defa
 
 ## Connection Failures
 
-A reply lost during a housekeeping read or while reading the config list leaves the serial
-link out of step: the plugin purges the port, restores the baud rate and reads once more, then
-logs `AMX reply lost, port resynchronized and read again`. These reads command nothing, and a
-write is never repeated.
+A reply lost during a housekeeping read, a routing read or while reading the config list leaves
+the serial link out of step: the plugin purges the port, restores the baud rate and reads once
+more, then logs `AMX reply lost, port resynchronized and read again`. These reads command nothing,
+and a write is never repeated.
+
+After an Explorer crash, the plugin reconnects and reads the running timing and routing, then
+adopts them: it loads no config and enables nothing.
 
 A failed or timed-out connection is never reused. A returned failed initial
 Open is cleaned up without output commands; `Connection pending` remains until

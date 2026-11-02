@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc::{self, SyncSender},
+    mpsc::{self, SyncSender, TrySendError},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, fs::File};
 
 type Active = Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>;
@@ -71,9 +71,28 @@ fn protocol_output() -> std::io::Result<File> {
     }
 }
 
+/// How long a reply waits for the supervisor to read. Explorer can hold the Python reader for a
+/// few seconds (2026-11-02 lab, AMX_A: exit 75 in the middle of an ordinary poll, the reply found
+/// the queue full once). A supervisor silent for this long, or a closed pipe, ends the worker.
+const OUTPUT_STALL: Duration = Duration::from_secs(10);
+
 fn send(sender: &SyncSender<Value>, value: Value) {
-    if sender.try_send(value).is_err() {
+    if !send_within(sender, value, OUTPUT_STALL) {
         exit_with_diagnostic(75, "Worker output queue exhausted or closed");
+    }
+}
+
+fn send_within(sender: &SyncSender<Value>, mut value: Value, limit: Duration) -> bool {
+    let until = Instant::now() + limit;
+    loop {
+        match sender.try_send(value) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(back)) if Instant::now() < until => {
+                value = back;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => return false,
+        }
     }
 }
 
@@ -299,6 +318,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_waits_for_a_slow_supervisor_but_not_for_a_closed_one() {
+        let (sender, receiver) = mpsc::sync_channel::<Value>(1);
+        sender.try_send(json!(0)).unwrap();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150)); // Explorer busy, the queue full.
+            let first = receiver.recv().unwrap();
+            (first, receiver.recv().unwrap())
+        });
+        assert!(send_within(&sender, json!(1), Duration::from_secs(5)));
+        assert_eq!(reader.join().unwrap(), (json!(0), json!(1)));
+        assert!(
+            !send_within(&sender, json!(2), Duration::from_secs(5)),
+            "closed: no wait"
+        );
+        let (sender, _receiver) = mpsc::sync_channel::<Value>(1);
+        sender.try_send(json!(0)).unwrap();
+        let started = Instant::now();
+        assert!(
+            !send_within(&sender, json!(1), Duration::from_millis(100)),
+            "never read"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
 
     struct Recorder(Arc<Mutex<Vec<String>>>);
     impl Backend for Recorder {
