@@ -135,6 +135,7 @@ def rig(mode, fault=None, offset=False):
         add_offset(r, factor=1/3, fixed=1.5 if offset == 2 else 0.)
     if offset == 2:
         add_offset(r, factor=1/3, fixed=1.5, pair=2)
+        s.offset_resolution, s.offset_minimum = 3., .75  # At 10 V: 0.33 V, so the minimum applies.
     s._plan = s._preflight()
     if offset:
         s._validation.update(offset_v=np.full((3, offset), np.nan), offset_target=np.full((3, offset), np.nan))

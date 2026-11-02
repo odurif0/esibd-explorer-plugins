@@ -70,6 +70,41 @@ const SETPOINT_REL_TOLERANCE: f64 = 0.01;
 const SETPOINT_SETTLE_S: f64 = 0.25;
 const SETPOINT_POLL_S: f64 = 0.02;
 
+/// Reads whose -10, -11, -13 or -14 is an answer on some firmware (the function is missing) and has
+/// a documented fallback. A reply really lost there leaves the next read out of step, and that
+/// read starts the recovery.
+const COMPATIBILITY_READS: &[&str] = &[
+    "GetConfigList",
+    "GetPSUEnable",
+    "GetPSUFullRange",
+    "HasPSUFullRange",
+    "GetFWVersion",
+    "GetFWDate",
+    "GetHWType",
+    "GetHWVersion",
+];
+
+/// Reads the plugin makes at each poll or connection. They command nothing, so after a lost reply
+/// the port is purged, the baud rate restored and the read made once more. Without it a lost
+/// reply left the port out of step: every later read failed with -13 and the plugin declared
+/// communication lost (2026-11-02 lab, PSU_A and PSU_E at 15:47: GetConfigName -10 at connection).
+const RECOVERABLE_READS: &[&str] = &[
+    "collect_housekeeping",
+    "list_configs",
+    "get_device_enabled",
+    "get_output_enabled",
+    "get_output_full_range",
+    "get_interlock_enabled",
+    "get_channel_voltage",
+    "get_channel_current",
+    "get_channel_voltage_limits",
+    "get_channel_current_limits",
+    "get_channel_measurements",
+    "get_channel_measured_voltage",
+    "get_channel_measured_current",
+    "get_product_info",
+];
+
 pub struct Controller {
     dll: Box<dyn Dll>,
     device_id: String,
@@ -84,6 +119,9 @@ pub struct Controller {
     open_failed: bool,
     failed_open_released: bool,
     opening: bool,
+    receive_fault: Option<String>,
+    pending_recovery: Option<String>,
+    reading: bool,
 }
 
 // A per-export budget supplements the parent request deadline. It cannot
@@ -401,7 +439,28 @@ impl Controller {
             open_failed: false,
             failed_open_released: false,
             opening: false,
+            receive_fault: None,
+            pending_recovery: None,
+            reading: false,
         })
+    }
+
+    /// After a read that lost a reply (-10 to -13): purge, restore the baud rate and return the
+    /// lost reply, ready for one more read. None when no reply was lost, or the transport is
+    /// poisoned or the request cancelled.
+    fn resynchronize_after_lost_reply(&mut self, io: &Io<'_>) -> Result<Option<String>> {
+        let Some(lost) = self.receive_fault.take() else {
+            return Ok(None);
+        };
+        if self.transport_poisoned || io.ctx.is_cancelled() {
+            return Ok(None);
+        }
+        self.write("Purge", &[], io)?;
+        let baud = self.read("SetBaudRate", &[json!(self.baudrate)], 1, io)?;
+        if word(&baud[0], u32::MAX as u64)? != self.baudrate as u64 {
+            return Err(Error::runtime("Baud rate not restored after purge"));
+        }
+        Ok(Some(lost))
     }
 
     fn usable(&self) -> Result<()> {
@@ -456,6 +515,12 @@ impl Controller {
             return Err(error);
         }
         let reply = result?;
+        if (-13..=-10).contains(&reply.status)
+            && self.receive_fault.is_none()
+            && !COMPATIBILITY_READS.contains(&suffix)
+        {
+            self.receive_fault = Some(Error::status(reply.status, suffix).message);
+        }
         if reply.status == 0 {
             match suffix {
                 "Open" => self.port_open = true,
@@ -507,6 +572,7 @@ impl Controller {
             let baud = self.read("SetBaudRate", &[json!(self.baudrate)], 1, io)?;
             word(&baud[0], u32::MAX as u64)?;
             self.connected = true;
+            self.pending_recovery = None;
             // Identity is advisory, but transport poisoning is never optional.
             let probe = self.raw(
                 "GetProductID",
@@ -1844,6 +1910,31 @@ impl Backend for Controller {
         }
         self.require_connected()?;
         ctx.check_cancelled()?;
+        if RECOVERABLE_READS.contains(&method) && !self.reading {
+            self.reading = true;
+            self.receive_fault = None;
+            let first = self.call(method, args, kwargs, ctx);
+            let result = match self.resynchronize_after_lost_reply(&io) {
+                Ok(None) => first,
+                Ok(Some(lost)) => {
+                    let again = self.call(method, args, kwargs, ctx);
+                    if again.is_ok() {
+                        self.pending_recovery = Some(lost);
+                    }
+                    again
+                }
+                Err(error) => Err(error),
+            };
+            self.reading = false;
+            let mut value = result?;
+            if method == "collect_housekeeping"
+                && value.is_object()
+                && let Some(lost) = self.pending_recovery.take()
+            {
+                value["read_recovery"] = json!(lost);
+            }
+            return Ok(value);
+        }
         match method {
             "list_configs" => self.list_configs(a.boolean("include_empty", false), &io),
             "load_config" => {

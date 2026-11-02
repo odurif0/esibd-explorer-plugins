@@ -980,6 +980,53 @@ fn two_rod_pairs_get_the_fixed_offset_plus_and_minus_the_variable_part_then_rest
 }
 
 #[test]
+fn the_resolution_offset_acts_with_opposite_signs_and_stops_at_the_minimum_u() {
+    // User decision 2026-11-02: U1,2 = x ± max(U_min, U/V × A − δ).
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([offset_channel("pair1", 3.0), offset_channel("pair2", -4.0)]);
+    r.settings["offset_factor"] = json!(0.2);
+    r.settings["offset_fixed"] = json!(10.0);
+    r.settings["offset_resolution"] = json!(3.0);
+    let result = r.run();
+    assert_eq!(
+        result["validation"]["offset_target"],
+        json!([[10.5, 9.5], [11.0, 9.0], [13.0, 7.0]])
+    );
+    // A negative U/V keeps swapping the pairs.
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([offset_channel("pair1", 3.0)]);
+    r.settings["offset_factor"] = json!(-0.5);
+    r.settings["offset_resolution"] = json!(1.0);
+    let result = r.run();
+    assert_eq!(
+        result["validation"]["offset_target"],
+        json!([[-4.0], [-9.0], [-14.0]])
+    );
+    // U/V = 0 is RF-only: no DC between the pairs, the minimum does not apply.
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([offset_channel("pair1", 3.0), offset_channel("pair2", -4.0)]);
+    r.settings["offset_factor"] = json!(0.0);
+    r.settings["offset_fixed"] = json!(15.0);
+    let result = r.run();
+    assert_eq!(
+        result["validation"]["offset_target"],
+        json!([[15.0, 15.0], [15.0, 15.0], [15.0, 15.0]])
+    );
+    for (name, bad) in [
+        ("offset_resolution", json!(-1.0)),
+        ("offset_resolution", codec::float(f64::NAN)),
+        ("offset_minimum", json!(0.0)),
+        ("offset_minimum", json!(-1.0)),
+        ("offset_minimum", codec::float(f64::NAN)),
+    ] {
+        let mut r = Rig::new("Step by step");
+        r.obs["offsets"] = json!([offset_channel("pair1", 3.0)]);
+        r.settings[name] = bad;
+        assert!(call(&mut r.controller, "start", &[r.settings, r.obs]).is_err());
+    }
+}
+
+#[test]
 fn each_rod_pair_is_bounded_and_watched_on_its_own() {
     // Pair 2 goes down to 10 − 0.2 × 30 = 4 V: a minimum of 5 V refuses the scan before any write.
     let mut r = Rig::new("Step by step");

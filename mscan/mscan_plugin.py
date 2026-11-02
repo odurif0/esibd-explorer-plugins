@@ -326,6 +326,8 @@ class MScan(Scan):
     OFFSET = 'Quadrupole offset'  # Rod pair 1; this key predates pair 2 and saved settings keep it.
     OFFSET_2 = 'Quadrupole offset pair 2'
     OFFSET_FACTOR = 'Offset coefficient'
+    OFFSET_RESOLUTION = 'Resolution offset'
+    OFFSET_MINIMUM = 'Minimum U'
     OFFSET_FIXED = 'Fixed offset'
     OFFSET_READBACK = 'Offset readback'
     NO_OFFSET = 'None'
@@ -547,25 +549,41 @@ class MScan(Scan):
         settings[self.OFFSET] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel', event=self._offset_changed,
             toolTip='AMPR channel (module, channel) of quadrupole rod pair 1. During the scan it is set to '
-                    'Fixed offset + U/V × A at every amplitude (U: DC, V: RF amplitude), then verified: the AMPR hardware '
+                    'Fixed offset + max(Minimum U, U/V × A − Resolution offset) at every amplitude (U: DC, V: RF amplitude), '
+                    'then verified: the AMPR hardware '
                     'setpoint must confirm the scan target and its Monitor must be within Voltage tolerance before '
                     'acquisition. Normal completion restores its initial value; Stop/error holds the last value. '
                     'None: not driven.')
         settings[self.OFFSET_2] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel_2', event=self._offset_changed,
-            toolTip='AMPR channel of quadrupole rod pair 2, set to Fixed offset − U/V × A: the same fixed offset, the '
+            toolTip='AMPR channel of quadrupole rod pair 2, set to Fixed offset − max(Minimum U, U/V × A − Resolution offset): '
+                    'the same fixed offset, the '
                     'variable part of opposite sign. Verified, recorded and restored like pair 1. None: only pair 1 is driven.')
         settings[self.OFFSET_FACTOR] = parameterDict(value=.2, minimum=-100., maximum=100.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_factor', event=self._offset_changed,
             instantUpdate=False, displayDecimals=4,
             toolTip='U/V: ratio of the variable DC part U to the RF amplitude V (here the scanned amplitude A). '
-                    'Pair 1 is set to Fixed offset + U/V × A, pair 2 to Fixed offset − U/V × A. '
+                    'Its limit is about 0.215 for an ideal 50 % square wave: above it nothing is transmitted. '
+                    '0: no DC between the pairs, RF-only. '
                     'Each commanded value is rounded to the AMPR channel display precision.')
+        settings[self.OFFSET_RESOLUTION] = parameterDict(value=0., minimum=0., maximum=1000.,
+            parameterType=PARAMETERTYPE.FLOAT, attr='offset_resolution', event=self._offset_changed,
+            instantUpdate=False, displayDecimals=3,
+            toolTip='δ, in V, subtracted from U/V × A with opposite signs on the two pairs: it acts on the filter, unlike '
+                    'Fixed offset. With U/V at its limit, a peak keeps about the same width in A over the scan, about '
+                    '6.4 × δ for an ideal square wave. 0: straight line through zero.')
+        settings[self.OFFSET_MINIMUM] = parameterDict(value=.5, minimum=.001, maximum=1000.,
+            parameterType=PARAMETERTYPE.FLOAT, attr='offset_minimum', event=self._offset_changed,
+            instantUpdate=False, displayDecimals=3,
+            toolTip='Smallest DC between a pair and the fixed offset, in V. At zero DC the filter would pass every heavy '
+                    'ion, so the DC never reaches zero during a scan, as on commercial instruments. Peaks whose tip lies '
+                    'below (Minimum U + δ) / (U/V) are not filtered reliably. Not used when U/V is 0.')
         settings[self.OFFSET_FIXED] = parameterDict(value=0., minimum=-1000., maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_fixed', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='DC offset common to both rod pairs, in V, constant during the scan. Added to the variable part '
-                    'U/V × A of each pair (pair 1 +, pair 2 −). 0: no fixed part.')
+            toolTip='DC offset common to both rod pairs, in V, constant during the scan: it sets the potential of the '
+                    'axis, so the ion energy, not the mass filter. Added to the variable part of each pair (pair 1 +, '
+                    'pair 2 −). 0: no fixed part.')
         settings[self.OFFSET_READBACK] = parameterDict(value='Not driven', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
             toolTip='Offset channel readback: AMPR Monitor (measured) and its setpoint. During a scan: scan target, '
@@ -574,7 +592,9 @@ class MScan(Scan):
                  self.DETECTOR, self.DMMR_INTERVAL,
                  self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.PASSES,
                  self.RATE,
-                 self.OFFSET, self.OFFSET_2, self.OFFSET_FACTOR, self.OFFSET_FIXED, self.OFFSET_READBACK,
+                 self.OFFSET, self.OFFSET_2, self.OFFSET_FACTOR, self.OFFSET_RESOLUTION, self.OFFSET_MINIMUM,
+                 self.OFFSET_FIXED,
+                 self.OFFSET_READBACK,
                  self.FINAL_VOLTAGES,
                  self.SETTLING, self.INTEGRATION, self.TIME_STEP, self.CADENCE, self.SAMPLES,
                  self.SCANTIME, self.STATUS, self.TIMEOUT, self.TOLERANCE)
@@ -666,7 +686,9 @@ class MScan(Scan):
         labels = {self.INTEGRATION: 'Measurement per point (s)', self.RATE: 'Sweep rate (V/s)',
                   self.TIMEOUT: 'Settle timeout (s)', self.TOLERANCE: 'Voltage tolerance (V)',
                   self.OFFSET: 'Quadrupole offset, pair 1 (AMPR)', self.OFFSET_2: 'Quadrupole offset, pair 2 (AMPR)',
-                  self.OFFSET_FACTOR: 'Offset coefficient (U/V)', self.OFFSET_FIXED: 'Fixed offset (V)'}
+                  self.OFFSET_FACTOR: 'Offset coefficient (U/V)', self.OFFSET_RESOLUTION: 'Resolution offset δ (V)',
+                  self.OFFSET_MINIMUM: 'Minimum U (V)',
+                  self.OFFSET_FIXED: 'Fixed offset (V)'}
         for key, label in labels.items():
             self.settingsMgr.settings[key].setText(0, label)  # labels, not INI/HDF5 keys
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -813,9 +835,38 @@ class MScan(Scan):
             raise ScanError('Fixed offset must be finite.')
         return fixed
 
+    def _offset_resolution(self):
+        try:
+            resolution = float(getattr(self, 'offset_resolution', 0.))
+        except (TypeError, ValueError):
+            resolution = math.nan
+        if not math.isfinite(resolution) or resolution < 0:
+            raise ScanError('Resolution offset δ must be finite and not negative.')
+        return resolution
+
+    def _offset_minimum(self):
+        try:
+            minimum = float(getattr(self, 'offset_minimum', .5))
+        except (TypeError, ValueError):
+            minimum = math.nan
+        if not math.isfinite(minimum) or minimum <= 0:
+            raise ScanError('Minimum U must be finite and above 0 V: at zero DC every heavy ion passes.')
+        return minimum
+
     @staticmethod
-    def _offset_formula(fixed, sign, factor):
-        variable = f'{factor:g} × A'
+    def _offset_value(fixed, sign, factor, resolution, minimum, amplitude):
+        """fixed ± max(U_min, U/V × A − δ). U/V = 0 is RF-only; a negative U/V swaps the pairs."""
+        if factor == 0:
+            return fixed
+        return fixed + sign * math.copysign(max(minimum, abs(factor) * float(amplitude) - resolution), factor)
+
+    @staticmethod
+    def _offset_formula(fixed, sign, factor, resolution, minimum):
+        if factor == 0:
+            return f'{fixed:g}'
+        sign = math.copysign(sign, sign * factor)
+        line = f'{abs(factor):g} × A − {resolution:g}' if resolution else f'{abs(factor):g} × A'
+        variable = f'max({minimum:g}, {line})'
         if fixed == 0:
             return variable if sign > 0 else f'−{variable}'
         return f'{fixed:g} {"+" if sign > 0 else "−"} {variable}'
@@ -842,10 +893,10 @@ class MScan(Scan):
             factor = math.nan
         if not math.isfinite(factor):
             raise ScanError('Offset coefficient U/V must be finite.')
-        fixed = self._offset_fixed()
-        return [self._offset_pair_plan(c, sign, factor, fixed, low, high) for c, sign in sources]
+        fixed, resolution, floor = self._offset_fixed(), self._offset_resolution(), self._offset_minimum()
+        return [self._offset_pair_plan(c, sign, factor, fixed, resolution, floor, low, high) for c, sign in sources]
 
-    def _offset_pair_plan(self, c, sign, factor, fixed, low, high):
+    def _offset_pair_plan(self, c, sign, factor, fixed, resolution, floor, low, high):
         self._registered(c)
         device = c.getDevice()
         ctrl = device.controller
@@ -862,16 +913,18 @@ class MScan(Scan):
         if ctrl._setpoint_cancel.is_set():
             raise ScanError(f'{c.name}: AMPR output shutdown requested.')
         minimum, maximum = self._offset_bounds(c, ctrl)
-        first, last = sorted((fixed + sign * factor * low, fixed + sign * factor * high))
+        # Monotonic in A, so the two ends of the span bound the whole scan.
+        first, last = sorted(self._offset_value(fixed, sign, factor, resolution, floor, a) for a in (low, high))
         if first < minimum or last > maximum:
-            raise ScanError(f'{c.name}: offset U = {first:g}–{last:g} V ({self._offset_formula(fixed, sign, factor)}) exceeds '
+            raise ScanError(f'{c.name}: offset U = {first:g}–{last:g} V '
+                            f'({self._offset_formula(fixed, sign, factor, resolution, floor)}) exceeds '
                             f'allowed {minimum:g}–{maximum:g} V.')
         initial = self._number(c, 'value', 'offset setpoint', nonnegative=False)
         if not minimum <= initial <= maximum:
             raise ScanError(f'{c.name}: final offset restoration to {initial:g} V is outside allowed {minimum:g}–{maximum:g} V.')
         o = dict(channel=c, name=c.name, device=device, controller=ctrl, backend=ctrl.device,
                  token=ctrl._setpoint_cancel, key=(c.module_address(), c.channel_number()), factor=factor,
-                 fixed=fixed, sign=sign, pair=1 if sign > 0 else 2,
+                 fixed=fixed, resolution=resolution, floor=floor, sign=sign, pair=1 if sign > 0 else 2,
                  initial=initial, expected=initial, requested=initial, written=False, observed=math.nan, ready=False)
         state, detail = self._offset_request_state(o)
         if state != 'confirmed':
@@ -925,8 +978,9 @@ class MScan(Scan):
         return o['ready']
 
     def _offset_target(self, amplitude):
-        """Each pair's DC target at amplitude A: fixed + sign × U/V × A (pair 1 +, pair 2 −)."""
-        return [o['fixed'] + o['sign'] * o['factor'] * float(amplitude) for o in self._plan.get('offsets') or []]
+        """Each pair's DC target at amplitude A: fixed ± max(U_min, U/V × A − δ) (pair 1 +, pair 2 −)."""
+        return [self._offset_value(o['fixed'], o['sign'], o['factor'], o['resolution'], o['floor'], amplitude)
+                for o in self._plan.get('offsets') or []]
 
     def _offset_snapshot(self):
         return [(o['observed'], o['expected']) for o in self._plan.get('offsets') or []]
@@ -950,12 +1004,15 @@ class MScan(Scan):
         if not sources:
             return 'Not driven'
         factor, fixed = float(self.offset_factor), self._offset_fixed()
+        resolution, floor = self._offset_resolution(), self._offset_minimum()
         lines = []
         for c, sign in sources:
             lines.append(f'{c.name}: Monitor {float(c.monitor):+.3f} V, set {float(c.value):+g} V')
             if all(math.isfinite(float(v)) for v in (self.start, self.stop)):
-                first, last = (fixed + sign * factor * float(v) for v in (self.start, self.stop))
-                lines.append(f'Scan: U = {self._offset_formula(fixed, sign, factor)} = {first:+g} … {last:+g} V')
+                first, last = (self._offset_value(fixed, sign, factor, resolution, floor, v)
+                               for v in (self.start, self.stop))
+                lines.append(f'Scan: U = {self._offset_formula(fixed, sign, factor, resolution, floor)} '
+                             f'= {first:+g} … {last:+g} V')
         return '\n'.join(lines)
 
     def estimateScanTime(self):
@@ -1742,10 +1799,12 @@ class MScan(Scan):
                 amplitude_definition='Vpos=+A, Vneg=-A relative to PSU reference; external offset not included',
                 offset=None if not offsets else dict(
                     coefficient=offsets[0]['factor'], fixed_v=offsets[0]['fixed'],
+                    resolution_offset_v=offsets[0]['resolution'], minimum_u_v=offsets[0]['floor'],
                     pairs=[dict(pair=o['pair'], channel=o['name'], ampr=o['device'].name, module=o['key'][0],
                                 ampr_channel=o['key'][1], sign=int(o['sign']), initial_v=o['initial'], final_v=o['initial'])
                            for o in offsets],
-                    definition='Pair 1: U = fixed + coefficient (U/V) × RF amplitude A; pair 2: U = fixed − coefficient × A. '
+                    definition='Pair 1: U = fixed + max(minimum U, coefficient (U/V) × RF amplitude A − resolution offset); '
+                               'pair 2: U = fixed − the same term. '
                                'Commanded on each AMPR channel at each amplitude (rounded to its display precision); '
                                'verified by its setpoint readback and Monitor. offset_v and offset_target have one '
                                'column per pair.'),
@@ -2413,7 +2472,7 @@ class MScan(Scan):
                     group.create_dataset(key, data=self._validation[key])
                 group['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of each quadrupole offset channel, one column per pair)'
                 group['offset_target'].attrs['Unit'] = ('V (DC offset commanded on each AMPR channel, one column per pair: '
-                                                        'pair 1 fixed + U/V × A, pair 2 fixed − U/V × A)')
+                                                        'pair 1 fixed + max(U_min, U/V × A − δ), pair 2 fixed − the same term)')
             for key in ('window_start', 'window_end'):
                 group[key].attrs['Unit'] = 's since Unix epoch'
             if 'continuous' in self._validation:

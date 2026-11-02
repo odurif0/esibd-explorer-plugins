@@ -158,6 +158,10 @@ impl Dll for MockDll {
                 h.open = false;
                 reply(vec![])
             }
+            "Purge" => {
+                assert_eq!(args.len(), 1);
+                reply(vec![])
+            }
             "SetBaudRate" => {
                 assert_eq!(args.len(), 2);
                 reply(vec![args[1].clone()])
@@ -906,6 +910,89 @@ fn telemetry_unknown_states_and_optional_full_range_support_are_preserved() {
     assert_eq!(s["channels"][0]["full_range"]["supported"], json!(false));
     h.lock().unwrap().status.insert("GetPSUData".into(), -11);
     assert!(call(&mut c, "collect_housekeeping", &[], json!({})).is_err());
+}
+
+#[test]
+fn a_reply_lost_at_connection_resynchronizes_instead_of_failing_every_poll() {
+    // 2026-11-02 lab, PSU_A and PSU_E at 15:47: GetConfigName -10 while listing the configs, then
+    // GetMainState -13 at each poll until the plugin declared communication lost.
+    let (mut c, h) = connected();
+    {
+        let mut h = h.lock().unwrap();
+        h.config_active[7] = true;
+        h.config_valid[9] = true;
+        h.script("GetConfigName", failed(-10));
+    }
+    let list = call(&mut c, "list_configs", &[], json!({})).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    {
+        let h = h.lock().unwrap();
+        assert_eq!(h.calls_named("Purge").len(), 1, "{:?}", h.names());
+        assert!(
+            !h.names()
+                .iter()
+                .any(|n| n.starts_with("Set") && *n != "SetBaudRate"),
+            "a recovery commands nothing"
+        );
+    }
+    let s = call(&mut c, "collect_housekeeping", &[], json!({})).unwrap();
+    assert!(
+        s["read_recovery"]
+            .as_str()
+            .unwrap()
+            .contains("GetConfigName failed with vendor status -10"),
+        "{s}"
+    );
+    let s = call(&mut c, "collect_housekeeping", &[], json!({})).unwrap();
+    assert!(s.get("read_recovery").is_none(), "reported once");
+    // A reply lost in a poll is read again at once.
+    h.lock().unwrap().script("GetMainState", failed(-13));
+    let s = call(&mut c, "collect_housekeeping", &[], json!({})).unwrap();
+    assert!(
+        s["read_recovery"]
+            .as_str()
+            .unwrap()
+            .contains("GetMainState"),
+        "{s}"
+    );
+}
+
+#[test]
+fn a_persistent_fault_gets_one_recovery_and_a_write_is_never_repeated() {
+    let (mut c, h) = connected();
+    h.lock().unwrap().status.insert("GetMainState".into(), -13);
+    assert!(call(&mut c, "collect_housekeeping", &[], json!({})).is_err());
+    assert_eq!(h.lock().unwrap().calls_named("Purge").len(), 1);
+    h.lock().unwrap().status.clear();
+    h.lock().unwrap().calls.clear();
+    h.lock().unwrap().script("SetPSUOutputVoltage", failed(-10));
+    assert!(
+        call(
+            &mut c,
+            "set_channel_voltage",
+            &[json!(0), json!(5.0)],
+            json!({})
+        )
+        .is_err()
+    );
+    let h = h.lock().unwrap();
+    assert!(h.calls_named("Purge").is_empty(), "{:?}", h.names());
+    assert_eq!(h.calls_named("SetPSUOutputVoltage").len(), 1);
+}
+
+#[test]
+fn a_compatibility_status_is_an_answer_not_a_lost_reply() {
+    // Some firmware answers -13 to these reads, and the worker has a documented fallback.
+    let (mut c, h) = connected();
+    {
+        let mut h = h.lock().unwrap();
+        h.status.insert("HasPSUFullRange".into(), -13);
+        h.status.insert("GetConfigList".into(), -13);
+    }
+    let s = call(&mut c, "collect_housekeeping", &[], json!({})).unwrap();
+    assert!(s.get("read_recovery").is_none(), "{s}");
+    call(&mut c, "list_configs", &[], json!({})).unwrap();
+    assert!(h.lock().unwrap().calls_named("Purge").is_empty());
 }
 
 #[test]

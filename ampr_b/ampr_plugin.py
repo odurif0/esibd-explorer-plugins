@@ -2256,9 +2256,12 @@ class AMPRController(DeviceController):
             self._sync_status_to_gui()
             self.initializing = False
             return
-        if self._dispose_device() is False:
+        # False without a device only means that the last OFF was not confirmed: no port is held, so
+        # the operator may reconnect (2026-11-02 lab: ON did nothing after "Communication lost").
+        if self._dispose_device() is False and self.device is not None:
             self.initializing = False
-            return  # The previous connection still owns its native port.
+            self.print("AMPR connection refused: the previous connection still owns its port.", flag=PRINT.WARNING)
+            return
         self.initialized = False
         try:
             ampr_driver_class = _get_ampr_driver_class()
@@ -2277,6 +2280,8 @@ class AMPRController(DeviceController):
                 self._sync_status_to_gui()
                 return
             self.device = device
+            if self.main_state in (_AMPR_SHUTDOWN_UNCONFIRMED_STATE, _AMPR_COMMUNICATION_LOST_STATE):
+                self.main_state = "Connecting"  # That state would hide the readbacks of the new session.
             backend_reason = str(
                 getattr(self.device, "_process_backend_disabled_reason", "")
             ).strip()

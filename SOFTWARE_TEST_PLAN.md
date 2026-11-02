@@ -329,9 +329,14 @@ requested`, not an error. Load a config without oscillator (state `0x801`): `Fre
 the panel reads `Oscillator 0: the loaded config keeps oscillator 0 off`, no 50 MHz appears.
 Load a config on PLL0: `Clock 0 is PLL0, not CLK100M`, `Freq` and its widths are greyed. With
 AMX recording ON, `Load now` keeps it ON. After a failed load, the readbacks go on (AMX A/B too).
+After `Communication lost` on a PSU, AMPR or AMX (for example by switching the device off), switch
+it on again and click ON: the plugin reconnects without restarting Explorer and its readbacks return.
+If `PSU reply lost, port resynchronized` appears, the readbacks go on without `Communication lost`.
 In MScan, select Q2_DC_1 as pair 1 and Q2_DC_2 as pair 2, a fixed offset of a few volts and
 U/V 0.2 at low amplitude: each AMPR channel reads fixed ± 0.2 × A at every point (pair 2 with the
-minus sign), both are restored at the end, and the file has two offset columns. Copy the MScan plot
+minus sign), both are restored at the end, and the file has two offset columns. With δ = 1 V, the
+variable part reads max(0.5, 0.2 × A − 1), and no wide plateau opens at the start of the spectrum. Raise U/V until the signal disappears: its value c gives
+the ratio of the amplitude on the rods to A, c / 0.2153. Copy the MScan plot
 to the clipboard (dark theme), then start a second scan with another range: the plot follows the new
 data. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
 (copy a plot, open a large file) while the AMX polls: no AMX worker stops with `exit=75`.

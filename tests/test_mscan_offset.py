@@ -48,6 +48,8 @@ def test_default_coefficient_is_0_2(mscan_module, monkeypatch):
                                                    _offset_changed=None, _signal_changed=None, _setup_changed=None,
                                                    _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None))
     assert settings[mscan_module.MScan.OFFSET_FACTOR]['value'] == .2
+    assert settings[mscan_module.MScan.OFFSET_RESOLUTION]['value'] == 0.
+    assert settings[mscan_module.MScan.OFFSET_MINIMUM]['value'] == .5
     assert settings[mscan_module.MScan.OFFSET]['value'] == 'None'
     keys = list(settings)
     assert keys.index(mscan_module.MScan.RATE) < keys.index(mscan_module.MScan.OFFSET) < keys.index(mscan_module.MScan.OFFSET_FACTOR) \
@@ -197,7 +199,7 @@ def test_hdf5_keeps_offset_readback_target_and_metadata(mscan_rig, tmp_path):
 def test_readback_and_completion_texts(mscan_rig):
     add_offset(mscan_rig)
     s = mscan_rig.scan
-    assert s._offset_readback_text() == 'Q_offset: Monitor +5.000 V, set +5 V\nScan: U = 0.2 × A = +2 … +6 V'
+    assert s._offset_readback_text() == 'Q_offset: Monitor +5.000 V, set +5 V\nScan: U = max(0.5, 0.2 × A) = +2 … +6 V'
     prepare(mscan_rig)
     assert s._offset_readback_text(running=True).startswith('Q_offset: target +5 V')
     assert s._completion_text(s._plan['rails'], running=True).splitlines()[-1] == 'Q_offset: +5 V (quadrupole offset)'
@@ -247,7 +249,9 @@ def test_two_pairs_in_continuous_mode(mscan_continuous):
 
 @pytest.mark.parametrize(('change', 'message'), [
     ('pair-2-alone', 'pair 1'), ('same-channel', 'two different'), ('pair-2-range', 'exceeds allowed'),
-    ('fixed', 'Fixed offset must be finite'),
+    ('fixed', 'Fixed offset must be finite'), ('resolution-sign', 'Resolution offset'),
+    ('resolution-nan', 'Resolution offset'), ('resolution-range', 'exceeds allowed'),
+    ('minimum-zero', 'Minimum U'), ('minimum-nan', 'Minimum U'),
 ])
 def test_two_pair_preflight_blocks_before_any_command(mscan_rig, change, message):
     first, second = two_pairs(mscan_rig)
@@ -260,6 +264,16 @@ def test_two_pair_preflight_blocks_before_any_command(mscan_rig, change, message
         second.min = 5.  # Pair 2 reaches 10 − 0.2 × 30 = 4 V.
     if change == 'fixed':
         s.offset_fixed = float('nan')
+    if change == 'resolution-sign':
+        s.offset_resolution = -1.
+    if change == 'resolution-nan':
+        s.offset_resolution = float('nan')
+    if change == 'minimum-zero':
+        s.offset_minimum = 0.
+    if change == 'minimum-nan':
+        s.offset_minimum = float('nan')
+    if change == 'resolution-range':
+        s.offset_resolution, second.min = 3., 8.  # Pair 2 reaches 10 − (0.2 × 30 − 3) = 7 V.
     with pytest.raises(mscan_rig.module.ScanError, match=message):
         s._prepare()
     assert first.writes == second.writes == [] and all(not p.writes for p in mscan_rig.psus)
@@ -284,8 +298,45 @@ def test_two_pair_readback_and_completion_texts(mscan_rig):
     two_pairs(mscan_rig)
     s = mscan_rig.scan
     assert s._offset_readback_text().splitlines() == [
-        'Q_offset: Monitor +5.000 V, set +5 V', 'Scan: U = 10 + 0.2 × A = +12 … +16 V',
-        'Q_offset_2: Monitor -4.000 V, set -4 V', 'Scan: U = 10 − 0.2 × A = +8 … +4 V']
+        'Q_offset: Monitor +5.000 V, set +5 V', 'Scan: U = 10 + max(0.5, 0.2 × A) = +12 … +16 V',
+        'Q_offset_2: Monitor -4.000 V, set -4 V', 'Scan: U = 10 − max(0.5, 0.2 × A) = +8 … +4 V']
     prepare(mscan_rig)
     assert s._completion_text(s._plan['rails'], running=True).splitlines()[-2:] == [
         'Q_offset: +5 V (quadrupole offset, pair 1)', 'Q_offset_2: -4 V (quadrupole offset, pair 2)']
+
+
+def test_the_resolution_offset_acts_with_opposite_signs_and_stops_at_the_minimum_u(mscan_rig):
+    # User decision 2026-11-02: U1,2 = x ± max(U_min, U/V × A − δ).
+    # At zero DC every heavy ion would pass: the DC must not reach zero during a scan.
+    first, second = two_pairs(mscan_rig)
+    s = mscan_rig.scan
+    s.offset_resolution = 3.
+    assert s._offset_readback_text().splitlines()[1::2] == [
+        'Scan: U = 10 + max(0.5, 0.2 × A − 3) = +10.5 … +13 V', 'Scan: U = 10 − max(0.5, 0.2 × A − 3) = +9.5 … +7 V']
+    mscan_rig.on_pause = mscan_rig.offset.settle
+    prepare(mscan_rig)
+    s.runScan(lambda: True)
+    assert s._validation['status'] == 'completed', s._validation
+    assert first.writes == [10.5, 11., 13., 5.]
+    assert second.writes == [9.5, 9., 7., -4.]
+    metadata = s._plan['metadata']['offset']
+    assert (metadata['resolution_offset_v'], metadata['minimum_u_v']) == (3., .5)
+
+
+def test_a_zero_coefficient_is_rf_only(mscan_rig):
+    first, second = two_pairs(mscan_rig, factor=0., fixed=15.)
+    s = mscan_rig.scan
+    assert 'Scan: U = 15 = +15 … +15 V' in s._offset_readback_text()
+    mscan_rig.on_pause = mscan_rig.offset.settle
+    prepare(mscan_rig)
+    s.runScan(lambda: True)
+    assert first.writes[:3] == second.writes[:3] == [15.] * 3
+
+
+def test_a_negative_coefficient_keeps_swapping_the_pairs_with_a_resolution_offset(mscan_rig):
+    channel = add_offset(mscan_rig, factor=-.5)
+    mscan_rig.scan.offset_resolution = 1.
+    mscan_rig.on_pause = mscan_rig.offset.settle
+    prepare(mscan_rig)
+    mscan_rig.scan.runScan(lambda: True)
+    assert channel.writes == [-4., -9., -14., 5.]
