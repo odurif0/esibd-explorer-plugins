@@ -61,13 +61,16 @@ routine experimental use. These checks do not certify physical shutdown.
    The voltage range and **PSU Ilim** are grouped together above the scan settings.
    **After completion** shows each channel's return voltage and live measured
    current, e.g. `PSU_D_CH0: +4 V, Iget 32 mA`.
-5. Optional: **Quadrupole offset (AMPR)** selects the AMPR channel (module and
-   channel) applying the quadrupole offset; **None** (default) leaves it alone.
-   During the scan it is set to U = **Offset coefficient (U/V)** × A at every
-   amplitude (default 0.2, negative allowed), together with the PSU rails.
-   U is the DC offset and V the RF amplitude, here the scanned amplitude A.
-   **Offset readback** shows the AMPR Monitor and setpoint; during a scan, the
-   scan target and whether the AMPR confirmed it. See *Quadrupole offset* below.
+5. Optional: **Quadrupole offset, pair 1 (AMPR)** and **pair 2 (AMPR)** select the
+   AMPR channels (module and channel) of the two rod pairs; **None** (default)
+   leaves them alone. During the scan, at every amplitude and together with the PSU
+   rails, pair 1 is set to **Fixed offset (V)** + **Offset coefficient (U/V)** × A
+   and pair 2 to **Fixed offset** − U/V × A: a fixed part common to both pairs, and a
+   variable part of opposite sign. U/V defaults to 0.2 (negative allowed), the fixed
+   offset to 0 V. U is the variable DC part and V the RF amplitude, here the scanned
+   amplitude A. Pair 2 alone is refused; pair 1 alone works as before. **Offset
+   readback** shows each channel's AMPR Monitor and setpoint; during a scan, its
+   target and whether the AMPR confirmed it. See *Quadrupole offset* below.
 6. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
    or **Continuous**, with **Sweep rate (V/s)** and **Time step (s)**.
    Set the timing fields shown for that mode, described below.
@@ -77,9 +80,9 @@ routine experimental use. These checks do not certify physical shutdown.
 
 ## Quadrupole offset
 
-The offset channel is an ordinary AMPR channel: switch it ON, in manual (not
-equation) control, with its AMPR ON. Start is refused if U/V × the
-requested amplitude span leaves the channel's Min/Max or the AMPR module rating,
+Each offset channel is an ordinary AMPR channel: switch it ON, in manual (not
+equation) control, with its AMPR ON. Start is refused if its target, fixed ± U/V × the
+requested amplitude span, leaves that channel's Min/Max or the AMPR module rating,
 if its initial value could not be restored there, or if its current setpoint is
 not confirmed by the AMPR. At each amplitude, the rails are commanded first, then
 the offset (rounded to the AMPR channel's display precision). No point is
@@ -87,11 +90,12 @@ acquired (and, in continuous mode, no next command is sent) until the AMPR has
 confirmed **that** target by its hardware setpoint readback and its Monitor is
 within **Voltage tolerance**; a small offset step is not "confirmed" by tolerance
 alone. An offset edited or failing outside the scan, an AMPR OFF or a switch to
-equation control aborts the scan. Normal completion restores the initial offset
-with the PSU setpoints; Stop/error holds the last value. The HDF5 file keeps the
-coefficient, channel and initial value in the setup, and per point the commanded
-offset (`offset_target`) and its Monitor (`offset_v`); continuous scans also keep
-them in the raw observations.
+equation control aborts the scan; a settling timeout names the channel not ready, with
+its Monitor and target. Normal completion restores each initial offset with the PSU
+setpoints; Stop/error holds the last values. The HDF5 file keeps the coefficient, the
+fixed offset and each pair's channel, sign and initial value in the setup, and per point
+the commanded offsets (`offset_target`) and their Monitors (`offset_v`), one column per
+pair; continuous scans also keep them in the raw observations.
 
 There is no Input/Output table or generic channel selector to configure.
 The **msScan** settings list belongs to this scan; Explorer's global

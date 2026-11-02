@@ -352,3 +352,19 @@ def test_mscan_names_why_the_amx_hd_has_no_waveform(mscan_rig, hd):
     with pytest.raises(mscan_rig.module.ScanError, match="turn AMX_HD recording ON"):
         mscan_rig.scan._prepare()
     assert not mscan_rig.psus[0].writes
+
+
+def test_crash_resume_reads_the_running_timing_and_routing(hd):
+    # 2026-11-02 lab, 13:09: the resume read only the light state (no oscillator, no timers) and
+    # always failed with "Loaded AMX config timing readback is incomplete".
+    _, parent, controller = make_case("amx_hd")
+    state, _ = config273()
+    device = RoutingDevice()
+    device.collect_housekeeping = lambda timeout_s=None: state
+    controller.device = device
+    snapshot = controller._collect_resume_snapshot()
+    assert snapshot is state and controller.hd_routing is not None
+    assert not any(call[0].startswith("set_") for call in device.calls), "a resume commands nothing"
+    controller._apply_snapshot(snapshot)
+    assert [r["frequency"] for r in controller.output_rows] == ["10 kHz"] * 4
+    controller._sync_loaded_config_to_gui(snapshot)  # Raised "timing readback is incomplete".

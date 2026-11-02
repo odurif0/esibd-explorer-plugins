@@ -31,7 +31,7 @@ fn observation() -> Value {
             "registered":true,"real":true,"unit":"A","enabled":true,"initialized":true,
             "acquiring":true,"recording":true,"history_id":"history1","interval_ms":2.0,
             "times":[99.996,99.998,100.0],"values":[40.0,40.0,40.0]},
-        "offset":null})
+        "offsets":[]})
 }
 
 fn call(
@@ -124,17 +124,23 @@ impl Rig {
             r["monitor"] = json!(actual);
             r["voltage_setpoint_readback"] = json!(actual);
         }
-        if let Some(target) = action["offset"].as_f64() {
+        let targets: Vec<f64> = action["offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        for (pair, target) in targets.into_iter().enumerate() {
             let actual = (target * 1000.0).round() / 1000.0;
-            self.obs["offset"]["value"] = json!(actual);
-            self.obs["offset"]["monitor"] = json!(actual);
+            self.obs["offsets"][pair]["value"] = json!(actual);
+            self.obs["offsets"][pair]["monitor"] = json!(actual);
         }
         self.tick(0.0001);
         json!({"session":action["session"],"action_id":action["action_id"],
             "start_wall":started,"end_wall":self.obs["wall"],"end_mono":self.obs["mono"],
             "revisions":self.obs["rails"].as_array().unwrap().iter().map(|r| r["revision"].clone()).collect::<Vec<_>>(),
             "values":self.obs["rails"].as_array().unwrap().iter().map(|r| r["value"].clone()).collect::<Vec<_>>(),
-            "offset_value":self.obs["offset"].get("value")})
+            "offset_values":self.obs["offsets"].as_array().unwrap().iter().map(|o| o["value"].clone()).collect::<Vec<_>>()})
     }
     fn step(&mut self) -> esibd_native_worker::error::Result<()> {
         let ack = if self.status["action"]["kind"] == "command" {
@@ -884,10 +890,16 @@ fn detector_interval_identity_and_clock_changes_abort_in_both_modes() {
     }
 }
 
-fn add_offset(r: &mut Rig) {
-    r.obs["offset"] = json!({"identity":"offset1","name":"Offset","registered":true,"real":true,
+fn offset_channel(identity: &str, value: f64) -> Value {
+    json!({"identity":identity,"name":identity,"registered":true,"real":true,
         "enabled":true,"active":true,"initialized":true,"on":true,"busy":false,"shutdown":false,
-        "state":"confirmed","value":-5.0,"monitor":-5.0,"min":-200.0,"max":200.0});
+        "state":"confirmed","value":value,"monitor":value,"min":-200.0,"max":200.0})
+}
+
+fn add_offset(r: &mut Rig) {
+    r.obs["offsets"] = json!([{"identity":"offset1","name":"Offset","registered":true,"real":true,
+        "enabled":true,"active":true,"initialized":true,"on":true,"busy":false,"shutdown":false,
+        "state":"confirmed","value":-5.0,"monitor":-5.0,"min":-200.0,"max":200.0}]);
 }
 
 #[test]
@@ -899,9 +911,9 @@ fn offset_commands_round_confirm_and_restore_distinct_initial_offset() {
     assert_eq!(result["validation"]["status"], "completed");
     assert_eq!(
         result["validation"]["offset_target"],
-        json!([1.235, 2.469, 3.704])
+        json!([[1.235], [2.469], [3.704]])
     );
-    assert_eq!(r.obs["offset"]["value"], json!(-5.0));
+    assert_eq!(r.obs["offsets"][0]["value"], json!(-5.0));
 }
 
 #[test]
@@ -917,21 +929,119 @@ fn offset_interlocks_bounds_external_edits_and_confirmation_are_enforced() {
             continue;
         }
         if fault == "bounds" {
-            r.obs["offset"]["max"] = json!(2.0);
+            r.obs["offsets"][0]["max"] = json!(2.0);
             assert!(call(&mut r.controller, "start", &[r.settings, r.obs]).is_err());
             continue;
         }
         r.start();
         r.step().unwrap();
         match fault {
-            "state" => r.obs["offset"]["state"] = json!("mismatch"),
-            "external" => r.obs["offset"]["value"] = json!(2.0),
-            "shutdown" => r.obs["offset"]["shutdown"] = json!(true),
-            "identity" => r.obs["offset"]["identity"] = json!("new"),
+            "state" => r.obs["offsets"][0]["state"] = json!("mismatch"),
+            "external" => r.obs["offsets"][0]["value"] = json!(2.0),
+            "shutdown" => r.obs["offsets"][0]["shutdown"] = json!(true),
+            "identity" => r.obs["offsets"][0]["identity"] = json!("new"),
             _ => {}
         }
         r.fault("offset");
     }
+}
+
+#[test]
+fn two_rod_pairs_get_the_fixed_offset_plus_and_minus_the_variable_part_then_restore() {
+    // User request 2026-11-02: pair 1 = fixed + U/V × A, pair 2 = fixed − U/V × A.
+    for mode in ["Step by step", "Continuous"] {
+        let mut r = Rig::new(mode);
+        r.obs["offsets"] = json!([offset_channel("pair1", 3.0), offset_channel("pair2", -4.0)]);
+        r.settings["offset_factor"] = json!(0.2);
+        r.settings["offset_fixed"] = json!(10.0);
+        let result = r.run();
+        assert_eq!(result["validation"]["status"], "completed", "{result}");
+        if mode == "Step by step" {
+            assert_eq!(
+                result["validation"]["offset_target"],
+                json!([[12.0, 8.0], [14.0, 6.0], [16.0, 4.0]])
+            );
+            assert_eq!(
+                result["validation"]["offset_v"],
+                result["validation"]["offset_target"]
+            );
+        }
+        assert_eq!(r.obs["offsets"][0]["value"], json!(3.0), "pair 1 restored");
+        assert_eq!(r.obs["offsets"][1]["value"], json!(-4.0), "pair 2 restored");
+        if mode == "Continuous" {
+            let raw = call(&mut r.controller, "raw", &[]).unwrap();
+            let targets = raw["data"]["offset_target"].as_array().unwrap();
+            assert!(
+                targets.iter().all(|row| row.as_array().unwrap().len() == 2),
+                "{raw}"
+            );
+        }
+    }
+}
+
+#[test]
+fn each_rod_pair_is_bounded_and_watched_on_its_own() {
+    // Pair 2 goes down to 10 − 0.2 × 30 = 4 V: a minimum of 5 V refuses the scan before any write.
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([offset_channel("pair1", 3.0), offset_channel("pair2", 6.0)]);
+    r.obs["offsets"][1]["min"] = json!(5.0);
+    r.settings["offset_factor"] = json!(0.2);
+    r.settings["offset_fixed"] = json!(10.0);
+    assert!(
+        call(
+            &mut r.controller,
+            "start",
+            &[r.settings.clone(), r.obs.clone()]
+        )
+        .is_err()
+    );
+    // An external edit of pair 2 alone stops the scan.
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([offset_channel("pair1", 3.0), offset_channel("pair2", -4.0)]);
+    r.settings["offset_fixed"] = json!(10.0);
+    r.start();
+    r.step().unwrap();
+    r.obs["offsets"][1]["value"] = json!(2.0);
+    r.fault("offset");
+    // Three channels are refused.
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([
+        offset_channel("a", 0.0),
+        offset_channel("b", 0.0),
+        offset_channel("c", 0.0)
+    ]);
+    assert!(
+        call(
+            &mut r.controller,
+            "start",
+            &[r.settings.clone(), r.obs.clone()]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_settling_timeout_names_the_source_that_is_not_ready() {
+    // 2026-11-02 lab: a scan stopped at 250 V and the message did not say whether the PSU or
+    // the offset was missing.
+    let mut r = Rig::new("Step by step");
+    r.obs["offsets"] = json!([offset_channel("Q2_DC_1", 3.0)]);
+    r.settings["offset_fixed"] = json!(10.0);
+    r.start();
+    r.step().unwrap();
+    r.obs["offsets"][0]["monitor"] = json!(5.0);
+    let error = loop {
+        r.tick(0.05);
+        if let Err(error) = r.step() {
+            break error;
+        }
+    };
+    assert!(
+        error
+            .message
+            .contains("Not ready: Q2_DC_1 Monitor 5.000 V for 11 V."),
+        "{error}"
+    );
 }
 
 #[test]

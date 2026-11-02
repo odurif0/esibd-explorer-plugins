@@ -1838,6 +1838,95 @@ fn a_persistent_fault_on_a_config_name_fails_the_list_after_one_recovery() {
 }
 
 #[test]
+fn a_reply_lost_on_an_hd_routing_read_resynchronizes_before_the_next_read() {
+    // 2026-11-02 lab, during an MScan scan: GetTimerTriggerSource -10 came back as a value, the
+    // port stayed out of step, GetTimerCount then failed with -13 and the poll failed.
+    let (mut device, state) = case(true);
+    connect(device.as_mut());
+    {
+        let mut state = state.lock().unwrap();
+        state.inject("GetTimerTriggerSource", -10, vec![json!(0)]);
+        state.calls.clear();
+    }
+    let reply = rpc(
+        device.as_mut(),
+        "get_timer_trigger_source",
+        &[json!(1)],
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(reply["$tuple"][0], json!(0), "{reply}");
+    // The next read, out of step in the lab, is answered normally.
+    let reply = rpc(
+        device.as_mut(),
+        "get_timer_stop_source",
+        &[json!(1)],
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(reply["$tuple"][0], json!(0), "{reply}");
+    {
+        let state = state.lock().unwrap();
+        let calls = state.names();
+        let count = |name: &str| calls.iter().filter(|call| *call == name).count();
+        assert_eq!(count("Purge"), 1, "{calls:?}");
+        assert_eq!(count("GetTimerTriggerSource"), 2, "{calls:?}");
+        let writes = calls
+            .iter()
+            .filter(|call| call.starts_with("Set") && *call != "SetBaudRate");
+        assert_eq!(writes.count(), 0, "a recovery commands nothing");
+    }
+    let snapshot = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+    assert!(
+        snapshot["read_recovery"]
+            .as_str()
+            .unwrap()
+            .contains("GetTimerTriggerSource failed with vendor status -10"),
+        "{snapshot}"
+    );
+}
+
+#[test]
+fn a_persistent_lost_reply_on_an_hd_routing_read_gets_one_recovery_and_writes_none() {
+    let (mut device, state) = case(true);
+    connect(device.as_mut());
+    {
+        let mut state = state.lock().unwrap();
+        state.inject("GetClockSource", -12, vec![json!(0)]);
+        state.inject("GetClockSource", -12, vec![json!(0)]);
+        state.calls.clear();
+    }
+    let reply = rpc(device.as_mut(), "get_clock_source", &[json!(0)], json!({})).unwrap();
+    assert_eq!(
+        reply["$tuple"][0],
+        json!(-12),
+        "the second status is returned as such"
+    );
+    {
+        let state = state.lock().unwrap();
+        let calls = state.names();
+        assert_eq!(
+            calls.iter().filter(|call| *call == "Purge").count(),
+            1,
+            "{calls:?}"
+        );
+    }
+    state.lock().unwrap().calls.clear();
+    rpc(
+        device.as_mut(),
+        "set_clock_source",
+        &[json!(0), json!(0)],
+        json!({}),
+    )
+    .unwrap();
+    let state = state.lock().unwrap();
+    assert!(
+        !state.names().iter().any(|call| call == "Purge"),
+        "a write is never repeated"
+    );
+}
+
+#[test]
 fn hd_reads_the_burst_register_only_on_timers_that_have_one() {
     // 2026-11-02 lab: 16 timers, 8 with a burst register. The 8 others never answered: 12.4 s per
     // housekeeping under the controller lock, and every operator action timed out on that lock.

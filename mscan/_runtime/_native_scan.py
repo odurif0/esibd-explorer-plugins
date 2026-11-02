@@ -113,6 +113,7 @@ class NativeScanAdapter:
                     time_step_s=float(getattr(scan, 'time_step_s', math.nan)),
                     sweep_rate=float(getattr(scan, 'sweep_rate', math.nan)),
                     offset_factor=float(getattr(scan, 'offset_factor', math.nan)),
+                    offset_fixed=float(getattr(scan, 'offset_fixed', 0.)),
                     passes=int(scan._passes()) if hasattr(scan, '_passes') else 1,
                     metadata=copy.deepcopy(self._plan.get('metadata', {})))
 
@@ -190,23 +191,22 @@ class NativeScanAdapter:
                         cadence_since=since if math.isfinite(since) else None,
                         times=[float(v) for v in device.time.get()],
                         values=[float(v) for v in source.getValues(subtractBackground=False)])
-        offset = None
-        if plan.get('offset') is not None:
-            o = plan['offset']
+        offsets = []
+        for o in plan.get('offsets') or []:  # Rod pair 1, then pair 2.
             channel, device = o['channel'], o['device']
             ctrl = device.controller
             low, high = scan._offset_bounds(channel, ctrl)
             state, _ = scan._offset_request_state(o)
-            offset = dict(identity=self._source_identity(channel, device, ctrl, ctrl._setpoint_cancel)
+            offsets.append(dict(identity=self._source_identity(channel, device, ctrl, ctrl._setpoint_cancel)
                           + ':' + str(channel.module_address()) + ':' + str(channel.channel_number()),
                           name=channel.name, registered=self._registered(channel) and scan._plugin(device.name) is device,
                           real=bool(channel.real), enabled=bool(channel.enabled), active=_manual(channel),
                           initialized=bool(ctrl.initialized and ctrl.device is not None), on=bool(device.isOn()),
                           busy=_busy(ctrl, _AMPR_BUSY), shutdown=bool(ctrl._setpoint_cancel.is_set()),
-                          state=state, value=float(channel.value), monitor=float(channel.monitor), min=low, max=high)
+                          state=state, value=float(channel.value), monitor=float(channel.monitor), min=low, max=high))
         self._sequence += 1
         return dict(sequence=self._sequence, wall=time.time(), mono=time.monotonic(), amx=amx_data,
-                    rails=rails, detector=detector, offset=offset,
+                    rails=rails, detector=detector, offsets=offsets,
                     other_scan_running=any(p is not scan and hasattr(p, 'finished') and not p.finished
                                            and hasattr(p, 'runScan') for p in scan.pluginManager.plugins))
 
@@ -242,8 +242,11 @@ class NativeScanAdapter:
         if scan.outputChannels[0].name != observation['detector']['name']:
             raise RuntimeError('Explorer output channel differs from the selected DMMR module')
         keys = ['point_status', 'rail_v', 'rail_i', 'window_start', 'window_end', 'samples', 'finite_samples']
-        if observation['offset'] is not None:
+        if observation['offsets']:
             keys += ['offset_v', 'offset_target']
+            if any(len(row) != len(observation['offsets']) for key in ('offset_v', 'offset_target')
+                   for row in scan._validation[key]):
+                raise RuntimeError('Explorer offset arrays differ from the native offset channel count')
         if len(scan.outputChannels[0].recordingData) != len(steps) or any(len(scan._validation[key]) != len(steps) for key in keys):
             raise RuntimeError('Explorer validation/data arrays differ from the native point count')
         if any(len(row) != len(observation['rails']) for key in ('rail_v', 'rail_i') for row in scan._validation[key]):
@@ -301,16 +304,15 @@ class NativeScanAdapter:
         if self._plan['mode'] == self.scan.CONTINUOUS and not action['restore']:
             window_start = getattr(self, '_continuous_begin', None) if action['index'] > 0 else None
             self.scan._require_time_step(self._plan['detectors'][0], self._plan['average'], window_start)
-        started, ended = self.scan._command(action['targets'], latest=action['latest_mono'], offset=action['offset'])
+        started, ended = self.scan._command(action['targets'], latest=action['latest_mono'], offsets=action['offsets'])
         end_mono = time.monotonic()
         if self._plan['mode'] == self.scan.CONTINUOUS and not action['restore']:
             self._continuous_begin = started
-        o = self._plan.get('offset')
         return dict(session=action['session'], action_id=action['action_id'], start_wall=started,
                     end_wall=ended, end_mono=end_mono,
                     revisions=[int(r['channel'].voltage_request_revision) for r in self._plan['rails']],
                     values=[float(r['channel'].value) for r in self._plan['rails']],
-                    offset_value=float(o['channel'].value) if o is not None else None)
+                    offset_values=[float(o['channel'].value) for o in self._plan.get('offsets') or []])
 
     def _apply_updates(self, status):
         def apply():
@@ -334,8 +336,9 @@ class NativeScanAdapter:
                     scan.outputChannels[j].recordingData[index] = mean
                     validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
                 validation['point_status'][index] = point['status']
-                if point.get('offset') is not None:
-                    validation['offset_v'][index], validation['offset_target'][index] = point['offset']
+                if point.get('offsets'):
+                    validation['offset_v'][index] = [monitor for monitor, _ in point['offsets']]
+                    validation['offset_target'][index] = [target for _, target in point['offsets']]
             scan.scan_status = status['state'].replace('_', ' ').capitalize()
             if status.get('error'):
                 scan.scan_status += ': ' + status['error']

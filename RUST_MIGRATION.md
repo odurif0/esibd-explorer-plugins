@@ -17,12 +17,12 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | IPC, supervision, ABI, build | Implemented | Implemented | 36 real-process fault tests; all deployment targets built | Not applicable |
 | ESI | Implemented | Implemented | 69 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
 | PSU A/B/C/D/E | Implemented | Implemented | 52 controller tests; isolated recovery checks | Not tested |
-| AMX A/B | Implemented | Implemented | 48 combined AMX/HD controller tests; 76 adapter tests | Not tested |
+| AMX A/B | Implemented | Implemented | 50 combined AMX/HD controller tests; 76 adapter tests | Not tested |
 | AMX HD | Implemented | Implemented | Same combined suite; independent HD ABI and process | Not tested |
 | AMPR A/B | Implemented | Implemented | 29 controller tests; isolated recovery checks | Not tested |
 | DMMR | Implemented | Implemented | 39 controller tests; isolated recovery checks | Not tested |
 | TPG366 | Implemented | Implemented | 17 Rust + 36 adapter/PTY tests; 30 Explorer 1.0.2 Qt cases | Not tested |
-| MScan | Implemented | Implemented | 43 native tests; 36 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
+| MScan | Implemented | Implemented | 46 native tests; 44 paired executions; 138 NumPy plans; 48 adapter cases | Not tested |
 | Transmission | Implemented | Implemented | 27 engine tests; 19 packaged lifecycle tests; 15 Explorer 1.0.2 Qt cases | Not tested |
 
 The local target-host environment is isolated from the owner's installed Explorer.
@@ -32,7 +32,7 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`018b6da2023bed2996a3775b506373b2b6936a9e4e6ab82d8c5a4e2c2184b795`.
+`8997d648ea21aa2b69366f71bc96487c4ec6bf1c9e46c6a48e9834c05add65b2`.
 
 ## v0.5.8 Update (2026-11-02)
 
@@ -43,8 +43,13 @@ hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
   at each poll until communication closed. Housekeeping and state reads now purge the port, restore
   the baud rate and read once more, then log `AMX reply lost, port resynchronized and read again`.
   Reading the config list does the same for each read, so one lost reply among the 180 names of an
-  HD no longer empties the list. A persistent fault still fails after one recovery. These reads
-  command nothing, and a write is never repeated.
+  HD no longer empties the list. So do the HD routing reads, made one register at a time: at 14:28
+  a lost `GetTimerTriggerSource` reply came back as a value, the next poll failed with -13 and MScan
+  stopped its scan. A persistent fault still fails after one recovery. These reads command nothing,
+  and a write is never repeated.
+- **AMX HD crash resume:** the resume read only the light state, without oscillator or timers, and
+  always failed with `Loaded AMX config timing readback is incomplete` (13:09). It now reads the full
+  housekeeping and the routing; it still loads no config and enables nothing.
 - **Config lists (AMX A/B, HD, PSU):** each poll rebuilt the open list, which jumped back to its top,
   so the configs at the end could not be reached. A poll now leaves an open list alone, and rebuilds
   a closed one only if its entries changed.
@@ -54,15 +59,26 @@ hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
   HD published no output rows when it was not running. Like the AMX A/B, it now reports `Not enabled`
   for each output, with its state. Without any decoded waveform, MScan gives the AMX state and what to
   do (wait for the next readback, or turn the AMX recording ON).
+- **MScan, two rod pairs:** **Quadrupole offset, pair 1** and **pair 2** (AMPR), with a **Fixed
+  offset** common to both: pair 1 = fixed + U/V × A, pair 2 = fixed − U/V × A (user request). The
+  engine takes a list of offset channels, bounds, confirms, watches and restores each, and records
+  one column per pair. A settling timeout names the source not ready (the 14:46 stop at 250 V did not).
+- **MScan plot:** an image copy in the dark theme switched the scale to manual, so a later scan with
+  another range stayed out of view; a copy now keeps the scale and each scan starts in automatic
+  scale. A plot fault is reported once per scan. After a stop, only one point reads `error`. The
+  static plot reported during the second scan was not reproduced.
+- **Worker output:** a reply now waits up to 10 s for the supervisor to read, a trace frame 2 s. At
+  14:31 the AMX_A worker stopped with `exit=75` in the middle of an ordinary poll, its reply having
+  found the output queue full once.
 - **OFF during a connection or a lost reply:** OFF during a connection prints `AMX connection stopped:
   OFF was requested`, not an error. The cancel grace of the AMX, ESI, AMPR and DMMR workers is now 2 s
   and the PSU keeps 5 s, above the 1.55 s DLL wait, so OFF during a lost reply no longer kills the
   worker.
 
 All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux
-for TPG366, MScan and Transmission). The Rust suite passes 332 tests; Clippy (`-D warnings`),
+for TPG366, MScan and Transmission). The Rust suite passes 338 tests; Clippy (`-D warnings`),
 formatting and the ABI/source/family/worker checks pass. The release validation
-(`pytest -q --all-siblings` on Explorer 1.0.2) passed 5764 tests with 9 skipped and no failure. All
+(`pytest -q --all-siblings` on Explorer 1.0.2) passed VALIDATION_PENDING tests with 9 skipped and no failure. All
 nine Windows workers pass the constructor-only Wine checks and the three Linux workers the Linux
 ones; no instrument is opened. Hardware validation is still pending.
 

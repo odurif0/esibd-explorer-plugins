@@ -4738,7 +4738,7 @@ class AMXHDController(DeviceController):
         """Crash resume: read the AMX as it runs and show it; nothing is loaded, enabled or applied."""
         try:
             with self._controller_lock_section("Could not acquire lock to resume the AMX."):
-                snapshot = self._collect_startup_snapshot()
+                snapshot = self._collect_resume_snapshot()
                 self._apply_snapshot(snapshot)
                 self._refresh_loaded_config_status()
             self._sync_loaded_config_to_gui(snapshot)
@@ -5048,6 +5048,19 @@ class AMXHDController(DeviceController):
         # calls) would hold the controller lock for ~1-2 s per iteration and
         # stall the ON transition for many seconds.
         return self._device_call(device, "collect_state_snapshot", timeout_s=self._startup_snapshot_timeout_s())
+
+    def _collect_resume_snapshot(self) -> dict[str, Any]:
+        """Crash resume adopts the running timing: full housekeeping and routing, read only.
+
+        The light state read has no oscillator or timers, so the resume always failed with
+        "Loaded AMX config timing readback is incomplete" (2026-11-02 lab, 13:09).
+        """
+        device = self.device
+        if device is None:
+            raise RuntimeError("AMX device disconnected.")
+        snapshot = self._device_call(device, "collect_housekeeping", timeout_s=self._startup_snapshot_timeout_s())
+        self._refresh_hd_routing(device, snapshot)
+        return snapshot
 
     def _startup_snapshot_ready(self, snapshot: dict[str, Any], config_index: int | None = None) -> bool:
         """The config being loaded decides, not the selector, which may change during the wait."""

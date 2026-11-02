@@ -15,7 +15,8 @@
 //! Settings: start/stop, mode ("Step by step" or "Continuous"), settling_s,
 //! settle_timeout (> settling_s), voltage_tolerance. Stepped uses step and
 //! integration_s; continuous uses sweep_rate * time_step_s and ignores step.
-//! An AMPR offset additionally uses offset_factor. All active numbers are finite.
+//! AMPR offsets (quadrupole rod pairs 1 and 2) use offset_fixed + sign × offset_factor × A,
+//! sign + for pair 1 and − for pair 2 (user request 2026-11-02). All active numbers are finite.
 //! Observation fields are described by Amx/Rail/Detector/Offset below; identities
 //! must include Explorer object/controller/backend/token identities and names.
 //! Detector histories include un-subtracted currents, including NaN/Inf slots.
@@ -52,6 +53,15 @@ fn missing_number() -> f64 {
 }
 fn one_pass() -> u64 {
     1
+}
+fn no_fixed_offset() -> f64 {
+    0.0
+}
+
+/// Quadrupole rod pairs: pair 1 = fixed + U/V × A, pair 2 = fixed − U/V × A.
+const MAX_OFFSETS: usize = 2;
+fn offset_sign(pair: usize) -> f64 {
+    if pair == 0 { 1.0 } else { -1.0 }
 }
 
 // Multipass (user request 2026-10-26): the same sweep N times in one file, in Step by step mode.
@@ -163,6 +173,8 @@ struct Settings {
     sweep_rate: f64,
     #[serde(default = "missing_number", deserialize_with = "read_number")]
     offset_factor: f64,
+    #[serde(default = "no_fixed_offset", deserialize_with = "read_number")]
+    offset_fixed: f64,
     #[serde(default = "one_pass")]
     passes: u64,
     #[serde(default)]
@@ -170,6 +182,10 @@ struct Settings {
 }
 
 impl Settings {
+    /// The DC target of rod pair `pair` (0 or 1) at amplitude A.
+    fn offset_target(&self, pair: usize, amplitude: f64) -> f64 {
+        self.offset_fixed + offset_sign(pair) * self.offset_factor * amplitude
+    }
     fn duration(&self) -> Result<f64> {
         let v = match self.mode.as_str() {
             STEPPED => self.integration_s,
@@ -600,7 +616,7 @@ struct Observation {
     rails: Vec<Rail>,
     detector: Detector,
     #[serde(default)]
-    offset: Option<Offset>,
+    offsets: Vec<Offset>,
     #[serde(default)]
     other_scan_running: bool,
 }
@@ -644,11 +660,11 @@ struct Point {
     end: f64,
     volts: Vec<f64>,
     currents: Vec<f64>,
-    offset: Option<(f64, f64)>,
+    offsets: Vec<(f64, f64)>,
 }
 
 impl Point {
-    fn empty(rails: usize, offset: bool) -> Self {
+    fn empty(rails: usize, offsets: usize) -> Self {
         Self {
             status: "not acquired".to_owned(),
             mean: f64::NAN,
@@ -658,14 +674,14 @@ impl Point {
             end: f64::NAN,
             volts: vec![f64::NAN; rails],
             currents: vec![f64::NAN; rails],
-            offset: offset.then_some((f64::NAN, f64::NAN)),
+            offsets: vec![(f64::NAN, f64::NAN); offsets],
         }
     }
     fn value(&self, index: usize) -> Value {
         json!({"index": index, "status": self.status, "mean": float(self.mean), "samples": self.samples,
             "finite_samples": self.finite_samples, "window_start": float(self.start), "window_end": float(self.end),
             "rail_v": floats(&self.volts), "rail_i": floats(&self.currents),
-            "offset": self.offset.map(|(a,b)| vec![float(a),float(b)])})
+            "offsets": self.offsets.iter().map(|(a, b)| vec![float(*a), float(*b)]).collect::<Vec<_>>()})
     }
 }
 
@@ -676,7 +692,7 @@ struct Pending {
     end: f64,
     volts: Vec<f64>,
     currents: Vec<f64>,
-    offset: Option<(f64, f64)>,
+    offsets: Vec<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -707,7 +723,7 @@ impl Phase {
 struct Command {
     id: u64,
     targets: Vec<f64>,
-    offset: Option<f64>,
+    offsets: Vec<f64>,
     restore: bool,
     latest_mono: Option<f64>,
     previous: Option<Pending>,
@@ -725,8 +741,8 @@ struct Acknowledgement {
     revisions: Vec<u64>,
     #[serde(deserialize_with = "read_numbers")]
     values: Vec<f64>,
-    #[serde(default)]
-    offset_value: Option<f64>,
+    #[serde(default, deserialize_with = "read_numbers")]
+    offset_values: Vec<f64>,
 }
 
 #[derive(Default)]
@@ -740,8 +756,8 @@ struct Raw {
     psu_i: Vec<Vec<f64>>,
     psu_target: Vec<Vec<f64>>,
     psu_ready: Vec<bool>,
-    offset_v: Vec<f64>,
-    offset_target: Vec<f64>,
+    offset_v: Vec<Vec<f64>>,
+    offset_target: Vec<Vec<f64>>,
 }
 
 struct Run {
@@ -767,7 +783,7 @@ struct Run {
     baseline: Option<f64>,
     cutoff: Option<f64>,
     ready_seen: bool,
-    offset_expected: Option<f64>,
+    offset_expected: Vec<f64>,
     points: Vec<Point>,
     pending: VecDeque<Pending>,
     updates: Vec<Value>,
@@ -852,7 +868,13 @@ impl Run {
                 value: r.value,
             });
         }
-        let offset_expected = if let Some(o) = &obs.offset {
+        if obs.offsets.len() > MAX_OFFSETS {
+            return Err(Error::argument(
+                "At most two quadrupole offset channels (rod pairs 1 and 2).",
+            ));
+        }
+        let mut offset_expected = Vec::new();
+        for (pair, o) in obs.offsets.iter().enumerate() {
             o.source()?;
             if o.busy || o.state != "confirmed" || !o.monitor.is_finite() {
                 return Err(Error::runtime(
@@ -860,13 +882,12 @@ impl Run {
                 ));
             }
             finite(settings.offset_factor, "Offset coefficient U/V")?;
-            o.bounds(settings.offset_factor * low)?;
-            o.bounds(settings.offset_factor * high)?;
+            finite(settings.offset_fixed, "Fixed offset")?;
+            o.bounds(settings.offset_target(pair, low))?;
+            o.bounds(settings.offset_target(pair, high))?;
             o.bounds(o.value)?;
-            Some(o.value)
-        } else {
-            None
-        };
+            offset_expected.push(o.value);
+        }
         let cadence = if settings.mode == CONTINUOUS {
             obs.detector.cadence(obs.wall, settings.duration()?, None)?
         } else {
@@ -902,7 +923,7 @@ impl Run {
         metadata["background_subtracted"] = json!(false);
         let points = steps
             .iter()
-            .map(|_| Point::empty(rails.len(), obs.offset.is_some()))
+            .map(|_| Point::empty(rails.len(), obs.offsets.len()))
             .collect();
         let raw = Raw {
             command_start: vec![f64::NAN; steps.len()],
@@ -990,9 +1011,7 @@ impl Run {
         if obs.detector.history_id != detector.history_id {
             return Err(Error::runtime("Detector history reset during the scan."));
         }
-        if obs.rails.len() != self.rails.len()
-            || obs.offset.is_some() != self.frozen.offset.is_some()
-        {
+        if obs.rails.len() != self.rails.len() || obs.offsets.len() != self.frozen.offsets.len() {
             return Err(Error::runtime("Scan source count changed."));
         }
         let mut ready = true;
@@ -1067,12 +1086,16 @@ impl Run {
                 && (r.monitor - state.expected).abs() <= self.settings.voltage_tolerance;
             state.value = r.value;
         }
-        if let (Some(o), Some(frozen)) = (&obs.offset, &self.frozen.offset) {
+        for ((o, frozen), &expected) in obs
+            .offsets
+            .iter()
+            .zip(&self.frozen.offsets)
+            .zip(&self.offset_expected)
+        {
             o.source()?;
             if o.identity != frozen.identity || o.name != frozen.name {
                 return Err(Error::runtime("Offset source changed."));
             }
-            let expected = self.offset_expected.unwrap();
             if !close(o.value, expected, 1e-9) {
                 return Err(Error::runtime(format!(
                     "{}: offset changed outside the scan.",
@@ -1125,14 +1148,20 @@ impl Run {
             }
             r.check_current(r.current_limits()?)?;
         }
-        let offset = self.frozen.offset.as_ref().map(|o| {
-            if restore {
-                o.value
-            } else {
-                self.settings.offset_factor * self.steps[self.index]
-            }
-        });
-        if let (Some(o), Some(target)) = (&obs.offset, offset) {
+        let offsets: Vec<f64> = self
+            .frozen
+            .offsets
+            .iter()
+            .enumerate()
+            .map(|(pair, o)| {
+                if restore {
+                    o.value
+                } else {
+                    self.settings.offset_target(pair, self.steps[self.index])
+                }
+            })
+            .collect();
+        for (o, &target) in obs.offsets.iter().zip(&offsets) {
             if o.busy {
                 return Err(Error::runtime(
                     "AMPR transition in progress; no scan command sent.",
@@ -1156,7 +1185,7 @@ impl Run {
         self.command = Some(Command {
             id: self.command_sequence,
             targets,
-            offset,
+            offsets,
             restore,
             latest_mono: latest,
             previous,
@@ -1179,7 +1208,7 @@ impl Run {
         }
         if ack.revisions.len() != self.rails.len()
             || ack.values.len() != self.rails.len()
-            || ack.offset_value.is_some() != command.offset.is_some()
+            || ack.offset_values.len() != command.offsets.len()
         {
             return Err(Error::argument(
                 "Command acknowledgement dimensions / offset do not match.",
@@ -1220,7 +1249,7 @@ impl Run {
                 ));
             }
         }
-        if ack.offset_value.is_some_and(|v| !v.is_finite()) {
+        if ack.offset_values.iter().any(|v| !v.is_finite()) {
             return Err(Error::argument("Nonfinite acknowledged offset target."));
         }
         let command = self.command.take().unwrap();
@@ -1232,7 +1261,7 @@ impl Run {
             r.value = ack.values[j];
             r.expected = command.targets[j];
         }
-        self.offset_expected = ack.offset_value;
+        self.offset_expected = ack.offset_values;
         if !command.restore && self.settings.mode == CONTINUOUS {
             self.raw.command_start[self.index] = ack.start_wall;
             self.raw.command_end[self.index] = ack.end_wall;
@@ -1273,10 +1302,12 @@ impl Run {
         Ok(())
     }
 
-    fn offset_snapshot(&self, obs: &Observation) -> Option<(f64, f64)> {
-        obs.offset
-            .as_ref()
-            .map(|o| (o.monitor, self.offset_expected.unwrap()))
+    fn offset_snapshot(&self, obs: &Observation) -> Vec<(f64, f64)> {
+        obs.offsets
+            .iter()
+            .zip(&self.offset_expected)
+            .map(|(o, &expected)| (o.monitor, expected))
+            .collect()
     }
 
     fn pending(&self, obs: &Observation) -> Pending {
@@ -1286,7 +1317,7 @@ impl Run {
             end: 0.0,
             volts: obs.volts(),
             currents: obs.currents(),
-            offset: self.offset_snapshot(obs),
+            offsets: self.offset_snapshot(obs),
         }
     }
 
@@ -1319,7 +1350,7 @@ impl Run {
             end: window.end,
             volts: window.volts,
             currents: window.currents,
-            offset: window.offset,
+            offsets: window.offsets,
         };
         self.updates.push(point.value(window.index));
         self.points[window.index] = point;
@@ -1370,6 +1401,56 @@ impl Run {
         }
     }
 
+    /// The sources not ready in `obs`, for an error message (2026-11-02 lab: a scan stopped at
+    /// 250 V on "PSU voltage / offset settling timed out" and nothing said which source).
+    fn waiting_for(&self, obs: &Observation) -> String {
+        let tolerance = self.settings.voltage_tolerance;
+        let mut waiting = Vec::new();
+        for (r, state) in obs.rails.iter().zip(&self.rails) {
+            if r.busy {
+                waiting.push(format!("{} busy", r.name));
+            } else if !r.monitor.is_finite() || r.monitor < 0.0 {
+                waiting.push(format!("{} no voltage readback", r.name));
+            } else if (r.monitor - state.expected).abs() > tolerance {
+                waiting.push(format!(
+                    "{} at {:.3} V for {} V",
+                    r.name, r.monitor, state.expected
+                ));
+            } else if !r.current_readback.is_finite() || r.current_readback < 0.0 {
+                waiting.push(format!("{} no current readback", r.name));
+            } else if ![
+                r.hardware_voltage_limit,
+                r.hardware_current_limit,
+                r.current_limit_readback,
+                r.voltage_setpoint_readback,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+            {
+                waiting.push(format!("{} limits/setpoint readback unavailable", r.name));
+            }
+        }
+        for (o, &expected) in obs.offsets.iter().zip(&self.offset_expected) {
+            if o.busy {
+                waiting.push(format!("{} busy", o.name));
+            } else if o.state != "confirmed" {
+                waiting.push(format!("{} setpoint {}", o.name, o.state));
+            } else if !o.monitor.is_finite() {
+                waiting.push(format!("{} no Monitor", o.name));
+            } else if (o.monitor - expected).abs() > tolerance {
+                waiting.push(format!(
+                    "{} Monitor {:.3} V for {} V",
+                    o.name, o.monitor, expected
+                ));
+            }
+        }
+        if waiting.is_empty() {
+            String::new()
+        } else {
+            format!(" Not ready: {}.", waiting.join("; "))
+        }
+    }
+
     fn raw_observation(&mut self, obs: &Observation, ready: bool) -> Result<()> {
         if self.raw.psu_time.len() >= self.max_raw {
             return Err(Error::runtime("MScan raw PSU observation limit exceeded."));
@@ -1381,9 +1462,14 @@ impl Run {
             .psu_target
             .push(self.rails.iter().map(|r| r.expected).collect());
         self.raw.psu_ready.push(ready);
-        if let Some((v, target)) = self.offset_snapshot(obs) {
-            self.raw.offset_v.push(v);
-            self.raw.offset_target.push(target);
+        let offsets = self.offset_snapshot(obs);
+        if !offsets.is_empty() {
+            self.raw
+                .offset_v
+                .push(offsets.iter().map(|o| o.0).collect());
+            self.raw
+                .offset_target
+                .push(offsets.iter().map(|o| o.1).collect());
         }
         Ok(())
     }
@@ -1446,16 +1532,18 @@ impl Run {
                         };
                     }
                 } else if obs.mono >= self.deadline {
-                    return Err(Error::runtime(
-                        "PSU voltage / offset settling timed out; no detector value assigned to this point.",
-                    ));
+                    return Err(Error::runtime(format!(
+                        "PSU voltage / offset settling timed out; no detector value assigned to this point.{}",
+                        self.waiting_for(obs)
+                    )));
                 }
             }
             Phase::Measuring => {
                 if !ready {
-                    return Err(Error::runtime(
-                        "PSU / offset readback became invalid or left tolerance during acquisition.",
-                    ));
+                    return Err(Error::runtime(format!(
+                        "PSU / offset readback became invalid or left tolerance during acquisition.{}",
+                        self.waiting_for(obs)
+                    )));
                 }
                 if obs.mono >= self.deadline {
                     self.history(&obs.detector, self.baseline)?;
@@ -1484,15 +1572,17 @@ impl Run {
             Phase::Continuous | Phase::Draining => {
                 self.raw_observation(obs, ready)?;
                 if self.ready_seen && !ready {
-                    return Err(Error::runtime(
-                        "PSU / offset readback became invalid or left tolerance after reaching the continuous target.",
-                    ));
+                    return Err(Error::runtime(format!(
+                        "PSU / offset readback became invalid or left tolerance after reaching the continuous target.{}",
+                        self.waiting_for(obs)
+                    )));
                 }
                 self.ready_seen |= ready && obs.mono <= self.deadline;
                 if !ready && obs.mono - self.begin_mono >= self.settings.settle_timeout {
-                    return Err(Error::runtime(
-                        "PSU voltage settling timed out during continuous acquisition.",
-                    ));
+                    return Err(Error::runtime(format!(
+                        "PSU voltage settling timed out during continuous acquisition.{}",
+                        self.waiting_for(obs)
+                    )));
                 }
                 let watermark = self.capture(obs)?;
                 self.finish_windows(watermark);
@@ -1605,7 +1695,7 @@ impl Run {
             Value::Null
         } else if let Some(c) = &self.command {
             json!({"kind": "command", "session": self.session, "action_id": c.id,
-                "targets": c.targets, "offset": c.offset, "restore": c.restore,
+                "targets": c.targets, "offsets": c.offsets, "restore": c.restore,
                 "latest_mono": c.latest_mono, "index": self.index,
                 "expected_revisions": self.rails.iter().map(|r| r.revision).collect::<Vec<_>>()})
         } else {
@@ -1625,7 +1715,7 @@ impl Run {
             "updates": self.updates, "expected": self.rails.iter().map(|r| r.expected).collect::<Vec<_>>(),
             "revisions": self.rails.iter().map(|r| r.revision).collect::<Vec<_>>(),
             "confirmed_vset": self.rails.iter().map(|r| r.confirmed.map(float)).collect::<Vec<_>>(),
-            "offset_target": self.offset_expected, "pending_windows": self.pending.len()})
+            "offset_targets": self.offset_expected, "pending_windows": self.pending.len()})
     }
 
     fn reply(&mut self) -> Value {
@@ -1645,17 +1735,18 @@ impl Run {
             "window_end": points.iter().map(|p| float(p.end)).collect::<Vec<_>>(),
             "samples": points.iter().map(|p| vec![p.samples]).collect::<Vec<_>>(),
             "finite_samples": points.iter().map(|p| vec![p.finite_samples]).collect::<Vec<_>>()});
-        if self.frozen.offset.is_some() {
+        if !self.frozen.offsets.is_empty() {
+            // One column per rod pair: monitor and commanded target.
             validation["offset_v"] = json!(
                 points
                     .iter()
-                    .map(|p| float(p.offset.unwrap().0))
+                    .map(|p| p.offsets.iter().map(|o| float(o.0)).collect::<Vec<_>>())
                     .collect::<Vec<_>>()
             );
             validation["offset_target"] = json!(
                 points
                     .iter()
-                    .map(|p| float(p.offset.unwrap().1))
+                    .map(|p| p.offsets.iter().map(|o| float(o.1)).collect::<Vec<_>>())
                     .collect::<Vec<_>>()
             );
         }
@@ -1687,9 +1778,9 @@ impl Run {
         page!(psu_i, |v: &Vec<f64>| floats(v));
         page!(psu_target, |v: &Vec<f64>| floats(v));
         page!(psu_ready, |v| json!(v));
-        if self.frozen.offset.is_some() {
-            page!(offset_v, |v| float(*v));
-            page!(offset_target, |v| float(*v));
+        if !self.frozen.offsets.is_empty() {
+            page!(offset_v, |v: &Vec<f64>| floats(v));
+            page!(offset_target, |v: &Vec<f64>| floats(v));
         }
         json!({"start": start, "count": count, "lengths": lengths, "data": data})
     }

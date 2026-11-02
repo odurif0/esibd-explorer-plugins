@@ -132,10 +132,12 @@ def rig(mode, fault=None, offset=False):
     s = c.scan
     s.scan_mode = mode
     if offset:
-        add_offset(r, factor=1/3)
+        add_offset(r, factor=1/3, fixed=1.5 if offset == 2 else 0.)
+    if offset == 2:
+        add_offset(r, factor=1/3, fixed=1.5, pair=2)
     s._plan = s._preflight()
     if offset:
-        s._validation.update(offset_v=np.full(3, np.nan), offset_target=np.full(3, np.nan))
+        s._validation.update(offset_v=np.full((3, offset), np.nan), offset_target=np.full((3, offset), np.nan))
     if fault == 'late_gui':
         command = s._command
         def delayed(targets, **kwargs):
@@ -168,14 +170,15 @@ def rig(mode, fault=None, offset=False):
 checked = 0
 try:
     for mode in [module.MScan.STEPPED, module.MScan.CONTINUOUS]:
-        for fault, offset in [(None,False),(None,True),('stop',False),('current',False),
-                              ('external',False),('clock',False),('detector',False),('offset',True),('late_gui',False)]:
+        for fault, offset in [(None,0),(None,1),(None,2),('stop',0),('current',0),
+                              ('external',0),('clock',0),('detector',0),('offset',1),('offset',2),('late_gui',0)]:
             reference = rig(mode, fault, offset)
             reference_runner(reference.scan, lambda: True)
             reference_data = reference.scan.outputChannels[0].recordingData.copy()
             reference_status = reference.scan._validation['status']
             reference_writes = list(reference.rig.psus[0].writes)
             reference_offset = list(reference.rig.offset.channel.writes) if offset else None
+            reference_offset2 = list(reference.rig.offset2.channel.writes) if offset == 2 else None
             for raw_json in [False, True]:
                 native = rig(mode, fault, offset)
                 adapter_module.time = module.time
@@ -191,6 +194,8 @@ try:
                     assert native.rig.psus[1].writes == []
                     assert native.rig.psus[0].isOn()
                     assert not adapter._running.is_set()
+                    if offset == 2:
+                        assert native.rig.offset2.channel.writes == reference_offset2
                     if offset:
                         assert native.rig.offset.channel.writes == reference_offset
                         assert result['validation']['offset_target'] == pytest.approx(reference.scan._validation['offset_target'], nan_ok=True)

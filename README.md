@@ -18,7 +18,8 @@ their ON/OFF and Range, and shows the PSU interlock loops and the AMX HD interlo
 v0.5.6 keeps Explorer responsive during the general Close communication, lets Transmission
 move PSU amplitudes, and fixes what the lab logs of 2026-10-28/30 showed; v0.5.7 fixes what
 the first run of the AMX HD on the instrument showed; v0.5.8 recovers AMX reads after a lost
-reply and keeps the AMX and PSU config lists in place while they are open.
+reply, keeps the AMX and PSU config lists in place while they are open, and lets MScan drive both
+quadrupole rod pairs with a fixed offset.
 Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
 no Explorer fork, external Python, private interpreter or shared device process
 is needed. **Real-hardware qualification is pending.** Local software, simulated
