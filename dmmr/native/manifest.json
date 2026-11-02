@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "c0537c4831891973d752049fdad44794cd367889b5f51194bc643bb5ae87e0b7",
-    "size_bytes": 339555,
-    "source_data_sha256": "963f36a482e751c60e8986080d64375e4079899ac32aab19b1c8d68cd9f672f4",
+    "sha256": "b4cabbe28f9e523a4ea7c3315848cc478b21626f1988e0dc5ff8669b9801c96e",
+    "size_bytes": 340106,
+    "source_data_sha256": "018b6da2023bed2996a3775b506373b2b6936a9e4e6ab82d8c5a4e2c2184b795",
     "vendored": false
   },
-  "source_data_sha256": "963f36a482e751c60e8986080d64375e4079899ac32aab19b1c8d68cd9f672f4",
+  "source_data_sha256": "018b6da2023bed2996a3775b506373b2b6936a9e4e6ab82d8c5a4e2c2184b795",
   "targets": {
     "windows-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-dmmr-worker.exe",
       "sha256": "ccc83ab1498d3356ba50d1916313852143d4f8324cdbc6c8c006f9a44fcc9c03",
       "size_bytes": 915456,
-      "source_data_sha256": "963f36a482e751c60e8986080d64375e4079899ac32aab19b1c8d68cd9f672f4",
+      "source_data_sha256": "018b6da2023bed2996a3775b506373b2b6936a9e4e6ab82d8c5a4e2c2184b795",
       "target": "x86_64-pc-windows-gnu"
     }
   },

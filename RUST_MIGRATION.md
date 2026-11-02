@@ -17,7 +17,7 @@ from mock-DLL, simulated-instrument, Linux, and Wine tests.
 | IPC, supervision, ABI, build | Implemented | Implemented | 36 real-process fault tests; all deployment targets built | Not applicable |
 | ESI | Implemented | Implemented | 69 controller tests; crash/blocked OFF/late Qt payloads | Not tested |
 | PSU A/B/C/D/E | Implemented | Implemented | 52 controller tests; isolated recovery checks | Not tested |
-| AMX A/B | Implemented | Implemented | 44 combined AMX/HD controller tests; 60 adapter tests | Not tested |
+| AMX A/B | Implemented | Implemented | 48 combined AMX/HD controller tests; 76 adapter tests | Not tested |
 | AMX HD | Implemented | Implemented | Same combined suite; independent HD ABI and process | Not tested |
 | AMPR A/B | Implemented | Implemented | 29 controller tests; isolated recovery checks | Not tested |
 | DMMR | Implemented | Implemented | 39 controller tests; isolated recovery checks | Not tested |
@@ -32,8 +32,39 @@ pseudo-terminal; scan tests use simulated Explorer instruments. None opens a rea
 HV device. Windows workers for all nine families and Linux workers for TPG366,
 MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
-`963f36a482e751c60e8986080d64375e4079899ac32aab19b1c8d68cd9f672f4`
-(v0.5.7 below).
+`018b6da2023bed2996a3775b506373b2b6936a9e4e6ab82d8c5a4e2c2184b795`.
+
+## v0.5.8 Update (2026-11-02)
+
+The second day of AMX HD runs on 2026-11-02, on v0.5.7, led to these fixes. None is validated on
+hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **Lost reply on the AMX:** a lost reply left the port out of step: housekeeping failed with -13
+  at each poll until communication closed. Housekeeping and state reads now purge the port, restore
+  the baud rate and read once more, then log `AMX reply lost, port resynchronized and read again`.
+  Reading the config list does the same for each read, so one lost reply among the 180 names of an
+  HD no longer empties the list. A persistent fault still fails after one recovery. These reads
+  command nothing, and a write is never repeated.
+- **Config lists (AMX A/B, HD, PSU):** each poll rebuilt the open list, which jumped back to its top,
+  so the configs at the end could not be reached. A poll now leaves an open list alone, and rebuilds
+  a closed one only if its entries changed.
+- **AMX HD connection:** the 5.6 s spent reading the names now shows `Reading names...` in `Available
+  configs`, with a message. The duration has not changed: 0.5 s on AMX A/B, 6 s on the HD.
+- **MScan with the AMX HD:** MScan said only `AMX waveform readback is unavailable`, because the AMX
+  HD published no output rows when it was not running. Like the AMX A/B, it now reports `Not enabled`
+  for each output, with its state. Without any decoded waveform, MScan gives the AMX state and what to
+  do (wait for the next readback, or turn the AMX recording ON).
+- **OFF during a connection or a lost reply:** OFF during a connection prints `AMX connection stopped:
+  OFF was requested`, not an error. The cancel grace of the AMX, ESI, AMPR and DMMR workers is now 2 s
+  and the PSU keeps 5 s, above the 1.55 s DLL wait, so OFF during a lost reply no longer kills the
+  worker.
+
+All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux
+for TPG366, MScan and Transmission). The Rust suite passes 332 tests; Clippy (`-D warnings`),
+formatting and the ABI/source/family/worker checks pass. The release validation
+(`pytest -q --all-siblings` on Explorer 1.0.2) passed 5764 tests with 9 skipped and no failure. All
+nine Windows workers pass the constructor-only Wine checks and the three Linux workers the Linux
+ones; no instrument is opened. Hardware validation is still pending.
 
 ## v0.5.7 Update (2026-11-02)
 

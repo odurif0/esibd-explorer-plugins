@@ -3293,13 +3293,19 @@ class PSUDevice(Device):
             combo_label = getattr(self, label_attr, None)
             if combo is None:
                 continue
+            view = getattr(combo, "view", None)
+            if callable(view) and getattr(view(), "isVisible", lambda: False)():
+                continue  # Rebuilt under the mouse, an open list jumps back to its top at every poll.
             block_signals = getattr(combo, "blockSignals", None)
             if callable(block_signals):
                 block_signals(True)
             try:
-                self._combo_clear(combo)
-                for value, entry_label in self._config_selector_entries(attr_name):
-                    self._combo_add_item(combo, entry_label, value)
+                entries = self._config_selector_entries(attr_name)
+                if getattr(combo, "_config_entries", None) != entries:
+                    self._combo_clear(combo)
+                    for value, entry_label in entries:
+                        self._combo_add_item(combo, entry_label, value)
+                    combo._config_entries = entries
                 selected_index = self._combo_find_data(
                     combo,
                     self._config_setting_value(attr_name),

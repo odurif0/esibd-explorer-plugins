@@ -1705,6 +1705,139 @@ fn cancellation_during_shutdown_keeps_the_link_and_completes_a_fresh_disable_con
 }
 
 #[test]
+fn a_reply_lost_during_housekeeping_resynchronizes_the_port_and_reads_again() {
+    // 2026-11-02 lab: -10 on GetTimerDelay, then -13 at each poll until communication closed.
+    for hd in [false, true] {
+        let (mut device, state) = case(hd);
+        connect(device.as_mut());
+        let delay = if hd {
+            "GetTimerDelay"
+        } else {
+            "GetPulserDelay"
+        };
+        state.lock().unwrap().inject(delay, -10, vec![json!(0)]);
+        state.lock().unwrap().calls.clear();
+        let snapshot = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+        assert!(
+            snapshot["read_recovery"].as_str().unwrap().contains("-10"),
+            "{snapshot}"
+        );
+        let state = state.lock().unwrap();
+        let symbols: Vec<_> = state
+            .calls
+            .iter()
+            .map(|(symbol, _)| symbol.as_str())
+            .collect();
+        let count = |name: &str| symbols.iter().filter(|s| s.ends_with(name)).count();
+        assert_eq!(
+            (count("_Purge"), count("_SetBaudRate")),
+            (1, 1),
+            "{symbols:?}"
+        );
+        let writes = symbols
+            .iter()
+            .filter(|s| s.contains("_Set") && !s.ends_with("_SetBaudRate"));
+        assert_eq!(writes.count(), 0, "a recovery commands nothing");
+    }
+}
+
+#[test]
+fn a_persistent_read_fault_gets_one_recovery_and_other_failures_none() {
+    let (mut device, state) = case(true);
+    connect(device.as_mut());
+    for _ in 0..2 {
+        state
+            .lock()
+            .unwrap()
+            .inject("GetDeviceState", -13, vec![json!(0), json!(0), json!(0)]);
+    }
+    state.lock().unwrap().calls.clear();
+    assert!(rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).is_err());
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|(s, _)| s.ends_with("_Purge"))
+                .count(),
+            1
+        );
+    }
+    state
+        .lock()
+        .unwrap()
+        .inject("GetDeviceState", -4, vec![json!(0), json!(0), json!(0)]);
+    state.lock().unwrap().calls.clear();
+    assert!(rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).is_err());
+    let state = state.lock().unwrap();
+    assert!(
+        !state.calls.iter().any(|(s, _)| s.ends_with("_Purge")),
+        "not a receive error"
+    );
+}
+
+#[test]
+fn a_reply_lost_while_listing_configs_costs_one_read_not_the_whole_list() {
+    for hd in [false, true] {
+        for lost in ["GetConfigList", "GetConfigName"] {
+            let (mut device, state) = case(hd);
+            connect(device.as_mut());
+            {
+                let mut state = state.lock().unwrap();
+                state.add_config(3, "first", false);
+                state.add_config(12, "second", false);
+                state.inject(lost, -10, vec![]);
+                state.calls.clear();
+            }
+            let configs = rpc(device.as_mut(), "list_configs", &[], json!({})).unwrap();
+            let names: Vec<_> = configs
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|config| config["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["first", "second"]);
+            {
+                let state = state.lock().unwrap();
+                let calls = state.names();
+                let count = |name: &str| calls.iter().filter(|call| *call == name).count();
+                assert_eq!(count("Purge"), 1, "{calls:?}");
+                assert_eq!(count(lost), if lost == "GetConfigList" { 2 } else { 3 });
+                let writes = calls
+                    .iter()
+                    .filter(|call| call.starts_with("Set") && *call != "SetBaudRate");
+                assert_eq!(writes.count(), 0, "a recovery commands nothing");
+            }
+            let first = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+            assert!(first["read_recovery"].as_str().unwrap().contains("-10"));
+            let next = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+            assert!(next.get("read_recovery").is_none(), "reported once");
+        }
+    }
+}
+
+#[test]
+fn a_persistent_fault_on_a_config_name_fails_the_list_after_one_recovery() {
+    let (mut device, state) = case(true);
+    connect(device.as_mut());
+    {
+        let mut state = state.lock().unwrap();
+        state.add_config(3, "first", false);
+        state.add_config(12, "second", false);
+        state.inject("GetConfigName", -13, vec![]);
+        state.inject("GetConfigName", -13, vec![]);
+        state.calls.clear();
+    }
+    assert!(rpc(device.as_mut(), "list_configs", &[], json!({})).is_err());
+    let state = state.lock().unwrap();
+    let calls = state.names();
+    let count = |name: &str| calls.iter().filter(|call| *call == name).count();
+    assert_eq!(count("Purge"), 1, "{calls:?}");
+    assert_eq!(count("GetConfigName"), 2, "stops at the first failing name");
+}
+
+#[test]
 fn hd_reads_the_burst_register_only_on_timers_that_have_one() {
     // 2026-11-02 lab: 16 timers, 8 with a burst register. The 8 others never answered: 12.4 s per
     // housekeeping under the controller lock, and every operator action timed out on that lock.

@@ -344,7 +344,10 @@ def _amx_output_rows(snapshot: dict[str, Any], clock_hz: float = 100e6) -> list[
         if trigger_code is not None and trigger_code <= 63 and 10 <= trigger_code & 31 <= 13:
             row.update(source_pulser=(trigger_code & 31) - 10, source_inverted=bool(trigger_code & 32))
         if snapshot.get("device_enabled") is not True or snapshot.get("main_state", {}).get("name") != "STATE_ON":
-            signal = unknown("Device is not confirmed enabled and in STATE_ON.", "Not enabled")
+            state_name = snapshot.get("main_state", {}).get("name") or "unknown"
+            enabled_text = "enabled" if snapshot.get("device_enabled") is True else "not enabled"
+            signal = unknown(f"Device is not confirmed enabled and in STATE_ON ({state_name}, device "
+                             f"{enabled_text}).", "Not enabled")
         elif mapping.get("trigger_enabled") is not False or mapping.get("enable_enabled") is not False:
             signal = unknown("Switch mapping is active or unavailable; direct source routing cannot be assumed.")
         elif flags is None:
@@ -828,6 +831,11 @@ def _action_label(action: Any) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _combo_popup_open(combo: Any) -> bool:
+    view = getattr(combo, "view", None)
+    return callable(view) and bool(getattr(view(), "isVisible", lambda: False)())
 
 
 def _format_available_configs(configs: list[dict[str, Any]]) -> str:
@@ -1811,15 +1819,18 @@ class AMXDevice(Device):
         self._update_config_controls()
 
     def _update_config_selector(self, combo: Any | None, attr_name: str) -> None:
-        if combo is None:
-            return
+        if combo is None or _combo_popup_open(combo):
+            return  # Rebuilt under the mouse, an open list jumps back to its top at every poll.
         block_signals = getattr(combo, "blockSignals", None)
         if callable(block_signals):
             block_signals(True)
         try:
-            self._combo_clear(combo)
-            for value, label in self._config_selector_entries(attr_name):
-                self._combo_add_item(combo, label, value)
+            entries = self._config_selector_entries(attr_name)
+            if getattr(combo, "_config_entries", None) != entries:
+                self._combo_clear(combo)
+                for value, label in entries:
+                    self._combo_add_item(combo, label, value)
+                combo._config_entries = entries
             selected_index = self._combo_find_data(combo, self._config_setting_value(attr_name))
             if selected_index < 0:
                 selected_index = 0
@@ -4367,14 +4378,18 @@ class AMXController(DeviceController):
         except Exception as exc:  # noqa: BLE001
             self._retire_failed_native_worker()
             self._restore_off_ui_state()
-            guidance = self._init_failure_guidance(exc)
-            message = (
-                f"AMX initialization failed on COM{int(self.controllerParent.com)}: "
-                f"{self._format_exception(exc)}"
-            )
-            if guidance:
-                message = f"{message}\n{guidance}"
-            self.print(message, flag=PRINT.ERROR)
+            if self._native_cancel_event.is_set():
+                # OFF during the connection (2026-11-02 lab: "Operation cancelled"): not a failure.
+                self.print("AMX connection stopped: OFF was requested.")
+            else:
+                guidance = self._init_failure_guidance(exc)
+                message = (
+                    f"AMX initialization failed on COM{int(self.controllerParent.com)}: "
+                    f"{self._format_exception(exc)}"
+                )
+                if guidance:
+                    message = f"{message}\n{guidance}"
+                self.print(message, flag=PRINT.ERROR)
             if (self._initial_open_close_requested
                     and self._native_backend(self.device) is not None
                     and not self._initial_open_incomplete()):
@@ -5351,6 +5366,9 @@ class AMXController(DeviceController):
         flags = snapshot.get("device_state", {}).get("flags", [])
         self.device_state_summary = ", ".join(str(flag) for flag in flags) if flags else "OK"
         controller_flags = snapshot.get("controller_state", {}).get("flags", [])
+        if snapshot.get("read_recovery"):
+            self.print(f"AMX reply lost, port resynchronized and read again: {snapshot['read_recovery']}",
+                       flag=PRINT.WARNING)
         self.controller_state_summary = (
             ", ".join(str(flag) for flag in controller_flags) if controller_flags else "OK"
         )

@@ -328,6 +328,12 @@ requested`, not an error. Load a config without oscillator (state `0x801`): `Fre
 the panel reads `Oscillator 0: the loaded config keeps oscillator 0 off`, no 50 MHz appears.
 Load a config on PLL0: `Clock 0 is PLL0, not CLK100M`, `Freq` and its widths are greyed. With
 AMX recording ON, `Load now` keeps it ON. After a failed load, the readbacks go on (AMX A/B too).
+In MScan, select the AMX HD while it holds its standby config: the message names `CH0: Not enabled`
+and the state, not `AMX waveform readback is unavailable`. On the AMX HD, `Reading the AMX HD config names` appears at connection and timing is enabled about
+6 s later. Open the config list with the AMX ON and scroll to the end: it stays there, and a config above 255
+can be clicked (same list on the PSUs). If `AMX reply lost, port resynchronized` appears, the
+readbacks go on without `Failed to read AMX housekeeping`. OFF during a connection prints `AMX
+connection stopped: OFF was requested`, and OFF during a lost reply no longer kills the worker.
 
 ## Transmission optimizer
 

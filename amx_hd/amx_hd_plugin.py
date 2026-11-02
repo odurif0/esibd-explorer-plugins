@@ -454,7 +454,10 @@ def _amx_hd_output_rows(snapshot: dict[str, Any], routing: dict[str, Any] | None
             row.update(source_pulser=(trigger_code & 0x3F) - _HD_SIGNAL_TIMER_OUT,
                        source_inverted=bool(trigger_code & 0x80))
         if snapshot.get("device_enabled") is not True or snapshot.get("main_state", {}).get("name") != "STATE_ON":
-            signal = unknown("Device is not confirmed enabled and in STATE_ON.", "Not enabled")
+            state_name = snapshot.get("main_state", {}).get("name") or "unknown"
+            enabled_text = "enabled" if snapshot.get("device_enabled") is True else "not enabled"
+            signal = unknown(f"Device is not confirmed enabled and in STATE_ON ({state_name}, device "
+                             f"{enabled_text}).", "Not enabled")
         elif flags is None:
             signal = unknown("Controller enable flags are unavailable.")
         elif not switch:
@@ -950,6 +953,11 @@ def _action_label(action: Any) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _combo_popup_open(combo: Any) -> bool:
+    view = getattr(combo, "view", None)
+    return callable(view) and bool(getattr(view(), "isVisible", lambda: False)())
 
 
 def _format_available_configs(configs: list[dict[str, Any]]) -> str:
@@ -1947,15 +1955,18 @@ class AMXHDDevice(Device):
         self._update_config_controls()
 
     def _update_config_selector(self, combo: Any | None, attr_name: str) -> None:
-        if combo is None:
-            return
+        if combo is None or _combo_popup_open(combo):
+            return  # Rebuilt under the mouse, an open list jumps back to its top at every poll.
         block_signals = getattr(combo, "blockSignals", None)
         if callable(block_signals):
             block_signals(True)
         try:
-            self._combo_clear(combo)
-            for value, label in self._config_selector_entries(attr_name):
-                self._combo_add_item(combo, label, value)
+            entries = self._config_selector_entries(attr_name)
+            if getattr(combo, "_config_entries", None) != entries:
+                self._combo_clear(combo)
+                for value, label in entries:
+                    self._combo_add_item(combo, label, value)
+                combo._config_entries = entries
             selected_index = self._combo_find_data(combo, self._config_setting_value(attr_name))
             if selected_index < 0:
                 selected_index = 0
@@ -4548,14 +4559,18 @@ class AMXHDController(DeviceController):
         except Exception as exc:  # noqa: BLE001
             self._retire_failed_native_worker()
             self._restore_off_ui_state()
-            guidance = self._init_failure_guidance(exc)
-            message = (
-                f"AMX initialization failed on COM{int(self.controllerParent.com)}: "
-                f"{self._format_exception(exc)}"
-            )
-            if guidance:
-                message = f"{message}\n{guidance}"
-            self.print(message, flag=PRINT.ERROR)
+            if self._native_cancel_event.is_set():
+                # OFF during the connection (2026-11-02 lab: "Operation cancelled"): not a failure.
+                self.print("AMX connection stopped: OFF was requested.")
+            else:
+                guidance = self._init_failure_guidance(exc)
+                message = (
+                    f"AMX initialization failed on COM{int(self.controllerParent.com)}: "
+                    f"{self._format_exception(exc)}"
+                )
+                if guidance:
+                    message = f"{message}\n{guidance}"
+                self.print(message, flag=PRINT.ERROR)
             if (self._initial_open_close_requested
                     and self._native_backend(self.device) is not None
                     and not self._initial_open_incomplete()):
@@ -4777,16 +4792,20 @@ class AMXHDController(DeviceController):
             self.available_configs_text = "Unavailable"
             return
 
+        # About 180 names at 30 ms each, 5.6 s on the instrument, with nothing moving on the panel.
+        self.available_configs_text = "Reading names..."
+        self._sync_status_to_gui()
+        self.print("Reading the AMX HD config names, this takes a few seconds.")
         try:
             configs = self._device_call(device, "list_configs",
                 timeout_s=float(getattr(self.controllerParent, "connect_timeout_s", 5.0))
             )
         except Exception as exc:  # noqa: BLE001
+            self.available_configs_text = "Unavailable"
             if (self._retire_failed_native_worker()
                     or (self._native_backend(device) is not None and self._native_cancel_event.is_set())):
                 raise
             self.available_configs = []
-            self.available_configs_text = "Unavailable"
             self.print(
                 f"Could not read AMX config list: {self._format_exception(exc)}",
                 flag=PRINT.WARNING,
@@ -5756,6 +5775,9 @@ class AMXHDController(DeviceController):
         flags = snapshot.get("device_state", {}).get("flags", [])
         self.device_state_summary = ", ".join(str(flag) for flag in flags) if flags else "OK"
         controller_flags = snapshot.get("controller_state", {}).get("flags", [])
+        if snapshot.get("read_recovery"):
+            self.print(f"AMX reply lost, port resynchronized and read again: {snapshot['read_recovery']}",
+                       flag=PRINT.WARNING)
         self.controller_state_summary = (
             ", ".join(str(flag) for flag in controller_flags) if controller_flags else "OK"
         )
@@ -5807,9 +5829,13 @@ class AMXHDController(DeviceController):
             burst = pulser_snapshot.get("burst")
             new_bursts[pulser] = "n/a" if burst is None else str(burst)
 
+        running = (snapshot.get("device_enabled") is True
+                   and snapshot.get("main_state", {}).get("name") == "STATE_ON")
+        # Stopped, each output reads "Not enabled", as on the AMX A/B; running, the rows need the
+        # routing (2026-11-02 lab: MScan only said "AMX waveform readback is unavailable").
         self.output_rows = (
             _amx_hd_output_rows(snapshot, self.hd_routing)
-            if self.hd_routing is not None
+            if self.hd_routing is not None or not running
             else None
         )
         if self.output_rows is not None:

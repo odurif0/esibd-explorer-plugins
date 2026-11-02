@@ -91,7 +91,9 @@ unsigned 64-bit integers. Late replies are retired, duplicate/unsolicited replie
 and malformed frames poison the session. No hardware write is replayed after
 failure, with two exceptions after a receive error (-10/-11/-12): an AMPR setpoint
 is read back and sent once more only if it was not applied, and the ESI discharge check
-purges and repeats one measurement step (ADC selection or read, never an output command). JSON NaN/Infinity tokens are forbidden; nonfinite readings use tagged
+purges and repeats one measurement step (ADC selection or read, never an output command). An
+AMX housekeeping or config-list read, which commands nothing, purges and reads once more after a
+receive error (-10 to -13). JSON NaN/Infinity tokens are forbidden; nonfinite readings use tagged
 values. Request and output queues are bounded (8 and 64).
 
 After each executor reply, a `state` map contains only cached lifecycle attributes:

@@ -759,3 +759,53 @@ def test_a_failed_load_resumes_polling_and_the_recording(case, monkeypatch, reco
     assert any("Failed to load" in str(message) for message in case.messages)
     assert restarted == [True]
     assert toggled == ([(True, False)] if recording else [])
+
+
+def test_a_resynchronized_read_is_reported_once_as_a_warning(case):
+    controller = case.controller
+    controller.initializeCommunication()
+    snapshot = controller._device_call(controller.device, "collect_housekeeping", timeout_s=1.)
+    case.messages.clear()
+    controller._apply_snapshot(dict(snapshot, read_recovery="GetTimerDelay failed with vendor status -10"))
+    assert ["reply lost" in str(message) and "-10" in str(message) for message in case.messages] == [True]
+    case.messages.clear()
+    controller._apply_snapshot(snapshot)
+    assert not case.messages
+
+
+def test_off_during_a_connection_is_not_a_failure(case):
+    # 2026-11-02 lab, AMX_HD: "AMX initialization failed on COM12: Operation cancelled" after OFF.
+    controller = case.controller
+    controller._initialize_transport_session = lambda: (_ for _ in ()).throw(RuntimeError("Operation cancelled"))
+    controller._native_cancel_event.set()
+    controller.runInitialization()
+    assert not any("initialization failed" in str(message) for message in case.messages)
+    assert any("OFF was requested" in str(message) for message in case.messages)
+
+
+def test_amx_hd_says_it_is_reading_the_config_names(case):
+    # 5.6 s on the instrument (2026-11-02), with nothing moving on the panel.
+    controller, family, seen = case.controller, case.proxies[0].family, []
+    device_call = controller._device_call
+
+    def spy(device, method, *args, **kwargs):
+        if method == "list_configs":
+            seen.append((getattr(case.parent, "available_configs_text", ""), list(map(str, case.messages))))
+        return device_call(device, method, *args, **kwargs)
+
+    controller._device_call = spy
+    controller.initializeCommunication()
+    assert len(seen) == 1
+    text, messages = seen[0]
+    if family == "amx_hd":
+        assert text == "Reading names..."
+        assert any("config names" in message for message in messages)
+        assert controller.available_configs_text == "79:Stored signal"
+    else:
+        assert not any("config names" in message for message in messages)
+
+
+def test_a_failed_config_list_does_not_stay_on_reading(case):
+    case.proxies[0].failures["list_configs"] = (RuntimeError("read failed"), False)
+    case.controller.initializeCommunication()
+    assert case.controller.available_configs_text == "Unavailable"
