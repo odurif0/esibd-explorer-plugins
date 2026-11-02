@@ -187,6 +187,9 @@ notebook, or on a normal AMX will exist on this HD controller.
 
 Important points:
 
+- The config list keeps its place while it is open: a poll never rebuilds it.
+- At each connection the plugin reads the name of each config, about 180 at 30 ms each, so a
+  connection takes about 6 s. `Available configs` reads `Reading names...` meanwhile.
 - `Operating config` covers every slot, 0 to 499. The numbers are those of the
   controller: `Configuration256` in CGC's `config_swA.cfg` is slot 255.
 - `Freq` drives oscillator 0 and the widths its timers, computed for the 100 MHz
@@ -230,6 +233,11 @@ plugin's `Interlock` row shows it (also with monitoring off); that PSU cuts its 
 on an open loop only while its `Interlock monitoring` setting is on (off by default).
 
 ## Connection Failures
+
+A reply lost during a housekeeping read or while reading the config list leaves the serial
+link out of step: the plugin purges the port, restores the baud rate and reads once more, then
+logs `AMX reply lost, port resynchronized and read again`. These reads command nothing, and a
+write is never repeated.
 
 A failed or timed-out connection is never reused. A returned failed initial
 Open is cleaned up without output commands; `Connection pending` remains until

@@ -1513,7 +1513,11 @@ class MScan(Scan):
             raise ScanError(f'{amx.name}: turn the AMX ON.')
         rows = controller.output_rows
         if not rows or len(rows) != 4:
-            raise ScanError('AMX waveform readback is unavailable.')
+            state = str(getattr(controller, 'main_state', '') or 'unknown')
+            hint = (f'turn {amx.name} recording ON: its outputs are decoded from its readbacks'
+                    if getattr(amx, 'recording', True) is False else
+                    'wait for its next readback, a few seconds after a config load or a timing edit')
+            raise ScanError(f'{amx.name}: no decoded AMX waveform yet (state {state}); {hint}.')
         return [rows[i] for i in selected]
 
     def _waveform(self, amx, selected):

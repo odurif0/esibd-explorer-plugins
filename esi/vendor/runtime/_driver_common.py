@@ -655,7 +655,9 @@ class ProcessIsolatedClientMixin:
             backend = NativeWorkerProxy(root, family, config,
                                         startup_timeout_s=self._PROCESS_STARTUP_TIMEOUT_S,
                                         log_dir=config.get("log_dir"),
-                                        stop_grace_s=5. if family == "psu" else 1.,
+                                        # Above the 1.55 s a CGC DLL waits for a lost reply: an OFF during
+                                        # that wait killed the AMX HD worker (2026-11-02 lab).
+                                        stop_grace_s=5. if family == "psu" else 2.,
                                         awake_request=SystemAwakeRequest(f"ESIBD Explorer: {self._INSTRUMENT_NAME} native worker"))
             object.__setattr__(self, "_backend_mode", "process")
             object.__setattr__(self, "_backend", backend)

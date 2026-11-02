@@ -102,7 +102,7 @@ def test_production_constructor_selects_only_native_worker(tmp_path, monkeypatch
         assert config["device_id"] == "packaging" and config["com"] == 16
         assert config["dll_path"] == str(ESI / "vendor/runtime/esi/vendor/x64/COM-ESI-CTRL.dll")
         assert config["log_dir"] == options["log_dir"] == log_dir
-        assert options["startup_timeout_s"] == 30. and options["stop_grace_s"] == 1.
+        assert options["startup_timeout_s"] == 30. and options["stop_grace_s"] == 2.
         assert device._process_backend_disabled_reason == ""
     finally:
         device.close()

@@ -246,6 +246,11 @@ monitoring off); that PSU cuts its outputs on an open loop only while its
 
 ## Connection Failures
 
+A reply lost during a housekeeping read or while reading the config list leaves the serial
+link out of step: the plugin purges the port, restores the baud rate and reads once more, then
+logs `AMX reply lost, port resynchronized and read again`. These reads command nothing, and a
+write is never repeated.
+
 A failed or timed-out connection is never reused. A returned failed initial
 Open is cleaned up without output commands; `Connection pending` remains until
 port cleanup or worker retirement is confirmed. `Disconnected` confirms

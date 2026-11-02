@@ -114,6 +114,8 @@ pub struct Controller {
     recording: bool,
     errors: Value,
     burst_timers: Option<u32>,
+    receive_fault: bool,
+    pending_recovery: Option<String>,
 }
 
 impl Controller {
@@ -175,6 +177,8 @@ impl Controller {
             recording: false,
             errors,
             burst_timers: None,
+            receive_fault: false,
+            pending_recovery: None,
         })
     }
 
@@ -239,6 +243,7 @@ impl Controller {
             }
         }
         let reply = result?;
+        self.receive_fault |= (-13..=-10).contains(&reply.status);
         if suffix == "LoadCurrentConfig" && reply.status == 0 {
             // The hardware has changed even if cancellation prevents the
             // facade's subsequent metadata/name reads from completing.
@@ -321,6 +326,7 @@ impl Controller {
             self.read("SetBaudRate", &[json!(self.baudrate)], 1, ctx)?;
             self.connected = true;
             self.burst_timers = None;
+            self.pending_recovery = None;
             // A vendor failure is fatal. The reference tolerates probe
             // exceptions on a usable transport and warns about an alien ID.
             match self.raw(
@@ -414,6 +420,42 @@ impl Controller {
         text(&values[0], "config name")
     }
 
+    /// A read that lost a reply leaves the port out of step: every later read then gets the wrong
+    /// reply (2026-11-02 lab: -10, then -13 at each poll until communication closed). Only reads
+    /// come here, they command nothing: purge, restore the baud rate and read once more. The next
+    /// snapshot reports the recovery.
+    fn read_with_recovery<T>(
+        &mut self,
+        read: impl Fn(&mut Self, &Context) -> Result<T>,
+        ctx: &Context,
+    ) -> Result<T> {
+        self.receive_fault = false;
+        let error = match read(self, ctx) {
+            Err(error) if self.receive_fault && !self.poisoned && !ctx.is_cancelled() => error,
+            other => return other,
+        };
+        self.write("Purge", &[], ctx)?;
+        let baud = self.read("SetBaudRate", &[json!(self.baudrate)], 1, ctx)?;
+        if baud[0] != json!(self.baudrate) {
+            return Err(Error::runtime("Baud rate not restored after purge"));
+        }
+        let value = read(self, ctx)?;
+        self.pending_recovery = Some(error.message);
+        Ok(value)
+    }
+
+    fn recovered_snapshot(
+        &mut self,
+        read: fn(&mut Self, &Context) -> Result<Value>,
+        ctx: &Context,
+    ) -> Result<Value> {
+        let mut snapshot = self.read_with_recovery(read, ctx)?;
+        if let Some(message) = self.pending_recovery.take() {
+            snapshot["read_recovery"] = json!(message);
+        }
+        Ok(snapshot)
+    }
+
     /// HD timers with a burst register. The others never answer GetTimerBurst and the DLL waits
     /// 1.5 s for each (2026-11-02 lab: 12.4 s per housekeeping, under the controller lock).
     fn burst_timer_count(&mut self, ctx: &Context) -> Result<u32> {
@@ -446,10 +488,15 @@ impl Controller {
     fn list_configs(&mut self, include_empty: bool, ctx: &Context) -> Result<Value> {
         self.require_connected()?;
         let n = self.config_limit() as usize;
-        let values = self.read(
-            "GetConfigList",
-            &[json!(vec![false; n]), json!(vec![false; n])],
-            2,
+        let values = self.read_with_recovery(
+            |device, ctx| {
+                device.read(
+                    "GetConfigList",
+                    &[json!(vec![false; n]), json!(vec![false; n])],
+                    2,
+                    ctx,
+                )
+            },
             ctx,
         )?;
         let active = array(&values[0], n, "config active flags")?;
@@ -460,7 +507,9 @@ impl Controller {
             let active = boolean(&active[index], "active")?;
             let valid = boolean(&valid[index], "valid")?;
             if include_empty || active || valid {
-                let name = self.config_name(index as u32, ctx)?;
+                // One lost reply among the ~180 names of an HD must not blank the whole list.
+                let name = self
+                    .read_with_recovery(|device, ctx| device.config_name(index as u32, ctx), ctx)?;
                 configs
                     .push(json!({"index": index, "name": name, "active": active, "valid": valid}));
             }
@@ -865,11 +914,11 @@ impl Controller {
             }
             "collect_housekeeping" => {
                 Params::new(args, kwargs, &["timeout_s"], 0, 1)?;
-                self.snapshot(ctx)
+                self.recovered_snapshot(Self::snapshot, ctx)
             }
             "collect_state_snapshot" if self.hd => {
                 Params::new(args, kwargs, &["timeout_s"], 0, 1)?;
-                self.state_snapshot(ctx)
+                self.recovered_snapshot(Self::state_snapshot, ctx)
             }
             "shutdown" => {
                 let p = Params::new(

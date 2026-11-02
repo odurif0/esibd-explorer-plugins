@@ -324,3 +324,31 @@ def test_mscan_refuses_an_undecoded_amx_hd_output(mscan_rig, hd):
         mscan_rig.scan._prepare()
     assert "Mapping engine" in str(error.value)
     assert not mscan_rig.psus[0].writes
+
+
+def test_a_stopped_amx_hd_says_not_enabled_like_the_amx_a_b(hd):
+    # 2026-11-02 lab: with no rows, MScan only said "AMX waveform readback is unavailable".
+    _, parent, controller = make_case("amx_hd")
+    state, _ = config273()
+    controller._apply_snapshot(dict(state, device_enabled=False))
+    rows = controller.output_rows
+    assert [row["state"] for row in rows] == ["Not enabled"] * 4
+    assert "STATE_ON, device not enabled" in rows[0]["detail"]
+    controller._apply_snapshot(state)
+    assert controller.output_rows is None, "running, the rows still need the routing"
+
+
+def test_mscan_names_why_the_amx_hd_has_no_waveform(mscan_rig, hd):
+    mscan_rig.amx.name = mscan_rig.scan.amx_name = "AMX_HD"
+    state, _ = config273()
+    mscan_rig.amx.controller.output_rows = hd._amx_hd_output_rows(dict(state, device_enabled=False), None)
+    with pytest.raises(mscan_rig.module.ScanError, match="AMX_HD CH0: Not enabled"):
+        mscan_rig.scan._prepare()
+    mscan_rig.amx.controller.output_rows = None
+    mscan_rig.amx.controller.main_state = "STATE_ON"
+    with pytest.raises(mscan_rig.module.ScanError, match=r"AMX_HD: no decoded AMX waveform yet \(state STATE_ON\); wait"):
+        mscan_rig.scan._prepare()
+    mscan_rig.amx.recording = False
+    with pytest.raises(mscan_rig.module.ScanError, match="turn AMX_HD recording ON"):
+        mscan_rig.scan._prepare()
+    assert not mscan_rig.psus[0].writes
