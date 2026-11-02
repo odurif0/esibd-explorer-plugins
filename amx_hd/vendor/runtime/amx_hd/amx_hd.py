@@ -582,6 +582,14 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
             include_empty,
         )
 
+    def _burst_timer_count(self, timer_count: int) -> int:
+        try:
+            status, *modules = AMXHDBase.get_hw_type(self)
+            self._raise_on_status(status, "get_hw_type")
+            return int(modules[3])
+        except Exception:
+            return timer_count
+
     def load_config(self, config_number: int, timeout_s: Optional[float] = None) -> None:
         """Load and apply one AMX configuration stored in controller NVM."""
         self._require_connected()
@@ -920,6 +928,8 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
         except (TypeError, ValueError):
             timer_count = 0
 
+        # The other timers never answer GetTimerBurst: the DLL waits 1.5 s for each.
+        burst_timers = self._burst_timer_count(timer_count)
         pulsers = []
         for timer in range(timer_count):
             delay_status, delay_ticks = AMXHDBase.get_timer_delay(self, timer)
@@ -927,11 +937,12 @@ class _AMXHDController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, AMXHDBase
             width_status, width_ticks = AMXHDBase.get_timer_width(self, timer)
             self._raise_on_status(width_status, f"get_timer_width({timer})")
             burst = None
-            try:
-                burst_status, burst = AMXHDBase.get_timer_burst(self, timer)
-                self._raise_on_status(burst_status, f"get_timer_burst({timer})")
-            except Exception:
-                burst = None
+            if timer < burst_timers:
+                try:
+                    burst_status, burst = AMXHDBase.get_timer_burst(self, timer)
+                    self._raise_on_status(burst_status, f"get_timer_burst({timer})")
+                except Exception:
+                    burst = None
             pulsers.append(
                 {
                     "pulser": timer,

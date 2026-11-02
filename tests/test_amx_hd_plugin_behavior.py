@@ -879,3 +879,110 @@ def test_loaded_config_status_reads_the_interlock_function_without_writing_it():
     assert set(calls) == {"get_status", "get_interlock_funct"}
     assert plugin._interlock_function_text(False) == "OFF (interlock input ignored)"
     assert plugin._interlock_function_text(None) == "n/a"
+
+
+def test_operating_config_reaches_every_hd_slot(monkeypatch):
+    # 2026-11-02 lab: the setting stopped at 255 and clamped silently: "Loaded AMX config 255".
+    plugin = load_plugin("amx_hd")
+
+    class Holder(plugin.AMXHDDevice):
+        def __init__(self):  # noqa: D107 - no Explorer plugin setup is needed here
+            self.name = "AMX_HD"
+
+    defaults = {"AMX_HD/Interval": {}, f"AMX_HD/{plugin.AMXHDDevice.MAXDATAPOINTS}": {}}
+    monkeypatch.setattr(plugin.Device, "getDefaultSettings", lambda self: dict(defaults), raising=False)
+    settings = Holder().getDefaultSettings()
+    assert settings["AMX_HD/Operating config"]["maximum"] == 499
+    assert settings[f"AMX_HD/{plugin.AMXHDDevice.COM}"]["maximum"] == 255  # A COM port number, not a config.
+
+
+def test_startup_wait_judges_the_config_being_loaded_not_the_selector():
+    # 2026-11-02 lab: config 0 "Standby (all modules disabled)" was refused after 10 s: "did not
+    # reach STATE_ON". The selector had moved during the wait, and only it was consulted.
+    plugin = load_plugin("amx_hd")
+    parent = types.SimpleNamespace(name="AMX_HD", operating_config=110)
+    controller = plugin.AMXHDController(controllerParent=parent)
+    controller.available_configs = [
+        {"index": 0, "name": "Standby (all modules disabled)", "active": True, "valid": True},
+        {"index": 110, "name": "Operate", "active": True, "valid": True},
+    ]
+    snapshot = {"main_state": {"name": "STATE_STANDBY"}, "device_enabled": False, "device_state": {"flags": []}}
+    assert controller._startup_snapshot_ready(snapshot, 0) is True
+    assert controller._startup_snapshot_ready(snapshot, 110) is False
+    assert "did not reach STATE_STANDBY after loading config 0" in controller._startup_failure_message(
+        config_index=0, snapshot={"main_state": {"name": "STATE_ON"}, "device_state": {"flags": []}})
+
+
+def _hd_controller(flags, period=9998, clocks=(3, 3, 3, 3)):
+    plugin = load_plugin("amx_hd")
+    controller = plugin.AMXHDController(controllerParent=types.SimpleNamespace(name="AMX_HD", operating_config=0))
+    controller._controller_flags, controller.oscillator_period = flags, period
+    controller.hd_routing = {"clock_sources": list(clocks)}
+    return plugin, controller
+
+
+RUNNING = ["ST_ENABLE", "ST_ENB_TIMER", "ST_ENB_OSC0"]
+
+
+def test_timing_edits_are_refused_only_when_they_cannot_act():
+    # 2026-11-02 lab: state 0x801 has neither oscillator nor timers, and 86 of the 178 CGC configs
+    # have a period of 0; 5 run on PLL0, where 100 MHz arithmetic writes a wrong period.
+    _, controller = _hd_controller(RUNNING)
+    assert controller.timing_block_reason() == "" and controller.timing_block_reason(2) == ""
+    assert "oscillator 0 off" in _hd_controller(["ST_ENABLE", "ST_ENB_TIMER"])[1].timing_block_reason()
+    assert "oscillator 0 off" in _hd_controller(RUNNING, period=0)[1].timing_block_reason()
+    assert "timers off" in _hd_controller(["ST_ENABLE", "ST_ENB_OSC0"])[1].timing_block_reason(0)
+    assert _hd_controller(RUNNING, clocks=(4, 3, 3, 3))[1].timing_block_reason() == "Clock 0 is PLL0, not CLK100M"
+    assert _hd_controller(RUNNING, clocks=(0x83, 3, 3, 3))[1].timing_block_reason() == ""  # Inverted, still 100 MHz.
+    # Timers 2 and 3 run on Clock 1, timers 8 and 9 on Clock 0 again.
+    mixed = _hd_controller(RUNNING, clocks=(3, 2, 3, 3))[1]
+    assert mixed.timing_block_reason(0) == "" and mixed.timing_block_reason(8) == ""
+    assert mixed.timing_block_reason(2) == "Clock 1 is CLK10M, not CLK100M"
+    # Before the first readback nothing is known: ON reloads the config anyway.
+    assert _hd_controller(None)[1].timing_block_reason() == ""
+
+
+def test_a_config_without_oscillator_shows_no_frequency_and_keeps_the_field(monkeypatch):
+    plugin, controller = _hd_controller(None)
+    controller.main_state = "STATE_ON"
+    controller._update_channel_config = lambda *a, **kw: None
+    snapshot = {"main_state": {"name": "STATE_ON"}, "device_enabled": True, "device_state": {"flags": []},
+                "controller_state": {"flags": ["ST_ENABLE", "ST_ENB_SWITCH"]},
+                "oscillator": {"period": 0, "frequency_hz": 50e6}, "pulsers": []}
+    controller.controllerParent.getChannels = lambda: []
+    controller._sync_status_to_gui = lambda: None
+    controller._apply_snapshot(snapshot)
+    assert controller.frequency_readback_khz != controller.frequency_readback_khz, "NaN, not 50 MHz"
+    parent = controller.controllerParent
+    parent.frequency_khz, parent.FREQUENCY_KHZ, parent.loading = 2.0, "Freq", False
+    controller.device = object()
+    monkeypatch.setattr(plugin, "_invoke_gui_callback", lambda callback: callback())
+    controller._sync_loaded_config_to_gui(snapshot)
+    assert parent.frequency_khz == 2.0
+
+
+def test_a_refused_timing_edit_writes_nothing_and_says_why():
+    _, controller = _hd_controller(["ST_ENABLE"], period=0)
+    messages, calls = [], []
+    controller.print = lambda text, **kw: messages.append(text)
+    controller.device = object()
+    controller.initialized = True
+    controller.lock = threading.Lock()
+    controller.controllerParent.isOn = lambda: True
+    controller.controllerParent.frequency_khz = 500.0
+    controller._device_call = lambda *a, **kw: calls.append(a)
+    controller.applyGlobalSettings()
+    controller.applyValue(types.SimpleNamespace(pulser_number=lambda: 1, real=True))
+    assert calls == []
+    assert messages == ["AMX frequency not applied: the loaded config keeps oscillator 0 off.",
+                        "AMX P1 not applied: the loaded config keeps the timers off."]
+
+
+def test_a_standby_in_memory_stays_active_when_the_selector_moves():
+    _, controller = _hd_controller(["ST_ENABLE"])
+    controller.controllerParent.operating_config = 110
+    controller.available_configs = [{"index": 0, "name": "Standby (all modules disabled)"}, {"index": 110, "name": "Test"}]
+    controller.main_state = "STATE_STANDBY"
+    assert controller._device_active() is False
+    controller._loaded_config_index = 0
+    assert controller._device_active() is True

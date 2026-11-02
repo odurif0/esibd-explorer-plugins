@@ -113,6 +113,7 @@ pub struct Controller {
     hardware_mutated: bool,
     recording: bool,
     errors: Value,
+    burst_timers: Option<u32>,
 }
 
 impl Controller {
@@ -173,6 +174,7 @@ impl Controller {
             hardware_mutated: false,
             recording: false,
             errors,
+            burst_timers: None,
         })
     }
 
@@ -318,6 +320,7 @@ impl Controller {
             outputs(reply, 0)?;
             self.read("SetBaudRate", &[json!(self.baudrate)], 1, ctx)?;
             self.connected = true;
+            self.burst_timers = None;
             // A vendor failure is fatal. The reference tolerates probe
             // exceptions on a usable transport and warns about an alien ID.
             match self.raw(
@@ -409,6 +412,18 @@ impl Controller {
             ctx,
         )?;
         text(&values[0], "config name")
+    }
+
+    /// HD timers with a burst register. The others never answer GetTimerBurst and the DLL waits
+    /// 1.5 s for each (2026-11-02 lab: 12.4 s per housekeeping, under the controller lock).
+    fn burst_timer_count(&mut self, ctx: &Context) -> Result<u32> {
+        if let Some(count) = self.burst_timers {
+            return Ok(count);
+        }
+        let values = self.read("GetHwType", &vec![json!(0); 9], 9, ctx)?;
+        let count = uint(&values[3], "burst timer count", 65535)?;
+        self.burst_timers = Some(count);
+        Ok(count)
     }
 
     fn load_config(&mut self, number: u32, source: &str, ctx: &Context) -> Result<()> {
@@ -1050,12 +1065,19 @@ impl Controller {
             snapshot["switch_mapping"] = json!({"trigger_enabled": if trigger.is_null() { Value::Null } else { json!(boolean(&trigger, "trigger mapping")?) },
                 "enable_enabled": if enable.is_null() { Value::Null } else { json!(boolean(&enable, "enable mapping")?) }});
         }
+        let burst_timers = if self.hd {
+            self.burst_timer_count(ctx)?
+        } else {
+            0
+        };
         let mut pulsers = Vec::new();
         for number in 0..count {
             ctx.check_cancelled()?;
             let delay = self.pulser_read(number, false, ctx)?;
             let width = self.pulser_read(number, true, ctx)?;
-            let burst = if self.hd {
+            let burst = if self.hd && number >= burst_timers {
+                Value::Null
+            } else if self.hd {
                 match self.read("GetTimerBurst", &[json!(number), json!(0)], 1, ctx) {
                     Ok(values) => values[0].clone(),
                     Err(error)
