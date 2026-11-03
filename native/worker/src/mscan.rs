@@ -36,6 +36,15 @@
 //! result/raw are paginated (default 1000, maximum 4096); replies carry totals.
 //! Raw detector and PSU records are independently limited to max_raw_samples
 //! (default 1,000,000). Exceeding that limit stops without another command.
+//!
+//! Map lines (v0.5.10, all optional): `points` lists the axis values explicitly (Step by step,
+//! one pass); `axis` is amplitude (default), offset (x, rails held at `amplitude`), extra (the
+//! last offset channel, e.g. the entry stub, rails held at `amplitude`) or frequency (the AMX
+//! oscillator, rails held at `amplitude`, U fixed). `adaptive` measures a subset of the points:
+//! coarse where the selected module (`detector.signal`) is flat, every point where it changes
+//! (crate::mscan_map::Stepper); the points never measured end as "skipped". A frequency line
+//! sends `frequency_hz` with each command and waits for the AMX readback (`amx.frequency_hz`)
+//! with an unchanged duty cycle (`amx.duty`).
 
 use crate::Backend;
 use crate::codec::float;
@@ -93,6 +102,14 @@ fn number(value: &Value) -> std::result::Result<f64, String> {
 
 fn read_number<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
     number(&Value::deserialize(d)?).map_err(serde::de::Error::custom)
+}
+
+/// A number that may be absent: null reads as NaN.
+fn read_maybe_number<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Null => Ok(f64::NAN),
+        v => number(&v).map_err(serde::de::Error::custom),
+    }
 }
 
 fn read_numbers<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<f64>, D::Error> {
@@ -190,17 +207,91 @@ struct Settings {
     passes: u64,
     #[serde(default)]
     metadata: Value,
+    #[serde(default)]
+    points: Option<Vec<f64>>,
+    #[serde(default = "amplitude_axis")]
+    axis: String,
+    #[serde(default = "missing_number", deserialize_with = "read_number")]
+    amplitude: f64,
+    #[serde(default)]
+    adaptive: Option<Adaptive>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct Adaptive {
+    coarse: usize,
+    #[serde(deserialize_with = "read_number")]
+    sigma: f64,
+    #[serde(deserialize_with = "read_number")]
+    fraction: f64,
+    #[serde(deserialize_with = "read_number")]
+    noise_floor: f64,
+}
+
+const AXIS_AMPLITUDE: &str = "amplitude";
+const AXIS_OFFSET: &str = "offset";
+const AXIS_EXTRA: &str = "extra";
+const AXIS_FREQUENCY: &str = "frequency";
+
+fn amplitude_axis() -> String {
+    AXIS_AMPLITUDE.to_owned()
 }
 
 impl Settings {
     /// The DC target of rod pair `pair` (0 or 1) at amplitude A.
     fn offset_target(&self, pair: usize, amplitude: f64) -> f64 {
+        self.pair_target(pair, amplitude, self.offset_fixed)
+    }
+
+    fn pair_target(&self, pair: usize, amplitude: f64, fixed: f64) -> f64 {
         if self.offset_factor == 0.0 {
-            return self.offset_fixed; // RF-only: no DC between the pairs.
+            return fixed; // RF-only: no DC between the pairs.
         }
         let variable = (self.offset_factor.abs() * amplitude - self.offset_resolution)
             .max(self.offset_minimum);
-        self.offset_fixed + offset_sign(pair) * variable.copysign(self.offset_factor)
+        fixed + offset_sign(pair) * variable.copysign(self.offset_factor)
+    }
+
+    /// RF amplitude of step `value` (the axis value at that step).
+    fn amplitude_at(&self, value: f64) -> f64 {
+        if self.axis == AXIS_AMPLITUDE {
+            value
+        } else {
+            self.amplitude
+        }
+    }
+
+    /// Axis potential x at step `value`.
+    fn fixed_at(&self, value: f64) -> f64 {
+        if self.axis == AXIS_OFFSET {
+            value
+        } else {
+            self.offset_fixed
+        }
+    }
+
+    /// Every AMPR target at step `value`: the rod pairs, then the swept extra channel.
+    fn offset_targets(&self, value: f64, channels: usize) -> Vec<f64> {
+        let pairs = if self.axis == AXIS_EXTRA {
+            channels.saturating_sub(1)
+        } else {
+            channels
+        };
+        let mut targets: Vec<f64> = (0..pairs)
+            .map(|p| self.pair_target(p, self.amplitude_at(value), self.fixed_at(value)))
+            .collect();
+        if self.axis == AXIS_EXTRA && channels > 0 {
+            targets.push(value);
+        }
+        targets
+    }
+
+    fn frequency_at(&self, value: f64) -> Option<f64> {
+        (self.axis == AXIS_FREQUENCY).then_some(value)
+    }
+
+    fn map_line(&self) -> bool {
+        self.points.is_some()
     }
     fn duration(&self) -> Result<f64> {
         let v = match self.mode.as_str() {
@@ -237,6 +328,54 @@ impl Settings {
     }
 
     fn steps(&self) -> Result<Vec<f64>> {
+        if let Some(points) = &self.points {
+            if self.mode != STEPPED || self.passes != 1 {
+                return Err(Error::argument(
+                    "Explicit scan points need Step by step and one pass.",
+                ));
+            }
+            if points.len() < 2
+                || points.len() as u64 > MAX_POINTS
+                || points.iter().any(|v| !v.is_finite())
+            {
+                return Err(Error::argument(
+                    "Explicit scan points must be 2 to 1,000,000 finite values.",
+                ));
+            }
+            if ![AXIS_AMPLITUDE, AXIS_OFFSET, AXIS_EXTRA, AXIS_FREQUENCY]
+                .contains(&self.axis.as_str())
+            {
+                return Err(Error::argument(
+                    "Scan axis must be amplitude, offset, extra or frequency.",
+                ));
+            }
+            if self.axis != AXIS_AMPLITUDE && !(self.amplitude.is_finite() && self.amplitude >= 0.0)
+            {
+                return Err(Error::argument(
+                    "A fixed amplitude is required for this scan axis.",
+                ));
+            }
+            if self.axis == AXIS_AMPLITUDE && points.iter().any(|v| *v < 0.0) {
+                return Err(Error::argument("Amplitudes must not be negative."));
+            }
+            if self.axis == AXIS_FREQUENCY && points.iter().any(|v| *v <= 0.0) {
+                return Err(Error::argument("Frequencies must be positive."));
+            }
+            if let Some(a) = &self.adaptive
+                && (a.coarse == 0
+                    || ![a.sigma, a.fraction, a.noise_floor]
+                        .iter()
+                        .all(|v| v.is_finite() && *v >= 0.0))
+            {
+                return Err(Error::argument("Invalid measurement-driven step settings."));
+            }
+            return Ok(points.clone());
+        }
+        if self.axis != AXIS_AMPLITUDE || self.adaptive.is_some() {
+            return Err(Error::argument(
+                "Another scan axis or a measurement-driven step needs explicit scan points.",
+            ));
+        }
         let step = self.command_step()?;
         let sweep = amplitude_steps(self.start, self.stop, step)?;
         if !(1..=MAX_PASSES).contains(&self.passes) {
@@ -286,6 +425,11 @@ struct Amx {
     selected: Vec<u8>,
     links: Value,
     rows: Vec<Value>,
+    /// Decoded oscillator frequency of the selected output (Hz); frequency lines only.
+    #[serde(default = "missing_number", deserialize_with = "read_maybe_number")]
+    frequency_hz: f64,
+    #[serde(default, deserialize_with = "read_numbers")]
+    duty: Vec<f64>,
 }
 
 fn tagged_nonfinite(value: &Value) -> bool {
@@ -466,6 +610,9 @@ struct Detector {
     times: Vec<f64>,
     #[serde(deserialize_with = "read_numbers")]
     values: Vec<f64>,
+    /// The module the measurement-driven step follows, on the same time axis.
+    #[serde(default, deserialize_with = "read_numbers")]
+    signal: Vec<f64>,
 }
 
 impl Detector {
@@ -670,6 +817,8 @@ struct RailState {
 struct Point {
     status: String,
     mean: f64,
+    signal: f64,
+    signal_sigma: f64,
     samples: usize,
     finite_samples: usize,
     start: f64,
@@ -684,6 +833,8 @@ impl Point {
         Self {
             status: "not acquired".to_owned(),
             mean: f64::NAN,
+            signal: f64::NAN,
+            signal_sigma: f64::NAN,
             samples: 0,
             finite_samples: 0,
             start: f64::NAN,
@@ -695,6 +846,7 @@ impl Point {
     }
     fn value(&self, index: usize) -> Value {
         json!({"index": index, "status": self.status, "mean": float(self.mean), "samples": self.samples,
+            "signal": float(self.signal), "signal_sigma": float(self.signal_sigma),
             "finite_samples": self.finite_samples, "window_start": float(self.start), "window_end": float(self.end),
             "rail_v": floats(&self.volts), "rail_i": floats(&self.currents),
             "offsets": self.offsets.iter().map(|(a, b)| vec![float(*a), float(*b)]).collect::<Vec<_>>()})
@@ -740,6 +892,7 @@ struct Command {
     id: u64,
     targets: Vec<f64>,
     offsets: Vec<f64>,
+    frequency_hz: Option<f64>,
     restore: bool,
     latest_mono: Option<f64>,
     previous: Option<Pending>,
@@ -759,6 +912,8 @@ struct Acknowledgement {
     values: Vec<f64>,
     #[serde(default, deserialize_with = "read_numbers")]
     offset_values: Vec<f64>,
+    #[serde(default = "missing_number", deserialize_with = "read_maybe_number")]
+    frequency_hz: f64,
 }
 
 #[derive(Default)]
@@ -805,6 +960,11 @@ struct Run {
     updates: Vec<Value>,
     raw: Raw,
     max_raw: usize,
+    /// Lowest and highest amplitude of the line (its rails' bounds are checked against them).
+    amplitude_range: (f64, f64),
+    stepper: Option<crate::mscan_map::Stepper>,
+    frequency_initial: f64,
+    frequency_expected: f64,
 }
 
 impl Run {
@@ -841,8 +1001,39 @@ impl Run {
                 "The selected AMX pair requires two distinct rails (CH0/CH1) of one associated PSU.",
             ));
         }
-        let low = settings.start.min(settings.stop);
-        let high = settings.start.max(settings.stop);
+        // A normal scan checks its requested endpoints, even an unaligned stop it never reaches;
+        // a map line, every amplitude it will command.
+        let (low, high) = if settings.map_line() {
+            let amplitudes: Vec<f64> = steps.iter().map(|v| settings.amplitude_at(*v)).collect();
+            (
+                amplitudes.iter().copied().fold(f64::INFINITY, f64::min),
+                amplitudes.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        } else {
+            (
+                settings.start.min(settings.stop),
+                settings.start.max(settings.stop),
+            )
+        };
+        if settings.axis == AXIS_FREQUENCY
+            && (!(obs.amx.frequency_hz.is_finite() && obs.amx.frequency_hz > 0.0)
+                || obs.amx.duty.len() != obs.amx.rows.len()
+                || obs.amx.duty.iter().any(|d| !d.is_finite()))
+        {
+            return Err(Error::runtime(
+                "AMX frequency / duty readback unavailable for a frequency scan.",
+            ));
+        }
+        if settings.adaptive.is_some() && obs.detector.signal.len() != obs.detector.times.len() {
+            return Err(Error::runtime(
+                "The measurement-driven step needs the selected DMMR module on the detector time axis.",
+            ));
+        }
+        if settings.axis == AXIS_EXTRA && obs.offsets.is_empty() {
+            return Err(Error::argument(
+                "An extra-channel scan needs its AMPR channel.",
+            ));
+        }
         let mut rails = Vec::with_capacity(obs.rails.len());
         for r in &obs.rails {
             r.source()?;
@@ -884,7 +1075,8 @@ impl Run {
                 value: r.value,
             });
         }
-        if obs.offsets.len() > MAX_OFFSETS {
+        let extra = usize::from(settings.axis == AXIS_EXTRA);
+        if obs.offsets.len() > MAX_OFFSETS + extra {
             return Err(Error::argument(
                 "At most two quadrupole offset channels (rod pairs 1 and 2).",
             ));
@@ -907,8 +1099,14 @@ impl Run {
             if settings.offset_minimum <= 0.0 {
                 return Err(Error::argument("Minimum U must be above 0 V."));
             }
-            o.bounds(settings.offset_target(pair, low))?;
-            o.bounds(settings.offset_target(pair, high))?;
+            if settings.map_line() {
+                for v in &steps {
+                    o.bounds(settings.offset_targets(*v, obs.offsets.len())[pair])?;
+                }
+            } else {
+                o.bounds(settings.offset_target(pair, low))?;
+                o.bounds(settings.offset_target(pair, high))?;
+            }
             o.bounds(o.value)?;
             offset_expected.push(o.value);
         }
@@ -955,8 +1153,26 @@ impl Run {
             command_end: vec![f64::NAN; steps.len()],
             ..Raw::default()
         };
+        let stepper = settings.adaptive.map(|a| {
+            crate::mscan_map::Stepper::new(
+                crate::mscan_map::StepPolicy {
+                    coarse: a.coarse,
+                    sigma: a.sigma,
+                    fraction: a.fraction,
+                    noise_floor: a.noise_floor,
+                },
+                steps.len(),
+            )
+        });
+        metadata["axis"] = json!(settings.axis);
+        metadata["measurement_driven_step"] = json!(settings.adaptive.is_some());
+        let frequency_initial = obs.amx.frequency_hz;
         Ok(Self {
             session,
+            amplitude_range: (low, high),
+            stepper,
+            frequency_initial,
+            frequency_expected: frequency_initial,
             settings,
             last_sequence: obs.sequence,
             last_mono: obs.mono,
@@ -1007,16 +1223,49 @@ impl Run {
         }
         self.last_sequence = obs.sequence;
         self.last_mono = obs.mono;
-        obs.amx.validate()?;
         let amx = &self.frozen.amx;
-        if obs.amx.identity != amx.identity
-            || obs.amx.links != amx.links
-            || obs.amx.rows != amx.rows
-            || obs.amx.selected != amx.selected
-        {
-            return Err(Error::runtime(
-                "AMX waveform, source or PSU association changed during the scan.",
-            ));
+        let mut amx_ready = true;
+        if self.settings.axis == AXIS_FREQUENCY {
+            // The period changes at every step: the source, links and duty cycle must not. The
+            // rows disappear for a moment after each frequency write (not ready, not a fault).
+            if obs.amx.identity != amx.identity
+                || obs.amx.links != amx.links
+                || obs.amx.selected != amx.selected
+            {
+                return Err(Error::runtime(
+                    "AMX source or PSU association changed during the scan.",
+                ));
+            }
+            if obs.amx.rows.len() == amx.rows.len() && obs.amx.duty.len() == amx.duty.len() {
+                obs.amx.validate()?;
+                if obs
+                    .amx
+                    .duty
+                    .iter()
+                    .zip(&amx.duty)
+                    .any(|(a, b)| (a - b).abs() > 1.0)
+                {
+                    return Err(Error::runtime(
+                        "AMX duty cycle changed during the frequency scan.",
+                    ));
+                }
+                amx_ready = obs.amx.frequency_hz.is_finite()
+                    && (obs.amx.frequency_hz - self.frequency_expected).abs()
+                        <= 1e-6 * self.frequency_expected;
+            } else {
+                amx_ready = false;
+            }
+        } else {
+            obs.amx.validate()?;
+            if obs.amx.identity != amx.identity
+                || obs.amx.links != amx.links
+                || obs.amx.rows != amx.rows
+                || obs.amx.selected != amx.selected
+            {
+                return Err(Error::runtime(
+                    "AMX waveform, source or PSU association changed during the scan.",
+                ));
+            }
         }
         obs.detector.validate()?;
         let detector = &self.frozen.detector;
@@ -1039,9 +1288,8 @@ impl Run {
         if obs.rails.len() != self.rails.len() || obs.offsets.len() != self.frozen.offsets.len() {
             return Err(Error::runtime("Scan source count changed."));
         }
-        let mut ready = true;
-        let low = self.settings.start.min(self.settings.stop);
-        let high = self.settings.start.max(self.settings.stop);
+        let mut ready = amx_ready;
+        let (low, high) = self.amplitude_range;
         for ((r, frozen), state) in obs
             .rails
             .iter()
@@ -1147,16 +1395,12 @@ impl Run {
         previous: Option<Pending>,
         latest: Option<f64>,
     ) -> Result<()> {
+        let value = self.steps[self.index];
+        let amplitude = self.settings.amplitude_at(value);
         let targets: Vec<_> = self
             .rails
             .iter()
-            .map(|r| {
-                if restore {
-                    r.initial
-                } else {
-                    self.steps[self.index]
-                }
-            })
+            .map(|r| if restore { r.initial } else { amplitude })
             .collect();
         for (r, target) in obs.rails.iter().zip(&targets) {
             if r.busy {
@@ -1173,19 +1417,23 @@ impl Run {
             }
             r.check_current(r.current_limits()?)?;
         }
-        let offsets: Vec<f64> = self
-            .frozen
-            .offsets
-            .iter()
-            .enumerate()
-            .map(|(pair, o)| {
-                if restore {
-                    o.value
-                } else {
-                    self.settings.offset_target(pair, self.steps[self.index])
-                }
-            })
-            .collect();
+        let offsets: Vec<f64> = if restore {
+            self.frozen.offsets.iter().map(|o| o.value).collect()
+        } else if self.settings.map_line() {
+            self.settings
+                .offset_targets(value, self.frozen.offsets.len())
+        } else {
+            (0..self.frozen.offsets.len())
+                .map(|pair| self.settings.offset_target(pair, value))
+                .collect()
+        };
+        let frequency_hz = if self.settings.axis != AXIS_FREQUENCY {
+            None
+        } else if restore {
+            Some(self.frequency_initial)
+        } else {
+            self.settings.frequency_at(value)
+        };
         for (o, &target) in obs.offsets.iter().zip(&offsets) {
             if o.busy {
                 return Err(Error::runtime(
@@ -1211,6 +1459,7 @@ impl Run {
             id: self.command_sequence,
             targets,
             offsets,
+            frequency_hz,
             restore,
             latest_mono: latest,
             previous,
@@ -1287,6 +1536,14 @@ impl Run {
             r.expected = command.targets[j];
         }
         self.offset_expected = ack.offset_values;
+        if let Some(f) = command.frequency_hz {
+            if !(ack.frequency_hz.is_finite() && (ack.frequency_hz - f).abs() <= 1e-6 * f) {
+                return Err(Error::runtime(
+                    "AMX frequency request not acknowledged as commanded.",
+                ));
+            }
+            self.frequency_expected = f;
+        }
         if !command.restore && self.settings.mode == CONTINUOUS {
             self.raw.command_start[self.index] = ack.start_wall;
             self.raw.command_end[self.index] = ack.end_wall;
@@ -1346,8 +1603,22 @@ impl Run {
         }
     }
 
-    fn store(&mut self, window: Pending, samples: &[f64], continuous: bool) {
+    fn store(&mut self, window: Pending, samples: &[f64], signal: &[f64], continuous: bool) {
         let count = samples.len();
+        let readings: Vec<f64> = signal.iter().copied().filter(|v| v.is_finite()).collect();
+        let (signal_mean, signal_sigma) = if readings.is_empty() {
+            (f64::NAN, f64::NAN)
+        } else {
+            let n = readings.len() as f64;
+            let m = readings.iter().sum::<f64>() / n;
+            let sigma = if readings.len() > 1 {
+                (readings.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+                    / n.sqrt()
+            } else {
+                f64::NAN
+            };
+            (m, sigma)
+        };
         let valid = samples.iter().filter(|v| v.is_finite()).count();
         // DMMR records NaN at each recorder tick without a new reading (2026-10-26 lab: about 5 of
         // 66 samples per point, so every point was NaN): average the readings present. An infinite
@@ -1369,6 +1640,8 @@ impl Run {
         let point = Point {
             status: status.to_owned(),
             mean,
+            signal: signal_mean,
+            signal_sigma,
             samples: count,
             finite_samples: valid,
             start: window.start,
@@ -1422,7 +1695,7 @@ impl Run {
             let lo = self.raw.detector_time.partition_point(|t| *t <= p.start);
             let hi = self.raw.detector_time.partition_point(|t| *t <= p.end);
             let samples = self.raw.detector_current[lo..hi].to_vec();
-            self.store(p, &samples, true);
+            self.store(p, &samples, &[], true);
         }
     }
 
@@ -1581,13 +1854,19 @@ impl Run {
                         let hi = obs.detector.times.partition_point(|t| *t <= end);
                         let mut p = self.pending(obs);
                         p.end = end;
-                        self.store(p, &obs.detector.values[lo..hi], false);
-                        self.origin = None;
-                        if self.index + 1 == self.steps.len() {
-                            self.issue(obs, true, None, None)?;
+                        let signal = if obs.detector.signal.len() == obs.detector.times.len() {
+                            obs.detector.signal[lo..hi].to_vec()
                         } else {
-                            self.index += 1;
-                            self.issue(obs, false, None, None)?;
+                            Vec::new()
+                        };
+                        self.store(p, &obs.detector.values[lo..hi], &signal, false);
+                        self.origin = None;
+                        match self.next_index() {
+                            Some(next) => {
+                                self.index = next;
+                                self.issue(obs, false, None, None)?;
+                            }
+                            None => self.issue(obs, true, None, None)?,
                         }
                     } else if obs.mono >= self.deadline + self.settings.settle_timeout {
                         return Err(Error::runtime("Fresh detector data timed out."));
@@ -1664,6 +1943,27 @@ impl Run {
         Ok(())
     }
 
+    /// The next point of a stepped line: the following one, or the measurement-driven choice.
+    fn next_index(&mut self) -> Option<usize> {
+        let Some(stepper) = self.stepper.as_mut() else {
+            return (self.index + 1 < self.steps.len()).then_some(self.index + 1);
+        };
+        let point = &self.points[self.index];
+        stepper.record(self.index, point.signal, point.signal_sigma);
+        let next = stepper.next_index();
+        if next.is_none() {
+            // The line is complete: the points never measured are skipped, not missing.
+            for p in self
+                .points
+                .iter_mut()
+                .filter(|p| p.status == "not acquired")
+            {
+                p.status = "skipped".to_owned();
+            }
+        }
+        next
+    }
+
     /// End of a continuous sweep: restore after the last pass, otherwise approach the next pass's
     /// first amplitude without a cadence deadline and settle, exactly like the first pass.
     fn after_sweep(&mut self, obs: &Observation) -> Result<()> {
@@ -1704,12 +2004,14 @@ impl Run {
         self.error = message.to_owned();
         self.command = None;
         self.phase = Phase::Finished;
-        if let Some((index, p)) = self
-            .points
-            .iter_mut()
-            .enumerate()
-            .find(|(_, p)| p.status == "not acquired")
+        // A measurement-driven line was interrupted at its current point, not at the first one
+        // never measured.
+        let current = (self.stepper.is_some() && self.points[self.index].status == "not acquired")
+            .then_some(self.index);
+        if let Some(index) =
+            current.or_else(|| self.points.iter().position(|p| p.status == "not acquired"))
         {
+            let p = &mut self.points[index];
             p.status = status.to_owned();
             self.updates.push(p.value(index));
         }
@@ -1721,6 +2023,7 @@ impl Run {
         } else if let Some(c) = &self.command {
             json!({"kind": "command", "session": self.session, "action_id": c.id,
                 "targets": c.targets, "offsets": c.offsets, "restore": c.restore,
+                "frequency_hz": c.frequency_hz,
                 "latest_mono": c.latest_mono, "index": self.index,
                 "expected_revisions": self.rails.iter().map(|r| r.revision).collect::<Vec<_>>()})
         } else {
@@ -1758,7 +2061,9 @@ impl Run {
             "rail_i": points.iter().map(|p| floats(&p.currents)).collect::<Vec<_>>(),
             "window_start": points.iter().map(|p| float(p.start)).collect::<Vec<_>>(),
             "window_end": points.iter().map(|p| float(p.end)).collect::<Vec<_>>(),
-            "samples": points.iter().map(|p| vec![p.samples]).collect::<Vec<_>>(),
+                        "samples": points.iter().map(|p| vec![p.samples]).collect::<Vec<_>>(),
+            "signal": points.iter().map(|p| float(p.signal)).collect::<Vec<_>>(),
+            "signal_sigma": points.iter().map(|p| float(p.signal_sigma)).collect::<Vec<_>>(),
             "finite_samples": points.iter().map(|p| vec![p.finite_samples]).collect::<Vec<_>>()});
         if !self.frozen.offsets.is_empty() {
             // One column per rod pair: monitor and commanded target.
