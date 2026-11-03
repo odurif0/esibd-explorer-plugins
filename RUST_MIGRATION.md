@@ -34,6 +34,28 @@ MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
 `f0f4362958fcc84a978c9b030ca90f219537e8c46583af775cb4b139d4832359`.
 
+## v0.5.10 Update (2026-11-04)
+
+The map of Q2 (`docs/quadrupole_optimization_plan.md`, revision 2). Not validated on hardware yet;
+`SOFTWARE_TEST_PLAN.md` lists the checks.
+
+- **Map engine** (`native/worker/src/mscan_map.rs`, in the MScan worker): pure and event-sourced, the
+  journal is the whole state. Plan (TOML, through Python) and live readings → `map_check` (problems,
+  warnings, estimate by simulation), `map_begin`, `map_next`, `map_record` (analysis of each line:
+  peaks with centre, height, FWHM and R from a Gaussian fit, stopping transition, stub profile),
+  `map_report`, `map_simulate`. Stages: references every 5 lines (drift), stopping cut, ladders in k
+  at the design points (closing bracketed to 0.00025, c from it; repeats; (k*, δ*) solved per point;
+  verification; stub cut), laws (c, R_cap(N), signal in f and E), trust-region search in (f, E) with
+  a quadratic or coordinate fallback, Sobol out-of-sample check, local check (a neighbour wins only at
+  equal resolution), best scan repeated with waits. No new dependency; the Q2 simulator (H1, H2, H4,
+  injected faults) drives the Rust tests.
+- **MScan line engine:** explicit points, axes x, extra AMPR channel and AMX frequency at fixed A, the
+  measurement-driven step on the selected module (`detector.signal`), frequency commands acknowledged
+  and confirmed by the decoded AMX period with an unchanged duty cycle. A normal scan is unchanged.
+- **MScan:** group Map, Check/Simulate/Resume/Start map, `_runtime/_map_runner.py` (journal written
+  atomically, faults, spray guard, safe stop, keep-awake, `map.h5`, report and figures), k with five
+  decimals, plan templates in `mscan/plans/`.
+
 ## v0.5.9 Update (2026-11-03)
 
 The 2026-11-03 scans, on v0.5.8, led to these changes. None is validated on hardware yet;

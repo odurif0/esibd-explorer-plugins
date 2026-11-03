@@ -129,7 +129,21 @@ class NativeScanAdapter:
                     offset_resolution=float(getattr(scan, 'offset_resolution', 0.)),
                     offset_minimum=float(getattr(scan, 'offset_minimum', .5)),
                     passes=int(scan._passes()) if hasattr(scan, '_passes') else 1,
-                    metadata=copy.deepcopy(self._plan.get('metadata', {})))
+                    metadata=copy.deepcopy(self._plan.get('metadata', {})),
+                    **self._line_settings())
+
+    def _line_settings(self):
+        """A map line: its explicit points, its axis and its measurement-driven step (else nothing)."""
+        line = getattr(self.scan, '_line', None)
+        if line is None:
+            return {}
+        settings = dict(points=[float(v) for v in line['axis']], axis=line['kind'],
+                        amplitude=float(line.get('amplitude_v') or 0.) if line['kind'] != 'amplitude' else math.nan)
+        if line.get('adaptive'):
+            # A change counts only above 3 sigma of the point means, and never below the DMMR resolution
+            # (1 fA): flat tails stay coarse even where the readings repeat exactly.
+            settings['adaptive'] = dict(coarse=int(line.get('coarse') or 4), sigma=3., fraction=.1, noise_floor=1e-15)
+        return settings
 
     def _bind(self):
         if self._running.is_set():
@@ -171,6 +185,15 @@ class NativeScanAdapter:
                         initialized=bool(controller.initialized and controller.device is not None and amx_registered),
                         on=bool(amx.isOn()), busy=_busy(controller, ('initializing', 'transitioning')),
                         selected=selected, links=links, rows=copy.deepcopy(chosen))
+        if getattr(scan, '_line', None) is not None:
+            # A frequency line waits for the decoded period and checks the duty cycle; the rows
+            # disappear for a moment after each write (not ready, not a fault).
+            try:
+                amx_data['frequency_hz'] = float(scan._frequency_hz(chosen)) if chosen else math.nan
+            except Exception:  # noqa: BLE001 - outputs being decoded again
+                amx_data['frequency_hz'] = math.nan
+            duty = scan._duty_percent(chosen) if chosen else []
+            amx_data['duty'] = [math.nan if d is None else float(d) for d in duty]
         rails = []
         for rail in plan['rails']:
             channel, device = rail['channel'], rail['device']
@@ -204,6 +227,7 @@ class NativeScanAdapter:
         _, since = scan._cadence_epoch(device)
         self._record_raw(times, columns)
         # The DMMR clock, not a module: 0 A where a recorded module has a new reading, NaN elsewhere.
+        signal_index = plan.get('signal_index')
         detector = dict(identity=_identity(device, device.time, *modules) + ':'
                         + ','.join(f'{c.module_address()}={c.name}' for c in modules) + ':' + device.name,
                         name='DMMR', device_name=device.name, module=0,
@@ -215,6 +239,9 @@ class NativeScanAdapter:
                         cadence_since=since if math.isfinite(since) else None,
                         times=[float(v) for v in times],
                         values=[0. if ok else math.nan for ok in valid])
+        if signal_index is not None and 0 <= signal_index < len(columns):
+            # The module a measurement-driven line follows, on the same time axis.
+            detector['signal'] = [float(v) for v in columns[signal_index]]
         offsets = []
         for o in plan.get('offsets') or []:  # Rod pair 1, then pair 2.
             channel, device = o['channel'], o['device']
@@ -355,7 +382,9 @@ class NativeScanAdapter:
         if self._plan['mode'] == self.scan.CONTINUOUS and not action['restore']:
             window_start = getattr(self, '_continuous_begin', None) if action['index'] > 0 else None
             self.scan._require_time_step(self._plan['detectors'], self._plan['average'], window_start)
-        started, ended = self.scan._command(action['targets'], latest=action['latest_mono'], offsets=action['offsets'])
+        frequency = action.get('frequency_hz')
+        started, ended = self.scan._command(action['targets'], latest=action['latest_mono'], offsets=action['offsets'],
+                                            **({} if frequency is None else dict(frequency_hz=float(frequency))))
         end_mono = time.monotonic()
         if self._plan['mode'] == self.scan.CONTINUOUS and not action['restore']:
             self._continuous_begin = started
@@ -363,7 +392,8 @@ class NativeScanAdapter:
                     end_wall=ended, end_mono=end_mono,
                     revisions=[int(r['channel'].voltage_request_revision) for r in self._plan['rails']],
                     values=[float(r['channel'].value) for r in self._plan['rails']],
-                    offset_values=[float(o['channel'].value) for o in self._plan.get('offsets') or []])
+                    offset_values=[float(o['channel'].value) for o in self._plan.get('offsets') or []],
+                    frequency_hz=None if frequency is None else float(frequency))
 
     def _apply_updates(self, status):
         def apply():

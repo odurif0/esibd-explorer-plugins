@@ -175,7 +175,9 @@ PSU range limit (Full range 0.5 A?) bound the high-f end, and so does the AMX HD
 The merit is computed on the mix ions of the **best-scan range** (default 322 to 2722), each with its
 local baseline subtracted and its signal divided by the latest reference (drift):
 
-- S_i: peak area (transmitted ions); R_i: m/Δm at half height.
+- S_i: peak height above the local baseline (the current transmitted at the peak, comparable between
+  amplitude and frequency lines, unlike an area in V or Hz); R_i: m/Δm at half height (Gaussian fit
+  of the points above 30 % of the height).
 - **Best = largest Σ S_i such that R_i ≥ R_target for every ion of the range.** R_target = 40
   (decided 2026-11-03).
 - The laws also give the whole **Pareto front** (largest signal for each resolution), so the best
@@ -362,8 +364,10 @@ laws, the outer search, the checks, the best scan.
 | P1 does not reproduce 2026-11-03 | **safe stop** (instrument changed) |
 | Anything else, or a fault repeated | **safe stop** |
 
-**Safe stop.** RF amplitude, rod pairs, x, stubs, Q1_DC and the AMX frequency are restored to their
-values at Start. The PSU range, Ilim and the ESI are never touched. The cause, the line and the time go
+**Safe stop.** The AMX frequency, Q1_DC, the stubs and MScan's settings are restored to their values
+at Start. The RF amplitude and the rod pairs stay as the last line left them: restored at the end of a
+completed line, held after a line fault, as for any MScan scan (no write after a fault). The PSU range,
+Ilim and the ESI are never touched. The cause, the line and the time go
 to the log and to a status file. Reaping a worker never confirms that an output is off (same rule as the
 plugins).
 
@@ -468,6 +472,17 @@ checks.
 - **Run journal and Resume**, keep-awake for the whole run, disk and memory checks.
 - **Q2 simulator, simulated full run with fault injection and real-time soak test**, as release tests.
 - **Figures** as listed in Section 5 G.
+
+**Built in v0.5.10 (2026-11-04).** The map engine (`native/worker/src/mscan_map.rs`), the line axes
+and the measurement-driven step of the MScan worker, the Map group of MScan and its runner
+(`mscan/_runtime/_map_runner.py`), the plan templates (`mscan/plans/`). Differences from the text
+above: the merit uses peak heights; the solver aims at R_target·(1 + r_noise) and a line reaches
+R_target from R_target·(1 − r_noise) (r_noise = 0.10, the scatter of R on one peak); when no setting
+reaches R_target on every ion, the target becomes 90 % of the highest R reached and the map still ends
+with a best scan; a stopping or stub cut holds the stubs at fixed values (they never stop the ions). In the Q2 simulator the
+full map takes about 40 h when R follows the RF cycles (H4) and about 65 h when R is capped near 45
+(H1): the target is then lowered and the search runs longer. The soak test is `tools/soak_mscan_map.py`.
+See `mscan/README.md`, section Map of Q2.
 
 ## 11. Decided and open
 

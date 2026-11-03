@@ -16,6 +16,8 @@ import importlib.util
 import json
 import math
 from pathlib import Path
+import shutil
+import threading
 from threading import Event
 import sys
 import time
@@ -400,6 +402,10 @@ class MScan(Scan):
     SUPPLY_READBACK = 'PSU readback'
     FILE_LABEL = 'File name'
     SCAN_NOTES = 'Scan notes'  # Not 'Notes': that legacy Explorer key is read as old metadata only.
+    # Map of Q2 (v0.5.10, docs/quadrupole_optimization_plan.md): a plan file run line by line, each line
+    # an ordinary scan of this plugin. The decisions belong to the MScan worker (mscan_map).
+    MAP_PLAN = 'Map plan'
+    MAP_STATUS = 'Map status'
     # Devices whose channels are recorded with each point, as the beam conditions of the scan
     # (user, 2026-11-03: "le suivi de l'ESI est important"): spray HV and current, pressures. Read live from
     # each plugin at every MScan poll, not from Explorer's history: they need not be recording (user choice).
@@ -443,12 +449,13 @@ class MScan(Scan):
         ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
                          FILTER_PREVIEW)),
         ('m/z', (MZ_R0, MZ_ATTENUATION, MZ_AXIS, MZ_SCALE)),
+        ('Map', (MAP_PLAN, MAP_STATUS)),
         ('Live readback', (SUPPLY_READBACK, OFFSET_READBACK, FINAL_VOLTAGES, SAMPLES)),
     )
     GROUP_OF = {key: group for group, keys in LAYOUT if group for key in keys}
     # Read-only rows whose text wraps over several lines.
     WRAPPED = (STATUS, SUPPLIES, FREQUENCY, MODULES, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
-               CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW, MZ_SCALE)
+               CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW, MZ_SCALE, MAP_STATUS)
     SQUARE_WAVE_APEX = .2153  # Largest U/V transmitted by an ideal 50 % square wave (docs/mscan_quadrupole.pdf).
     # Calibrated together on 2026-11-03 (Q2, AMX HD, 400-500 kHz) with the Agilent G2421A tuning mix: the M03 peaks
     # are 622, 922, 1522 and 2122. The band widths at k = 0.20 and the transmission at k = 0.21 give the
@@ -568,6 +575,9 @@ class MScan(Scan):
         self.notes = ''
         self._collapsed_groups = set()  # Groups the operator folded, kept when settings are reloaded.
         self._arranging = False
+        self._line = None  # The map line being measured (a request of the map engine), else None.
+        self._line_map = None
+        self._map_runner = None
         super().__init__(**kwargs)
         self.useDisplayChannel = False  # Every recorded DMMR module is plotted, with a legend.
         self._bridge = _GuiBridge(self)
@@ -701,7 +711,7 @@ class MScan(Scan):
                     'opposite sign. Verified, recorded and restored like pair 1. None: only pair 1 is driven.')
         settings[self.OFFSET_FACTOR] = parameterDict(value=.2, minimum=-100., maximum=100.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_factor', event=self._offset_changed,
-            instantUpdate=False, displayDecimals=4,
+            instantUpdate=False, displayDecimals=5,
             toolTip='k = U/V: ratio of the DC U to the RF amplitude V (here the scanned amplitude A). It sets the '
                     'resolution: for an ideal 50 % square wave nothing is transmitted above about 0.215, and '
                     'm/Δm ≈ 0.157 / (0.2153 − k), about 10 at 0.20 and 30 at 0.21. '
@@ -762,6 +772,14 @@ class MScan(Scan):
                     'or the low-mass cut-off when RF only. m/z = 4 e A / (q r0² (2π f)²), with q the centre of the '
                     'stable band on the scan line a = 2 (U/A) q (docs/mscan_quadrupole.pdf). Theory: exact only once '
                     'r0 is calibrated on a known peak.')
+        settings[self.MAP_PLAN] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='map_plan',
+            toolTip='Plan file (TOML) of a map: mscan/plans/q2_map.toml, q2_check_1h.toml or q2_check_4h.toml, or '
+                    'your own copy. Check validates it against the instrument, Simulate runs it against the Q2 '
+                    'simulator without hardware, Start map runs it line by line with no operator.')
+        settings[self.MAP_STATUS] = parameterDict(value='No map', parameterType=PARAMETERTYPE.LABEL, indicator=True,
+            restore=False, attr='map_status',
+            toolTip='The running map: stage, line, point and what it waits for. The same in status.json of the '
+                    'map folder (<Data path>/MScan/maps/), with its journal, map.h5 and log.')
         order = [key for _, keys in self.LAYOUT for key in keys]
         return {key: settings[key] for key in order}
 
@@ -790,6 +808,19 @@ class MScan(Scan):
         self.settingsMgr.init()
         self.addAction(event=lambda: self.loadSettings(file=None), toolTip='Load msScan settings.', icon=self.makeCoreIcon('blue-folder-import.png'))
         self.addAction(event=lambda: self.saveSettings(file=None), toolTip='Export msScan settings.', icon=self.makeCoreIcon('blue-folder-export.png'))
+        self.mapCheckAction = self.addAction(event=lambda: self._map_action('check'),
+            toolTip='Map: check the plan file against the instrument (what to change before Start).',
+            icon=self.makeCoreIcon('check.png'))
+        self.mapSimulateAction = self.addAction(event=lambda: self._map_action('simulate'),
+            toolTip='Map: run the plan against the Q2 simulator, without hardware (lines and time).',
+            icon=self.makeCoreIcon('chart.png'))
+        self.mapResumeAction = self.addAction(event=lambda: self._map_action('resume'),
+            toolTip='Map: resume a stopped map from its folder (its journal).',
+            icon=self.makeCoreIcon('arrow-circle-315.png'))
+        self.mapAction = self.addStateAction(event=lambda: self._map_action('toggle'),
+            toolTipFalse='Map: start the plan file, line by line, with no operator.', iconFalse=self.makeCoreIcon('clock.png'),
+            toolTipTrue='Map: safe stop (the current line stops like a scan, the settings return to Start).',
+            iconTrue=self.makeCoreIcon('stop.png'))
         self.recordingAction = self.addStateAction(event=self.toggleRecording,
             toolTipFalse='Start the AMX/PSU scan, recording every enabled DMMR module.', iconFalse=self.makeCoreIcon('play.png'),
             toolTipTrue='Stop the scan; hold the last PSU setpoints. HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
@@ -1527,6 +1558,9 @@ class MScan(Scan):
 
     def _plot_axis(self, amplitudes):
         """Abscissa values and label: A, or m/z when chosen and computable for this scan."""
+        if getattr(self, '_line', None) is not None and self._line['kind'] != 'amplitude':
+            name, unit = self._line_axis()
+            return amplitudes, f'{name} ({unit})'
         if getattr(self, 'mz_axis', self.AXIS_AMPLITUDE) == self.AXIS_MZ and len(amplitudes):
             try:
                 inputs = self._mz_inputs(self._scan_metadata())
@@ -1998,6 +2032,8 @@ class MScan(Scan):
         return increment
 
     def _scan_steps(self):
+        if getattr(self, '_line', None) is not None:
+            return np.asarray(self._line['axis'], dtype=float)
         start, stop, step = float(self.start), float(self.stop), self._command_step()
         span = abs(stop - start)
         # Match amplitude_steps' floating-point margin for an aligned endpoint.
@@ -2020,7 +2056,8 @@ class MScan(Scan):
             steps = self._scan_steps()
         except (ScanError, AttributeError, TypeError, ValueError):
             return
-        self.addInputChannel('Amplitude', unit='V', recordingData=steps)
+        name, unit = self._line_axis()
+        self.addInputChannel(name, unit=unit, recordingData=steps)
 
     def addInputChannel(self, name, start=None, stop=None, step=None, unit='V', recordingData=None):
         axis = _Amplitude(parentPlugin=self, name=name, unit=unit, recordingData=recordingData, inout=INOUT.IN)
@@ -2060,6 +2097,7 @@ class MScan(Scan):
         device = modules[0].getDevice()
         plan['detectors'] = modules
         plan['detector_identity'] = (device, [(c.module_address(), c.name) for c in modules])
+        plan['signal_index'] = self._map_signal_index(modules) if getattr(self, '_line', None) is not None else None
         self._cadence_epoch(device)
         plan['detector_interval_ms'] = float(device.interval)
         plan['metadata']['detector'] = dict(
@@ -2142,7 +2180,7 @@ class MScan(Scan):
         """<Data path>/MScan/<date>/<date_time>[_<name>]_PSU-<X>_<from>-<to>V.h5 (user choice 2026-10-26)."""
         now = time.localtime() if now is None else now
         folder = Path(self.pluginManager.Settings.dataPath) / self.FOLDER / time.strftime('%Y-%m-%d', now)
-        span = f'{float(self.start):g}-{float(self.stop):g}V'
+        span = f'{float(self.start):g}-{float(self.stop):g}V' if getattr(self, '_line', None) is None else self._line_span()
         parts = [time.strftime('%Y-%m-%d_%H-%M-%S', now), self._file_label(), self._psu_tag(separator='-').replace(' ', '-'), span]
         stem = '_'.join(part for part in parts if part)
         candidate, n = folder / f'{stem}.h5', 2
@@ -2350,10 +2388,13 @@ class MScan(Scan):
         return rails
 
     def _prepare(self):
-        self._scan_steps()
+        steps = self._scan_steps()
         # Check the *requested endpoints*, even if a non-aligned step would not
         # acquire the last endpoint. Never silently accept an incompatible span.
         low, high = sorted((float(self.start), float(self.stop)))
+        if getattr(self, '_line', None) is not None:
+            low, high = ((float(np.min(steps)), float(np.max(steps))) if self._line['kind'] == 'amplitude'
+                         else (float(self._line['amplitude_v']),) * 2)
         mode, duration = self._timing()
         if not all(math.isfinite(float(v)) and float(v) > 0
                    for v in (self.settling_s, self.settle_timeout, self.voltage_tolerance)):
@@ -2419,6 +2460,8 @@ class MScan(Scan):
             if plugin is not self and isinstance(plugin, Scan) and not plugin.finished:
                 raise ScanError(f'Finish {plugin.name} before starting this coupled scan.')
         offsets = self._offset_plan(low, high)
+        if getattr(self, '_line', None) is not None:
+            offsets = self._map_line_offsets(offsets, steps)
         filter_warning = None
         if offsets and abs(offsets[0]['factor']) >= self._closing_k():
             filter_warning = (f'k = {abs(offsets[0]["factor"]):g} is at or above {self._closing_k():.4g} '
@@ -2459,7 +2502,8 @@ class MScan(Scan):
                                'Commanded on each AMPR channel at each amplitude (rounded to its display precision); '
                                'verified by its setpoint readback and Monitor. offset_v and offset_target have one '
                                'column per pair.'),
-                calibration='Amplitude A in V; m/z, when known, in Validation/mz with its Definition', background_subtracted=False))
+                calibration='Amplitude A in V; m/z, when known, in Validation/mz with its Definition', background_subtracted=False,
+                map_line=None if getattr(self, '_line', None) is None else dict(self._line)))
 
     def _observation(self):
         """GUI-only: immutable readback copy; never performs a hardware read."""
@@ -2468,7 +2512,7 @@ class MScan(Scan):
         if (self._plugin(amx.name) is not amx or amx.controller is not p['amx_controller']
                 or amx.controller.device is not p['amx_backend']
                 or any(str(getattr(amx, attr)) != name for attr, name in p['links'])
-                or self._waveform(amx, p['selected']) != p['waveform']):
+                or not self._same_waveform(amx, p)):
             raise ScanError('AMX waveform, source or PSU association changed during the scan.')
         measured, currents = [], []
         ready = True
@@ -2519,7 +2563,18 @@ class MScan(Scan):
         self._headroom_guard()
         return ready, np.asarray(measured), np.asarray(currents), time.time()
 
-    def _command(self, targets, latest=None, *, offsets=()):
+    def _same_waveform(self, amx, p):
+        """The waveform of the scan; on a frequency line only its duty cycle, while the period changes."""
+        if getattr(self, '_line', None) is None or self._line['kind'] != 'frequency':
+            return self._waveform(amx, p['selected']) == p['waveform']
+        rows = amx.controller.output_rows
+        if not rows or len(rows) != 4:
+            return True  # Decoded again after each frequency write: the engine waits, nothing to compare.
+        duty = self._duty_percent([rows[i] for i in p['selected']])
+        planned = self._duty_percent(json.loads(p['waveform']))
+        return all(a is not None and b is not None and abs(a - b) <= 1. for a, b in zip(duty, planned))
+
+    def _command(self, targets, latest=None, *, offsets=(), frequency_hz=None):
         # Validate *all* sources before the first write. No OFF/ON, ranges or
         # current-limit writes: use the standard Channel.value path only.
         planned, offsets = self._plan.get('offsets') or [], list(offsets or ())
@@ -2547,6 +2602,10 @@ class MScan(Scan):
         if latest is not None and time.monotonic() >= latest:
             raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
         started = time.time()
+        if frequency_hz is not None:
+            if getattr(self, '_line', None) is None or self._line['kind'] != 'frequency':
+                raise ScanError('A frequency command outside a frequency line; no scan command sent.')
+            self._set_map_frequency(float(frequency_hz))
         self._plan['expected'] = list(targets)
         for rail, target in zip(self._plan['rails'], targets):
             rail['channel'].value = target
@@ -2953,6 +3012,346 @@ class MScan(Scan):
                 self.signalComm.scanUpdateSignal.emit(True)
             self._queue_completion(finish)
 
+    # ------------------------------------------------------------------ map (v0.5.10)
+
+    MAP_SETTINGS = ('start', 'stop', 'step', 'scan_mode', 'passes', 'settling_s', 'integration_s', 'offset_factor',
+                    'offset_resolution', 'offset_fixed', 'file_label', 'scan_notes')
+
+    def _map_channels(self):
+        names = {'q1_dc': 'Q1_DC', 'aperture': 'Ap_Q1_Q2', 'stub_entry': 'Stub_Entry_Q2'}
+        names.update((getattr(self, '_line_map', None) or {}).get('channels') or {})
+        return names
+
+    def _line_axis(self):
+        kind = (getattr(self, '_line', None) or {}).get('kind', 'amplitude')
+        if kind == 'offset':
+            return 'Axis potential x', 'V'
+        if kind == 'extra':
+            return self._map_channels()['stub_entry'], 'V'
+        if kind == 'frequency':
+            return 'Frequency', 'Hz'
+        return 'Amplitude', 'V'
+
+    def _line_span(self):
+        axis = np.asarray(self._line['axis'], dtype=float)
+        low, high = float(np.min(axis)), float(np.max(axis))
+        if self._line['kind'] == 'frequency':
+            return f'{low / 1e3:.0f}-{high / 1e3:.0f}kHz'
+        prefix = {'offset': 'x', 'extra': 'stub'}.get(self._line['kind'], '')
+        return f'{prefix}{low:g}-{high:g}V'
+
+    def _map_line_offsets(self, offsets, steps):
+        """The rod pairs over every x of an offset line; the swept channel of an extra line after them."""
+        kind = self._line['kind']
+        if kind == 'offset':
+            amplitude = float(self._line['amplitude_v'])
+            for o in offsets:
+                minimum, maximum = self._offset_bounds(o['channel'], o['controller'])
+                for x in (float(np.min(steps)), float(np.max(steps))):
+                    value = self._offset_value(x, o['sign'], o['factor'], o['resolution'], o['floor'], amplitude)
+                    if not minimum <= value <= maximum:
+                        raise ScanError(f'{o["name"]}: {value:g} V at x = {x:g} V exceeds allowed '
+                                        f'{minimum:g}–{maximum:g} V.')
+        if kind == 'extra':
+            offsets = [*offsets, self._map_extra_plan(self._map_channel(self._map_channels()['stub_entry']), steps)]
+        return offsets
+
+    def _map_extra_plan(self, c, steps):
+        """The AMPR channel an extra line sweeps, checked and confirmed like a rod pair (its targets: the axis)."""
+        self._registered(c)
+        device = c.getDevice()
+        ctrl = device.controller
+        if not all(hasattr(ctrl, field) for field in ('_latest_setpoints', '_setpoint_lock', '_setpoint_cancel')):
+            raise ScanError(f'{c.name}: update MScan and AMPR plugins together; setpoint confirmation required.')
+        if not c.enabled or not manual_control(c) or not device.isOn() or not ctrl.initialized or ctrl.device is None:
+            raise ScanError(f'{c.name}: switch the AMPR channel ON, in manual control, with its AMPR ON.')
+        if any(bool(getattr(ctrl, flag, False)) for flag in ('initializing', 'transitioning', 'ramping')):
+            raise ScanError(f'{c.name}: wait for the AMPR transition to finish.')
+        minimum, maximum = self._offset_bounds(c, ctrl)
+        if float(np.min(steps)) < minimum or float(np.max(steps)) > maximum:
+            raise ScanError(f'{c.name}: {float(np.min(steps)):g}–{float(np.max(steps)):g} V exceeds allowed '
+                            f'{minimum:g}–{maximum:g} V.')
+        initial = self._number(c, 'value', 'setpoint', nonnegative=False)
+        o = dict(channel=c, name=c.name, device=device, controller=ctrl, backend=ctrl.device,
+                 token=ctrl._setpoint_cancel, key=(c.module_address(), c.channel_number()), factor=0., fixed=initial,
+                 resolution=0., floor=0., sign=0., pair=0, initial=initial, expected=initial, requested=initial,
+                 written=False, observed=math.nan, ready=False)
+        state, detail = self._offset_request_state(o)
+        if state != 'confirmed' or not math.isfinite(float(c.monitor)):
+            raise ScanError(f'{c.name}: setpoint {initial:g} V not confirmed by the AMPR ({state}). {detail}'.strip())
+        return o
+
+    def _map_signal_index(self, modules):
+        """The DMMR module of the plan ("detector", e.g. M03) that the measurement-driven step follows."""
+        name = str((getattr(self, '_line_map', None) or {}).get('detector', 'M03')).strip()
+        for j, c in enumerate(modules):
+            number = c.module_address() if callable(getattr(c, 'module_address', None)) else None
+            if c.name == name or c.name.endswith(name) or (number is not None and f'M{int(number):02d}' == name.upper()):
+                return j
+        raise ScanError(f'Map detector {name} is not a recorded DMMR module: enable it, or set "detector" in the plan.')
+
+    def _map_channel(self, name):
+        channel = self.pluginManager.DeviceManager.getChannelByName(name)
+        if channel is None or not self._is_ampr(channel):
+            raise ScanError(f'{name}: no AMPR channel of that name; set [map.channels] in the plan.')
+        return channel
+
+    def _map_frequency_hz(self):
+        amx = self._plugin(self.amx_name)
+        return self._frequency_hz(self._amx_rows(amx, self._selected_outputs()))
+
+    @staticmethod
+    def _map_frequency_writable(amx):
+        controller = getattr(amx, 'controller', None)
+        block = getattr(controller, 'timing_block_reason', None)
+        try:
+            blocked = bool(block()) if callable(block) else False
+            clock = float(getattr(getattr(controller, 'device', None), 'CLOCK', 100e6) or 100e6)
+        except Exception:  # noqa: BLE001 - a missing readback means not writable
+            return False
+        return (callable(getattr(amx, '_set_frequency_setting_value', None))
+                and callable(getattr(amx, 'frequencyChanged', None)) and not blocked and clock == 100e6)
+
+    def _set_map_frequency(self, frequency_hz):
+        """The AMX HD oscillator 0 through its own plugin, which keeps the 50 % duty cycle (GUI thread)."""
+        amx = self._plugin(self.amx_name)
+        if not self._map_frequency_writable(amx):
+            raise ScanError(f'{amx.name}: its frequency cannot be set from MScan (AMX HD on its 100 MHz clock).')
+        if amx._set_frequency_setting_value(round(float(frequency_hz) / 1e3, 6)):
+            amx.frequencyChanged()
+
+    def _map_spray_now(self):
+        """Present ESI current (A) of the spraying channel: the largest ESI current, None without ESI."""
+        best = None
+        for c in self._context_channels():
+            if c.getDevice().name.upper() != 'ESI' or self._channel_unit(c) != 'A':
+                continue
+            value = self._context_reading(c)
+            if math.isfinite(value) and (best is None or abs(value) > abs(best)):
+                best = value
+        return best
+
+    def _map_instrument(self, config, data_path):
+        """Live readings a plan is checked against (GUI thread; reads only)."""
+        self._line_map = config
+        names = self._map_channels()
+        q1, aperture, stub = (self._map_channel(names[key]) for key in ('q1_dc', 'aperture', 'stub_entry'))
+        amx = self._plugin(self.amx_name)
+        selected = self._selected_outputs()
+        frequency = self._frequency_hz(self._amx_rows(amx, selected))
+        rails = self._associated_rails(amx, selected)
+        reading = dict(q1_dc_v=float(q1.value), ap_q1_q2_v=float(aperture.value), x_v=float(self.offset_fixed),
+                       ilim_a=min(float(r['channel'].current_limit_readback) for r in rails),
+                       psu_max_v=min(self._voltage_bounds(r['channel'])[1] for r in rails),
+                       full_range=all(self._rail_headroom(r)[1] is not False for r in rails),
+                       f_hz=frequency, frequency_writable=self._map_frequency_writable(amx),
+                       free_disk_bytes=float(shutil.disk_usage(Path(data_path)).free))
+        with contextlib.suppress(AttributeError, TypeError, ValueError):
+            reading['clock_hz'] = float(getattr(amx.controller.device, 'CLOCK', 100e6) or 100e6)
+        level = float(np.mean([abs(float(r['channel'].monitor)) for r in rails]))
+        current = max(float(r['channel'].current_readback) for r in rails)
+        if level > 50. and math.isfinite(current) and current > 0.:
+            reading['current_per_hz_v'] = current / (frequency * level)
+        pairs = [c for c, _ in self._offset_sources()]
+        if pairs:
+            bounds = [self._offset_bounds(c, c.getDevice().controller) for c in pairs]
+            reading.update(pair_min_v=max(b[0] for b in bounds), pair_max_v=min(b[1] for b in bounds))
+        reading['stub_min_v'], reading['stub_max_v'] = self._offset_bounds(stub, stub.getDevice().controller)
+        reading['q1_max_v'] = self._offset_bounds(q1, q1.getDevice().controller)[1]
+        return reading
+
+    def _map_settings_snapshot(self):
+        return {attr: getattr(self, attr) for attr in self.MAP_SETTINGS}
+
+    def _map_settings_restore(self, snapshot):
+        for attr, value in snapshot.items():
+            if getattr(self, attr) != value:
+                setattr(self, attr, value)
+
+    def _configure_map_line(self, request, config):
+        """The settings of one map line, set like an operator would (GUI thread, between scans)."""
+        if not self.finished:
+            raise ScanError('A scan is running: the map waits for it.')
+        self._line, self._line_map = None, config
+        axis = request['axis']
+        amplitude_line = request['kind'] == 'amplitude'
+        span_low = float(min(axis)) if amplitude_line else float(request['amplitude_v'])
+        name = '-'.join(str(config.get('name', 'map')).split())
+        values = dict(scan_mode=self.STEPPED, passes=1, settling_s=float(config.get('settle_s', .3)),
+                      integration_s=float(config.get('point_s', .8)), offset_factor=float(request['k']),
+                      offset_resolution=float(request['delta_v']),
+                      offset_fixed=float(axis[0] if request['kind'] == 'offset' else request['x_v']),
+                      start=span_low, stop=float(max(axis)) if amplitude_line else span_low + 1.,
+                      file_label=f'{name}-L{int(request["id"]):04d}-{request.get("role", "")}',
+                      scan_notes=(f'Map {config.get("name", "")}, line {request["id"]}: stage {request["stage"]} '
+                                  f'{request["role"]} {request["point"]} {request["variant"]}; '
+                                  f'f {request["f_hz"] / 1e3:g} kHz, E {request["energy_ev"]:g} eV, '
+                                  f'k {request["k"]:g}, delta {request["delta_v"]:g} V, x {request["x_v"]:g} V, '
+                                  f'stub {request["stub_v"]:g} V, Q1_DC {request["q1_dc_v"]:g} V'))
+        for attr, value in values.items():
+            if getattr(self, attr) != value:
+                setattr(self, attr, value)
+        self._line = dict(request)
+
+    def _start_map_line(self):
+        """Start the configured line like the Start button; False when MScan refused it."""
+        if not self.finished or getattr(self, '_line', None) is None:
+            return False
+        self.recordingAction.state = True
+        self.toggleRecording()
+        return not self.finished
+
+    def _stop_map_line(self):
+        if not self.finished:
+            self.recording = False
+
+    def _end_map_line(self):
+        if self.finished:
+            self._line = None
+
+    def _map_line_result(self):
+        """The arrays of the finished line, on its axis (GUI thread)."""
+        validation = self._validation or {}
+        axis = [float(v) for v in self.inputChannels[0].recordingData] if self.inputChannels else []
+        n = len(axis)
+        index = (self._plan or {}).get('signal_index')
+        signal = ([float(v) for v in self.outputChannels[index].recordingData]
+                  if index is not None and index < len(self.outputChannels) else [math.nan] * n)
+        sigma = validation.get('signal_sigma')
+        sigma = [float(v) for v in sigma] if sigma is not None and len(sigma) == n else [math.nan] * n
+        return dict(status=str(validation.get('status', 'error')), error=str(validation.get('error', '')),
+                    axis=axis, signal=signal, sigma=sigma, spray=self._map_spray_points(n), file=str(self.file))
+
+    def _map_spray_points(self, n):
+        context = (self._plan or {}).get('context') or []
+        data = np.asarray((self._validation or {}).get('context', np.empty((n, 0))), dtype=float)
+        best, level = None, -1.
+        for j, c in enumerate(context):
+            if (c.getDevice().name.upper() != 'ESI' or self._channel_unit(c) != 'A' or data.ndim != 2
+                    or j >= data.shape[1] or not np.isfinite(data[:, j]).any()):
+                continue
+            mean = float(np.nanmean(np.abs(data[:, j])))
+            if mean > level:
+                best, level = j, mean
+        return [float(v) for v in data[:, best]] if best is not None else []
+
+    def _show_map_status(self, status):
+        progress = status.get('progress') or {}
+        remaining = progress.get('remaining_s_estimate')
+        text = status.get('message', '')
+        if status.get('state') == 'running' and remaining:
+            text += f' (about {float(remaining) / 3600:.1f} h left)'
+        if self.settingsMgr is not None and self.MAP_STATUS in self.settingsMgr.settings:
+            self.map_status = f'{status.get("state", "")}: {text}'
+        if status.get('state') in ('done', 'stopped') and getattr(self, 'mapAction', None) is not None:
+            self.mapAction.state = False
+            self.print(f'Map {status.get("state")}: {text}', flag=PRINT.WARNING if status['state'] == 'stopped' else PRINT.MESSAGE)
+
+    def _save_map_best_settings(self, best, path):
+        """The best scan as an MScan settings file, to load and repeat it later."""
+        snapshot = self._map_settings_snapshot()
+        cfg = getattr(self, '_line_map', None) or {}
+        low, high = (cfg.get('a_range_v') or [20., 348.])[:2]
+        try:
+            for attr, value in dict(offset_factor=best['k'], offset_resolution=best['delta_v'], offset_fixed=best['x_v'],
+                                    start=float(low), stop=float(high), scan_mode=self.STEPPED, passes=1,
+                                    file_label=f'{cfg.get("name", "map")}-best').items():
+                setattr(self, attr, value)
+            self.settingsMgr.saveSettings(file=Path(path))
+        finally:
+            self._map_settings_restore(snapshot)
+
+    def _map_engine(self, method, *args):
+        """One map call on a short-lived MScan worker; never while a scan holds its own worker."""
+        if getattr(self, '_native_worker', None) is not None:
+            raise ScanError('A scan is running: the map engine waits for it to finish.')
+        worker = _load_native_runtime('_native_worker').NativeWorkerProxy(
+            Path(__file__).resolve().parent, 'mscan', {},
+            log_dir=Path(self.pluginManager.Settings.dataPath) / 'logs' / 'mscan')
+        try:
+            return worker.call_method(method, *args, rpc_timeout_s=900.)
+        finally:
+            worker.close(grace_s=0)
+
+    def _map_runner_instance(self):
+        if self._map_runner is None:
+            runtime = _load_native_runtime('_map_runner')
+            self._map_runner = runtime.MapRunner(self, self._map_engine, data_path=self.pluginManager.Settings.dataPath)
+        return self._map_runner
+
+    def _map_plan_path(self):
+        path = Path(str(getattr(self, 'map_plan', '') or '').strip())
+        if str(path) not in ('', '.') and path.is_file():
+            return path
+        chosen, _ = QFileDialog.getOpenFileName(None, 'Map plan', str(Path(__file__).resolve().parent / 'plans'),
+                                                'Map plan (*.toml)')
+        if not chosen:
+            return None
+        self.map_plan = chosen
+        return Path(chosen)
+
+    def _map_action(self, what):
+        """Check, Simulate, Resume and Start/Stop of a map (GUI thread; the work runs in its own thread)."""
+        runner = self._map_runner_instance()
+        if what == 'toggle' and runner.running:
+            runner.stop()
+            return
+        if runner.running:
+            self.print('A map is running: stop it first.', flag=PRINT.WARNING)
+            return
+        if not self.finished:
+            self.print('Finish the scan before a map.', flag=PRINT.WARNING)
+            if what == 'toggle':
+                self.mapAction.state = False
+            return
+        if what == 'resume':
+            folder = QFileDialog.getExistingDirectory(None, 'Map to resume', str(
+                Path(self.pluginManager.Settings.dataPath) / self.FOLDER / 'maps'))
+            if not folder:
+                return
+            plan = None
+        else:
+            plan = self._map_plan_path()
+            if plan is None:
+                if what == 'toggle':
+                    self.mapAction.state = False
+                return
+            folder = None
+
+        def report(text, flag=PRINT.MESSAGE):
+            self._queue_completion(lambda: self.print(text, flag=flag))
+
+        def work():
+            try:
+                if what == 'check':
+                    result = runner.check(plan)
+                    report(self._map_check_text(result), PRINT.WARNING if result['problems'] else PRINT.MESSAGE)
+                elif what == 'simulate':
+                    result = runner.simulate(plan)
+                    report(f'Map simulated (hypothesis H1): {result["outcome"]}, {len(result["lines"])} lines, '
+                           f'about {result["total_s"] / 3600:.1f} h; {result["reason"]}')
+                else:
+                    folder_used = runner.start(plan, resume=folder)
+                    report(f'Map started in {folder_used}')
+            except Exception as exc:  # noqa: BLE001 - reported, never raised into Qt
+                report(f'Map {what}: {exc}', PRINT.WARNING)
+                if what in ('toggle', 'resume'):
+                    self._queue_completion(lambda: setattr(self.mapAction, 'state', False))
+        if what == 'resume':
+            self.mapAction.state = True
+        threading.Thread(target=work, name=f'MScan map {what}', daemon=True).start()
+
+    @staticmethod
+    def _map_check_text(result):
+        lines = ['Map check: ' + ('ready to start.' if not result['problems'] else 'change this before Start:')]
+        lines += [f'  - {p}' for p in result['problems']]
+        lines += [f'  ! {w}' for w in result['warnings']]
+        estimate = result.get('estimate') or {}
+        if estimate:
+            lines.append(f'  Simulated (H1): {estimate.get("lines", 0)} lines, about '
+                         f'{float(estimate.get("total_s", 0)) / 3600:.1f} h.')
+        return '\n'.join(lines)
+
     @property
     def recording(self):
         return Scan.recording.fget(self)
@@ -3053,7 +3452,9 @@ class MScan(Scan):
             data = np.asarray(channel.getRecordingData(), dtype=float).reshape(passes, n) * self.PICOAMPERE
             with np.errstate(all='ignore'), warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)  # A point not yet measured in any pass.
-                line.set_data(x[:n], np.nanmean(data, axis=0) if passes > 1 else data[0])
+                y = np.nanmean(data, axis=0) if passes > 1 else data[0]
+                shown = np.isfinite(y) if getattr(self, '_line', None) is not None else slice(None)  # Skipped points: no gaps.
+                line.set_data(x[:n][shown], y[shown])
             for k, pass_line in enumerate(display.pass_lines[j * passes:(j + 1) * passes]):
                 pass_line.set_data(x[:n], data[k])
         if not outputs:
@@ -3136,6 +3537,8 @@ class MScan(Scan):
             group.attrs['status'] = self._validation['status']
             group.attrs['error'] = self._validation['error']
             group.attrs['setup'] = json.dumps(self._plan['metadata'], allow_nan=False)
+            if getattr(self, '_line', None) is not None:
+                group.attrs['map_line'] = json.dumps(self._line, allow_nan=False)
             group.attrs['modules'] = json.dumps([c.name for c in self.outputChannels])
             group.attrs['channels'] = ('Every enabled DMMR module is recorded, in the order of modules; no module is a '
                 'reference. Each is averaged over the same windows (start, end] of the DMMR time axis. Samples and '

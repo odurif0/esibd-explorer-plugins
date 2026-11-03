@@ -372,7 +372,7 @@ def test_panel_groups_every_setting_once_without_changing_its_key(mscan_module, 
     placed = [key for _, keys in M.LAYOUT for key in keys]
     assert sorted(placed) == sorted(settings) and len(set(placed)) == len(placed)
     assert list(settings)[0] == M.STATUS and M.STATUS not in M.GROUP_OF
-    assert [group for group, _ in M.LAYOUT] == [None, 'Setup', 'Amplitude scan', 'Mass filter', 'm/z', 'Live readback']
+    assert [group for group, _ in M.LAYOUT] == [None, 'Setup', 'Amplitude scan', 'Mass filter', 'm/z', 'Map', 'Live readback']
     assert all('/' not in key for key in settings)
     assert (M.START, M.OFFSET, M.OFFSET_FIXED) == ('Amplitude from (V)', 'Quadrupole offset', 'Fixed offset')
     assert set(M.LABELS) <= set(settings) and set(M.WRAPPED) <= set(settings)

@@ -1,0 +1,107 @@
+# Q2 map: the full plan of docs/quadrupole_optimization_plan.md (revision 2).
+# MScan: Map plan = this file, then Check, Simulate and Start map. Every key has the value the
+# map engine uses when it is left out; change a copy of this file, not the file itself.
+
+[map]
+name = "q2-map"
+mix = [118.09, 322.05, 622.03, 922.01, 1521.97, 2121.93, 2721.89]  # Agilent G2421A, m/z
+best_scan_range = [322, 2722]   # the merit and R_target apply to the mix ions in this range
+r_target = 40
+r_max = 100                     # highest R the step must resolve (a specification, not a prediction)
+r_noise = 0.10                  # the solver aims at R_target·(1 + r_noise), a line passes at R_target·(1 − r_noise)
+a_range_v = [20, 348]           # every amplitude line (PSU in Full range)
+min_ions_in_line = 2
+reference_every = 5             # one reference window every 5 lines
+spray_window_percent = 20       # around the ESI current at Start
+seed = 1
+detector = "M03"                # the DMMR module the measurement-driven step follows
+point_s = 0.8                   # measurement time per point (s)
+settle_s = 0.3                  # settling time per point (s)
+q2_length_m = 0.15
+max_failures = 3                # the same line failing this many times stops the map
+max_lines = 600
+coarse = 4                      # fine steps per coarse step: coarse A/(2·r_max), fine A/(8·r_max)
+
+[map.bounds]                    # hard limits, checked before Start; the measurement finds the rest
+f_khz = [100, 1000]
+energy_ev = [3, 30]             # x = x_stop − E (x_stop from the stopping cut)
+delta_v = [0, 2]
+stub_below_q1_v = 1
+
+[map.design]                    # first operating points; the outer search adds more
+amplitude = [[500, 26], [500, 12], [500, 5], [300, 26], [300, 9.4], [300, 4.3],
+             [550, 26], [550, 8], [900, 26], [200, 26]]   # (f kHz, E eV)
+frequency = [[110, 26], [110, 8]]                          # (A V, E eV): frequency lines
+
+[map.ladder]
+first_k = 0.200
+distances = [0.005, 0.0025, 0.0012, 0.0006, 0.0003]   # below the expected closing
+finest_k = 0.00025
+beyond_step = 0.0003
+repeats = 2
+max_lines = 14
+
+[map.stub]                      # Stub_Entry_Q2 = x + s·(Ap_Q1_Q2 − x)
+s = 0.42
+cut_from_x_v = -10
+cut_to_q1_v = -2
+cut_step_v = 1
+significant = 0.10
+
+[map.follow]                    # other AMPR channels, as offsets from x, restored at the end
+Stub_Exit_Q2 = -15.0
+
+[map.channels]
+q1_dc = "Q1_DC"
+aperture = "Ap_Q1_Q2"
+stub_entry = "Stub_Entry_Q2"
+
+[map.stopping]
+f_khz = 500
+k = 0.200
+ions = [922.01, 2121.93]
+x_from_v = 25
+x_to_v = 45
+x_step_v = 0.25
+q1_shift_v = 2
+repeats = 2
+
+[map.reference]
+f_khz = 500
+k = 0.200
+energy_ev = 26
+ion = 922.01
+window = 0.10
+
+[map.outer]
+max_ladders = 6
+radius = 0.08                   # trust region in log10 of f and E
+
+[map.validation]
+points = 10
+pass = 8
+
+[map.local]
+f_rel = 0.10
+e_rel = 0.25
+stub_v = 2
+k = 0.0005
+delta_v = 0.25
+repeats = 2
+
+[map.best]
+repeats = 5
+spacing_s = 3600
+
+[map.calibration]               # starting values (2026-11-03); the map measures c itself
+c = 0.978
+r0_mm = 2.625
+u_min_v = 0.5
+
+[map.stages]
+stopping = true
+design = true
+search = true
+validation = true
+local = true
+best = true

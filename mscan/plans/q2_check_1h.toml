@@ -1,0 +1,23 @@
+# First step on the instrument (about 1 h): the stopping cut and the start of the P1 ladder.
+# Every key left out takes the value of q2_map.toml.
+
+[map]
+name = "q2-check-1h"
+max_lines = 40
+
+[map.design]
+amplitude = [[500, 26]]
+frequency = []
+
+[map.ladder]
+repeats = 0
+max_lines = 4
+
+[map.stopping]
+repeats = 1
+
+[map.stages]
+search = false
+validation = false
+local = false
+best = false
