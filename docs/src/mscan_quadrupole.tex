@@ -29,8 +29,8 @@
 
 \section{Scope}
 MScan sweeps the RF amplitude $A$ of one AMX output (CH0-CH1 or CH2-CH3) and, optionally, the DC of
-the two rod pairs through two AMPR channels. At each amplitude it averages the current of a DMMR
-module (the ion collector) and saves current versus $A$. It does not change the AMX frequency, duty
+the two rod pairs through two AMPR channels. At each amplitude it averages the current of every
+enabled DMMR module, the ion collector among them, and saves current versus $A$ for each. It does not change the AMX frequency, duty
 cycle or routing, and it does not convert $A$ to $m/z$: the file states
 \texttt{calibration: None; amplitude in V, not m/z}.
 
@@ -195,6 +195,12 @@ with its peak at 300\,V and $\delta=1$\,V: transmitted from 0 to 4.72\,V with $\
   $\SI{12}{mA} + \SI{0.565}{mA/V}\times A$ per rail, i.e.\ \SI{153}{mA} at 250\,V. With
   $I_\text{lim}=\SI{200}{mA}$ the amplitude cannot exceed about 333\,V at 500\,kHz, even with the PSU
   range switched on. The current scales with $f$: about \SI{97}{mA} at 300\,kHz and 250\,V.
+\item PSU headroom (PSU\_A in Half range, lab 2026-11-03): output + dropout fell from 256\,V at 0\,mA
+  to about 248.5\,V at 150\,mA, so the rails could not regulate above about 248\,V and a 50--300\,V
+  scan stopped at 250\,V. MScan now refuses a scan above output + dropout $-$ 2\,V, stops at once when
+  a rail has lost its headroom, and flags points measured with less than 2\,V
+  (\texttt{low\_headroom}). Full range raises the internal supply; check the dropout and the PSU
+  temperature at the highest amplitude.
 \item The scan law is applied by two instruments (PSU and AMPR) that must agree to better than 1\,\%
   in ratio near the apex. Rectangular-wave (digital) quadrupoles can instead keep the amplitude and
   the DC fixed and sweep the frequency: $U/A$ is then constant by construction and $m/z\propto1/f^2$.

@@ -68,29 +68,29 @@ def test_interval_change_uses_only_fresh_samples_without_erasing_history(mscan_r
     d.interval = 1000
     d.time.data = [8., 9., 10.]
     c.values.data = [2., 2., 2.]
-    assert s._detector_cadence(c)['minimum_time_step_s'] == 1.
+    assert s._detector_cadence([c])['minimum_time_step_s'] == 1.
     d.interval = 100
     with pytest.raises(mscan_rig.module.ScanError, match='two.*samples.*interval change'):
-        s._detector_cadence(c)
+        s._detector_cadence([c])
     d.time.data.append(10.1)
     c.values.data.append(2.)
     wall[0] = 10.1
     with pytest.raises(mscan_rig.module.ScanError, match='two.*samples.*interval change'):
-        s._detector_cadence(c)
+        s._detector_cadence([c])
     d.time.data.append(10.2)
     c.values.data.append(2.)
     wall[0] = 10.2
-    cadence = s._detector_cadence(c)
+    cadence = s._detector_cadence([c])
     assert cadence['minimum_time_step_s'] == .1
     assert cadence['sample_count'] == 2
     assert d.time.data[:3] == [8., 9., 10.]
-    # A second module shares the edit epoch, not the first module's speed.
+    # Another module shares the edit epoch: on its own, its old readings do not count after the edit.
     other = NS(**vars(c))
     other.name = 'Detector5'
     other.module_address = lambda: 5
     other.getValues = lambda **kw: np.array([1., 1., 1., np.nan, 1.])
     with pytest.raises(mscan_rig.module.ScanError, match='two.*samples.*interval change'):
-        s._detector_cadence(other)
+        s._detector_cadence([other])
 
 
 def test_nan_recorder_ticks_after_interval_edit_are_not_new_cadence(mscan_rig, monkeypatch):
@@ -99,15 +99,15 @@ def test_nan_recorder_ticks_after_interval_edit_are_not_new_cadence(mscan_rig, m
     monkeypatch.setattr(mscan_rig.module, 'time', NS(time=lambda: wall[0]))
     d.interval = 1000
     d.time.data, c.values.data = [8., 9., 10.], [1., 1., 1.]
-    s._detector_cadence(c)
+    s._detector_cadence([c])
     d.interval = 100
     with pytest.raises(mscan_rig.module.ScanError):
-        s._detector_cadence(c)
+        s._detector_cadence([c])
     wall[0] = 10.3
     d.time.data += [10.1, 10.2, 10.3]
     c.values.data += [np.nan, 1., np.nan]
     with pytest.raises(mscan_rig.module.ScanError, match='two.*samples'):
-        s._detector_cadence(c)
+        s._detector_cadence([c])
     assert len(d.time.data) == 6
 
 
@@ -118,15 +118,15 @@ def test_recovery_gap_stays_in_cadence_until_replaced_by_real_finite_replies(msc
     d.interval = 100
     d.time.data = [9.6, 9.7, 9.8, 9.9, 10.]
     c.values.data = [1., np.nan, np.nan, np.nan, 2.]
-    assert s._detector_cadence(c)['minimum_time_step_s'] == .4
+    assert s._detector_cadence([c])['minimum_time_step_s'] == .4
     with pytest.raises(mscan_rig.module.ScanError, match='Time step must be at least'):
-        s._require_time_step(c, .1)
+        s._require_time_step([c], .1)
     original = list(c.values.data)
     for index in range(1, 22):
         wall[0] = 10. + index * .1
         d.time.data.append(wall[0])
         c.values.data.append(2.)
-    assert s._detector_cadence(c)['minimum_time_step_s'] == .1
+    assert s._detector_cadence([c])['minimum_time_step_s'] == .1
     np.testing.assert_equal(c.values.data[:5], original)
     assert not any(p.writes for p in mscan_rig.psus)
 
@@ -136,6 +136,6 @@ def test_missing_reply_after_recovery_cannot_advance_a_scan_window(mscan_rig, mo
     monkeypatch.setattr(mscan_rig.module, 'time', NS(time=lambda: 10.2))
     d.interval = 100
     d.time.data, c.values.data = [9.9, 10., 10.1, 10.2], [1., 1., np.nan, np.nan]
-    with pytest.raises(mscan_rig.module.ScanError, match='no new valid DMMR sample'):
-        s._require_time_step(c, .1, window_start=10.)
+    with pytest.raises(mscan_rig.module.ScanError, match='no new valid sample'):
+        s._require_time_step([c], .1, window_start=10.)
     assert not any(p.writes for p in mscan_rig.psus)

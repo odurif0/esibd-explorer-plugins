@@ -101,6 +101,7 @@ def test_native_adapter_completion_owner_preserves_point_updates(mscan_module, m
                                window_start=np.full(2, np.nan), window_end=np.full(2, np.nan),
                                samples=np.zeros((2, 1), dtype=int), finite_samples=np.zeros((2, 1), dtype=int)),
               outputChannels=[NS(recordingData=np.full(2, np.nan))],
+              _module_values=lambda start, end: [(13., 2, 2)], _store_headroom=lambda *args: None,
               _gui=lambda action, **kwargs: action(),
               signalComm=NS(updateRecordingSignal=NS(emit=lambda value: notifications.append(('recording', value))),
                             scanUpdateSignal=NS(emit=lambda value: notifications.append(('update', value)))))
@@ -140,47 +141,52 @@ def test_native_adapter_completion_owner_preserves_point_updates(mscan_module, m
         adapter.run()
         assert scan._validation['status'] == 'completed'
         assert scan._plan['metadata'] == {'native': True}
-        assert scan.outputChannels[0].recordingData.tolist() == [13., 15.]
+        # The engine's data is the DMMR clock: module columns come from the point updates only.
+        assert scan.outputChannels[0].recordingData[0] == 13.
+        assert np.isnan(scan.outputChannels[0].recordingData[1])
     expected = [('recording', False), ('update', True)] if emit_completion is None else []
     assert notifications == expected
     assert not adapter._running.is_set()
 
 
-def test_native_updates_and_completion_keep_the_extra_dmmr_modules(mscan_module, monkeypatch):
-    # 2026-10-26: every enabled DMMR module is recorded; the native engine counts the reference only.
+def test_native_updates_fill_every_dmmr_module_over_the_engine_windows(mscan_module, monkeypatch):
+    # 2026-10-26: every enabled DMMR module is recorded. 2026-11-03: none is a reference; the
+    # engine times the windows on the DMMR clock and every module is averaged here.
     from threading import Event
     import numpy as np
 
     windows = []
-    def extra_values(start, end):
+    def module_values(start, end):
         windows.append((start, end))
-        return [(7e-12, 3, 2)]
-    scan = NS(_cancel=Event(), _plan={'metadata': {}, 'extra_detectors': ['DMMR_M05']},
+        return [(13e-12, 5, 4), (7e-12, 5, 2)]
+    scan = NS(_cancel=Event(), _plan={'metadata': {}, 'detectors': ['DMMR_M03', 'DMMR_M05']},
               _validation=dict(status='running', error='', point_status=['not acquired'] * 2,
                                rail_v=np.full((2, 1), np.nan), rail_i=np.full((2, 1), np.nan),
                                window_start=np.full(2, np.nan), window_end=np.full(2, np.nan),
                                samples=np.zeros((2, 2), dtype=int), finite_samples=np.zeros((2, 2), dtype=int)),
               outputChannels=[NS(recordingData=np.full(2, np.nan)), NS(recordingData=np.full(2, np.nan))],
-              _extra_values=extra_values, _gui=lambda action, **kwargs: action(),
+              _module_values=module_values, _store_headroom=lambda *args: None, _gui=lambda action, **kwargs: action(),
               signalComm=NS(updateRecordingSignal=NS(emit=lambda value: None), scanUpdateSignal=NS(emit=lambda value: None)))
     adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, lambda *a: None, emit_completion=False)
     adapter._bind()
     adapter._apply_updates(dict(state='acquiring', status='running', updates=[
-        dict(index=0, mean=13e-12, rail_v=[10.], rail_i=[.1], window_start=1., window_end=2.,
-             samples=5, finite_samples=4, status='acquired')]))
+        dict(index=0, mean=0., rail_v=[10.], rail_i=[.1], window_start=1., window_end=2.,
+             samples=5, finite_samples=5, status='acquired')]))
     assert windows == [(1., 2.)]
-    assert scan.outputChannels[1].recordingData[0] == 7e-12
-    assert scan._validation['samples'][0].tolist() == [5, 3]
+    assert [c.recordingData[0] for c in scan.outputChannels] == [13e-12, 7e-12]
+    assert scan._validation['samples'][0].tolist() == [5, 5]
     assert scan._validation['finite_samples'][0].tolist() == [4, 2]
     monkeypatch.setattr(adapter, 'start', adapter._running.set)
     monkeypatch.setattr(adapter, 'step', adapter._running.clear)
-    monkeypatch.setattr(adapter, 'export_result', lambda: dict(data=[13e-12, 15e-12], metadata={},
+    # Point 1 closed without a published update: filled from its window at completion.
+    monkeypatch.setattr(adapter, 'export_result', lambda: dict(data=[0., 0.], metadata={},
         validation=dict(status='completed', error='', point_status=['acquired'] * 2,
-                        samples=[[5], [6]], finite_samples=[[4], [6]])))
+                        window_start=[1., 2.], window_end=[2., 3.], samples=[5, 6], finite_samples=[5, 6])))
     adapter.run()
-    assert scan._validation['samples'].tolist() == [[5, 3], [6, 0]]
-    assert scan._validation['finite_samples'].tolist() == [[4, 2], [6, 0]]
-    assert scan.outputChannels[1].recordingData[0] == 7e-12
+    assert windows == [(1., 2.), (2., 3.)]
+    assert scan._validation['samples'].tolist() == [[5, 5], [5, 5]]
+    assert scan._validation['finite_samples'].tolist() == [[4, 2], [4, 2]]
+    assert [c.recordingData.tolist() for c in scan.outputChannels] == [[13e-12, 13e-12], [7e-12, 7e-12]]
 
 
 @pytest.mark.parametrize(('native_confirmation', 'native_revision', 'python_confirmation'),
@@ -213,7 +219,7 @@ def test_native_prewrite_rejects_hardware_change_after_point_update(mscan_rig, n
                                          window_start=1., window_end=2., samples=2, finite_samples=2, status='acquired')])
     published = []
     def change_hardware_after_point(done):
-        assert done is False and scan.outputChannels[0].recordingData[0] == 10.
+        assert done is False and scan._validation['rail_v'][0].tolist() == [10., 10.]
         channel._value = channel.monitor = channel.voltage_setpoint_readback = 10.001
         published.append(done)
     scan.signalComm.scanUpdateSignal.emit = change_hardware_after_point
@@ -792,7 +798,8 @@ def run(scenario, target, app_holder=None):
                     full_range={'enabled': self.ranges[i], 'supported': True}) for i in (0, 1)])
         def get_channel_measurements(self, channel, **kw):
             current = self.currents[channel] / 2 if self.forced_current is None else self.forced_current
-            return self.voltages[channel] - .1 - self.drop_voltage, current, 15.
+            # Third value: dropout, i.e. internal supply (400 V here) minus output, as GetPSUData reports it.
+            return self.voltages[channel] - .1 - self.drop_voltage, current, 400. - self.voltages[channel]
     hw = controller.device = Hardware()
     hw.enabled, hw.outputs, hw.interlocks = True, (True, True), (True, True)
     hw.voltages, hw.currents = {0: 100., 1: 110.}, {0: .001, 1: .001}
@@ -813,7 +820,7 @@ def run(scenario, target, app_holder=None):
     detector.initGUI({'Name': 'DMMR_M03', 'Module': '3'})
     detector.values = core.DynamicNp(max_size=100000)
     if scenario == 'multi-dmmr':
-        # A second enabled module of the same DMMR, recorded over the reference module's windows.
+        # A second enabled module of the same DMMR, recorded over the same windows.
         second = dmmr.DMMRChannel(detector_device, detector_device.tree)
         detector_device.tree.addTopLevelItem(second)
         detector_device.channels.append(second)
@@ -898,30 +905,29 @@ def run(scenario, target, app_holder=None):
         else:
             assert scan.notes == unicode_note
             assert scan.start == 63.5
-            assert scan.detector_module == 'Module 3 — DMMR_M03'
-            assert scan._detector() is detector
+            assert 'DMMR module' not in scan.settingsMgr.settings  # A former selection is ignored.
+            assert scan._modules() == [detector]
         manager.loading = manager.Settings.loading = False
         scan.amx_name, scan.amx_outputs = 'AMX_A', 'CH2-CH3'
         scan.start, scan.stop, scan.step = 72.5, 122.5, 2.5
         scan.settling_s, scan.integration_s = .4, 2.5
-        scan.detector_module = 'Module 3 — DMMR_M03'
         scan.settingsMgr.saveSettings(useDefaultFile=True)
         parsed = configparser.ConfigParser(interpolation=None)
         parsed.read(settings_file, encoding='utf-8-sig')
         assert parsed['External metadata']['Value'] == unicode_note
-        assert parsed['DMMR module']['Value'] == 'Module 3 — DMMR_M03'
+        assert scenario == 'windows-save' or parsed['DMMR module']['Value'] == 'Module 3 — DMMR_M03'  # kept, unused
         assert parsed['Info']['Plugin'] == 'MScan Settings'
         scan.settingsMgr.loadSettings(useDefaultFile=True)
         assert (scan.start, scan.stop, scan.step) == (72.5, 122.5, 2.5)
         assert (scan.settling_s, scan.integration_s) == (.4, 2.5)
         assert scan.amx_name == 'AMX_A' and scan.amx_outputs == 'CH2-CH3'
-        assert scan._detector() is detector
+        assert scan._modules() == [detector]
         exported = target / 'Réglages “copie”.INI'
         exported.write_bytes(settings_file.read_bytes())
         imported_bytes = exported.read_bytes()
         scan.loadSettings(file=exported)
         assert exported.read_bytes() == imported_bytes
-        assert scan._detector() is detector
+        assert scan._modules() == [detector]
         # Invalid UTF-8 must not discard settings or overwrite the source file.
         broken = target / 'broken.ini'
         broken.write_bytes(b'[Notes]\nValue = bad \xff\n')
@@ -971,10 +977,12 @@ def run(scenario, target, app_holder=None):
     scan.passes = passes
     scan.loading = False
     scan._refresh_interface()
-    measured = scan.settingsMgr.settings[scan.DETECTOR]
-    assert measured.text(0) == 'DMMR module'
-    assert measured.fixedItems
-    assert measured.value == scan.NO_SIGNAL
+    # Every enabled DMMR module is recorded; none is chosen (user request 2026-11-03).
+    recorded = scan.settingsMgr.settings[scan.MODULES]
+    assert recorded.text(0) == 'DMMR modules' and recorded.parent().text(0) == 'Setup'
+    assert recorded.value.splitlines()[0] == ('M3 DMMR_M03, M5 DMMR_M05' if scenario == 'multi-dmmr'
+                                              else 'M3 DMMR_M03'), recorded.value
+    assert 'DMMR module' not in scan.settingsMgr.settings
     # Panel layout (user request 2026-11-03): Status first, next to Start, then four open groups.
     tree, named = scan.settingsTree, scan.settingsMgr.settings
     assert tree.indexOfTopLevelItem(named[scan.STATUS]) == 0
@@ -986,14 +994,6 @@ def run(scenario, target, app_holder=None):
     assert named[scan.FILTER_PREVIEW].value.startswith('No rod pair selected')
     if not start_button.isEnabled():  # A greyed Start says why, without scrolling to Status.
         assert scan.scan_status in start_button.toolTip(), (scan.scan_status, start_button.toolTip())
-    assert 'Module 3 — DMMR_M03' in measured.items
-    assert not any('PSU' in item for item in measured.items)
-    assert 'Detector' not in measured.items
-    # Actual keyboard selection, without adding/editing an item by hand.
-    measured.combo.setFocus()
-    QTest.keyClick(measured.combo, Qt.Key.Key_Home)
-    QTest.keyClick(measured.combo, Qt.Key.Key_Down)
-    assert measured.value == 'Module 3 — DMMR_M03'
     pairs = scan.settingsMgr.settings[scan.OUTPUTS]
     assert pairs.items == [scan.NO_PAIR, 'CH0-CH1', 'CH2-CH3']
     assert 'CH0-CH3' not in pairs.items
@@ -1086,7 +1086,7 @@ def run(scenario, target, app_holder=None):
         assert scan.scan_status == 'Ready to scan', scan.scan_status
         assert start_button.isEnabled()
         assert 'Time step ≥ 0.1 s' in scan.settingsMgr.settings[scan.CADENCE].value
-        measured.combo.setCurrentText('Module 5 — DMMR_M05')
+        detector.values = history([1e-12, np.nan, 1e-12, np.nan, 1e-12])  # Both silent on the same ticks.
         scan._refresh_interface()
         assert 'Time step must be at least 0.2 s' in scan.scan_status, scan.scan_status
         assert not start_button.isEnabled()
@@ -1110,9 +1110,9 @@ def run(scenario, target, app_holder=None):
         assert 'after DMMR interval change' in scan.scan_status, scan.scan_status
         assert not start_button.isEnabled()
         detector_device.interval = 10
-        slow.values = history([np.nan] * 5)
+        slow.values = detector.values = history([np.nan] * 5)
         scan._refresh_interface()
-        assert 'two valid recorded DMMR samples' in scan.scan_status, scan.scan_status
+        assert 'two valid recorded samples' in scan.scan_status, scan.scan_status
         assert not start_button.isEnabled()
         assert hw.calls == before_calls
         scan.closeGUI()
@@ -1157,7 +1157,7 @@ def run(scenario, target, app_holder=None):
             assert start_button.text() == 'Start scan'
         check_status('Ready to scan')
         detector_device.recording = False
-        check_status('DMMR_M03: start detector recording')
+        check_status('DMMR: start recording')
         sources_widget.hide()
         plot_widget.hide()
         window.resize(400, 600)
@@ -1171,14 +1171,14 @@ def run(scenario, target, app_holder=None):
         inputs, outputs = list(scan.inputChannels), list(scan.outputChannels)
         detector_device.recording = True
         detector_device.controller.acquiring = False
-        check_status('DMMR_M03: start detector acquisition')
+        check_status('DMMR_M03: start DMMR acquisition')
         detector_device.controller.acquiring = True
         detector_device.controller.initialized = False
-        check_status('DMMR_M03: initialize the detector')
+        check_status('DMMR_M03: initialize the DMMR')
         detector_device.controller.initialized = True
         detector_device.loading = True
         detector.enabled = False
-        check_status('DMMR_M03: enable the detector channel')
+        check_status('Enable at least one DMMR module')  # The only module, disabled: nothing to record.
         detector.enabled = True
         detector_device.loading = False
         amx.isOn = lambda: False
@@ -1225,7 +1225,7 @@ def run(scenario, target, app_holder=None):
         # Readiness recovers on the actual timer, without clicking Start again.
         detector_device.recording = False
         QTest.qWait(650)
-        assert 'start detector recording' in scan.scan_status
+        assert 'DMMR: start recording' in scan.scan_status
         detector_device.recording = True
         QTest.qWait(650)
         assert 'Ready to scan' in scan.scan_status
@@ -1334,7 +1334,7 @@ def run(scenario, target, app_holder=None):
             for new, old in ((scan.START, 'From'), (scan.STOP, 'To'), (scan.STEP, 'Step'), (scan.OUTPUTS, 'AMX outputs')):
                 config[old] = dict(config[new])
                 del config[new]
-            for key in (scan.DETECTOR, scan.SETTLING, scan.INTEGRATION):
+            for key in (scan.SETTLING, scan.INTEGRATION):
                 del config[key]
             config['AMX outputs']['Value'] = 'CH0-CH3'
             config['AMX outputs']['Default'] = 'CH0-CH3'
@@ -1350,7 +1350,7 @@ def run(scenario, target, app_holder=None):
                 group = f['MScan/Settings']
                 for new, old in ((scan.START, 'From'), (scan.STOP, 'To'), (scan.STEP, 'Step'), (scan.OUTPUTS, 'AMX outputs')):
                     group.move(new, old)
-                for key in (scan.DETECTOR, scan.SETTLING, scan.INTEGRATION):
+                for key in (scan.SETTLING, scan.INTEGRATION):
                     del group[key]
                 group['AMX outputs'].attrs['Value'] = 'CH0-CH3'
                 group['AMX outputs'].attrs['Default'] = 'CH0-CH3'
@@ -1364,10 +1364,7 @@ def run(scenario, target, app_holder=None):
         scan.loadSettings(file=legacy)
         assert legacy.read_bytes() == original_file  # importing is strictly read-only
         assert scan.settling_s == .025 and scan.integration_s == .055
-        measured = scan.settingsMgr.settings[scan.DETECTOR]
-        assert measured.value == 'Module 3 — DMMR_M03'
-        assert measured.fixedItems and measured.text(0) == 'DMMR module'
-        assert not {'Detector', 'MissingOldDetector'}.intersection(measured.items)
+        assert scan._modules() == [detector] and 'Display' not in scan.settingsMgr.settings  # 'Display' is ignored.
         assert scan.start == 60. and scan.stop == 80. and scan.step == 10.
         pairs = scan.settingsMgr.settings[scan.OUTPUTS]
         assert 'CH0-CH3' not in pairs.items and scan.amx_outputs == scan.NO_PAIR
@@ -1377,16 +1374,11 @@ def run(scenario, target, app_holder=None):
         assert scan.outputChannels[0].sourceChannel is detector
         assert scan.settingsMgr.settings[scan.START].text(0) == 'Amplitude from (V)'
     if scenario == 'interface':
-        # Placeholder, removed channel, duplicate name, and recording stopped:
-        # each must block, with no PSU command and no fallback detector.
-        measured.value = scan.NO_SIGNAL
-        assert not scan.initScan() and 'Select a DMMR module' in scan.scan_status
-        measured.value = 'Module 3 — DMMR_M03'
+        # No DMMR module, a duplicate name, and recording stopped: each must block, with no PSU command.
         detector_device.channels.remove(detector)
         scan._refresh_interface()
-        assert measured.value == 'Module 3 — DMMR_M03'
-        assert 'missing/ambiguous' in measured.combo.itemData(measured.combo.currentIndex(), Qt.ItemDataRole.ToolTipRole)
-        assert not scan.initScan() and 'unavailable' in scan.scan_status
+        assert 'No DMMR module discovered' in scan.settingsMgr.settings[scan.MODULES].value
+        assert not scan.initScan() and 'No DMMR module discovered' in scan.scan_status
         detector_device.channels.append(detector)
         detector_device.loading = True
         other = dmmr.DMMRChannel(detector_device, detector_device.tree)
@@ -1395,16 +1387,11 @@ def run(scenario, target, app_holder=None):
         detector_device.channels.append(other)
         detector_device.loading = False
         scan._refresh_interface()
-        assert not scan.initScan() and 'ambiguous' in scan.scan_status
+        assert not scan.initScan() and 'share the name DMMR_M03' in scan.scan_status
         other.name = 'DMMR_M05'
         other.module = 5
         scan._refresh_interface()
-        assert 'Module 5 — DMMR_M05' in measured.items, (measured.items, other.name, scan.finished, scan.recording,
-            scan.loading, scan.settingsMgr.loading, manager.loading, [c.name for c in dm.channels()])
-        assert measured.value == 'Module 3 — DMMR_M03'
-        # Being a choice in the combo acquires nothing before a scan; during a scan every
-        # enabled module is recorded over the reference module's windows.
-        assert len(other.values.get()) == 0
+        assert scan.settingsMgr.settings[scan.MODULES].value.splitlines()[0] == 'M3 DMMR_M03, M5 DMMR_M05'
         detector_device.recording = False
         assert not scan.initScan() and 'recording' in scan.scan_status
         detector_device.recording = True
@@ -1789,7 +1776,8 @@ def run(scenario, target, app_holder=None):
             for i, (start, end) in enumerate(zip(validation['window_start'], validation['window_end'])):
                 if np.isfinite(start):
                     selected = currents[(times > start) & (times <= end)]
-                    assert scan.outputChannels[0].recordingData[i] == pytest.approx(np.mean(selected), rel=1e-12)
+                    assert scan.outputChannels[0].recordingData[i] == pytest.approx(np.mean(selected), rel=1e-12), (
+                        i, scan.outputChannels[0].recordingData[i], selected.ravel().tolist())
         values = scan.outputChannels[0].recordingData.copy()
         scan.loadData(scan.file)
         assert scan.scan_mode == scan.CONTINUOUS
@@ -1890,14 +1878,14 @@ def run(scenario, target, app_holder=None):
         scan._refresh_interface()
         assert scan.scan_status == running_status and start_button.isEnabled()
         detector_device.recording = True
-    # Every enabled module of the DMMR is recorded, the selected reference first (2026-10-26).
+    # Every enabled module of the DMMR is recorded, by module number (2026-10-26, no reference since 2026-11-03).
     assert [c.name for c in scan.outputChannels] == (['DMMR_M03', 'DMMR_M05'] if scenario in ('multi-dmmr', 'interface')
                                                    else ['DMMR_M03'])
     assert scan.channelTree is None and scan.inputChannelGroupItem is None
     assert 'PSU_A' in scan.settingsMgr.settings[scan.SUPPLIES].value
     assert 'CH0 = CH1 = A' in scan.settingsMgr.settings[scan.SUPPLIES].value
     assert '500 kHz' in scan.settingsMgr.settings[scan.FREQUENCY].value
-    for key in (scan.DETECTOR, scan.AMX, scan.OUTPUTS):
+    for key in (scan.AMX, scan.OUTPUTS):
         assert not scan.settingsMgr.settings[key].getWidget().isEnabled()
     for key in (scan.START, scan.INTEGRATION):
         assert scan.settingsMgr.settings[key].getWidget().isReadOnly()
@@ -2009,22 +1997,24 @@ def run(scenario, target, app_holder=None):
             assert scan.display.axes[0].get_ylabel() == 'Current (pA)'
     assert not any('Plot not updated' in str(message) for message in warnings), warnings
     assert not any(call[0] in ('outputs', 'device', 'range') for call in hw.calls), hw.calls
-    assert 'valid /' in scan.settingsMgr.settings[scan.SAMPLES].value
+    assert 'DMMR_M03 ' in scan.settingsMgr.settings[scan.SAMPLES].value and 'valid/total' in scan.settingsMgr.settings[scan.SAMPLES].value
     if scenario != 'auto-save':
         scan.saveData(scan.file)
     with h5py.File(scan.file) as f:
         assert f['MScan'].attrs['notes'] == 'Legacy session note, not a scan control.'
         if scenario == 'auto-save':
-            assert {'DMMR module', 'Settling time (s)', 'Measurement time (s)'} <= set(f['MScan/Settings'])
+            assert {'DMMR modules', 'Settling time (s)', 'Measurement time (s)'} <= set(f['MScan/Settings'])
+            assert 'DMMR module' not in f['MScan/Settings']
             assert not {'Notes', 'Display', 'Wait', 'Wait long', 'Average', 'Large step', 'Channel'} & set(f['MScan/Settings'])
         assert f['MScan/Input Channels/Amplitude'][:].tolist() == [60, 70, 80] * passes
         assert np.array_equal(f['MScan/Output Channels/DMMR_M03'][:], scan.outputChannels[0].recordingData, equal_nan=True)
         assert f['MScan/Validation'].attrs['status'] == scan._validation['status']
         assert np.array_equal(f['MScan/Validation/rail_i'][:], scan._validation['rail_i'], equal_nan=True)
-        assert f['MScan/Validation'].attrs['reference_channel'] == 'DMMR_M03'
+        import json
+        assert json.loads(f['MScan/Validation'].attrs['modules']) == [c.name for c in scan.outputChannels]
+        assert 'reference_channel' not in f['MScan/Validation'].attrs
         if scenario == 'multi-dmmr':
             assert np.array_equal(f['MScan/Output Channels/DMMR_M05'][:], scan.outputChannels[1].recordingData, equal_nan=True)
-            assert f['MScan/Validation'].attrs['extra_channels'] == '["DMMR_M05"]'
             assert f['MScan/Validation/samples'].shape == (3, 2)
     scan.plot(done=True)
     QTest.qWait(30)
@@ -2086,7 +2076,7 @@ def run(scenario, target, app_holder=None):
     scan.toggleAdvanced(advanced=False)
     assert scan.settingsMgr.settings[scan.TIMEOUT].isHidden()
     assert start_button.text() == 'Start scan' and start_button.isEnabled() == scan._ready
-    assert scan.settingsMgr.settings[scan.DETECTOR].getWidget().isEnabled()
+    assert scan.settingsMgr.settings[scan.AMX].getWidget().isEnabled()
     if scenario in ('stop', 'local-stop', 'off'):
         outcome = scan.scan_status
         scan._refresh_interface()
@@ -2117,8 +2107,8 @@ def run(scenario, target, app_holder=None):
         before_calls = list(hw.calls)
         other.name = 'DMMR_Renamed'
         QTest.qWait(650)  # real refresh timer, not only a direct helper call
-        assert 'Module 5 — DMMR_Renamed' in measured.items and 'Module 5 — DMMR_M05' not in measured.items
-        assert measured.value == 'Module 3 — DMMR_M03'
+        recorded = scan.settingsMgr.settings[scan.MODULES].value
+        assert 'M5 DMMR_Renamed' in recorded and 'DMMR_M05' not in recorded, recorded
         assert scan.outputChannels == original_channels
         assert np.array_equal(scan.outputChannels[0].recordingData, original)
         assert hw.calls == before_calls
@@ -2175,7 +2165,7 @@ def run(scenario, target, app_holder=None):
         scan.saveSettings(file=target / 'roundtrip.ini')
         scan.loadSettings(file=target / 'roundtrip.ini')
         assert scan.displayDefault == 'DMMR_M03'
-        assert scan.settingsMgr.settings[scan.DETECTOR].text(0) == 'DMMR module'
+        assert scan.settingsMgr.settings[scan.MODULES].text(0) == 'DMMR modules'
         # Groups are display only: the file keeps flat keys, and a reload keeps the folded group.
         sections = configparser.ConfigParser(interpolation=None)
         sections.read(target / 'roundtrip.ini', encoding='utf-8')
@@ -2187,12 +2177,9 @@ def run(scenario, target, app_holder=None):
         assert scan.settingsMgr.settings[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
         scan.settingsTree.expandItem(scan.settingsMgr.settings[scan.SAMPLES].parent())
         assert scan.channelTree is None
-        # Select another physical module through the actual combo, then run a
-        # second scan: module 5 must supply its own (doubled) current, not M03's.
+        # A second scan with the renamed module: each module supplies its own current,
+        # module 5 twice module 3's, in module order.
         controller._update_state()
-        choice = scan.settingsMgr.settings[scan.DETECTOR].combo
-        choice.setCurrentText('Module 5 — DMMR_Renamed')
-        assert scan.outputChannels[0].sourceChannel is other
         scan.recording = True
         scan.initData()
         assert scan.initScan(), scan.scan_status
@@ -2208,18 +2195,18 @@ def run(scenario, target, app_holder=None):
         timer.stop()
         app.processEvents()
         assert not worker.is_alive() and scan._validation['status'] == 'completed', scan._validation
-        # The new reference first, then the other enabled module, each with its own current.
-        assert [c.name for c in scan.outputChannels] == ['DMMR_Renamed', 'DMMR_M03']
+        assert [c.name for c in scan.outputChannels] == ['DMMR_M03', 'DMMR_Renamed']
         assert scan.outputChannels[0].recordingData == pytest.approx(
-            [2 * math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
-        assert scan.outputChannels[1].recordingData == pytest.approx(
             [math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
-        assert scan._plan['metadata']['detector'] == dict(device='DMMR', module=5, channel='DMMR_Renamed',
-                                                       interval_ms=detector_device.interval)
+        assert scan.outputChannels[1].recordingData == pytest.approx(
+            [2 * math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
+        detector_metadata = scan._plan['metadata']['detector']
+        assert detector_metadata['modules'] == [dict(module=3, channel='DMMR_M03'), dict(module=5, channel='DMMR_Renamed')]
+        assert detector_metadata['interval_ms'] == detector_device.interval
         scan.saveData(target / 'module-5.mscan.h5')
         with h5py.File(target / 'module-5.mscan.h5') as f:
             assert sorted(f['MScan/Output Channels']) == ['DMMR_M03', 'DMMR_Renamed']
-            assert f['MScan/Validation'].attrs['reference_channel'] == 'DMMR_Renamed'
+            assert f['MScan/Validation'].attrs['modules'] == '["DMMR_M03", "DMMR_Renamed"]'
         scan.finished = True
     if scenario == 'dock':
         from PyQt6.QtWidgets import QMainWindow

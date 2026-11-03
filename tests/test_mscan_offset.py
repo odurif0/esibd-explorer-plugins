@@ -47,7 +47,7 @@ def test_offset_is_coefficient_times_amplitude_at_every_point_then_restored(msca
 def test_default_coefficient_is_0_2(mscan_module, monkeypatch):
     monkeypatch.setattr(mscan_module, 'PARAMETERTYPE', NS(COMBO='COMBO', FLOAT='FLOAT', INT='INT', LABEL='LABEL', TEXT='TEXT'))
     settings = mscan_module.MScan.getDefaultSettings(NS(**{k: getattr(mscan_module.MScan, k) for k in dir(mscan_module.MScan) if k.isupper()},
-                                                   _offset_changed=None, _signal_changed=None, _setup_changed=None,
+                                                   _offset_changed=None, _setup_changed=None,
                                                    _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None))
     assert settings[mscan_module.MScan.OFFSET_FACTOR]['value'] == .2
     assert settings[mscan_module.MScan.OFFSET_RESOLUTION]['value'] == 0.

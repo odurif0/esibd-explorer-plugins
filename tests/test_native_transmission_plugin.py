@@ -649,3 +649,29 @@ def test_files_go_to_their_dated_folder_without_session_fields_and_never_overwri
     assert scan._scan_file(now).name == "2026-10-30_14-44-06_2_transmission.h5"
     scan._simulated_run = True
     assert scan._scan_file(now).name == "2026-10-30_14-44-06_simulation_transmission.h5"
+
+
+def test_mscan_spectra_use_the_beamline_detector_column(module, tmp_path):
+    # MScan records every enabled DMMR module since 2026-11-03: the column is the beamline's detector,
+    # else the reference module of an older file, else the first one.
+    import h5py
+
+    def write(path, reference=None):
+        with h5py.File(path, "w") as handle:
+            group = handle.create_group("MScan")
+            group.create_group("Input Channels").create_dataset("Amplitude", data=[1., 2.])
+            outputs = group.create_group("Output Channels")
+            for name, scale in (("DMMR_M00", 1.), ("DMMR_M03", 3.), ("DMMR_M04", 4.)):
+                outputs.create_dataset(name, data=[scale, 2 * scale])
+            validation = group.create_group("Validation")
+            if reference:
+                validation.attrs["reference_channel"] = reference
+        return path
+
+    new, old = write(tmp_path / "new.h5"), write(tmp_path / "old.h5", reference="DMMR_M04")
+    amplitude, current, detector, _ = module.read_mscan(new, "DMMR_M03")
+    assert detector == "DMMR_M03" and current.tolist() == [3., 6.] and amplitude.tolist() == [1., 2.]
+    assert module.read_mscan(new)[2] == "DMMR_M00"
+    assert module.read_mscan(new, "DMMR_M09")[2] == "DMMR_M00"
+    assert module.read_mscan(old)[2] == "DMMR_M04"
+    assert module.read_mscan(old, "DMMR_M03")[2] == "DMMR_M03"

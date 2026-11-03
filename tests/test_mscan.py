@@ -62,7 +62,7 @@ def test_run_couples_rails_without_zero_and_restores_distinct_initials(mscan_rig
 
 
 @pytest.mark.parametrize('change', ['virtual', 'non-dmmr', 'unit', 'module'])
-def test_only_real_dmmr_modules_can_be_selected(mscan_rig, change):
+def test_only_real_dmmr_modules_are_recorded(mscan_rig, change):
     if change == 'virtual': mscan_rig.detector.real = False
     if change == 'non-dmmr': mscan_rig.detector_device.name = 'Other'
     if change == 'unit': mscan_rig.detector.unit = 'V'
@@ -72,7 +72,7 @@ def test_only_real_dmmr_modules_can_be_selected(mscan_rig, change):
     assert mscan_rig.psus[0].writes == []
 
 
-def test_changed_dmmr_module_cannot_replace_selected_module_mid_scan(mscan_rig):
+def test_changed_dmmr_module_cannot_replace_a_recorded_module_mid_scan(mscan_rig):
     mscan_rig.scan._plan = mscan_rig.scan._preflight()
     mscan_rig.detector.module_address = lambda: 5
     mscan_rig.scan.runScan(lambda: True)
@@ -94,7 +94,7 @@ def test_one_continuous_settling_duration_at_every_point_and_return(mscan_rig):
     assert times == [s.settling_s] * 4
     assert s._plan['average'] == s.integration_s
     assert s._plan['metadata']['settling_s'] == s.settling_s
-    assert s._plan['metadata']['detector']['module'] == 3
+    assert s._plan['metadata']['detector']['modules'] == [dict(module=3, channel='Detector')]
 
 
 def test_second_pair_resolves_other_psu(mscan_rig):
@@ -248,37 +248,80 @@ def test_an_infinite_reading_invalidates_its_point(mscan_rig):
     assert mscan_rig.scan._validation['point_status'][0] == 'invalid detector data'
 
 
-def test_other_enabled_dmmr_modules_are_recorded_over_the_reference_windows(mscan_rig):
-    # 2026-10-26: record every active DMMR module, not only the selected one.
-    s, r = mscan_rig.scan, mscan_rig
-    extra = NS(name='DMMR_M05', real=True, unit='A', module_address=lambda: 5, enabled=True, initialized=True,
-               acquiring=True, values=History(), getDevice=lambda: r.detector_device)
-    extra.getValues = lambda **kw: extra.values.get()
-    extra.values.data.append(np.nan)  # Same recorder ticks as the reference module.
-    r.on_pause = lambda: extra.values.data.append(np.nan if len(extra.values.data) % 4 == 0 else 3 * r.current())
-    s._plan['extra_detectors'] = [extra]
-    s.outputChannels.append(NS(name='DMMR_M05', recordingData=np.full(3, np.nan)))
+def add_module(r, name, number, reading):
+    """Another enabled module of the rig's DMMR, on the same recorder ticks; ``reading()`` gives each new value."""
+    module = NS(name=name, real=True, unit='A', module_address=lambda: number, enabled=True, initialized=True,
+                acquiring=True, values=History(), getDevice=lambda: r.detector_device)
+    module.getValues = lambda **kw: module.values.get()
+    module.values.data.extend([np.nan] * len(r.detector_device.time.data))
+    previous = r.on_pause
+    def pause():
+        previous()
+        module.values.data.append(reading())
+    r.on_pause = pause
+    r.all_channels.append(module)
+    return module
+
+
+def use_modules(r, *modules):
+    s = r.scan
+    s._plan['detectors'] = [r.detector, *modules]
+    s.outputChannels = [NS(name=c.name, recordingData=np.full(3, np.nan)) for c in s._plan['detectors']]
     for key in ('samples', 'finite_samples'):
-        s._validation[key] = np.zeros((3, 2), dtype=int)
+        s._validation[key] = np.zeros((3, len(s.outputChannels)), dtype=int)
+
+
+def test_every_enabled_dmmr_module_is_recorded_over_the_same_windows(mscan_rig):
+    # 2026-10-26: record every active DMMR module. 2026-11-03: no module is chosen any more.
+    s, r = mscan_rig.scan, mscan_rig
+    extra = add_module(r, 'DMMR_M05', 5, lambda: np.nan if len(r.detector_device.time.data) % 4 == 0 else 3 * r.current())
+    assert [c.name for c in s._modules()] == ['Detector', 'DMMR_M05']
+    use_modules(r, extra)
     s.runScan(lambda: True)
     v = s._validation
     assert v['status'] == 'completed'
     assert s.outputChannels[1].recordingData == pytest.approx(3 * s.outputChannels[0].recordingData)
     assert (v['finite_samples'][:, 1] > 0).all() and (v['finite_samples'][:, 1] <= v['samples'][:, 1]).all()
+    assert (v['samples'][:, 0] == v['samples'][:, 1]).all()  # One DMMR time axis.
     assert v['point_status'] == ['acquired'] * 3
 
 
-def test_an_extra_module_without_readings_never_invalidates_the_reference(mscan_rig):
+def test_a_module_without_readings_never_invalidates_a_point(mscan_rig):
     s, r = mscan_rig.scan, mscan_rig
-    silent = NS(name='DMMR_M06', getDevice=lambda: r.detector_device, getValues=lambda **kw: np.array([]))
-    s._plan['extra_detectors'] = [silent]
-    s.outputChannels.append(NS(name='DMMR_M06', recordingData=np.full(3, np.nan)))
-    for key in ('samples', 'finite_samples'):
-        s._validation[key] = np.zeros((3, 2), dtype=int)
+    silent = add_module(r, 'DMMR_M06', 6, lambda: np.nan)
+    use_modules(r, silent)
     s.runScan(lambda: True)
     assert s._validation['point_status'] == ['acquired'] * 3
     assert np.isnan(s.outputChannels[1].recordingData).all()
-    assert (s._validation['samples'][:, 1] == 0).all()
+    assert (s._validation['finite_samples'][:, 1] == 0).all() and (s._validation['samples'][:, 1] > 0).all()
+
+
+def test_a_point_is_invalid_only_when_no_module_read_anything(mscan_rig):
+    s, r = mscan_rig.scan, mscan_rig
+    other = add_module(r, 'DMMR_M07', 7, lambda: 2 * r.current())
+    r.detector.getValues = lambda **kw: np.full(len(r.detector.values.data), np.nan)  # The first module reads nothing.
+    use_modules(r, other)
+    s.runScan(lambda: True)
+    assert s._validation['point_status'] == ['acquired'] * 3
+    assert np.isnan(s.outputChannels[0].recordingData).all()
+    assert s.outputChannels[1].recordingData == pytest.approx([20., 40., 60.])
+    s._validation['point_status'] = ['not acquired'] * 3
+    s._store_point(0, 0., 1., [10., 10.], [0., 0.], [(np.nan, 3, 0), (np.nan, 3, 0)])
+    assert s._validation['point_status'][0] == 'invalid detector data'
+
+
+def test_modules_are_found_by_number_without_a_selection(mscan_rig):
+    s, r = mscan_rig.scan, mscan_rig
+    disabled = add_module(r, 'DMMR_M00', 0, lambda: 1.)
+    disabled.enabled = False
+    first = add_module(r, 'DMMR_M01', 1, lambda: 1.)
+    assert [c.name for c in s._modules()] == ['DMMR_M01', 'Detector']
+    first.name = 'Detector'
+    with pytest.raises(mscan_rig.module.ScanError, match='share the name Detector'):
+        s._modules()
+    first.name, first.enabled, r.detector.enabled = 'DMMR_M01', False, False
+    with pytest.raises(mscan_rig.module.ScanError, match='Enable at least one DMMR module'):
+        s._modules()
 
 
 def test_an_inactive_rail_without_equation_is_operator_set(mscan_rig):
@@ -324,7 +367,7 @@ def test_panel_groups_every_setting_once_without_changing_its_key(mscan_module, 
     M = mscan_module.MScan
     monkeypatch.setattr(mscan_module, 'PARAMETERTYPE', NS(COMBO='COMBO', FLOAT='FLOAT', INT='INT', LABEL='LABEL', TEXT='TEXT'))
     settings = M.getDefaultSettings(NS(**{k: getattr(M, k) for k in dir(M) if k.isupper()},
-                                       _offset_changed=None, _signal_changed=None, _setup_changed=None,
+                                       _offset_changed=None, _setup_changed=None,
                                        _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None))
     placed = [key for _, keys in M.LAYOUT for key in keys]
     assert sorted(placed) == sorted(settings) and len(set(placed)) == len(placed)

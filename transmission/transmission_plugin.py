@@ -214,22 +214,29 @@ def current_source_problem(device_of, detector, spray):
     return ""
 
 
-def read_mscan(path):
-    """Amplitude (V), current (A), detector name and rail channels of a saved MScan file."""
+def read_mscan(path, detector=None):
+    """Amplitude (V), current (A), detector name and rail channels of a saved MScan file.
+
+    MScan records every enabled DMMR module (2026-11-03): take the column of ``detector``, the
+    beamline's detector channel, when the file has it; else the reference module of an older file;
+    else the first column.
+    """
     with h5py.File(path, "r") as handle:
         if "MScan" not in handle:
             raise ValueError(f"{Path(path).name} is not an MScan file")
         group = handle["MScan"]
         amplitude = np.asarray(group["Input Channels"]["Amplitude"][:], float)
         outputs = group["Output Channels"]
-        detector = next(iter(outputs))
-        current = np.asarray(outputs[detector][:], float)
-        rails = []
         validation = group.get("Validation")
+        reference = str(validation.attrs.get("reference_channel", "")) if validation is not None else ""
+        names = list(outputs)
+        chosen = next((name for name in (detector, reference) if name and name in names), names[0])
+        current = np.asarray(outputs[chosen][:], float)
+        rails = []
         if validation is not None and "setup" in validation.attrs:
             setup = json.loads(validation.attrs["setup"])
             rails = [rail["channel"] for rail in setup.get("rails", [])]
-    return amplitude, current, detector, rails
+    return amplitude, current, chosen, rails
 
 
 class _Call:
@@ -984,13 +991,13 @@ class _SpectrumDialog(QDialog):
             self.load_mscan(name)
 
     def load_mscan(self, path):
+        beamline = self.plugin.active_beamline()
         try:
-            amplitude, current, detector, rails = read_mscan(path)
-        except (OSError, KeyError, ValueError, StopIteration) as exc:
+            amplitude, current, detector, rails = read_mscan(path, (beamline.get("detector") or {}).get("channel"))
+        except (OSError, KeyError, ValueError, IndexError) as exc:
             self.info.setText(f"Cannot read {Path(path).name}: {exc}")
             self.plugin.session("mscan_unreadable", path=str(path), error=str(exc))
             return
-        beamline = self.plugin.active_beamline()
         matched = [key for key, _ in _beamline.filters(beamline)
                    if rails and set(beamline["knobs"].get(f"{key}_rf", {})) == set(rails)]
         if matched:
