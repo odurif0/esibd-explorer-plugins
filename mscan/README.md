@@ -48,6 +48,7 @@ other rows are in four groups, in the order a scan is prepared:
 - **Amplitude scan**: allowed range and PSU Ilim, mode, amplitudes, timing, duration.
 - **Mass filter**: the AMPR channels of the two rod pairs, k, δ, Minimum U, axis potential
   x, and a **Preview** of what the scan will apply.
+- **m/z**: the field radius r0, the plot abscissa (A or m/z) and the m/z range of the scan.
 - **Live readback**: PSU rails, rod pair channels, values restored after completion, samples
   at the last point.
 
@@ -220,7 +221,7 @@ not peak-to-peak voltage. Both PSU setpoints are positive magnitudes.
 Other outputs sharing these supplies are affected; external offsets are not
 included. The AMX frequency, duty cycle and routing stay unchanged.
 
-The result is **current versus amplitude**, not a calibrated m/z axis. The plot
+The measured axis is **amplitude**; the m/z is computed from it (see *m/z* below). The plot
 shows every recorded module in **pA** with a legend (files keep amperes); the
 x axis names the driven supply, e.g. **PSU D (V)**. In continuous mode it says
 **PSU D, commanded (V)**:
@@ -229,6 +230,30 @@ of voltage through a transition. Check peak positions and widths against
 stepped acquisition on the real setup before relying on a continuous spectrum.
 Mass-filter selectivity and calibration must be established experimentally;
 a symmetric 50% waveform can give a transmission curve rather than mass peaks.
+
+## m/z
+
+**m/z range** shows the m/z at Amplitude from and to, and **Plot axis** = **m/z** draws the
+spectrum against it (user request 2026-11-03). For an ideal 50 % square wave:
+
+    m/z [Th] = 4 e A / (q r0² (2π f)²) / u ≈ 2.444 · A / q · (4 mm / r0)² · (500 kHz / f)²
+
+- **f** is the AMX output frequency, read from the AMX (and saved with each scan).
+- **q** is the centre of the stable band on the scan line a = 2 (U/A) q, with U = max(Minimum U,
+  k × A − δ) at each point, as the rods are driven; 0.536 at k = 0.2 and δ = 0. Without rod pairs
+  or with k = 0 (RF only) there are no peaks: the axis is the **low-mass cut-off** (q = 0.712).
+  With one driven pair the DC between the pairs is unknown and no m/z is given; above the apex
+  (about 0.2153) nothing is transmitted.
+- **r0 (mm)** is the field radius, from the axis to the inner surface of a rod: 5 mm for Q2,
+  provisional. m/z varies as 1/r0², so 1 % on r0 is 2 % on m/z.
+
+This is theory until it is checked on a known ion: the amplitude on the rods is assumed equal to
+A, which is not verified. r0 absorbs that ratio too, so calibrate on a known peak by setting
+r0 to r0 × √(m/z shown / m/z known); one peak fixes the scale at every amplitude, frequency and k.
+A scan is converted with its own settings, saved in the file, not with the panel's current ones.
+The file always keeps A as the axis and adds `Validation/mz` (NaN where not transmitted or
+unknown), with the formula and the values used in its `Definition` attribute. MScan gives m/z, not
+the mass: that needs the charge.
 
 ## Limits and stopping
 
