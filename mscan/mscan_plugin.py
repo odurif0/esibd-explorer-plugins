@@ -942,8 +942,21 @@ class MScan(Scan):
         previous = np.maximum.accumulate(np.r_[-np.inf, np.where(finite, times, -np.inf)[:-1]])
         return finite & (times > previous)
 
-    def _dmmr_history(self, modules):
-        """The DMMR time axis and each module's values, without skipped records (see _increasing)."""
+    @staticmethod
+    def _recent(times, since):
+        """Index of the first record to process: 64 before `since`, so a window or baseline is covered."""
+        if since is None or not len(times):
+            return 0
+        return max(0, int(np.searchsorted(times, since, side='left')) - 64)
+
+    def _dmmr_history(self, modules, since=None):
+        """The DMMR time axis and each module's values from `since` on, without skipped records (see _increasing).
+
+        Recent records only (2026-11-03): processing and sending the whole history at every 50 ms poll
+        (about 120 ms of Python and 2.5 MB of JSON for 100 000 records) saturated Explorer's GUI thread, and
+        its recordings then bunched up into empty readings and repeated timestamps. Explorer returns views,
+        so taking the end of the history copies nothing.
+        """
         device = modules[0].getDevice()
         times = np.asarray(device.time.get(), dtype=float)
         columns = []
@@ -952,13 +965,22 @@ class MScan(Scan):
             if len(values) != len(times):
                 raise ScanError(f'{c.name}: DMMR timestamps and values are misaligned.')
             columns.append(values)
+        first = self._recent(times, since)
+        times, columns = times[first:], [values[first:] for values in columns]
         keep = self._increasing(times)
         return device, times[keep], [values[keep] for values in columns], int(len(times) - keep.sum())
 
-    def _dmmr_clock(self, modules):
+    def _history_span(self, device):
+        """How far back the scan needs the DMMR history: a whole point window, and 21 valid samples."""
+        p = self._plan or {}
+        interval = float(getattr(device, 'interval', 1000.)) / 1000
+        span = float(p.get('average', 0.)) + float(p.get('timeout', 0.)) + 10.
+        return max(60., 30 * interval if math.isfinite(interval) else 60., span)
+
+    def _dmmr_clock(self, modules, since=None):
         """The DMMR time axis, per tick whether at least one recorded module has a new reading, and the
         number of records skipped for a repeated or earlier timestamp."""
-        device, times, columns, skipped = self._dmmr_history(modules)
+        device, times, columns, skipped = self._dmmr_history(modules, since)
         valid = np.zeros(len(times), dtype=bool)
         for values in columns:
             valid |= np.isfinite(values)
@@ -975,8 +997,10 @@ class MScan(Scan):
                 times = np.asarray(c.getDevice().time.get(), dtype=float)
                 values = np.asarray(c.getValues(subtractBackground=False), dtype=float)
                 n = min(len(times), len(values))
-                keep = self._increasing(times[:n])
-                times, values = times[:n][keep], values[:n][keep]
+                first = self._recent(times[:n], start)
+                times, values = times[first:n], values[first:n]
+                keep = self._increasing(times)
+                times, values = times[keep], values[keep]
                 lo, hi = np.searchsorted(times, (start, end), side='right')
                 results.append(self._average_samples(values[lo:hi]))
             except (AttributeError, TypeError, ValueError):
@@ -1428,7 +1452,7 @@ class MScan(Scan):
         if not device.recording or not any(c.acquiring for c in modules):
             raise ScanError('DMMR acquisition/recording stopped.')
         configured, since = self._cadence_epoch(device)
-        _, times, valid, skipped = self._dmmr_clock(modules)
+        _, times, valid, skipped = self._dmmr_clock(modules, time.time() - self._history_span(device))
         self._require_monotonic(device, times, 'DMMR: invalid timestamps.')
         valid_times = self._last_finite_times(times, np.where(valid, 0., np.nan), since, 21)
         if len(valid_times) < 2:
@@ -2372,6 +2396,8 @@ class MScan(Scan):
             values = np.asarray(c.getValues(subtractBackground=False))
             if history != id(c.values) or len(times) != len(values):
                 raise ScanError(f'{c.name}: detector history reset or timestamps misaligned.')
+            first = self._recent(times, start if baseline is None else min(start, baseline))
+            times, values = times[first:], values[first:]
             keep = self._increasing(times)
             times, values = times[keep], values[keep]
             if baseline is not None and (not len(times) or times[0] > baseline):
