@@ -344,7 +344,8 @@ disable one in the DMMR plugin and it disappears from the next scan. With PSU_A 
 and one ending a few volts below the reachable value starts with a warning. In Full range, read
 output + dropout in PSU_A (the internal supply) and the `max` of `PSU Ilim` (about 500 mA?), then scan
 50–300 V: no stop, and `low_headroom` stays false. Set `Plot axis` to m/z: the axis reads `m/z (Th)`
-with both rod pairs, `Low-mass cut-off` without; adjust r0 on a known ion. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
+with both rod pairs, `Low-mass cut-off` without; adjust r0 on a known ion. If `DMMR data interval`
+reports skipped records, note the time: MScan must keep scanning, and the next scan must start. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
 (copy a plot, open a large file) while the AMX polls: no AMX worker stops with `exit=75`.
 In MScan, select the AMX HD while it holds its standby config: the message names `CH0: Not enabled`
 and the state, not `AMX waveform readback is unavailable`. On the AMX HD, `Reading the AMX HD config names` appears at connection and timing is enabled about

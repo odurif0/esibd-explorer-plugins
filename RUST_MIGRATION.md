@@ -54,6 +54,11 @@ rebuilt). None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each 
   its own column only. The native worker is unchanged: it receives this DMMR clock as its detector.
   Files list the modules in `Validation/modules` (formerly `reference_channel`/`extra_channels`);
   continuous raw currents have one column per module. Transmission takes its own detector column.
+- **DMMR timestamps:** at 15:57:31 a DMMR record with a repeated or earlier stamp (Explorer stamps each
+  record with the PC clock) stopped the scan with `Invalid or nonmonotonic DMMR timestamps`, and every
+  later scan was refused, even after restarting the DMMR plugin: MScan sent the whole history to the
+  worker, which rejects a history that does not increase. Such a record is now skipped with its values
+  wherever MScan reads the history; `DMMR data interval` gives their number.
 - **m/z:** an `m/z` group gives the field radius r0 (Q2: 5 mm, provisional), the m/z range of the
   scan, and a plot axis in A or m/z: m/z = 4 e A / (q r0² (2π f)²) for an ideal square wave, with q
   the centre of the stable band at U/A for each point, or the low-mass cut-off when RF only. The

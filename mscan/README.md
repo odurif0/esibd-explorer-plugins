@@ -208,6 +208,11 @@ The **msScan** settings list belongs to this scan; Explorer's global
   amplitude plus one settling per pass and the final settling. Approach/return, communication,
   scheduling and waiting for the last DMMR sample add time. **Continuous is not
   inherently faster**: duration depends on voltage step and timing.
+- Explorer stamps each DMMR record with the PC clock. A record whose stamp is not later than every
+  earlier one (a clock adjustment, or two records within the clock resolution) is skipped with its
+  values; **DMMR data interval** says how many. On 2026-11-03 one such record made MScan refuse
+  every later scan (`Invalid or nonmonotonic DMMR timestamps`), even after restarting the DMMR
+  plugin, which keeps its history.
 - Only samples timestamped inside the measurement window contribute. The DMMR
   records NaN at each recorder tick without a new reading; those are skipped and
   the point is the mean of the readings present, with **valid / total** samples

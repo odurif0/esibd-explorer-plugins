@@ -928,17 +928,41 @@ class MScan(Scan):
             raise ScanError(f'DMMR modules share the name {", ".join(shared)}: rename them in the DMMR plugin.')
         return modules
 
-    def _dmmr_clock(self, modules):
-        """The DMMR time axis and, per tick, whether at least one recorded module has a new reading."""
+    @staticmethod
+    def _increasing(times):
+        """Records whose timestamp is later than every earlier one.
+
+        Explorer stamps each DMMR record with time.time(). On 2026-11-03 a repeated or earlier stamp (a clock
+        adjustment, or two records within the Windows clock resolution) entered the DMMR history at 15:57:31:
+        that scan stopped with `Invalid or nonmonotonic DMMR timestamps`, and every later one too, even after
+        restarting the DMMR plugin, which keeps its history. Such a record is now skipped with its values.
+        """
+        times = np.asarray(times, dtype=float)
+        finite = np.isfinite(times)
+        previous = np.maximum.accumulate(np.r_[-np.inf, np.where(finite, times, -np.inf)[:-1]])
+        return finite & (times > previous)
+
+    def _dmmr_history(self, modules):
+        """The DMMR time axis and each module's values, without skipped records (see _increasing)."""
         device = modules[0].getDevice()
         times = np.asarray(device.time.get(), dtype=float)
-        valid = np.zeros(len(times), dtype=bool)
+        columns = []
         for c in modules:
             values = np.asarray(c.getValues(subtractBackground=False), dtype=float)
             if len(values) != len(times):
                 raise ScanError(f'{c.name}: DMMR timestamps and values are misaligned.')
+            columns.append(values)
+        keep = self._increasing(times)
+        return device, times[keep], [values[keep] for values in columns], int(len(times) - keep.sum())
+
+    def _dmmr_clock(self, modules):
+        """The DMMR time axis, per tick whether at least one recorded module has a new reading, and the
+        number of records skipped for a repeated or earlier timestamp."""
+        device, times, columns, skipped = self._dmmr_history(modules)
+        valid = np.zeros(len(times), dtype=bool)
+        for values in columns:
             valid |= np.isfinite(values)
-        return device, times, valid
+        return device, times, valid, skipped
 
     def _module_values(self, start, end):
         """Average every recorded module over (start, end] of the shared DMMR time axis.
@@ -951,7 +975,9 @@ class MScan(Scan):
                 times = np.asarray(c.getDevice().time.get(), dtype=float)
                 values = np.asarray(c.getValues(subtractBackground=False), dtype=float)
                 n = min(len(times), len(values))
-                lo, hi = np.searchsorted(times[:n], (start, end), side='right')
+                keep = self._increasing(times[:n])
+                times, values = times[:n][keep], values[:n][keep]
+                lo, hi = np.searchsorted(times, (start, end), side='right')
                 results.append(self._average_samples(values[lo:hi]))
             except (AttributeError, TypeError, ValueError):
                 results.append((np.nan, 0, 0))
@@ -1402,7 +1428,7 @@ class MScan(Scan):
         if not device.recording or not any(c.acquiring for c in modules):
             raise ScanError('DMMR acquisition/recording stopped.')
         configured, since = self._cadence_epoch(device)
-        _, times, valid = self._dmmr_clock(modules)
+        _, times, valid, skipped = self._dmmr_clock(modules)
         self._require_monotonic(device, times, 'DMMR: invalid timestamps.')
         valid_times = self._last_finite_times(times, np.where(valid, 0., np.nan), since, 21)
         if len(valid_times) < 2:
@@ -1417,7 +1443,7 @@ class MScan(Scan):
         micros = round(max(configured, largest) * 1e6)
         return dict(configured_interval_s=configured, typical_interval_s=float(np.median(intervals)),
             largest_interval_s=largest, minimum_time_step_s=((micros + 999) // 1000) / 1000,
-            last_sample_time=float(valid_times[-1]), sample_count=len(valid_times))
+            last_sample_time=float(valid_times[-1]), sample_count=len(valid_times), skipped_records=skipped)
 
     def _require_monotonic(self, device, times, message):
         """Require finite, strictly increasing timestamps over the whole history.
@@ -1470,6 +1496,9 @@ class MScan(Scan):
             cadence = self._detector_cadence(self._plan['detectors'] if running else self._modules())
             text = (f'≈ {cadence["typical_interval_s"]:.3g} s between valid samples; '
                     f'Time step ≥ {cadence["minimum_time_step_s"]:g} s')
+            if cadence['skipped_records']:
+                text += (f'\n{cadence["skipped_records"]} DMMR record(s) with a repeated or earlier timestamp '
+                         'skipped (clock adjustment?)')
         except (ScanError, AttributeError, ValueError, TypeError) as exc:
             text = str(exc)
         self.settingsMgr.settings[self.CADENCE].value = text
@@ -2343,6 +2372,8 @@ class MScan(Scan):
             values = np.asarray(c.getValues(subtractBackground=False))
             if history != id(c.values) or len(times) != len(values):
                 raise ScanError(f'{c.name}: detector history reset or timestamps misaligned.')
+            keep = self._increasing(times)
+            times, values = times[keep], values[keep]
             if baseline is not None and (not len(times) or times[0] > baseline):
                 raise ScanError(f'{c.name}: history buffer truncated during averaging.')
             self._require_monotonic(c.getDevice(), times, f'{c.name}: invalid or nonmonotonic timestamps.')
