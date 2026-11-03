@@ -34,6 +34,42 @@ MScan and Transmission have been rebuilt after the final Rust edits. Deployment
 manifests all identify raw source data
 `f0f4362958fcc84a978c9b030ca90f219537e8c46583af775cb4b139d4832359`.
 
+## v0.5.9 Update (2026-11-03)
+
+The 2026-11-03 scans, on v0.5.8, led to these changes, all in MScan (Python only; no worker
+rebuilt). None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **PSU headroom:** a 50–300 V scan stopped at 250 V after a 30 s settle timeout. The PSU log shows
+  why: PSU_A was in Half range, its dropout (internal supply − output, the third value of
+  `GetPSUData`) fell to 0.05 V, and output + dropout went from 256 V at 0 mA to about 248.5 V at
+  150 mA; Ilim (200 mA) and temperature (20 °C) were not involved. MScan now refuses a scan above
+  output + dropout − 2 V, warns without blocking above output + dropout − (2 V + 3 % of the rise),
+  stops at once with the cause when a rail is out of tolerance with less than 1 V of dropout, and
+  flags points measured below 2 V (`Validation/rail_dropout`, `low_headroom`). `Allowed amplitude`
+  showed 350 V in Half range; it now also shows what the PSU can reach now. MScan never switches the
+  range or Ilim.
+- **Every DMMR module recorded, none chosen:** the peaks of 13:28 were on M03 while M04 was the chosen
+  reference. Point windows now follow the DMMR time axis (a tick counts when any recorded module has
+  a reading) and each enabled module is averaged over them; a module without readings gives NaN for
+  its own column only. The native worker is unchanged: it receives this DMMR clock as its detector.
+  Files list the modules in `Validation/modules` (formerly `reference_channel`/`extra_channels`);
+  continuous raw currents have one column per module. Transmission takes its own detector column.
+- **m/z:** an `m/z` group gives the field radius r0 (Q2: 5 mm, provisional), the m/z range of the
+  scan, and a plot axis in A or m/z: m/z = 4 e A / (q r0² (2π f)²) for an ideal square wave, with q
+  the centre of the stable band at U/A for each point, or the low-mass cut-off when RF only. The
+  file keeps A and adds `Validation/mz` with the formula and values used. Theory until r0 is
+  calibrated on a known ion.
+- **Panel:** `Status` first, next to Start (a greyed Start says why); settings in foldable groups
+  Setup, Amplitude scan, Mass filter, m/z, Live readback; the mass filter named after its physics
+  (rod pairs, U/V ratio k, resolution δ, minimum U, axis potential x) with a `Preview` of U and both
+  pair potentials. Setting keys in settings files and scans are unchanged.
+- **Documentation:** `docs/mscan_quadrupole.pdf` describes the rod potentials, the scan law, its
+  parameters and their effect, with sources in `docs/src`.
+
+The native workers, manifests and source archives are those of v0.5.8; the ABI, source and worker
+checks pass. The release validation (`pytest -q --all-siblings` on Explorer 1.0.2) passed 5839 tests
+with 10 skipped and no failure. No instrument is opened. Hardware validation is still pending.
+
 ## v0.5.8 Update (2026-11-02)
 
 The second day of AMX HD runs on 2026-11-02, on v0.5.7, led to these fixes. None is validated on

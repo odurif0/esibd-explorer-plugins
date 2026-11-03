@@ -19,7 +19,8 @@ v0.5.6 keeps Explorer responsive during the general Close communication, lets Tr
 move PSU amplitudes, and fixes what the lab logs of 2026-10-28/30 showed; v0.5.7 fixes what
 the first run of the AMX HD on the instrument showed; v0.5.8 recovers AMX and PSU reads after a lost
 reply, reconnects after `Communication lost` without restarting Explorer, keeps the AMX and PSU config lists in place while they are open, and lets MScan drive both
-quadrupole rod pairs with a fixed offset.
+quadrupole rod pairs with a fixed offset; v0.5.9 regroups the MScan panel, records every DMMR module,
+checks the PSU headroom (Half/Full range) and gives an m/z axis.
 Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
 no Explorer fork, external Python, private interpreter or shared device process
 is needed. **Real-hardware qualification is pending.** Local software, simulated
@@ -49,7 +50,7 @@ hardware checks; qualify the devices before routine experimental use.
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.8.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.9.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -222,9 +223,9 @@ python3 -m pytest -q --all-siblings      # release validation: every sibling cop
 ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
 ```
 
-Use the v0.5.8 native archive for release checks, selected explicitly with
+Use the v0.5.9 native archive for release checks, selected explicitly with
 `ESIBD_RELEASE_ZIP`. The historical v0.4.2 ZIP is intentionally unchanged and
-cannot validate the native bundle. The v0.5.8 tag message gives the archive's
+cannot validate the native bundle. The v0.5.9 tag message gives the archive's
 SHA-256; earlier packaging-test evidence is recorded in
 [RUST_MIGRATION.md](RUST_MIGRATION.md).
 

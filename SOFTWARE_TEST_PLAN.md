@@ -338,7 +338,13 @@ minus sign), both are restored at the end, and the file has two offset columns. 
 variable part reads max(0.5, 0.2 × A − 1), and no wide plateau opens at the start of the spectrum. Raise U/V until the signal disappears: its value c gives
 the ratio of the amplitude on the rods to A, c / 0.2153. Copy the MScan plot
 to the clipboard (dark theme), then start a second scan with another range: the plot follows the new
-data. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
+data. v0.5.9: `DMMR modules` lists every enabled module and the file has one column per module;
+disable one in the DMMR plugin and it disappears from the next scan. With PSU_A in Half range,
+`PSU rails` shows the headroom; a scan to 300 V is refused at Start with `Switch PSU_A to Full range`,
+and one ending a few volts below the reachable value starts with a warning. In Full range, read
+output + dropout in PSU_A (the internal supply) and the `max` of `PSU Ilim` (about 500 mA?), then scan
+50–300 V: no stop, and `low_headroom` stays false. Set `Plot axis` to m/z: the axis reads `m/z (Th)`
+with both rod pairs, `Low-mass cut-off` without; adjust r0 on a known ion. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
 (copy a plot, open a large file) while the AMX polls: no AMX worker stops with `exit=75`.
 In MScan, select the AMX HD while it holds its standby config: the message names `CH0: Not enabled`
 and the state, not `AMX waveform readback is unavailable`. On the AMX HD, `Reading the AMX HD config names` appears at connection and timing is enabled about
