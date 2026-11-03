@@ -17,6 +17,8 @@ pub mod dmmr;
 pub mod esi;
 #[cfg(feature = "mscan")]
 pub mod mscan;
+#[cfg(feature = "mscan")]
+pub mod mscan_map;
 #[cfg(feature = "psu")]
 pub mod psu;
 #[cfg(feature = "tpg366")]
