@@ -59,3 +59,24 @@ def test_the_engine_receives_increasing_times_only(mscan_rig):
     detector = adapter._snapshot_on_gui()['detector']
     assert (np.diff(detector['times']) > 0).all()
     assert len(detector['times']) == len(detector['values']) == len(t) - 2
+
+
+def test_only_recent_history_is_processed_and_sent(mscan_rig):
+    # 2026-11-03: the whole DMMR history went to the engine every 50 ms (2.5 MB of JSON and about 120 ms of
+    # Python for 100 000 records), which saturated Explorer's GUI thread over the day.
+    import time
+    s, r = mscan_rig.scan, mscan_rig
+    n = 50_000
+    start = time.time() - n * .15
+    r.detector_device.time.data = list(start + .15 * np.arange(n))
+    r.detector.values.data = [40.] * n
+    s._plan = s._preflight()
+    s._plan['detectors'] = [r.detector]
+    adapter = r.module._load_native_runtime('_native_scan').NativeScanAdapter(s, lambda *a: None, emit_completion=False)
+    adapter._bind()
+    times = adapter._snapshot_on_gui()['detector']['times']
+    assert len(times) < 1000 and times[-1] == r.detector_device.time.data[-1]
+    assert times[0] <= time.time() - 60  # At least a minute: whole point windows and 21 valid samples.
+    s.runScan(lambda: True)
+    assert s._validation['status'] == 'completed', s._validation['error']
+    assert s.outputChannels[0].recordingData == pytest.approx([10., 20., 30.])

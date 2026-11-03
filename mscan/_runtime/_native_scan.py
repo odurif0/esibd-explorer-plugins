@@ -196,7 +196,8 @@ class NativeScanAdapter:
             raise RuntimeError('Native MScan requires at least one recorded DMMR module')
         # Records with a repeated or earlier timestamp are skipped here: the engine rejects a history
         # that does not increase, and one such record used to block every later scan (2026-11-03).
-        device, times, columns, _ = scan._dmmr_history(modules)
+        device = modules[0].getDevice()
+        device, times, columns, _ = scan._dmmr_history(modules, time.time() - scan._history_span(device))
         valid = np.zeros(len(times), dtype=bool)
         for values in columns:
             valid |= np.isfinite(values)

@@ -1028,6 +1028,12 @@ class DMMRDevice(Device):
     name = "DMMR"
     version = "0.1.1"
     supportedVersion = "1.0.2"
+    # Explorer stamps each record with time.time(), whose Windows resolution can be 15.6 ms (Python before
+    # 3.13). Records bunched by a busy GUI thread then got an equal or slightly earlier stamp; on 2026-11-03
+    # one such record made MScan refuse every later scan. A stamp at most this far before the previous one is
+    # moved 1 µs after it; a larger step back (a clock adjustment) is left alone, and readers skip it.
+    _STAMP_BUNCH_S = 0.1
+    _STAMP_STEP_S = 1e-6
     pluginType = PLUGINTYPE.INPUTDEVICE
     log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.
     unit = "A"
@@ -1053,6 +1059,16 @@ class DMMRDevice(Device):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.channelType = DMMRChannel
+
+    def appendData(self, nan: bool = False, skipPlotting: bool = False) -> None:
+        """Record like Explorer, then keep the new timestamp later than the previous one."""
+        super().appendData(nan, skipPlotting)
+        try:
+            last = self.time.get()[-2:]  # A view: the correction is written into the history.
+            if len(last) == 2 and last[0] - self._STAMP_BUNCH_S < last[1] <= last[0]:
+                last[1] = last[0] + self._STAMP_STEP_S
+        except (AttributeError, TypeError, ValueError, IndexError):
+            pass  # No timestamped history to correct.
 
     def bufferLagging(self, wait: "int | None" = None) -> bool:
         """Name Explorer's display-lag pauses: each one silently counts a DMMR error.
