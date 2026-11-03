@@ -102,6 +102,7 @@ def test_native_adapter_completion_owner_preserves_point_updates(mscan_module, m
                                samples=np.zeros((2, 1), dtype=int), finite_samples=np.zeros((2, 1), dtype=int)),
               outputChannels=[NS(recordingData=np.full(2, np.nan))],
               _module_values=lambda start, end: [(13., 2, 2)], _store_headroom=lambda *args: None,
+              _store_context=lambda *args: None, _store_samples=lambda *args: None,
               _gui=lambda action, **kwargs: action(),
               signalComm=NS(updateRecordingSignal=NS(emit=lambda value: notifications.append(('recording', value))),
                             scanUpdateSignal=NS(emit=lambda value: notifications.append(('update', value)))))
@@ -166,6 +167,7 @@ def test_native_updates_fill_every_dmmr_module_over_the_engine_windows(mscan_mod
                                samples=np.zeros((2, 2), dtype=int), finite_samples=np.zeros((2, 2), dtype=int)),
               outputChannels=[NS(recordingData=np.full(2, np.nan)), NS(recordingData=np.full(2, np.nan))],
               _module_values=module_values, _store_headroom=lambda *args: None, _gui=lambda action, **kwargs: action(),
+              _store_context=lambda *args: None, _store_samples=lambda *args: None,
               signalComm=NS(updateRecordingSignal=NS(emit=lambda value: None), scanUpdateSignal=NS(emit=lambda value: None)))
     adapter = mscan_module._load_native_runtime('_native_scan').NativeScanAdapter(scan, lambda *a: None, emit_completion=False)
     adapter._bind()

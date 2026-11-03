@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "74f8763b7d0906cbdee4a4116dadd858ad4c67776dd027dd796b1b101d99ce8f",
-    "size_bytes": 549322,
-    "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+    "sha256": "261389fc71fdb38e39a7a53c2426bf13c777e1672129e2961feadf4e287d5890",
+    "size_bytes": 549342,
+    "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
     "vendored": false
   },
-  "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+  "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
   "targets": {
     "linux-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-transmission-worker",
       "sha256": "f3bddbc9a9c37a31655a98f140bce9cebf677f98c7772b5a10a6e38a02a6595e",
       "size_bytes": 1184448,
-      "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+      "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
       "target": "x86_64-unknown-linux-gnu"
     },
     "windows-x86_64": {
@@ -32,7 +32,7 @@
       "file": "esibd-transmission-worker.exe",
       "sha256": "5221dbf18223a88b3520ae70167d9869e5cddd11d6f6ce535836c41d9576c141",
       "size_bytes": 1128448,
-      "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+      "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
       "target": "x86_64-pc-windows-gnu"
     }
   },

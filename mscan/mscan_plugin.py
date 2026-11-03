@@ -11,6 +11,7 @@ from bisect import bisect_right
 from collections import deque
 import configparser
 import contextlib
+import hashlib
 import importlib.util
 import json
 import math
@@ -364,8 +365,9 @@ class MScan(Scan):
     """Sweep symmetric PSU magnitudes while keeping the selected AMX waveform fixed.
 
     A is defined by Vpos=+A, Vneg=-A relative to the PSU reference. The x axis
-    is volts, not m/z. The operator must establish the mass-filter waveform
-    and calibration separately. Devices must already be enabled and recording.
+    is A in volts; m/z is derived from it with r0 and the RF attenuation factor.
+    The operator sets the AMX waveform. The AMX, PSU and DMMR must already be
+    enabled, the DMMR recording; the ESI and TPG366 are read live if present.
     """
     name = 'MScan'
     version = '0.2.0'
@@ -397,6 +399,13 @@ class MScan(Scan):
     SUPPLIES = 'Driven PSU'
     SUPPLY_READBACK = 'PSU readback'
     FILE_LABEL = 'File name'
+    SCAN_NOTES = 'Scan notes'  # Not 'Notes': that legacy Explorer key is read as old metadata only.
+    # Devices whose channels are recorded with each point, as the beam conditions of the scan
+    # (user, 2026-11-03: "le suivi de l'ESI est important"): spray HV and current, pressures. Read live from
+    # each plugin at every MScan poll, not from Explorer's history: they need not be recording (user choice).
+    CONTEXT_DEVICES = ('ESI', 'TPG366')
+    CONTEXT_STALE_S = 10.  # A window without a poll takes the last reading before its end, if this recent.
+    CONTEXT_KEPT = 20000  # Polls kept for the point windows still open (about 16 min at 50 ms).
     FOLDER = 'MScan'  # <Data path>/MScan/<YYYY-MM-DD>/, never Explorer's session fields (user choice 2026-10-26)
     FREQUENCY = 'Fixed frequency'
     AMPLITUDE_LIMITS = 'Allowed amplitude (V)'
@@ -428,7 +437,7 @@ class MScan(Scan):
     # Start; then what to choose, in the order a scan is prepared; live readings last. None: top level.
     LAYOUT = (
         (None, (STATUS,)),
-        ('Setup', (AMX, OUTPUTS, SUPPLIES, FREQUENCY, MODULES, DMMR_INTERVAL, CADENCE, FILE_LABEL)),
+        ('Setup', (AMX, OUTPUTS, SUPPLIES, FREQUENCY, MODULES, DMMR_INTERVAL, CADENCE, FILE_LABEL, SCAN_NOTES)),
         ('Amplitude scan', (AMPLITUDE_LIMITS, CURRENT_LIMITS, MODE, START, STOP, STEP, RATE, TIME_STEP, PASSES,
                             SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE)),
         ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
@@ -443,8 +452,8 @@ class MScan(Scan):
     SQUARE_WAVE_APEX = .2153  # Largest U/V transmitted by an ideal 50 % square wave (docs/mscan_quadrupole.pdf).
     # Calibrated together on 2026-11-03 (Q2, AMX HD, 400-500 kHz) with the Agilent G2421A tuning mix: the M03 peaks
     # are 622, 922, 1522 and 2122. The band widths at k = 0.20 and the transmission at k = 0.21 give the
-    # attenuation; r0 then fits 15 peaks to ± 0.003 mm. r0 is effective: the 5 mm given for Q2 disagrees by a
-    # factor 3.5 in m/z, unexplained (2 r0 = 5 mm? an RF frequency half the displayed one?).
+    # attenuation; r0 then fits 15 peaks to ± 0.003 mm. r0 is effective: 5 % above the nominal 2.5 mm of Q2 (5 mm
+    # between opposite rods, user 2026-11-03), about 10 % in m/z.
     DEFAULT_RF_ATTENUATION = .978
     DEFAULT_R0_MM = 2.625
     # PSU regulator headroom (dropout = internal supply − output, read by the PSU plugin each poll). Lab 2026-11-03,
@@ -463,7 +472,7 @@ class MScan(Scan):
               OFFSET: 'Rod pair 1 (AMPR)', OFFSET_2: 'Rod pair 2 (AMPR)', OFFSET_FACTOR: 'U/V ratio k',
               OFFSET_RESOLUTION: 'Resolution δ (V)', OFFSET_MINIMUM: 'Minimum U (V)',
               OFFSET_FIXED: 'Axis potential x (V)', FILTER_PREVIEW: 'Preview',
-              SUPPLY_READBACK: 'PSU rails', OFFSET_READBACK: 'Rod pairs (AMPR)', MZ_R0: 'r0 (mm)',
+              SUPPLY_READBACK: 'PSU rails', OFFSET_READBACK: 'Rod pairs (AMPR)', MZ_R0: 'r0 (mm)', SCAN_NOTES: 'Notes',
               MZ_SCALE: 'm/z range'}
 
     class Display(Scan.Display):
@@ -659,6 +668,9 @@ class MScan(Scan):
         settings[self.FILE_LABEL] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='file_label',
             toolTip='Optional name added to each scan file: <Data path>/MScan/<date>/<date_time>_<name>_PSU-<X>_<from>-<to>V.h5. '
                     'Letters, digits, - and _ are kept; other characters become -.')
+        settings[self.SCAN_NOTES] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='scan_notes',
+            toolTip='Free text saved with each scan: sample, dilution, conditions (e.g. "Agilent G2421A tuning mix"). '
+                    'Kept in the file as MScan notes and in Validation/setup.')
         settings[self.FREQUENCY] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False, toolTip='Read from AMX. Frequency, duty cycle and routing stay fixed; change them in AMX, not here.')
         for key, tooltip in (
@@ -729,8 +741,8 @@ class MScan(Scan):
             toolTip='Field radius of the quadrupole: distance from its axis to the inner surface of a rod. '
                     'm/z varies as A / r0², so 1 % on r0 is 2 % on m/z. Default 2.625 mm: calibrated on Q2 on '
                     '2026-11-03 with the Agilent G2421A tuning mix (622, 922, 1522, 2122) and the RF attenuation '
-                    'factor 0.978. It is an effective value: the 5 mm given for Q2 disagrees by a factor 3.5 in '
-                    'm/z. To calibrate on a known peak, set r0 to r0 × √(m/z shown / m/z known).')
+                    'factor 0.978. It is an effective value, 5 % above the nominal 2.5 mm of Q2 (5 mm between '
+                    'opposite rods). To calibrate on a known peak, set r0 to r0 × √(m/z shown / m/z known).')
         settings[self.MZ_ATTENUATION] = parameterDict(value=self.DEFAULT_RF_ATTENUATION, minimum=.5, maximum=1.5,
             parameterType=PARAMETERTYPE.FLOAT, attr='rf_attenuation', event=self._mz_changed, instantUpdate=False,
             displayDecimals=3,
@@ -1005,6 +1017,143 @@ class MScan(Scan):
         for values in columns:
             valid |= np.isfinite(values)
         return device, times, valid, skipped
+
+    def _context_channels(self):
+        """Real, enabled channels of the context devices, recorded with each point (never commanded)."""
+        found = []
+        for c in self.pluginManager.DeviceManager.channels():
+            try:
+                if c.getDevice().name in self.CONTEXT_DEVICES and c.real and c.enabled:
+                    found.append(c)
+            except (AttributeError, TypeError):
+                continue
+        return sorted(found, key=lambda c: (c.getDevice().name, c.name))
+
+    @staticmethod
+    def _context_reading(c):
+        """What the plugin shows now: its monitor when it uses one (what Explorer would record), else its
+        value. NaN while it is not acquiring: a stale display is never recorded."""
+        try:
+            if not c.enabled or not c.real or not getattr(c, 'acquiring', True):
+                return np.nan
+            value = float(c.monitor if getattr(c, 'useMonitors', False) else c.value)
+            return value if math.isfinite(value) else np.nan
+        except (AttributeError, TypeError, ValueError):
+            return np.nan
+
+    def _sample_context(self):
+        """GUI-only, at every MScan poll during a scan: one timestamped reading of each context channel."""
+        channels = (self._plan or {}).get('context') or []
+        if not channels or 'context' not in (getattr(self, '_validation', None) or {}):
+            return
+        samples = getattr(self, '_context_samples', None)
+        if samples is None:
+            samples = self._context_samples = deque(maxlen=self.CONTEXT_KEPT)
+        samples.append((time.time(), [self._context_reading(c) for c in channels]))
+
+    def _context_warning(self, channels):
+        """A context device loaded but not acquiring gives NaN columns: said at Start, which stays allowed."""
+        loaded = {p.name for p in self.pluginManager.plugins}
+        idle = [name for name in self.CONTEXT_DEVICES if name in loaded
+                and not any(c.getDevice().name == name and math.isfinite(self._context_reading(c)) for c in channels)]
+        if not idle:
+            return None
+        return (f'{" and ".join(idle)} not acquiring: NaN for {"its" if len(idle) == 1 else "their"} readings in the '
+                'scan file. Turn it on to record them with each point.')
+
+    @staticmethod
+    def _channel_unit(c):
+        try:
+            return str(getattr(c, 'unit', '') or getattr(c.getDevice(), 'unit', '') or '')
+        except (AttributeError, TypeError):
+            return ''
+
+    def _store_context(self, index, start, end):
+        """Mean of the live readings polled in (start, end], per channel; a window without a poll takes the
+        last one before its end if at most CONTEXT_STALE_S old. NaN otherwise: never an invented value."""
+        validation = self._validation
+        samples = list(getattr(self, '_context_samples', None) or ())  # One copy: polls may append meanwhile.
+        if 'context' not in validation or not validation['context'].shape[1] or not samples:
+            return
+        inside, before = [], None
+        for t, row in reversed(samples):
+            if t > end + 1e-6:
+                continue
+            if t > start + 1e-6:
+                inside.append(row)
+            else:
+                before = (t, row)
+                break
+        if inside:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)  # A channel NaN at every poll stays NaN.
+                validation['context'][index] = np.nanmean(np.asarray(inside, dtype=float), axis=0)
+        elif before is not None and end - before[0] <= self.CONTEXT_STALE_S:
+            validation['context'][index] = before[1]
+
+    def _store_samples(self, index, start, end):
+        """Every DMMR record of the point window: time, current and range of each module.
+
+        Kept per point index, so a point updated again replaces its records instead of repeating them."""
+        raw = self._validation.get('raw_samples')
+        modules = (self._plan or {}).get('detectors') or []
+        if raw is None or not modules:
+            return
+        try:
+            times = np.asarray(modules[0].getDevice().time.get(), dtype=float)
+        except (AttributeError, TypeError, ValueError):
+            return
+        first = self._recent(times, start)
+        keep = self._increasing(times[first:])
+        window_times = times[first:][keep]
+        lo, hi = np.searchsorted(window_times, (start + 1e-6, end + 1e-6), side='right')
+        currents, ranges = [], []
+        for c in modules:
+            for history, columns in ((lambda c=c: c.getValues(subtractBackground=False), currents),
+                                     (lambda c=c: getattr(c, 'range_history').get(), ranges)):
+                try:
+                    values = np.asarray(history(), dtype=float)
+                    columns.append(values[first:][keep][lo:hi] if len(values) == len(times) else np.full(hi - lo, np.nan))
+                except (AttributeError, TypeError, ValueError):
+                    columns.append(np.full(hi - lo, np.nan))
+        raw[int(index)] = (window_times[lo:hi], np.column_stack(currents).reshape(hi - lo, len(modules)),
+                           np.column_stack(ranges).reshape(hi - lo, len(modules)))
+
+    def _software(self):
+        """Provenance of this scan: plugin version and SHA-256 of the code and worker that ran it."""
+        if getattr(self, '_software_cache', None) is None:
+            root = Path(__file__).resolve().parent
+
+            def sha(path):
+                try:
+                    return hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    return None
+            target = 'windows-x86_64' if sys.platform == 'win32' else 'linux-x86_64'
+            try:
+                worker = json.loads((root / 'native/manifest.json').read_text(encoding='utf-8'))['targets'][target]
+                worker = dict(file=worker.get('file'), sha256=worker.get('sha256'))
+            except (OSError, KeyError, TypeError, ValueError):
+                worker = None
+            self._software_cache = dict(plugin='MScan', plugin_version=self.version,
+                                        mscan_plugin_sha256=sha(root / 'mscan_plugin.py'),
+                                        native_scan_sha256=sha(root / '_runtime/_native_scan.py'), worker=worker)
+        return dict(self._software_cache)
+
+    @staticmethod
+    def _duty_percent(rows):
+        """Duty cycle (% at Vpos) of each selected output from its AMX source timing, else its displayed text."""
+        values = []
+        for row in rows:
+            timing = (row.get('waveform') or {}).get('source') or row.get('timing') or {}
+            try:
+                values.append(100. * float(timing['high']) / float(timing['period']))
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                try:
+                    values.append(float(str(row.get('duty', '')).lstrip('≈')))
+                except ValueError:
+                    values.append(None)
+        return [v if v is None or math.isfinite(v) else None for v in values]
 
     def _module_values(self, start, end):
         """Average every recorded module over (start, end] of the shared DMMR time axis.
@@ -1794,7 +1943,7 @@ class MScan(Scan):
             plan = self._preflight()
             self._ready = True
             status = 'Ready to scan'
-            for key in ('headroom_warning', 'filter_warning'):
+            for key in ('headroom_warning', 'filter_warning', 'context_warning'):
                 if plan.get(key):
                     status += f'\nWarning: {plan[key]}'
         except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -1920,6 +2069,18 @@ class MScan(Scan):
                     'has a new reading. Each module is averaged over the same windows.')
         if plan['mode'] == self.CONTINUOUS:
             plan['metadata']['detector_cadence'] = self._require_time_step(modules, plan['average'])
+        rows = plan['metadata']['waveform']
+        try:
+            frequency = self._frequency_hz(rows)
+        except ScanError:
+            frequency = None
+        plan['metadata']['rf'] = dict(frequency_hz=frequency, duty_percent=self._duty_percent(rows))
+        plan['metadata']['software'] = self._software()
+        plan['metadata']['notes'] = str(getattr(self, 'scan_notes', '') or '')
+        plan['context'] = self._context_channels()
+        plan['metadata']['context'] = [dict(device=c.getDevice().name, channel=c.name, unit=self._channel_unit(c))
+                                       for c in plan['context']]
+        plan['context_warning'] = self._context_warning(plan['context'])
         return plan
 
     def initScan(self):
@@ -1934,7 +2095,8 @@ class MScan(Scan):
         self._last_scan_status = ''
         try:
             self._plan = self._preflight()
-            for key in ('headroom_warning', 'filter_warning'):
+            self._context_samples = deque(maxlen=self.CONTEXT_KEPT)
+            for key in ('headroom_warning', 'filter_warning', 'context_warning'):
                 if self._plan.get(key):
                     self.print(f'Warning: {self._plan[key]}', flag=PRINT.WARNING)
             configured = [c.name for c in self._plan['detectors']]
@@ -1952,7 +2114,9 @@ class MScan(Scan):
                 rail_v=np.full((n, rails), np.nan), rail_i=np.full((n, rails), np.nan),
                 window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
                 samples=np.zeros((n, outputs), dtype=np.int64), finite_samples=np.zeros((n, outputs), dtype=np.int64),
-                rail_dropout=np.full((n, rails), np.nan), low_headroom=np.zeros(n, dtype=bool))
+                rail_dropout=np.full((n, rails), np.nan), low_headroom=np.zeros(n, dtype=bool),
+                context=np.full((n, len(self._plan.get('context') or [])), np.nan),
+                raw_samples={})
             if self._plan.get('offsets'):
                 k = len(self._plan['offsets'])  # One column per rod pair.
                 self._validation.update(offset_v=np.full((n, k), np.nan), offset_target=np.full((n, k), np.nan))
@@ -2295,7 +2459,7 @@ class MScan(Scan):
                                'Commanded on each AMPR channel at each amplitude (rounded to its display precision); '
                                'verified by its setpoint readback and Monitor. offset_v and offset_target have one '
                                'column per pair.'),
-                calibration='None; amplitude in V, not m/z', background_subtracted=False))
+                calibration='Amplitude A in V; m/z, when known, in Validation/mz with its Definition', background_subtracted=False))
 
     def _observation(self):
         """GUI-only: immutable readback copy; never performs a hardware read."""
@@ -2351,6 +2515,7 @@ class MScan(Scan):
             ready &= (fresh and math.isfinite(current) and current >= 0 and math.isfinite(v)
                       and v >= 0 and abs(v - expected) <= p['tolerance'])
         ready = self._offset_observation() and ready
+        self._sample_context()
         self._headroom_guard()
         return ready, np.asarray(measured), np.asarray(currents), time.time()
 
@@ -2538,6 +2703,8 @@ class MScan(Scan):
             self.outputChannels[j].recordingData[index] = mean
             validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
         self._store_headroom(index, start, end)
+        self._store_context(index, start, end)
+        self._store_samples(index, start, end)
         # Acquired when at least one module read something in the window, like the native engine's DMMR clock.
         validation['point_status'][index] = (('acquired during sweep' if continuous else 'acquired')
             if any(math.isfinite(mean) for mean, _, _ in values) else 'invalid detector data')
@@ -2962,8 +3129,9 @@ class MScan(Scan):
         if not self._validation:
             return
         with h5py.File(file, 'a') as handle:
-            if self.notes:
-                handle[self.name].attrs['notes'] = self.notes
+            notes = str(getattr(self, 'scan_notes', '') or '') or self.notes
+            if notes:
+                handle[self.name].attrs['notes'] = notes
             group = handle[self.name].require_group(self.VALIDATION)
             group.attrs['status'] = self._validation['status']
             group.attrs['error'] = self._validation['error']
@@ -2994,6 +3162,33 @@ class MScan(Scan):
                     **inputs))
             except (ScanError, AttributeError, KeyError, TypeError, ValueError):
                 pass  # No AMX frequency in this scan's metadata: A only.
+            context = (self._plan or {}).get('metadata', {}).get('context') or []
+            if context and 'context' in self._validation:
+                for j, info in enumerate(context):
+                    name = f"Context/{info['device']}/{str(info['channel']).replace('/', '-')}"
+                    group.create_dataset(name, data=np.asarray(self._validation['context'])[:, j])
+                    group[name].attrs['Unit'] = info['unit']
+                group['Context'].attrs['Description'] = (
+                    f'Beam conditions: each channel of {", ".join(self.CONTEXT_DEVICES)} read live from its plugin '
+                    f'(its monitor when it uses one) at every MScan poll and averaged over each point window; a '
+                    f'window without a poll takes the last reading before its end if at most '
+                    f'{self.CONTEXT_STALE_S:g} s old; NaN while the device is not acquiring. Independent of '
+                    'Explorer recording. Recorded, never used to correct the currents.')
+            raw = self._validation.get('raw_samples')
+            if isinstance(raw, dict):
+                samples = group.create_group('Samples')
+                count, points = max(1, len(self.outputChannels)), sorted(raw)
+                samples.create_dataset('time', data=np.concatenate([raw[i][0] for i in points] or [np.empty(0)]))
+                samples.create_dataset('point', data=np.concatenate(
+                    [np.full(len(raw[i][0]), i, dtype=np.int64) for i in points] or [np.empty(0, dtype=np.int64)]))
+                for column, key in ((1, 'current'), (2, 'range')):
+                    samples.create_dataset(key, data=np.concatenate(
+                        [raw[i][column] for i in points] or [np.empty((0, count))]).reshape(-1, count))
+                samples['time'].attrs['Unit'] = 's since Unix epoch (Explorer recording time)'
+                samples['current'].attrs['Unit'] = 'A, one column per module as in Validation modules; NaN: no new reading'
+                samples['range'].attrs['Description'] = 'DMMR measurement range of each reading; NaN: unknown'
+                samples.attrs['Description'] = ('Every DMMR record of each point window (start, end], with the index of '
+                                                'its point: the readings behind each mean.')
             if 'rail_dropout' in self._validation:
                 group.create_dataset('rail_dropout', data=self._validation['rail_dropout'])
                 group['rail_dropout'].attrs['Unit'] = ('V (lowest PSU regulator headroom, dropout, over the point window, '

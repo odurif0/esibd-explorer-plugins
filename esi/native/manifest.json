@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "3ea61c5d245e951638d2b568913593b8d0d1c14221ff49cea73ede2542a2086c",
-    "size_bytes": 344179,
-    "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+    "sha256": "49fc889660c7a4433b30004b7e405b0174b5059b38bf0ac39bbeb9e141bedcaa",
+    "size_bytes": 344204,
+    "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
     "vendored": false
   },
-  "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+  "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
   "targets": {
     "windows-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-esi-worker.exe",
       "sha256": "48350f36987433ca4f6fd55f5f163675b4c1ee5ed36a65da51301ed6b2767fcc",
       "size_bytes": 850944,
-      "source_data_sha256": "233877ac221ed585c48527a58a41d5169e6fc180c18e5b64cff777351ae0fcb7",
+      "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
       "target": "x86_64-pc-windows-gnu"
     }
   },

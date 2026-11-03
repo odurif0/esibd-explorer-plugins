@@ -44,7 +44,8 @@ scan cannot start, and a greyed **Start scan** shows the same reason in its tool
 other rows are in four groups, in the order a scan is prepared:
 
 - **Setup**: AMX, connectors, the PSU they drive, AMX frequency, the recorded DMMR modules
-  and interval, file name.
+  and interval, file name, and **Notes**: free text (sample, dilution, conditions) saved with
+  each scan and kept for the next ones until changed.
 - **Amplitude scan**: allowed range and PSU Ilim, mode, amplitudes, timing, duration.
 - **Mass filter**: the AMPR channels of the two rod pairs, k, δ, Minimum U, axis potential
   x, and a **Preview** of what the scan will apply.
@@ -266,9 +267,10 @@ spectrum against it (user request 2026-11-03). For an ideal 50 % square wave:
 G2421A: the M03 peaks are its ions at m/z 622, 922, 1522 and 2122, and they fall on the same m/z at
 500, 450 and 400 kHz. The band widths at k = 0.20 and the transmission at k = 0.21 give an RF
 attenuation factor of **0.978**; r0 then fits the 15 peaks with **2.625 ± 0.003 mm**, and each
-lands within 0.6 % of its mass. That r0 is effective: the 5 mm given for Q2 disagrees by a factor
-3.5 in m/z, unexplained (is 5 mm the distance between opposite rods? is the RF frequency half the
-displayed one?). Measure both again for another quadrupole, AMX or frequency range.
+lands within 0.6 % of its mass. That r0 is effective: 5 % above the nominal 2.5 mm of Q2 (5 mm
+between opposite rods), so the nominal value would read m/z about 10 % too high. The real
+waveform, round rods and the rod spacing can each account for that; it is not measured. Measure
+both again for another quadrupole, AMX or frequency range.
 Resolution measured that day (m/Δm at half height): 12–16 at k = 0.20, 35–55 at k = 0.21.
 A scan is converted with its own settings, saved in the file, not with the panel's current ones.
 The file always keeps A as the axis and adds `Validation/mz` (NaN where not transmitted or
@@ -388,7 +390,24 @@ limits, return setpoints, AMX waveform and DMMR module identity. **Validation**
 lists the recorded modules (`modules`, JSON, in column order); `samples` and `finite_samples`
 have one column per module, and `rail_dropout`/`low_headroom` keep the PSU headroom. Files
 written before 2026-11-03 name a reference module (`reference_channel`) and the others
-(`extra_channels`) instead. Continuous scans
+(`extra_channels`) instead. Since v0.5.9 a scan also keeps:
+
+- **Validation/Context/ESI/…** and **Context/TPG366/…**: each enabled, real channel of the ESI
+  (spray currents, HV, heater) and of the TPG366 (pressures), one value per point with its
+  `Unit`. MScan reads what each plugin shows (the measured value: the monitor for the ESI) at
+  every poll and averages it over the point window. These devices need not be recording in
+  Explorer; one that is not acquiring gives NaN, and `Status` says so before Start. Recorded
+  only, never used to correct the currents.
+- **Validation/Samples**: every DMMR record behind the point means: `time`, `point` (its point
+  index), `current` and `range` (DMMR measurement range), one column per module. NaN: no new
+  reading, or range unknown.
+- In `Validation/setup` (JSON): `rf` (`frequency_hz`, `duty_percent` per selected AMX output,
+  null when unknown), `software` (plugin version, SHA-256 of `mscan_plugin.py`,
+  `_runtime/_native_scan.py` and of the MScan worker in `native/manifest.json`), `notes` and
+  `context` (device, channel and unit of each context column).
+- **Notes** in the `MScan` attribute `notes`.
+
+Continuous scans
 also retain the detector cadence used for preflight, requested sweep speed,
 computed voltage step and configured DMMR interval. Device
 configurations are also archived using Explorer's normal mechanism. Continuous
@@ -413,7 +432,8 @@ and the greater of `Wait`/`Wait long` becomes the single settling duration. A sa
 one physical pair is explicitly selected; it never silently changes the wiring.
 Old data files, including multiple saved signals,
 remain viewable; every saved signal is plotted. Importing an old settings
-file does not rewrite it. Notes are metadata, not a scan control.
+file does not rewrite it. Notes are metadata, not a scan control: a legacy `[Notes]` entry
+is kept as such, and **Notes** in Setup (key `Scan notes`) replaces it in new files when set.
 INI settings are read and written as UTF-8, including files with a Windows BOM;
 module names and saved selections do not depend on the Windows locale.
 

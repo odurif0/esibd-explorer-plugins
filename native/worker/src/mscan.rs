@@ -943,7 +943,8 @@ impl Run {
         metadata["links"] = obs.amx.links.clone();
         metadata["amplitude_definition"] =
             json!("Vpos=+A, Vneg=-A relative to PSU reference; external offset not included");
-        metadata["calibration"] = json!("None; amplitude in V, not m/z");
+        metadata["calibration"] =
+            json!("Amplitude A in V; m/z, when known, in Validation/mz with its Definition");
         metadata["background_subtracted"] = json!(false);
         let points = steps
             .iter()
