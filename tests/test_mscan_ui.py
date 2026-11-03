@@ -987,7 +987,7 @@ def run(scenario, target, app_holder=None):
     tree, named = scan.settingsTree, scan.settingsMgr.settings
     assert tree.indexOfTopLevelItem(named[scan.STATUS]) == 0
     groups = [tree.topLevelItem(i) for i in range(1, tree.topLevelItemCount())]
-    assert [g.text(0) for g in groups] == ['Setup', 'Amplitude scan', 'Mass filter', 'Live readback']
+    assert [g.text(0) for g in groups] == ['Setup', 'Amplitude scan', 'Mass filter', 'm/z', 'Live readback']
     assert all(g.isExpanded() and g.isFirstColumnSpanned() and g.font(0).bold() for g in groups)
     assert named[scan.OFFSET_FIXED].parent() is groups[2] and named[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
     assert named[scan.OFFSET_FACTOR].text(0) == 'U/V ratio k'
@@ -2018,6 +2018,17 @@ def run(scenario, target, app_holder=None):
             assert f['MScan/Validation/samples'].shape == (3, 2)
     scan.plot(done=True)
     QTest.qWait(30)
+    if scenario == 'complete':
+        # m/z abscissa (user request 2026-11-03). No rod pair here: RF only, the low-mass cut-off.
+        scan._refresh_interface()
+        scale = scan.settingsMgr.settings[scan.MZ_SCALE]
+        assert scale.text(0) == 'm/z range' and '500 kHz, r0 5 mm' in scale.value, scale.value
+        scan.settingsMgr.settings[scan.MZ_AXIS].value = scan.AXIS_MZ
+        assert scan.display.axes[0].get_xlabel() == 'Low-mass cut-off m/z (Th), RF only'
+        cutoff = 2.444 * 80 / .712 * (4 / 5) ** 2  # A = 80 V, 500 kHz, r0 = 5 mm
+        assert np.nanmax(scan.display.ms.get_xdata()) == pytest.approx(cutoff, rel=3e-3)
+        scan.settingsMgr.settings[scan.MZ_AXIS].value = scan.AXIS_AMPLITUDE
+        assert scan.display.axes[0].get_xlabel() == scan._axis_label()
     status_label = scan.settingsMgr.settings[scan.STATUS].label
     status_bounds = status_label.fontMetrics().boundingRect(QRect(0, 0, status_label.width(), 10000),
         Qt.TextFlag.TextWordWrap, status_label.text())
@@ -2173,7 +2184,7 @@ def run(scenario, target, app_holder=None):
         assert not any('/' in section for section in sections.sections())
         folded = {g.text(0): g.isExpanded() for g in (scan.settingsTree.topLevelItem(i)
                   for i in range(1, scan.settingsTree.topLevelItemCount()))}
-        assert folded == {'Setup': True, 'Amplitude scan': True, 'Mass filter': True, 'Live readback': False}, folded
+        assert folded == {'Setup': True, 'Amplitude scan': True, 'Mass filter': True, 'm/z': True, 'Live readback': False}, folded
         assert scan.settingsMgr.settings[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
         scan.settingsTree.expandItem(scan.settingsMgr.settings[scan.SAMPLES].parent())
         assert scan.channelTree is None

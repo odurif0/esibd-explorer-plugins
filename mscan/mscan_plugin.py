@@ -85,6 +85,63 @@ def amplitude_steps(start: float, stop: float, step: float) -> np.ndarray:
     return result
 
 
+# m/z from the amplitude (user request 2026-11-03). Ideal 50 % square wave, conventions of Steel and Henchman
+# (U and V = A per rod, from the axis): a = 8eU/(m r0² Ω²), q = 4eA/(m r0² Ω²), so m/z = 4eA / (q r0² Ω²).
+# Derivation and figures: docs/mscan_quadrupole.pdf.
+_E_OVER_U = 1.602176634e-19 / 1.66053906660e-27  # Elementary charge over atomic mass unit (C/kg).
+_RF_ONLY_Q = .7120  # Largest stable q at a = 0 (RF only): the low-mass cut-off.
+
+
+def _square_wave_trace(a, q):
+    """Half-trace of the one-period transfer matrix, x direction; stable when |trace| < 2."""
+    w1 = np.sqrt((a + 2 * q).astype(complex)) + 1e-16
+    w2 = np.sqrt((a - 2 * q).astype(complex)) + 1e-16
+    h = np.pi / 2
+    return (2 * np.cos(w1 * h) * np.cos(w2 * h) - (w1 / w2 + w2 / w1) * np.sin(w1 * h) * np.sin(w2 * h)).real
+
+
+_BANDS = {}
+
+
+def square_wave_band(k):
+    """Stable q interval on the scan line a = 2kq (k = U/A); None above the apex (k ≈ 0.2153).
+
+    k = 0 gives (0, 0.712): RF only, a high-pass whose upper q is the low-mass cut-off.
+    """
+    k = round(abs(float(k)), 5)
+    if k not in _BANDS:
+        if k == 0:
+            _BANDS[k] = (0., _RF_ONLY_Q)
+        else:
+            q = np.linspace(1e-4, .8, 16001)
+            a = 2 * k * q
+            stable = (np.abs(_square_wave_trace(a, q)) < 2) & (np.abs(_square_wave_trace(-a, -q)) < 2)
+            _BANDS[k] = (float(q[stable][0]), float(q[stable][-1])) if stable.any() else None
+    return _BANDS[k]
+
+
+def mz_from_amplitude(amplitudes, *, frequency_hz, r0_mm, factor=0., resolution=0., minimum=.5, pairs=2):
+    """m/z (Th) at the centre of the transmitted band for each amplitude A; RF only: the low-mass cut-off.
+
+    U = max(minimum, |factor| × A − resolution), as MScan drives the rod pairs. NaN where nothing is
+    transmitted (above the apex) or where the DC between the pairs is unknown (one driven pair).
+    """
+    amplitudes = np.asarray(amplitudes, dtype=float)
+    scale = 4 * _E_OVER_U / ((r0_mm * 1e-3) ** 2 * (2 * np.pi * frequency_hz) ** 2)
+    result = np.full(amplitudes.shape, np.nan)
+    if factor and pairs != 2:
+        return result  # Pair 2 keeps its own potential: the filtering DC is not known.
+    for i, amplitude in enumerate(amplitudes):
+        if not math.isfinite(amplitude) or amplitude <= 0:
+            continue
+        k = max(minimum, abs(factor) * amplitude - resolution) / amplitude if factor else 0.
+        band = square_wave_band(k)
+        if band is not None:
+            q = band[1] if not factor else (band[0] + band[1]) / 2
+            result[i] = scale * amplitude / q
+    return result
+
+
 class _Call:
     # Explorer's dynamicImport omits sys.modules registration, which dataclasses
     # need when resolving postponed annotations. Keep this a plain container.
@@ -350,6 +407,10 @@ class MScan(Scan):
     OFFSET_FIXED = 'Fixed offset'
     OFFSET_READBACK = 'Offset readback'
     FILTER_PREVIEW = 'Filter preview'
+    MZ_R0 = 'Field radius r0'
+    MZ_AXIS = 'Plot axis'
+    MZ_SCALE = 'Mass scale'  # Never '/' in a key: Explorer reads it as a group (tree and HDF5).
+    AXIS_AMPLITUDE, AXIS_MZ = 'Amplitude (V)', 'm/z'
     NO_OFFSET = 'None'
     NO_PAIR = 'Select AMX pair'
     TIMEOUT = 'Settle timeout'
@@ -368,12 +429,13 @@ class MScan(Scan):
                             SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE)),
         ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
                          FILTER_PREVIEW)),
+        ('m/z', (MZ_R0, MZ_AXIS, MZ_SCALE)),
         ('Live readback', (SUPPLY_READBACK, OFFSET_READBACK, FINAL_VOLTAGES, SAMPLES)),
     )
     GROUP_OF = {key: group for group, keys in LAYOUT if group for key in keys}
     # Read-only rows whose text wraps over several lines.
     WRAPPED = (STATUS, SUPPLIES, FREQUENCY, MODULES, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
-               CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW)
+               CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW, MZ_SCALE)
     SQUARE_WAVE_APEX = .2153  # Largest U/V transmitted by an ideal 50 % square wave (docs/mscan_quadrupole.pdf).
     # PSU regulator headroom (dropout = internal supply − output, read by the PSU plugin each poll). Lab 2026-11-03,
     # PSU_A in Half range: the internal supply fell from 256 V at 0 mA to 248.5 V at 150 mA; the output was exact
@@ -391,7 +453,8 @@ class MScan(Scan):
               OFFSET: 'Rod pair 1 (AMPR)', OFFSET_2: 'Rod pair 2 (AMPR)', OFFSET_FACTOR: 'U/V ratio k',
               OFFSET_RESOLUTION: 'Resolution δ (V)', OFFSET_MINIMUM: 'Minimum U (V)',
               OFFSET_FIXED: 'Axis potential x (V)', FILTER_PREVIEW: 'Preview',
-              SUPPLY_READBACK: 'PSU rails', OFFSET_READBACK: 'Rod pairs (AMPR)'}
+              SUPPLY_READBACK: 'PSU rails', OFFSET_READBACK: 'Rod pairs (AMPR)', MZ_R0: 'r0 (mm)',
+              MZ_SCALE: 'm/z range'}
 
     class Display(Scan.Display):
         def closeGUI(self):
@@ -650,6 +713,23 @@ class MScan(Scan):
             indicator=True, restore=False,
             toolTip='Rod pair channels: AMPR Monitor (measured) and setpoint. During a scan: scan target, '
                     'Monitor and whether the AMPR confirmed the target. Display only, never a command.')
+        settings[self.MZ_R0] = parameterDict(value=5., minimum=.1, maximum=100., unit='mm',
+            parameterType=PARAMETERTYPE.FLOAT, attr='mz_r0_mm', event=self._mz_changed, instantUpdate=False,
+            displayDecimals=3,
+            toolTip='Field radius of the quadrupole: distance from its axis to the inner surface of a rod. '
+                    'm/z varies as A / r0², so 1 % on r0 is 2 % on m/z. Q2: 5 mm, provisional (2026-11-03). '
+                    'r0 also absorbs the unverified ratio between the rod amplitude and A: to calibrate on a '
+                    'known peak, set r0 to r0 × √(m/z shown / m/z known).')
+        settings[self.MZ_AXIS] = parameterDict(value=self.AXIS_AMPLITUDE, items=f'{self.AXIS_AMPLITUDE},{self.AXIS_MZ}',
+            parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='mz_axis', event=self._mz_changed,
+            toolTip='Abscissa of the plot. m/z is computed from A, the AMX frequency, r0 and the mass filter '
+                    'settings of the scan. The file always keeps A, and adds the m/z in Validation/mz.')
+        settings[self.MZ_SCALE] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
+            indicator=True, restore=False,
+            toolTip='m/z at Amplitude from/to: the centre of the transmitted band for an ideal 50 % square wave, '
+                    'or the low-mass cut-off when RF only. m/z = 4 e A / (q r0² (2π f)²), with q the centre of the '
+                    'stable band on the scan line a = 2 (U/A) q (docs/mscan_quadrupole.pdf). Theory: exact only once '
+                    'r0 is calibrated on a known peak.')
         order = [key for _, keys in self.LAYOUT for key in keys]
         return {key: settings[key] for key in order}
 
@@ -1140,6 +1220,84 @@ class MScan(Scan):
         if setting.value != text:
             setting.value = text
 
+    def _mz_changed(self):
+        if not self.loading and not self.settingsMgr.loading:
+            self._refresh_interface()
+            self.plot(update=False)
+
+    @staticmethod
+    def _frequency_hz(rows):
+        """AMX output frequency from its decoded rows (source period, else the displayed text)."""
+        values, units = [], {'Hz': 1., 'kHz': 1e3, 'MHz': 1e6}
+        for row in rows:
+            waveform = row.get('waveform') or {}
+            source = waveform.get('source') or {}
+            if waveform.get('clock_hz') and source.get('period'):
+                values.append(float(waveform['clock_hz']) / float(source['period']))
+                continue
+            text = str(row.get('frequency', '')).split()
+            if len(text) == 2 and text[1] in units:
+                try:
+                    values.append(float(text[0]) * units[text[1]])
+                except ValueError:
+                    pass
+        if (len(values) != len(rows) or not values or any(not math.isfinite(v) or v <= 0 for v in values)
+                or max(values) - min(values) > 1e-6 * max(values)):
+            raise ScanError('AMX frequency unavailable: m/z needs it.')
+        return values[0]
+
+    def _mz_inputs(self, metadata=None):
+        """Frequency, r0 and mass filter of a scan (its metadata) or of the present settings."""
+        if metadata:
+            offset = metadata.get('offset')
+            rows = metadata.get('waveform') or []
+            mass_filter = (dict(factor=float(offset['coefficient']), resolution=float(offset.get('resolution_offset_v', 0.)),
+                                minimum=float(offset.get('minimum_u_v', .5)), pairs=len(offset.get('pairs') or []))
+                           if offset else dict(factor=0.))
+        else:
+            sources = self._offset_sources()
+            mass_filter = (dict(factor=float(self.offset_factor), resolution=self._offset_resolution(),
+                                minimum=self._offset_minimum(), pairs=len(sources)) if sources else dict(factor=0.))
+            rows = self._amx_rows(self._plugin(self.amx_name), self._selected_outputs())
+        return dict(frequency_hz=self._frequency_hz(rows), r0_mm=float(self.mz_r0_mm), **mass_filter)
+
+    def _scan_metadata(self):
+        return (self._plan or {}).get('metadata') or None
+
+    def _mz_scale_text(self):
+        inputs = self._mz_inputs()
+        low, high = float(self.start), float(self.stop)
+        mz = mz_from_amplitude([low, high], **inputs)
+        if inputs['factor'] and inputs.get('pairs') != 2:
+            return 'No m/z with one rod pair: the DC between the pairs is unknown.'
+        if not np.isfinite(mz).any():
+            return 'No m/z: U/A above the apex over the whole scan, no ion transmitted.'
+        quantity = 'peak centre' if inputs['factor'] else 'low-mass cut-off, RF only'
+        shown = ' → '.join(f'{value:.0f}' if math.isfinite(value) else 'none' for value in mz)
+        return (f'A = {low:g} → {high:g} V ≈ m/z {shown} ({quantity})\n'
+                f'{inputs["frequency_hz"] / 1e3:g} kHz, r0 {inputs["r0_mm"]:g} mm; theory until r0 is calibrated')
+
+    def _refresh_mz_scale(self):
+        try:
+            text = self._mz_scale_text()
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            text = f'Unavailable: {exc}'
+        setting = self.settingsMgr.settings[self.MZ_SCALE]
+        if setting.value != text:
+            setting.value = text
+
+    def _plot_axis(self, amplitudes):
+        """Abscissa values and label: A, or m/z when chosen and computable for this scan."""
+        if getattr(self, 'mz_axis', self.AXIS_AMPLITUDE) == self.AXIS_MZ and len(amplitudes):
+            try:
+                inputs = self._mz_inputs(self._scan_metadata())
+                values = mz_from_amplitude(amplitudes, **inputs)
+                if np.isfinite(values).any():
+                    return values, 'm/z (Th)' if inputs['factor'] else 'Low-mass cut-off m/z (Th), RF only'
+            except (ScanError, AttributeError, KeyError, TypeError, ValueError):
+                pass  # The amplitude axis stays: the m/z scale row says why.
+        return amplitudes, self._axis_label()
+
     def estimateScanTime(self):
         if not all(hasattr(self, attr) for attr in ('start', 'stop', 'step', 'settling_s', 'integration_s')):
             return
@@ -1536,6 +1694,7 @@ class MScan(Scan):
         self._refresh_readback(rails)
         self._refresh_offset_readback()
         self._refresh_filter_preview()  # Frozen during a scan with the settings it shows.
+        self._refresh_mz_scale()
         # Same preflight as Start, but do not initialize data, bind a plan, log
         # warnings or touch a device. Keep the last outcome (including save errors).
         try:
@@ -2601,6 +2760,7 @@ class MScan(Scan):
         ax = display.axes[0]
         outputs = self.outputChannels if self.inputChannels else []
         x = np.asarray(self.inputChannels[0].getRecordingData() if outputs else [], dtype=float)
+        x, x_label = self._plot_axis(x)
         passes = int(((self._plan or {}).get('metadata') or {}).get('passes') or 1)
         if passes < 1 or len(x) % passes:
             passes = 1  # Older files: one sweep.
@@ -2635,7 +2795,7 @@ class MScan(Scan):
         elif legend is not None:
             legend.remove()
         ax.set_ylabel('Current (pA)')
-        ax.set_xlabel(self._axis_label())
+        ax.set_xlabel(x_label)
         autoscale = getattr(display, 'autoscaleAction', None)
         if autoscale is None or autoscale.state:
             self._rescaling = True
@@ -2716,6 +2876,19 @@ class MScan(Scan):
             group.create_dataset('point_status', data=self._validation['point_status'], dtype=h5py.string_dtype('utf-8'))
             group['rail_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
             group['rail_i'].attrs['Unit'] = 'A (PSU readback at end of integration, not detector current)'
+            try:
+                inputs = self._mz_inputs(self._scan_metadata())
+                group.create_dataset('mz', data=mz_from_amplitude(
+                    np.asarray(self.inputChannels[0].recordingData, dtype=float), **inputs))
+                group['mz'].attrs['Unit'] = ('Th: m/z at the centre of the transmitted band (low-mass cut-off when '
+                                             'RF only); NaN where not transmitted or unknown')
+                group['mz'].attrs['Definition'] = json.dumps(dict(
+                    formula='m/z = 4 e A / (q r0^2 (2 pi f)^2) / u; q = centre of the stable band on a = 2 (U/A) q, '
+                            'U = max(minimum, factor A - resolution); ideal 50 % square wave, rod amplitude = A',
+                    calibration='theory with this r0; r0 absorbs the rod amplitude ratio once fitted on a known peak',
+                    **inputs))
+            except (ScanError, AttributeError, KeyError, TypeError, ValueError):
+                pass  # No AMX frequency in this scan's metadata: A only.
             if 'rail_dropout' in self._validation:
                 group.create_dataset('rail_dropout', data=self._validation['rail_dropout'])
                 group['rail_dropout'].attrs['Unit'] = ('V (lowest PSU regulator headroom, dropout, over the point window, '
