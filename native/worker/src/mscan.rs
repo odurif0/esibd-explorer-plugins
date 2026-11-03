@@ -1920,6 +1920,9 @@ impl Backend for Controller {
             }
             return Err(error);
         }
+        if let Some(reply) = crate::mscan_map::call(method, args, kwargs) {
+            return reply;
+        }
         match method {
             "amplitude_steps" => {
                 let get =
