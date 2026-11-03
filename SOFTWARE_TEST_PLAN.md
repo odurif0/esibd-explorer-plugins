@@ -344,7 +344,9 @@ disable one in the DMMR plugin and it disappears from the next scan. With PSU_A 
 and one ending a few volts below the reachable value starts with a warning. In Full range, read
 output + dropout in PSU_A (the internal supply) and the `max` of `PSU Ilim` (about 500 mA?), then scan
 50–300 V: no stop, and `low_headroom` stays false. Set `Plot axis` to m/z: the axis reads `m/z (Th)`
-with both rod pairs, `Low-mass cut-off` without; adjust r0 on a known ion. If `DMMR data interval`
+with both rod pairs, `Low-mass cut-off` without; with the default r0 (2.625 mm) and RF attenuation
+factor (0.978), the tuning-mix peaks must read 622, 922, 1522 and 2122 within about 1 %. At k = 0.211
+the preview and Start must warn that no ion will pass. If `DMMR data interval`
 reports skipped records, note the time: MScan must keep scanning, and the next scan must start.
 During a long scan with a DMMR history of several hours, `Samples at last point` must stay close to
 the number of DMMR ticks per window (2026-11-03: about half of them were empty). ESI: a lost reply

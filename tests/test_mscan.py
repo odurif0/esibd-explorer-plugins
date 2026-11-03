@@ -377,3 +377,5 @@ def test_panel_groups_every_setting_once_without_changing_its_key(mscan_module, 
     assert (M.START, M.OFFSET, M.OFFSET_FIXED) == ('Amplitude from (V)', 'Quadrupole offset', 'Fixed offset')
     assert set(M.LABELS) <= set(settings) and set(M.WRAPPED) <= set(settings)
     assert all(settings[key]['parameterType'] == 'LABEL' for key in M.WRAPPED)
+    # Calibrated on the Agilent G2421A tuning mix on 2026-11-03 (user: "les nouvelles valeurs optimum par défaut").
+    assert (settings[M.MZ_ATTENUATION]['value'], settings[M.MZ_R0]['value']) == (.978, 2.625)

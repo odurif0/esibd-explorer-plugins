@@ -205,7 +205,7 @@ def test_readback_and_completion_texts(mscan_rig):
     assert s._filter_preview_text().splitlines() == [
         'U = max(0.5, 0.2 × A) = 2 → 6 V for A = 10 → 30 V', 'Pair 1 = x + U = +2 → +6 V',
         'Pair 2 not driven: the DC between the pairs also depends on its potential.',
-        'm/Δm ≈ 10 (ideal square wave, rods at amplitude A)']
+        'm/Δm ≈ 10 (ideal square wave)']
     prepare(mscan_rig)
     assert s._offset_readback_text(running=True).startswith('Q_offset: target +5 V')
     assert s._completion_text(s._plan['rails'], running=True).splitlines()[-1] == 'Q_offset: +5 V (rod pair 1)'
@@ -309,7 +309,7 @@ def test_two_pair_readback_and_completion_texts(mscan_rig):
     assert s._filter_preview_text().splitlines() == [
         'U = max(0.5, 0.2 × A) = 2 → 6 V for A = 10 → 30 V',
         'Pair 1 = x + U = +12 → +16 V', 'Pair 2 = x − U = +8 → +4 V',
-        'm/Δm ≈ 10 (ideal square wave, rods at amplitude A)']
+        'm/Δm ≈ 10 (ideal square wave)']
     prepare(mscan_rig)
     assert s._completion_text(s._plan['rails'], running=True).splitlines()[-2:] == [
         'Q_offset: +5 V (rod pair 1)', 'Q_offset_2: -4 V (rod pair 2)']
@@ -361,10 +361,10 @@ def test_a_negative_coefficient_keeps_swapping_the_pairs_with_a_resolution_offse
 @pytest.mark.parametrize(('factor', 'expected'), [
     (-.2, ['U = max(0.5, 0.2 × A) = 2 → 6 V for A = 10 → 30 V', 'Pair 1 = x − U = +8 → +4 V',
            'Pair 2 = x + U = +12 → +16 V', 'k < 0: pairs swapped, pair 1 below x.',
-           'm/Δm ≈ 10 (ideal square wave, rods at amplitude A)']),
+           'm/Δm ≈ 10 (ideal square wave)']),
     (.22, ['U = max(0.5, 0.22 × A) = 2.2 → 6.6 V for A = 10 → 30 V', 'Pair 1 = x + U = +12.2 → +16.6 V',
            'Pair 2 = x − U = +7.8 → +3.4 V',
-           '|k| ≥ 0.2153: above the apex of an ideal 50 % square wave, no ion is expected through the filter.']),
+           '|k| ≥ 0.2153 (0.2153 × RF attenuation factor): above the apex of an ideal 50 % square wave, no ion is expected through the filter.']),
     (.1, ['U = max(0.5, 0.1 × A) = 1 → 3 V for A = 10 → 30 V', 'Pair 1 = x + U = +11 → +13 V',
           'Pair 2 = x − U = +9 → +7 V']),  # Far from the apex the estimate is too rough to show.
 ])
@@ -382,3 +382,17 @@ def test_the_preview_reports_invalid_settings_instead_of_values(mscan_rig):
     s.offset_fixed, s.offset_factor = 10., float('nan')
     with pytest.raises(mscan_rig.module.ScanError, match='U/V ratio k must be finite'):
         s._filter_preview_text()
+
+
+def test_the_rf_attenuation_factor_moves_the_closing_k(mscan_rig):
+    # 2026-11-03: the rods see 0.978 A, so the filter closes at k = 0.2153 × 0.978 = 0.2105, not at 0.2153.
+    two_pairs(mscan_rig, factor=.21)
+    s = mscan_rig.scan
+    s.rf_attenuation = .978
+    assert s._filter_preview_text().splitlines()[-1] == 'm/Δm > 50 ideally; in practice about 35-55 at k = 0.21 (2026-11-03)'
+    assert s._prepare()['filter_warning'] is None
+    s.offset_factor = .211
+    assert s._filter_preview_text().splitlines()[-1].startswith('|k| ≥ 0.2106 (0.2153 × RF attenuation factor)')
+    assert 'no ion is expected' in s._prepare()['filter_warning']
+    s.rf_attenuation = 1.
+    assert s._prepare()['filter_warning'] is None

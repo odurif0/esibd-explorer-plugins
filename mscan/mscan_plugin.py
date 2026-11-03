@@ -120,11 +120,13 @@ def square_wave_band(k):
     return _BANDS[k]
 
 
-def mz_from_amplitude(amplitudes, *, frequency_hz, r0_mm, factor=0., resolution=0., minimum=.5, pairs=2):
+def mz_from_amplitude(amplitudes, *, frequency_hz, r0_mm, factor=0., resolution=0., minimum=.5, pairs=2,
+                      attenuation=1.):
     """m/z (Th) at the centre of the transmitted band for each amplitude A; RF only: the low-mass cut-off.
 
-    U = max(minimum, |factor| × A − resolution), as MScan drives the rod pairs. NaN where nothing is
-    transmitted (above the apex) or where the DC between the pairs is unknown (one driven pair).
+    U = max(minimum, |factor| × A − resolution), as MScan drives the rod pairs, and the rods see an RF
+    amplitude attenuation × A. NaN where nothing is transmitted (above the apex) or where the DC between
+    the pairs is unknown (one driven pair).
     """
     amplitudes = np.asarray(amplitudes, dtype=float)
     scale = 4 * _E_OVER_U / ((r0_mm * 1e-3) ** 2 * (2 * np.pi * frequency_hz) ** 2)
@@ -134,11 +136,12 @@ def mz_from_amplitude(amplitudes, *, frequency_hz, r0_mm, factor=0., resolution=
     for i, amplitude in enumerate(amplitudes):
         if not math.isfinite(amplitude) or amplitude <= 0:
             continue
-        k = max(minimum, abs(factor) * amplitude - resolution) / amplitude if factor else 0.
+        rods = attenuation * amplitude  # RF amplitude actually on the rods
+        k = max(minimum, abs(factor) * amplitude - resolution) / rods if factor else 0.
         band = square_wave_band(k)
         if band is not None:
             q = band[1] if not factor else (band[0] + band[1]) / 2
-            result[i] = scale * amplitude / q
+            result[i] = scale * rods / q
     return result
 
 
@@ -408,6 +411,7 @@ class MScan(Scan):
     OFFSET_READBACK = 'Offset readback'
     FILTER_PREVIEW = 'Filter preview'
     MZ_R0 = 'Field radius r0'
+    MZ_ATTENUATION = 'RF attenuation factor'
     MZ_AXIS = 'Plot axis'
     MZ_SCALE = 'Mass scale'  # Never '/' in a key: Explorer reads it as a group (tree and HDF5).
     AXIS_AMPLITUDE, AXIS_MZ = 'Amplitude (V)', 'm/z'
@@ -429,7 +433,7 @@ class MScan(Scan):
                             SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE)),
         ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
                          FILTER_PREVIEW)),
-        ('m/z', (MZ_R0, MZ_AXIS, MZ_SCALE)),
+        ('m/z', (MZ_R0, MZ_ATTENUATION, MZ_AXIS, MZ_SCALE)),
         ('Live readback', (SUPPLY_READBACK, OFFSET_READBACK, FINAL_VOLTAGES, SAMPLES)),
     )
     GROUP_OF = {key: group for group, keys in LAYOUT if group for key in keys}
@@ -437,6 +441,12 @@ class MScan(Scan):
     WRAPPED = (STATUS, SUPPLIES, FREQUENCY, MODULES, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
                CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW, MZ_SCALE)
     SQUARE_WAVE_APEX = .2153  # Largest U/V transmitted by an ideal 50 % square wave (docs/mscan_quadrupole.pdf).
+    # Calibrated together on 2026-11-03 (Q2, AMX HD, 400-500 kHz) with the Agilent G2421A tuning mix: the M03 peaks
+    # are 622, 922, 1522 and 2122. The band widths at k = 0.20 and the transmission at k = 0.21 give the
+    # attenuation; r0 then fits 15 peaks to ± 0.003 mm. r0 is effective: the 5 mm given for Q2 disagrees by a
+    # factor 3.5 in m/z, unexplained (2 r0 = 5 mm? an RF frequency half the displayed one?).
+    DEFAULT_RF_ATTENUATION = .978
+    DEFAULT_R0_MM = 2.625
     # PSU regulator headroom (dropout = internal supply − output, read by the PSU plugin each poll). Lab 2026-11-03,
     # PSU_A in Half range: the internal supply fell from 256 V at 0 mA to 248.5 V at 150 mA; the output was exact
     # with 2.7 V of headroom, 0.3 V low with 0.9 V and 2 V low with 0.05 V, and the scan waited 30 s for 250 V.
@@ -713,13 +723,23 @@ class MScan(Scan):
             indicator=True, restore=False,
             toolTip='Rod pair channels: AMPR Monitor (measured) and setpoint. During a scan: scan target, '
                     'Monitor and whether the AMPR confirmed the target. Display only, never a command.')
-        settings[self.MZ_R0] = parameterDict(value=5., minimum=.1, maximum=100., unit='mm',
+        settings[self.MZ_R0] = parameterDict(value=self.DEFAULT_R0_MM, minimum=.1, maximum=100., unit='mm',
             parameterType=PARAMETERTYPE.FLOAT, attr='mz_r0_mm', event=self._mz_changed, instantUpdate=False,
             displayDecimals=3,
             toolTip='Field radius of the quadrupole: distance from its axis to the inner surface of a rod. '
-                    'm/z varies as A / r0², so 1 % on r0 is 2 % on m/z. Q2: 5 mm, provisional (2026-11-03). '
-                    'r0 also absorbs the unverified ratio between the rod amplitude and A: to calibrate on a '
-                    'known peak, set r0 to r0 × √(m/z shown / m/z known).')
+                    'm/z varies as A / r0², so 1 % on r0 is 2 % on m/z. Default 2.625 mm: calibrated on Q2 on '
+                    '2026-11-03 with the Agilent G2421A tuning mix (622, 922, 1522, 2122) and the RF attenuation '
+                    'factor 0.978. It is an effective value: the 5 mm given for Q2 disagrees by a factor 3.5 in '
+                    'm/z. To calibrate on a known peak, set r0 to r0 × √(m/z shown / m/z known).')
+        settings[self.MZ_ATTENUATION] = parameterDict(value=self.DEFAULT_RF_ATTENUATION, minimum=.5, maximum=1.5,
+            parameterType=PARAMETERTYPE.FLOAT, attr='rf_attenuation', event=self._mz_changed, instantUpdate=False,
+            displayDecimals=3,
+            toolTip='RF amplitude actually seen by the rods divided by A (1: no loss). Default 0.978: measured '
+                    'on Q2 with the AMX HD at 400-500 kHz on 2026-11-03, from the band widths at k = 0.20 and '
+                    'the transmission at k = 0.21. The filter closes at k = 0.2153 × this factor (0.2105), '
+                    'and the m/z uses the attenuated amplitude. To measure it: on a peak, raise k until the signal '
+                    'disappears; the factor is that k / 0.2153. Measure it again for another quadrupole, AMX or '
+                    'frequency range: edge rounding matters more at high frequency.')
         settings[self.MZ_AXIS] = parameterDict(value=self.AXIS_AMPLITUDE, items=f'{self.AXIS_AMPLITUDE},{self.AXIS_MZ}',
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='mz_axis', event=self._mz_changed,
             toolTip='Abscissa of the plot. m/z is computed from A, the AMX frequency, r0 and the mass filter '
@@ -1255,12 +1275,15 @@ class MScan(Scan):
             lines.append('Pair 2 not driven: the DC between the pairs also depends on its potential.')
         if factor < 0:
             lines.append('k < 0: pairs swapped, pair 1 below x.')
-        if abs(factor) >= self.SQUARE_WAVE_APEX:
-            lines.append(f'|k| ≥ {self.SQUARE_WAVE_APEX:g}: above the apex of an ideal 50 % square wave, '
-                         'no ion is expected through the filter.')
-        elif resolution == 0 and abs(factor) >= .15:
-            lines.append(f'm/Δm ≈ {.157 / (self.SQUARE_WAVE_APEX - abs(factor)):.2g} '
-                         '(ideal square wave, rods at amplitude A)')
+        closing = self._closing_k()
+        rods = abs(factor) / self._rf_attenuation()  # U/V on the rods
+        if abs(factor) >= closing:
+            lines.append(f'|k| ≥ {closing:.4g} ({self.SQUARE_WAVE_APEX:g} × RF attenuation factor): above the apex '
+                         'of an ideal 50 % square wave, no ion is expected through the filter.')
+        elif resolution == 0 and rods >= .15:
+            ideal = .157 / (self.SQUARE_WAVE_APEX - rods)
+            lines.append(f'm/Δm ≈ {ideal:.2g} (ideal square wave)' if ideal <= 50 else
+                         'm/Δm > 50 ideally; in practice about 35-55 at k = 0.21 (2026-11-03)')
         return '\n'.join(lines)
 
     def _refresh_filter_preview(self):
@@ -1311,7 +1334,21 @@ class MScan(Scan):
             mass_filter = (dict(factor=float(self.offset_factor), resolution=self._offset_resolution(),
                                 minimum=self._offset_minimum(), pairs=len(sources)) if sources else dict(factor=0.))
             rows = self._amx_rows(self._plugin(self.amx_name), self._selected_outputs())
-        return dict(frequency_hz=self._frequency_hz(rows), r0_mm=float(self.mz_r0_mm), **mass_filter)
+        return dict(frequency_hz=self._frequency_hz(rows), r0_mm=float(self.mz_r0_mm),
+                    attenuation=self._rf_attenuation(), **mass_filter)
+
+    def _rf_attenuation(self):
+        try:
+            value = float(getattr(self, 'rf_attenuation', 1.))
+        except (TypeError, ValueError):
+            value = math.nan
+        if not math.isfinite(value) or value <= 0:
+            raise ScanError('RF attenuation factor must be positive and finite.')
+        return value
+
+    def _closing_k(self):
+        """The U/A at which the filter closes: the square-wave apex on the attenuated rod amplitude."""
+        return self.SQUARE_WAVE_APEX * self._rf_attenuation()
 
     def _scan_metadata(self):
         return (self._plan or {}).get('metadata') or None
@@ -1327,7 +1364,8 @@ class MScan(Scan):
         quantity = 'peak centre' if inputs['factor'] else 'low-mass cut-off, RF only'
         shown = ' → '.join(f'{value:.0f}' if math.isfinite(value) else 'none' for value in mz)
         return (f'A = {low:g} → {high:g} V ≈ m/z {shown} ({quantity})\n'
-                f'{inputs["frequency_hz"] / 1e3:g} kHz, r0 {inputs["r0_mm"]:g} mm; theory until r0 is calibrated')
+                f'{inputs["frequency_hz"] / 1e3:g} kHz, r0 {inputs["r0_mm"]:g} mm, '
+                f'RF attenuation factor {inputs["attenuation"]:g}')
 
     def _refresh_mz_scale(self):
         try:
@@ -1756,8 +1794,9 @@ class MScan(Scan):
             plan = self._preflight()
             self._ready = True
             status = 'Ready to scan'
-            if plan.get('headroom_warning'):
-                status += f'\nWarning: {plan["headroom_warning"]}'
+            for key in ('headroom_warning', 'filter_warning'):
+                if plan.get(key):
+                    status += f'\nWarning: {plan[key]}'
         except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
             self._ready = False
             status = f'Not ready: {exc}'
@@ -1895,8 +1934,9 @@ class MScan(Scan):
         self._last_scan_status = ''
         try:
             self._plan = self._preflight()
-            if self._plan.get('headroom_warning'):
-                self.print(f'Warning: {self._plan["headroom_warning"]}', flag=PRINT.WARNING)
+            for key in ('headroom_warning', 'filter_warning'):
+                if self._plan.get(key):
+                    self.print(f'Warning: {self._plan[key]}', flag=PRINT.WARNING)
             configured = [c.name for c in self._plan['detectors']]
             self.addInputChannels()
             self.addOutputChannels()
@@ -2215,7 +2255,11 @@ class MScan(Scan):
             if plugin is not self and isinstance(plugin, Scan) and not plugin.finished:
                 raise ScanError(f'Finish {plugin.name} before starting this coupled scan.')
         offsets = self._offset_plan(low, high)
-        return dict(amx=amx, offsets=offsets, amx_controller=amx.controller, amx_backend=amx.controller.device,
+        filter_warning = None
+        if offsets and abs(offsets[0]['factor']) >= self._closing_k():
+            filter_warning = (f'k = {abs(offsets[0]["factor"]):g} is at or above {self._closing_k():.4g} '
+                              f'({self.SQUARE_WAVE_APEX:g} × RF attenuation factor): no ion is expected through the filter.')
+        return dict(amx=amx, offsets=offsets, filter_warning=filter_warning, amx_controller=amx.controller, amx_backend=amx.controller.device,
             selected=selected, links=links, waveform=waveform, rails=rails,
             expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),
             headroom_warning=headroom_warning,
@@ -2942,9 +2986,11 @@ class MScan(Scan):
                 group['mz'].attrs['Unit'] = ('Th: m/z at the centre of the transmitted band (low-mass cut-off when '
                                              'RF only); NaN where not transmitted or unknown')
                 group['mz'].attrs['Definition'] = json.dumps(dict(
-                    formula='m/z = 4 e A / (q r0^2 (2 pi f)^2) / u; q = centre of the stable band on a = 2 (U/A) q, '
-                            'U = max(minimum, factor A - resolution); ideal 50 % square wave, rod amplitude = A',
-                    calibration='theory with this r0; r0 absorbs the rod amplitude ratio once fitted on a known peak',
+                    formula='m/z = 4 e V / (q r0^2 (2 pi f)^2) / u with V = attenuation A on the rods; q = centre of '
+                            'the stable band on a = 2 (U/V) q, U = max(minimum, factor A - resolution); ideal 50 % '
+                            'square wave',
+                    calibration='r0 and the RF attenuation factor (rod amplitude / A) as set; defaults calibrated on '
+                                'the Agilent G2421A tuning mix on 2026-11-03',
                     **inputs))
             except (ScanError, AttributeError, KeyError, TypeError, ValueError):
                 pass  # No AMX frequency in this scan's metadata: A only.

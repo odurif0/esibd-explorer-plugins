@@ -2022,10 +2022,11 @@ def run(scenario, target, app_holder=None):
         # m/z abscissa (user request 2026-11-03). No rod pair here: RF only, the low-mass cut-off.
         scan._refresh_interface()
         scale = scan.settingsMgr.settings[scan.MZ_SCALE]
-        assert scale.text(0) == 'm/z range' and '500 kHz, r0 5 mm' in scale.value, scale.value
+        # Defaults calibrated on the Agilent tuning mix (2026-11-03): r0 2.625 mm, RF attenuation factor 0.978.
+        assert scale.text(0) == 'm/z range' and '500 kHz, r0 2.625 mm, RF attenuation factor 0.978' in scale.value, scale.value
         scan.settingsMgr.settings[scan.MZ_AXIS].value = scan.AXIS_MZ
         assert scan.display.axes[0].get_xlabel() == 'Low-mass cut-off m/z (Th), RF only'
-        cutoff = 2.444 * 80 / .712 * (4 / 5) ** 2  # A = 80 V, 500 kHz, r0 = 5 mm
+        cutoff = 2.444 * .978 * 80 / .712 * (4 / 2.625) ** 2  # A = 80 V, 500 kHz
         assert np.nanmax(scan.display.ms.get_xdata()) == pytest.approx(cutoff, rel=3e-3)
         scan.settingsMgr.settings[scan.MZ_AXIS].value = scan.AXIS_AMPLITUDE
         assert scan.display.axes[0].get_xlabel() == scan._axis_label()
