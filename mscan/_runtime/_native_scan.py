@@ -10,8 +10,13 @@ For a raw JSON function such as ``call_json``, pass ``raw_json=True``.
 
 All Explorer channel access, including history copies, runs through ``scan._gui``. The
 existing ``_command`` is a conservative, GUI-time pre-write guard and the only
-channel-write path; scan timing, window selection, averaging, progress, stop and
-successful restoration decisions are native. No device plugin is imported.
+channel-write path; scan timing, window selection, progress, stop and successful
+restoration decisions are native. No device plugin is imported.
+
+Every enabled DMMR module is recorded (2026-11-03); none is chosen. The native engine
+takes one "detector": it receives the DMMR clock, the shared time axis with a value
+wherever at least one recorded module has a new reading, and times the windows with it.
+Each module is then averaged here over those windows, in its own column.
 """
 from __future__ import annotations
 
@@ -87,6 +92,11 @@ class NativeScanAdapter:
         self._origin_plan = scan._plan
         self._cancel_token = scan._cancel
         self._plan = None
+        # Raw values of every recorded module per DMMR tick seen since this adapter started,
+        # to fill the continuous raw arrays, where the engine only holds the clock.
+        self._raw_since = time.time()
+        self._raw_times, self._raw_rows = [], []
+        self._updated = set()  # Points whose module columns were filled from an engine update.
 
     def _is_current(self):
         return self.scan._plan is self._origin_plan and self.scan._cancel is self._cancel_token
@@ -141,7 +151,7 @@ class NativeScanAdapter:
         return (_identity(channel, device, controller, controller.device, token)
                 + ':' + channel.name + ':' + device.name)
 
-    def _snapshot_on_gui(self):
+    def _snapshot_on_gui(self, guard=False):
         self._require_current('during native acquisition')
         scan, plan = self.scan, self._plan
         if plan is None or scan._plan is not plan:
@@ -179,20 +189,24 @@ class NativeScanAdapter:
                 current_limit_readback=float(channel.current_limit_readback),
                 voltage_setpoint_readback=float(channel.voltage_setpoint_readback),
                 current_readback=float(channel.current_readback)))
-        if len(plan['detectors']) != 1:
-            raise RuntimeError('Native MScan requires exactly one selected DMMR module')
-        source = plan['detectors'][0]
-        device = source.getDevice()
+        modules = plan['detectors']
+        if not modules:
+            raise RuntimeError('Native MScan requires at least one recorded DMMR module')
+        device, times, valid = scan._dmmr_clock(modules)
         _, since = scan._cadence_epoch(device)
-        detector = dict(identity=_identity(source, device) + ':' + source.name + ':' + device.name,
-                        name=source.name, device_name=device.name, module=source.module_address(),
-                        registered=self._registered(source), real=bool(source.real), unit=source.unit,
-                        enabled=bool(source.enabled), initialized=bool(source.initialized),
-                        acquiring=bool(source.acquiring), recording=bool(device.recording),
-                        history_id=_identity(source.values, device.time), interval_ms=float(device.interval),
+        self._record_raw(modules, times)
+        # The DMMR clock, not a module: 0 A where a recorded module has a new reading, NaN elsewhere.
+        detector = dict(identity=_identity(device, device.time, *modules) + ':'
+                        + ','.join(f'{c.module_address()}={c.name}' for c in modules) + ':' + device.name,
+                        name='DMMR', device_name=device.name, module=0,
+                        registered=all(self._registered(c) for c in modules), real=all(bool(c.real) for c in modules),
+                        unit='A', enabled=any(bool(c.enabled) for c in modules),
+                        initialized=any(bool(c.initialized) for c in modules),
+                        acquiring=any(bool(c.acquiring) for c in modules), recording=bool(device.recording),
+                        history_id=_identity(device.time, *[c.values for c in modules]), interval_ms=float(device.interval),
                         cadence_since=since if math.isfinite(since) else None,
-                        times=[float(v) for v in device.time.get()],
-                        values=[float(v) for v in source.getValues(subtractBackground=False)])
+                        times=[float(v) for v in times],
+                        values=[0. if ok else math.nan for ok in valid])
         offsets = []
         for o in plan.get('offsets') or []:  # Rod pair 1, then pair 2.
             channel, device = o['channel'], o['device']
@@ -206,14 +220,43 @@ class NativeScanAdapter:
                           initialized=bool(ctrl.initialized and ctrl.device is not None), on=bool(device.isOn()),
                           busy=_busy(ctrl, _AMPR_BUSY), shutdown=bool(ctrl._setpoint_cancel.is_set()),
                           state=state, value=float(channel.value), monitor=float(channel.monitor), min=low, max=high))
+        if guard:
+            scan._headroom_guard()  # A PSU without headroom stops the scan now, not after the settle timeout.
         self._sequence += 1
         return dict(sequence=self._sequence, wall=time.time(), mono=time.monotonic(), amx=amx_data,
                     rails=rails, detector=detector, offsets=offsets,
                     other_scan_running=any(p is not scan and hasattr(p, 'finished') and not p.finished
                                            and hasattr(p, 'runScan') for p in scan.pluginManager.plugins))
 
-    def snapshot(self, *, cancellable=True):
-        return self.scan._gui(self._snapshot_on_gui, cancel=cancellable)
+    def _record_raw(self, modules, times):
+        """Keep each module's value at every new DMMR tick (GUI thread)."""
+        import numpy as np
+        last = self._raw_times[-1] if self._raw_times else self._raw_since
+        first = int(np.searchsorted(times, last, side='right'))
+        if first >= len(times):
+            return
+        columns = [np.asarray(c.getValues(subtractBackground=False), dtype=float)[first:len(times)] for c in modules]
+        self._raw_times.extend(float(t) for t in times[first:])
+        self._raw_rows.extend(np.column_stack(columns).tolist())
+
+    def _raw_modules(self, times, count):
+        """Rows of module values at the engine's raw tick times; NaN for a tick this adapter never saw."""
+        import numpy as np
+        known = np.asarray(self._raw_times, dtype=float)
+        rows = np.full((len(times), count), np.nan)
+        if len(known) and len(times):
+            # Nearest recorded tick: the engine's JSON round trip may move a timestamp by one float
+            # step (0.24 µs at 1.8e9 s); DMMR ticks are milliseconds apart, so 1 µs is unambiguous.
+            right = np.clip(np.searchsorted(known, times), 0, len(known) - 1)
+            left = np.clip(right - 1, 0, len(known) - 1)
+            at = np.where(np.abs(known[left] - times) < np.abs(known[right] - times), left, right)
+            hit = np.abs(known[at] - times) <= 1e-6
+            table = np.asarray(self._raw_rows, dtype=float).reshape(len(known), count)
+            rows[hit] = table[at[hit]]
+        return rows
+
+    def snapshot(self, *, cancellable=True, guard=False):
+        return self.scan._gui(lambda: self._snapshot_on_gui(guard=guard), cancel=cancellable)
 
     def prepare(self):
         self._bind()
@@ -235,14 +278,14 @@ class NativeScanAdapter:
     def _validate_data_model(self, steps, observation):
         self._require_current('before native data validation')
         scan = self.scan
-        if len(scan.inputChannels) != 1 or len(scan.outputChannels) != 1 + len(self._plan.get('extra_detectors', [])):
-            raise RuntimeError('MScan requires one amplitude axis, the reference DMMR output and one per extra module')
+        if len(scan.inputChannels) != 1 or len(scan.outputChannels) != len(self._plan['detectors']):
+            raise RuntimeError('MScan requires one amplitude axis and one output per recorded DMMR module')
         actual = scan.inputChannels[0].recordingData
         if len(actual) != len(steps) or any(not math.isclose(float(a), b, rel_tol=1e-12, abs_tol=1e-12)
                                           for a, b in zip(actual, steps)):
             raise RuntimeError('Explorer amplitude axis differs from the native plan; repeat initScan')
-        if scan.outputChannels[0].name != observation['detector']['name']:
-            raise RuntimeError('Explorer output channel differs from the selected DMMR module')
+        if [c.name for c in scan.outputChannels] != [c.name for c in self._plan['detectors']]:
+            raise RuntimeError('Explorer output channels differ from the recorded DMMR modules')
         keys = ['point_status', 'rail_v', 'rail_i', 'window_start', 'window_end', 'samples', 'finite_samples']
         if observation['offsets']:
             keys += ['offset_v', 'offset_target']
@@ -305,7 +348,7 @@ class NativeScanAdapter:
         # In continuous mode cadence is also revalidated after queueing delay.
         if self._plan['mode'] == self.scan.CONTINUOUS and not action['restore']:
             window_start = getattr(self, '_continuous_begin', None) if action['index'] > 0 else None
-            self.scan._require_time_step(self._plan['detectors'][0], self._plan['average'], window_start)
+            self.scan._require_time_step(self._plan['detectors'], self._plan['average'], window_start)
         started, ended = self.scan._command(action['targets'], latest=action['latest_mono'], offsets=action['offsets'])
         end_mono = time.monotonic()
         if self._plan['mode'] == self.scan.CONTINUOUS and not action['restore']:
@@ -326,17 +369,15 @@ class NativeScanAdapter:
             validation['status'], validation['error'] = status['status'], status.get('error', '')
             for point in status.get('updates', []):
                 index = point['index']
-                scan.outputChannels[0].recordingData[index] = point['mean']
                 for key in ('rail_v', 'rail_i', 'window_start', 'window_end'):
                     validation[key][index] = point[key]
-                validation['samples'][index, 0] = point['samples']
-                validation['finite_samples'][index, 0] = point['finite_samples']
-                # Other enabled DMMR modules, over the reference module's window (same time axis).
-                extras = (scan._extra_values(point['window_start'], point['window_end'])
-                          if self._plan.get('extra_detectors') else [])
-                for j, (mean, count, finite) in enumerate(extras, start=1):
+                # Every recorded module over the engine's window; the engine's own mean is the clock's.
+                values = scan._module_values(point['window_start'], point['window_end'])
+                for j, (mean, count, finite) in enumerate(values):
                     scan.outputChannels[j].recordingData[index] = mean
                     validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
+                scan._store_headroom(index, point['window_start'], point['window_end'])
+                self._updated.add(index)
                 validation['point_status'][index] = point['status']
                 if point.get('offsets'):
                     validation['offset_v'][index] = [monitor for monitor, _ in point['offsets']]
@@ -385,7 +426,7 @@ class NativeScanAdapter:
             else:
                 raise RuntimeError('Unknown native MScan action: ' + str(action['kind']))
             try:
-                self._status = self._call('advance', self.snapshot(), ack)
+                self._status = self._call('advance', self.snapshot(guard=True), ack)
             except Exception:
                 # A native semantic fault persists its status. A transport fault
                 # is not retried: the supervising caller must retire the worker.
@@ -463,19 +504,27 @@ class NativeScanAdapter:
         def finish():
             self._require_current('before native completion')
             import numpy as np
-            self.scan.outputChannels[0].recordingData[:] = result['data']
+            # result['data'] is the DMMR clock: the module columns were filled point by point.
             validation = result['validation']
             for key, value in list(validation.items()):
                 if isinstance(value, list) and key != 'point_status':
                     validation[key] = np.asarray(value)
             previous = self.scan._validation
-            for key in ('samples', 'finite_samples') if self._plan.get('extra_detectors') else ():
-                # The native engine counts the reference module; keep the extra modules' columns.
-                reference = np.asarray(validation[key]).reshape(len(result['data']), -1)[:, :1]
-                validation[key] = np.column_stack([reference, np.asarray(previous[key])[:, 1:]]).astype(reference.dtype)
+            # A point the engine closed without a published update: average the modules over its window now.
+            for index, (start, end) in enumerate(zip(validation.get('window_start', ()), validation.get('window_end', ()))):
+                if index not in self._updated and math.isfinite(float(start)) and math.isfinite(float(end)):
+                    for j, (mean, count, finite) in enumerate(self.scan._module_values(float(start), float(end))):
+                        self.scan.outputChannels[j].recordingData[index] = mean
+                        previous['samples'][index, j], previous['finite_samples'][index, j] = count, finite
+            for key in ('samples', 'finite_samples', 'rail_dropout', 'low_headroom'):
+                if key in previous:  # One column per module or rail, computed here, not by the engine.
+                    validation[key] = np.asarray(previous[key])
             if 'continuous' in validation:
                 for key, value in validation['continuous'].items():
                     validation['continuous'][key] = np.asarray(value)
+                raw = validation['continuous']
+                raw['detector_current'] = self._raw_modules(np.asarray(raw['detector_time'], dtype=float),
+                                                            len(self._plan['detectors']))
             self.scan._validation = validation
             self.scan._plan['metadata'] = result['metadata']
             self.scan.scan_status = validation['status'].capitalize()

@@ -84,7 +84,7 @@ def test_transition_samples_are_kept_not_discarded_or_called_settled(mscan_conti
     s._continuous_command = moving
     v = run(r)
     assert v['status'] == 'completed', v['error']
-    assert 1000. in v['continuous']['detector_current']
+    assert 1000. in np.ravel(v['continuous']['detector_current'])
     assert s.outputChannels[0].recordingData[1] > 20.
     assert s.outputChannels[0].recordingData[2] > 30.
     assert v['point_status'] == ['acquired during sweep'] * 3
@@ -100,7 +100,7 @@ def test_detector_slower_than_time_step_aborts_instead_of_advancing_blindly(msca
         return False
     r.record = occasional
     v = run(r)
-    assert v['status'] == 'error' and 'no new valid DMMR sample' in v['error']
+    assert v['status'] == 'error' and 'no new valid sample' in v['error']
     assert r.rig.psus[0].writes == [(0, 10), (1, 10)]
     assert np.isnan(v['continuous']['command_start'][1:]).all()
     assert np.isnan(r.scan.outputChannels[0].recordingData).all()
@@ -136,7 +136,7 @@ def test_missing_detector_aborts_without_zero_or_restoration(mscan_continuous):
     r = mscan_continuous
     r.record = lambda: False
     v = run(r)
-    assert v['status'] == 'error' and 'no new valid DMMR sample' in v['error']
+    assert v['status'] == 'error' and 'no new valid sample' in v['error']
     assert np.isnan(r.scan.outputChannels[0].recordingData).all()
     assert r.rig.psus[0].writes == [(0, 10), (1, 10)]
 
@@ -152,7 +152,7 @@ def test_stop_retains_raw_partial_window_but_not_a_fictitious_point(mscan_contin
     assert r.rig.psus[0].writes == [(0, 10), (1, 10), (0, 20), (1, 20)]
     assert s.outputChannels[0].recordingData[0] == 10
     assert np.isnan(s.outputChannels[0].recordingData[1:]).all()
-    assert 20. in v['continuous']['detector_current']
+    assert 20. in np.ravel(v['continuous']['detector_current'])
     assert np.isnan(v['continuous']['command_start'][2])
 
 
@@ -261,7 +261,7 @@ def test_nan_remains_in_raw_data_and_invalidates_its_window(mscan_continuous):
     r = mscan_continuous
     r.sample = lambda: np.nan if r.rig.current() == 20 else r.rig.current()
     v = run(r)
-    assert v['status'] == 'error' and 'no new valid DMMR sample' in v['error']
+    assert v['status'] == 'error' and 'no new valid sample' in v['error']
     assert np.isnan(r.scan.outputChannels[0].recordingData[1:]).all()
     assert np.isnan(v['continuous']['detector_current']).any()
     assert np.isnan(v['window_end'][1:]).all()
@@ -339,17 +339,19 @@ def test_unavailable_module_cadence_blocks_continuous_before_commands(mscan_cont
     assert r.rig.psus[0].writes == []
 
 
-def test_cadence_is_specific_to_selected_module(mscan_continuous):
+def test_cadence_counts_a_tick_when_any_recorded_module_reads(mscan_continuous):
+    # 2026-11-03: no module is chosen; the DMMR time axis times the scan, and a tick is valid
+    # when at least one recorded module has a new reading.
     r = mscan_continuous
-    set_cadence(r, [-.2, -.15, -.1, -.05, 0.], [7.] * 5)
-    slow = NS(**vars(r.rig.detector))
-    slow.name, slow.module_address = 'Detector5', lambda: 5
-    slow.getValues = lambda **kw: np.array([7., np.nan, 7., np.nan, 7.])
-    r.rig.all_channels.append(slow)
+    set_cadence(r, [-.2, -.15, -.1, -.05, 0.], [7., np.nan, 7., np.nan, 7.])
+    other = NS(**vars(r.rig.detector))
+    other.name, other.module_address = 'Detector5', lambda: 5
+    other.getValues = lambda **kw: np.array([np.nan, 7., np.nan, 7., np.nan])
+    r.rig.all_channels.append(other)
     r.scan.time_step_s = .05
-    assert r.scan._preflight()['detectors'] == [r.rig.detector]
-    r.scan.detector_module = 'Module 5 — Detector5'
-    with pytest.raises(r.rig.module.ScanError, match='Detector5.*Time step.*at least 0.1 s'):
+    assert [c.name for c in r.scan._preflight()['detectors']] == ['Detector', 'Detector5']
+    other.getValues = lambda **kw: np.array([7., np.nan, 7., np.nan, 7.])  # Both silent on the same ticks.
+    with pytest.raises(r.rig.module.ScanError, match='DMMR: Time step.*at least 0.1 s'):
         r.scan._preflight()
     assert r.rig.psus[0].writes == []
 
@@ -382,7 +384,9 @@ def test_continuous_archive_roundtrip_preserves_raw_data_and_axis(mscan_continuo
         raw = f['MScan/Validation/Continuous']
         assert raw['psu_v'].shape[1] == 2
         assert raw['psu_i'].shape == raw['psu_v'].shape
-        assert raw['detector_current'][:] == pytest.approx(v['continuous']['detector_current'])
+        # One column per recorded module (here one).
+        assert raw['detector_current'].shape == (len(v['continuous']['detector_time']), 1)
+        assert raw['detector_current'][:] == pytest.approx(np.asarray(v['continuous']['detector_current']), nan_ok=True)
         assert 'not hardware-synchronized' in raw.attrs['timestamps']
         assert 'no background' in raw['detector_current'].attrs['Unit']
     original = v['continuous']['command_start'].copy()

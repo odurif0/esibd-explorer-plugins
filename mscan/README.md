@@ -1,6 +1,6 @@
 # MScan Plugin
 
-Amplitude scan for an AMX/PSU quadrupole, with current measured by a DMMR module.
+Amplitude scan for an AMX/PSU quadrupole, with the currents of every enabled DMMR module.
 Enable the `MScan` plugin in Explorer's Plugin Manager. Its panel is titled
 **msScan — AMX/PSU**, distinct from the built-in **msScan** that expects
 `AMP_Q1`/`AMP_Q2`. Those historical channels are not used here.
@@ -43,8 +43,8 @@ routine experimental use. These checks do not certify physical shutdown.
 scan cannot start, and a greyed **Start scan** shows the same reason in its tooltip. The
 other rows are in four groups, in the order a scan is prepared:
 
-- **Setup**: AMX, connectors, the PSU they drive, AMX frequency, DMMR module and interval,
-  file name.
+- **Setup**: AMX, connectors, the PSU they drive, AMX frequency, the recorded DMMR modules
+  and interval, file name.
 - **Amplitude scan**: allowed range and PSU Ilim, mode, amplitudes, timing, duration.
 - **Mass filter**: the AMPR channels of the two rod pairs, k, δ, Minimum U, axis potential
   x, and a **Preview** of what the scan will apply.
@@ -76,17 +76,20 @@ and after this layout read the same. The mass filter rows keep these keys:
    an assumed oscillator frequency; MScan never changes it. Per-edge compensation delays are allowed
    and retained in the scan metadata; their exact phase is not inferred.
    Changing them during a scan aborts it. Update AMX and MScan together.
-3. Select **DMMR module**, shown as its physical number and channel name.
-   Choose the module wired to the ion collector after the quadrupole. It is the
-   **reference**: its samples define each point's window, cadence and validity.
-   Every other **enabled** module of the same DMMR is also recorded and plotted,
-   averaged over the same windows (all modules share the DMMR time axis); such a
-   module never stops the scan, and a point it cannot read stays NaN for it only.
-   No placeholder `Detector` is used.
+3. **DMMR modules** lists the modules recorded: every **enabled** current module of the
+   DMMR, by module number, each in its own column and plot line. No module is chosen
+   (2026-11-03: a chosen reference module was a trap; that day the peaks were on M03
+   while M04 was the reference). Enable or disable modules in the DMMR plugin.
+   The point windows follow the DMMR time axis, shared by all modules: a tick counts when
+   at least one recorded module has a new reading. A module without a reading in a window
+   gives NaN for that point only and never stops the scan; a point is **invalid detector
+   data** only when no module read anything. Start is refused when no module is enabled,
+   when two modules share a name, or when the DMMR does not acquire and record.
    **DMMR interval (ms)** edits the live DMMR acquisition/recording setting,
    shared by **all** its modules. It does not change the ADC configuration.
 4. In **Amplitude scan**, set **Amplitude from / to (V)** within **Allowed amplitude (V)**.
-   The voltage range and **PSU Ilim** are the first two rows of the group.
+   The voltage range and **PSU Ilim** are the first two rows of the group. **Allowed
+   amplitude** also shows what the PSU can reach now, when that is lower: see *PSU headroom* below.
    **After completion** (Live readback) shows each channel's return voltage and live measured
    current, e.g. `PSU_D_CH0: +4 V, Iget 32 mA`.
 5. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
@@ -174,16 +177,16 @@ The **msScan** settings list belongs to this scan; Explorer's global
   shorten the next one to catch up. A full missed interval, or a PSU target not
   reached by the next deadline, aborts without sending the next command.
   The next command is also refused if the current interval has no new valid
-  DMMR sample, or the detector cadence has become incompatible with Time step.
+  DMMR sample, or the DMMR cadence has become incompatible with Time step.
   The interrupted point stays NaN; the scan does not continue without data.
-- **DMMR data interval** uses valid samples from the selected module, not empty
-  recorder ticks or changes in the current's numeric value. It shows the typical
+- **DMMR data interval** uses valid DMMR ticks (at least one recorded module with a new
+  reading), not empty recorder ticks or changes in the current's numeric value. It shows the typical
   interval and the **minimum Time step**: the larger of the configured DMMR
   interval and the largest of the last 20 valid-sample intervals, rounded up to
   milliseconds. At least two recent valid samples are required. A shorter Time
   step blocks Start before any PSU command; the setting is never silently changed.
   This is an observed software cadence, not an ADC conversion rate or hardware
-  synchronization. **Samples at last point** shows finite/total samples used.
+  synchronization. **Samples at last point** shows valid/total samples of each module.
   Allow several samples per measurement/command interval.
 - **DMMR interval (ms)** uses Explorer's existing DMMR setting, with the same
   allowed range (normally 100–10000 ms; default 1000 ms). Enter or leave the field
@@ -228,6 +231,39 @@ Mass-filter selectivity and calibration must be established experimentally;
 a symmetric 50% waveform can give a transmission curve rather than mass peaks.
 
 ## Limits and stopping
+
+### PSU headroom
+
+The PSU regulates its output below an internal supply; the difference is its **dropout**,
+which the PSU plugin reads at every poll. The internal supply falls as the RF load draws
+more current, and once the dropout is gone the output stays below its setpoint. On
+2026-11-03, PSU_A in **Half range** went from 256 V at 0 mA to about 248.5 V at 150 mA: the
+output was exact with 2.7 V of dropout, 0.3 V low with 0.9 V and 2 V low with 0.05 V, and
+a 50–300 V scan waited 30 s at 250 V before stopping on a generic settling timeout. MScan
+now handles this in three places:
+
+- **Before Start**: output + dropout is the most the rail can reach, since the load only
+  grows with A. Start is refused when **Amplitude to** is above it minus 2 V, with the rail,
+  its range and what to do (switch the PSU to **Full range**, or lower Amplitude to). The
+  load still to come lowers it further (4.3 V for a 206 V rise that day, about 2 %): above
+  it minus (2 V + 3 % of the rise from the present output), **Status** adds a warning, e.g.
+  `Warning: PSU_A_CH0: about 252 V reachable now (Half range), less under load: Full range
+  recommended.`, also written to the log at Start. Start stays allowed. MScan never switches
+  the range itself: it is a configuration change of a live HV supply, for the operator.
+  **Allowed amplitude** shows this value when it is the lower limit, and **PSU rails**
+  shows each rail's headroom and range.
+- **During the scan**: a rail out of tolerance with less than 1 V of dropout, on two
+  different PSU readings in a row, stops the scan at once with the cause, e.g.
+  `PSU_A_CH0 cannot reach 250 V: PSU_A has no headroom left (dropout 0.05 V at 248.56 V,
+  146 mA, Half range). Switch PSU_A to Full range or lower Amplitude to.`
+- **In the file**: `Validation/rail_dropout` keeps the lowest dropout of each rail over
+  each point window, and `Validation/low_headroom` flags points measured with less than
+  2 V, where the RF amplitude may not have been regulated. The log lists them at the end.
+
+Full range raises the internal supply, and the heat the PSU must dissipate; the PSU lowers
+its current limit when it heats up. A PSU that does not report its dropout is not judged.
+
+### Allowed amplitude, limits and stopping
 
 **Allowed amplitude** is read-only: it intersects channel Min/Max with the
 PSU-reported voltage limits for its current range. There is no fixed 350 V cap
@@ -304,12 +340,15 @@ Controls are locked until acquisition and saving finish.
 The scan file retains planned amplitudes, current averages, sample counts,
 NaN gaps, acquisition windows, point status, PSU voltage/current readbacks,
 limits, return setpoints, AMX waveform and DMMR module identity. **Validation**
-names the reference module (`reference_channel`) and the other recorded modules
-(`extra_channels`); `samples` and `finite_samples` have one column per module. Continuous scans
+lists the recorded modules (`modules`, JSON, in column order); `samples` and `finite_samples`
+have one column per module, and `rail_dropout`/`low_headroom` keep the PSU headroom. Files
+written before 2026-11-03 name a reference module (`reference_channel`) and the others
+(`extra_channels`) instead. Continuous scans
 also retain the detector cadence used for preflight, requested sweep speed,
 computed voltage step and configured DMMR interval. Device
 configurations are also archived using Explorer's normal mechanism. Continuous
-files additionally store **Validation/Continuous**: raw DMMR current/timestamps,
+files additionally store **Validation/Continuous**: raw DMMR timestamps and currents
+(`detector_current`, one column per recorded module),
 GUI command dispatch times, and timestamped PSU voltage/current/target snapshots
 (including unavailable readbacks). These are PC/Explorer timestamps, **not
 synchronized ADC times**. Point readbacks are observations at the end of each
@@ -323,10 +362,9 @@ blocks Start rather than silently choosing a different protocol. Old continuous
 settings derive Sweep rate from the saved Amplitude step / Time step, preserving
 the planned amplitudes. Loading settings or data never applies a saved DMMR
 interval to the device; that field always reflects the current live setting.
-Old MScan settings are converted: `Display` becomes the selected DMMR module,
-`Average` becomes the measurement duration in seconds, and the greater of
-`Wait`/`Wait long` becomes the single settling duration. A missing detector is
-never silently replaced. The former **CH0-CH3** selection blocks Start until
+Old MScan settings are converted: `Average` becomes the measurement duration in seconds,
+and the greater of `Wait`/`Wait long` becomes the single settling duration. A saved
+`Display` or `DMMR module` selection is ignored: every enabled module is recorded. The former **CH0-CH3** selection blocks Start until
 one physical pair is explicitly selected; it never silently changes the wiring.
 Old data files, including multiple saved signals,
 remain viewable; every saved signal is plotted. Importing an old settings

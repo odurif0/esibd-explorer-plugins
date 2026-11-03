@@ -205,7 +205,7 @@ class _Settings(SettingsManager):
                     if group is not None:
                         saved = {key: dict(value.attrs) for key, value in group.items()}
         scan = self.parentPlugin
-        aliases = {scan.DETECTOR: 'Display', scan.OUTPUTS: 'AMX outputs',
+        aliases = {scan.OUTPUTS: 'AMX outputs',
                    scan.START: 'From', scan.STOP: 'To', scan.STEP: 'Step'}
         def old_value(key, field):
             values = saved.get(key, {})
@@ -247,11 +247,9 @@ class _Settings(SettingsManager):
                     if field in item and item[field] not in scan.PAIRS:
                         item[field] = scan.NO_PAIR
                 item[Parameter.ITEMS] = ','.join([scan.NO_PAIR, *scan.PAIRS])
-            if key in (scan.DETECTOR, scan.AMX, scan.OFFSET, scan.OFFSET_2):
+            if key in (scan.AMX, scan.OFFSET, scan.OFFSET_2):
                 # Keep missing selections explicit, without phantom old choices.
-                if key == scan.DETECTOR:
-                    choices = [scan.NO_SIGNAL, *[scan._module_label(c) for c in scan.pluginManager.DeviceManager.channels() if scan._is_dmmr(c)]]
-                elif key in (scan.OFFSET, scan.OFFSET_2):
+                if key in (scan.OFFSET, scan.OFFSET_2):
                     choices = [scan.NO_OFFSET, *[scan._offset_label(c) for c in scan.pluginManager.DeviceManager.channels() if scan._is_ampr(c)]]
                 else:
                     choices = ['None', *[p.name for p in scan.pluginManager.plugins if p.name in scan.AMX_PLUGINS]]
@@ -327,7 +325,9 @@ class MScan(Scan):
     CONTINUOUS = 'Continuous'
     TIME_STEP = 'Time step (s)'
     RATE = 'Sweep rate'
-    DETECTOR = 'DMMR module'
+    # Every enabled DMMR module is recorded (user request 2026-11-03): no module is chosen. The
+    # former 'DMMR module' selection is ignored in old settings files.
+    MODULES = 'DMMR modules'
     DMMR_INTERVAL = 'DMMR interval (ms)'
     SETTLING = 'Settling time (s)'
     INTEGRATION = 'Measurement time (s)'
@@ -351,7 +351,6 @@ class MScan(Scan):
     OFFSET_READBACK = 'Offset readback'
     FILTER_PREVIEW = 'Filter preview'
     NO_OFFSET = 'None'
-    NO_SIGNAL = 'Select DMMR module'
     NO_PAIR = 'Select AMX pair'
     TIMEOUT = 'Settle timeout'
     TOLERANCE = 'Voltage tolerance'
@@ -364,7 +363,7 @@ class MScan(Scan):
     # Start; then what to choose, in the order a scan is prepared; live readings last. None: top level.
     LAYOUT = (
         (None, (STATUS,)),
-        ('Setup', (AMX, OUTPUTS, SUPPLIES, FREQUENCY, DETECTOR, DMMR_INTERVAL, CADENCE, FILE_LABEL)),
+        ('Setup', (AMX, OUTPUTS, SUPPLIES, FREQUENCY, MODULES, DMMR_INTERVAL, CADENCE, FILE_LABEL)),
         ('Amplitude scan', (AMPLITUDE_LIMITS, CURRENT_LIMITS, MODE, START, STOP, STEP, RATE, TIME_STEP, PASSES,
                             SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE)),
         ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
@@ -373,9 +372,18 @@ class MScan(Scan):
     )
     GROUP_OF = {key: group for group, keys in LAYOUT if group for key in keys}
     # Read-only rows whose text wraps over several lines.
-    WRAPPED = (STATUS, SUPPLIES, FREQUENCY, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
+    WRAPPED = (STATUS, SUPPLIES, FREQUENCY, MODULES, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
                CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW)
     SQUARE_WAVE_APEX = .2153  # Largest U/V transmitted by an ideal 50 % square wave (docs/mscan_quadrupole.pdf).
+    # PSU regulator headroom (dropout = internal supply − output, read by the PSU plugin each poll). Lab 2026-11-03,
+    # PSU_A in Half range: the internal supply fell from 256 V at 0 mA to 248.5 V at 150 mA; the output was exact
+    # with 2.7 V of headroom, 0.3 V low with 0.9 V and 2 V low with 0.05 V, and the scan waited 30 s for 250 V.
+    HEADROOM_START_V = 2.  # Start refused when Amplitude to exceeds output + dropout − this margin.
+    HEADROOM_LOST_V = 1.  # Below this, with the output out of tolerance, the PSU cannot reach its target.
+    HEADROOM_LOW_V = 2.  # Points measured below this are flagged (low_headroom).
+    # The load still to come lowers the ceiling: 4.3 V for a 206 V rise that day (Half range, 500 kHz), about 2 %.
+    # Above ceiling − (2 V + 3 % of the rise), Start is allowed with a warning that names the remedy.
+    HEADROOM_SAG = .03
     # Displayed names where they differ from the setting keys, which files keep unchanged.
     # The mass filter is named after its physics (U, k, δ, x), not after the AMPR "offset" (2026-11-03).
     LABELS = {INTEGRATION: 'Measurement per point (s)', RATE: 'Sweep rate (V/s)',
@@ -484,10 +492,12 @@ class MScan(Scan):
 
     def getDefaultSettings(self):
         settings = {}
-        settings[self.DETECTOR] = parameterDict(value=self.NO_SIGNAL, items=self.NO_SIGNAL,
-            parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='detector_module', event=self._signal_changed,
-            toolTip='Physical DMMR module wired to the ion collector after the quadrupole. '
-                    'Only this current channel is acquired. DMMR acquisition and recording must already be active.')
+        settings[self.MODULES] = parameterDict(value='No DMMR module enabled', parameterType=PARAMETERTYPE.LABEL,
+            indicator=True, restore=False,
+            toolTip='Every enabled current module of the DMMR is recorded, each in its own column and plot line: '
+                    'enable or disable modules in the DMMR plugin. Point windows follow the DMMR time axis, shared '
+                    'by all modules. A module without a reading in a window gives NaN for that point only and '
+                    'never stops the scan. DMMR acquisition and recording must already be active.')
         settings[self.AMX] = parameterDict(value='None', items=', '.join(['None', *self.AMX_PLUGINS]),
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_name', event=self._setup_changed,
             toolTip='AMX with PSU associations already configured in its Settings. No automatic ON or config load.')
@@ -669,7 +679,7 @@ class MScan(Scan):
         self.addAction(event=lambda: self.loadSettings(file=None), toolTip='Load msScan settings.', icon=self.makeCoreIcon('blue-folder-import.png'))
         self.addAction(event=lambda: self.saveSettings(file=None), toolTip='Export msScan settings.', icon=self.makeCoreIcon('blue-folder-export.png'))
         self.recordingAction = self.addStateAction(event=self.toggleRecording,
-            toolTipFalse='Start the AMX/PSU scan with the selected DMMR module.', iconFalse=self.makeCoreIcon('play.png'),
+            toolTipFalse='Start the AMX/PSU scan, recording every enabled DMMR module.', iconFalse=self.makeCoreIcon('play.png'),
             toolTipTrue='Stop the scan; hold the last PSU setpoints. HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
         self.loading = False
         self.estimateScanTime()
@@ -738,7 +748,7 @@ class MScan(Scan):
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for spin in self.settingsTree.findChildren(QAbstractSpinBox):
             spin.setKeyboardTracking(False)
-        for key in (self.DETECTOR, self.AMX, self.OUTPUTS, self.MODE, self.OFFSET, self.OFFSET_2):
+        for key in (self.AMX, self.OUTPUTS, self.MODE, self.OFFSET, self.OFFSET_2):
             combo = self.settingsMgr.settings[key].combo
             combo.setMaximumWidth(16777215)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -812,35 +822,51 @@ class MScan(Scan):
         except (AttributeError, TypeError, ValueError):
             return False
 
-    @staticmethod
-    def _module_label(channel):
-        return f'Module {channel.module_address()} — {channel.name}'
+    def _dmmr_device(self):
+        devices = list({id(c.getDevice()): c.getDevice() for c in self.pluginManager.DeviceManager.channels()
+                        if self._is_dmmr(c)}.values())
+        if len(devices) != 1:
+            raise ScanError('No DMMR module discovered. Check the DMMR plugin.' if not devices
+                            else 'Several DMMR devices found; MScan records one.')
+        return devices[0]
 
-    def _detector(self):
-        selection = str(self.detector_module).strip()
-        if not selection or selection == self.NO_SIGNAL:
-            raise ScanError('Select a DMMR module connected to the ion collector.')
-        matches = [c for c in self.pluginManager.DeviceManager.channels() if self._is_dmmr(c)
-                   and selection in (self._module_label(c), c.name)]
-        if len(matches) != 1:
-            raise ScanError(f'DMMR module {selection} is unavailable or ambiguous. Check DMMR discovery and selection.')
-        return matches[0]
+    def _modules(self):
+        """Every enabled DMMR current module, by module number: all are recorded, none is chosen.
 
-    def _extra_detectors(self, detector):
-        """The other enabled modules of the same DMMR, recorded over the reference module's windows."""
-        device = detector.getDevice()
-        return sorted((c for c in self.pluginManager.DeviceManager.channels()
-                       if self._is_dmmr(c) and c is not detector and c.getDevice() is device and c.enabled),
-                      key=lambda c: (c.module_address(), c.name))
+        User request 2026-11-03: a chosen "reference" module was a trap (that day it was M04, flat,
+        while the peaks were on M03). The DMMR time axis, shared by all modules, now times the points.
+        """
+        device = self._dmmr_device()
+        modules = sorted((c for c in self.pluginManager.DeviceManager.channels()
+                          if self._is_dmmr(c) and c.enabled and c.getDevice() is device),
+                         key=lambda c: (c.module_address(), c.name))
+        if not modules:
+            raise ScanError('Enable at least one DMMR module in the DMMR plugin.')
+        names = [c.name for c in modules]
+        shared = sorted({name for name in names if names.count(name) > 1})
+        if shared:
+            raise ScanError(f'DMMR modules share the name {", ".join(shared)}: rename them in the DMMR plugin.')
+        return modules
 
-    def _extra_values(self, start, end):
-        """Average each extra module over the reference window (start, end].
+    def _dmmr_clock(self, modules):
+        """The DMMR time axis and, per tick, whether at least one recorded module has a new reading."""
+        device = modules[0].getDevice()
+        times = np.asarray(device.time.get(), dtype=float)
+        valid = np.zeros(len(times), dtype=bool)
+        for c in modules:
+            values = np.asarray(c.getValues(subtractBackground=False), dtype=float)
+            if len(values) != len(times):
+                raise ScanError(f'{c.name}: DMMR timestamps and values are misaligned.')
+            valid |= np.isfinite(values)
+        return device, times, valid
 
-        All DMMR modules share the device time axis, so the window holds the same recorder ticks.
-        An extra module never stops the scan: an unreadable history gives NaN for that point.
+    def _module_values(self, start, end):
+        """Average every recorded module over (start, end] of the shared DMMR time axis.
+
+        A module without a usable history gives NaN for that point only: it never stops the scan.
         """
         results = []
-        for c in (self._plan or {}).get('extra_detectors', []):
+        for c in (self._plan or {}).get('detectors', []):
             try:
                 times = np.asarray(c.getDevice().time.get(), dtype=float)
                 values = np.asarray(c.getValues(subtractBackground=False), dtype=float)
@@ -1138,11 +1164,11 @@ class MScan(Scan):
         return mode, duration
 
     def _dmmr_interval_setting(self):
-        device = self._detector().getDevice()
+        device = self._dmmr_device()
         settings = getattr(self.pluginManager.Settings, 'settings', {})
         setting = settings.get(f'{device.name}/{device.INTERVAL}')
         if setting is None or setting.spin is None:
-            raise ScanError('DMMR Interval setting unavailable. Select an initialized DMMR module.')
+            raise ScanError('DMMR Interval setting unavailable. Initialize the DMMR.')
         return device, setting
 
     def _dmmr_interval_editable(self, *, before_start=False):
@@ -1212,25 +1238,22 @@ class MScan(Scan):
             self._dmmr_cadence_epoch = (device, configured, time.time())
         return configured, self._dmmr_cadence_epoch[2]
 
-    def _detector_cadence(self, c):
-        """Bound the scan by this module's usable history, not recorder ticks."""
-        device = c.getDevice()
-        if not c.acquiring or not device.recording:
-            raise ScanError(f'{c.name}: DMMR acquisition/recording stopped.')
+    def _detector_cadence(self, modules):
+        """Bound the scan by the DMMR's usable history: a tick counts when a recorded module has a reading."""
+        device = modules[0].getDevice()
+        if not device.recording or not any(c.acquiring for c in modules):
+            raise ScanError('DMMR acquisition/recording stopped.')
         configured, since = self._cadence_epoch(device)
-        times = np.asarray(device.time.get())
-        values = np.asarray(c.getValues(subtractBackground=False))
-        if len(times) != len(values):
-            raise ScanError(f'{c.name}: DMMR timestamps and values are misaligned.')
-        self._require_monotonic(device, times, f'{c.name}: invalid DMMR timestamps.')
-        valid_times = self._last_finite_times(times, values, since, 21)
+        _, times, valid = self._dmmr_clock(modules)
+        self._require_monotonic(device, times, 'DMMR: invalid timestamps.')
+        valid_times = self._last_finite_times(times, np.where(valid, 0., np.nan), since, 21)
         if len(valid_times) < 2:
             reason = 'after DMMR interval change' if math.isfinite(since) else 'to determine Time step'
-            raise ScanError(f'{c.name}: waiting for two valid recorded DMMR samples {reason}.')
+            raise ScanError(f'DMMR: waiting for two valid recorded samples {reason}.')
         intervals = np.diff(valid_times)
         largest = float(intervals.max())
         if not 0 <= time.time() - valid_times[-1] <= max(2., 3 * configured, 3 * largest):
-            raise ScanError(f'{c.name}: waiting for fresh valid DMMR samples.')
+            raise ScanError('DMMR: waiting for fresh valid samples.')
         # Round Unix timestamp subtraction to microseconds before the GUI's
         # millisecond ceiling; binary roundoff must not add a spurious ms.
         micros = round(max(configured, largest) * 1e6)
@@ -1272,20 +1295,21 @@ class MScan(Scan):
             end, chunk = begin, chunk * 4
         return np.concatenate(found)[-count:] if found else times[:0]
 
-    def _require_time_step(self, c, duration, window_start=None):
-        cadence = self._detector_cadence(c)
+    def _require_time_step(self, modules, duration, window_start=None):
+        cadence = self._detector_cadence(modules)
         minimum = cadence['minimum_time_step_s']
         if duration < minimum:
-            raise ScanError(f'{c.name}: Time step must be at least {minimum:g} s for the selected DMMR module '
+            raise ScanError(f'DMMR: Time step must be at least {minimum:g} s for the DMMR cadence '
                             f'(requested {duration:g} s). Increase Time step or change DMMR acquisition settings.')
         if window_start is not None and cadence['last_sample_time'] <= window_start:
-            raise ScanError(f'{c.name}: no new valid DMMR sample within Time step. '
+            raise ScanError('DMMR: no new valid sample within Time step. '
                             'Scan stopped without advancing; increase Time step or check DMMR acquisition.')
         return cadence
 
     def _acquisition_info(self):
         try:
-            cadence = self._detector_cadence(self._detector())
+            running = self._plan is not None and self._plan.get('detectors') and not self.finished
+            cadence = self._detector_cadence(self._plan['detectors'] if running else self._modules())
             text = (f'≈ {cadence["typical_interval_s"]:.3g} s between valid samples; '
                     f'Time step ≥ {cadence["minimum_time_step_s"]:g} s')
         except (ScanError, AttributeError, ValueError, TypeError) as exc:
@@ -1294,17 +1318,17 @@ class MScan(Scan):
         counts, finite = self._validation.get('samples'), self._validation.get('finite_samples')
         windows = self._validation.get('window_end')
         acquired = np.flatnonzero(np.isfinite(windows)) if windows is not None else []
-        self.settingsMgr.settings[self.SAMPLES].value = (f'{int(finite[acquired[-1], 0])} valid / {int(counts[acquired[-1], 0])} total'
-            if len(acquired) and counts is not None else 'Not acquired')
+        text = 'Not acquired'
+        if len(acquired) and counts is not None:
+            row = acquired[-1]
+            names = [c.name for c in self.outputChannels][:counts.shape[1]] if np.ndim(counts) == 2 else []
+            text = ', '.join(f'{name} {int(finite[row, j])}/{int(counts[row, j])}' for j, name in enumerate(names))
+            text = f'{text} valid/total' if text else 'Not acquired'
+        self.settingsMgr.settings[self.SAMPLES].value = text
 
     def scanUpdate(self, done=False):
         self._acquisition_info()
         super().scanUpdate(done=done)
-
-    def _signal_changed(self):
-        if not self.loading and not self.settingsMgr.loading:
-            self._refresh_interface()
-            self.dummyInitialization()
 
     def _setup_changed(self):
         if not self.loading and not self.settingsMgr.loading:
@@ -1365,7 +1389,9 @@ class MScan(Scan):
                 setpoint = f'{sign}{self._number(c, "voltage_setpoint_readback", "Vset readback"):g} V'
             except ScanError:
                 setpoint = 'unconfirmed'
-            lines.append(f'{r["name"]}: {measured} (set {setpoint})')
+            dropout, full = self._rail_headroom(r)
+            headroom = f', headroom {dropout:.1f} V' if math.isfinite(dropout) else ''
+            lines.append(f'{r["name"]}: {measured} (set {setpoint}){headroom}, {self._range_text(full)}')
         return '\n'.join(lines) or 'Select an AMX'
 
     def _refresh_readback(self, rails):
@@ -1400,31 +1426,16 @@ class MScan(Scan):
             self._layout_readonly_fields()
             return
         channels = list(self.pluginManager.DeviceManager.channels())
-        modules = sorted([c for c in channels if self._is_dmmr(c)], key=lambda c: (c.module_address(), c.name))
-        setting = self.settingsMgr.settings[self.DETECTOR]
-        combo, selected = setting.combo, str(setting.value).strip()
-        if not combo.view().isVisible():
-            legacy = [c for c in modules if c.name == selected]
-            if len(legacy) == 1:
-                selected = self._module_label(legacy[0])
-            choices = list(dict.fromkeys([self.NO_SIGNAL, *[self._module_label(c) for c in modules]]))
-            if selected and selected not in choices:
-                choices.append(selected)  # never silently replace a lost selection
-            previous = combo.blockSignals(True)
-            if setting.items != choices:
-                combo.clear()
-                combo.addItems(choices)
-            combo.setCurrentText(selected or self.NO_SIGNAL)
-            for index, name in enumerate(choices):
-                matches = [c for c in modules if self._module_label(c) == name]
-                if len(matches) == 1:
-                    c = matches[0]
-                    text = f'{c.name}: ion current (A), DMMR module {c.module_address()}. '
-                    text += 'Acquiring and recording.' if c.acquiring and c.getDevice().recording else 'Start DMMR acquisition and recording.'
-                else:
-                    text = 'Select a discovered DMMR module; missing/ambiguous modules cannot start a scan.'
-                combo.setItemData(index, text, Qt.ItemDataRole.ToolTipRole)
-            combo.blockSignals(previous)
+        try:
+            modules = self._modules()
+            device = modules[0].getDevice()
+            recorded = ', '.join(f'M{c.module_address()} {c.name}' for c in modules)
+            live = device.recording and any(c.acquiring for c in modules)
+            modules_text = f'{recorded}\n{"Recording" if live else "Start DMMR acquisition and recording"}'
+        except (ScanError, AttributeError, TypeError, ValueError) as exc:
+            modules_text = str(exc)
+        if self.settingsMgr.settings[self.MODULES].value != modules_text:
+            self.settingsMgr.settings[self.MODULES].value = modules_text
         amx_setting = self.settingsMgr.settings[self.AMX]
         if not amx_setting.combo.view().isVisible():
             choices = ['None', *sorted({p.name for p in self.pluginManager.plugins if p.name in self.AMX_PLUGINS})]
@@ -1493,11 +1504,17 @@ class MScan(Scan):
         limits, currents = 'Unavailable', 'Unavailable'
         rails = []
         limit_help = ('Read-only admissible range. Choose the sweep with Amplitude from/to. '
-                      'Channel Min/Max can restrict it; the PSU hardware ceiling cannot be overridden.')
+                      'Channel Min/Max can restrict it; the PSU hardware ceiling cannot be overridden. '
+                      '"Reachable now" is output + dropout: the PSU cannot regulate above it, and less at a '
+                      'larger load. Start is refused above it minus 2 V; Full range raises it.')
         try:
             rails = self._associated_rails(self._plugin(self.amx_name), self._selected_outputs())
             low, high = self._amplitude_range(rails)
             limits = f'{low:g} – {high:g}'
+            reachable = self._headroom_ceiling(rails)
+            if reachable is not None and reachable[0] < high:
+                ceiling, rail, full = reachable
+                limits += f'\nReachable now ≤ {ceiling:.0f} V ({rail["name"]}, {self._range_text(full)})'
             limit_help += '\n' + '\n'.join(
                 f'{r["device"].name} CH{r["number"]}: channel {r["channel"].min:g}–{r["channel"].max:g} V; '
                 f'PSU-reported maximum {r["channel"].hardware_voltage_limit:g} V (current range).'
@@ -1522,9 +1539,11 @@ class MScan(Scan):
         # Same preflight as Start, but do not initialize data, bind a plan, log
         # warnings or touch a device. Keep the last outcome (including save errors).
         try:
-            self._preflight()
+            plan = self._preflight()
             self._ready = True
             status = 'Ready to scan'
+            if plan.get('headroom_warning'):
+                status += f'\nWarning: {plan["headroom_warning"]}'
         except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
             self._ready = False
             status = f'Not ready: {exc}'
@@ -1612,12 +1631,13 @@ class MScan(Scan):
         if not self.inputChannels:
             return
         try:
-            source = self._detector()
+            planned = (self._plan or {}).get('detectors')
+            modules = planned if planned else self._modules()
         except ScanError:
             return  # No synthetic or unavailable channel in the data model.
-        self.displayDefault = source.name
-        # The reference module first, then every other enabled module of the same DMMR.
-        for channel in (source, *self._extra_detectors(source)):
+        self.displayDefault = modules[0].name
+        # Every enabled DMMR module, by module number.
+        for channel in modules:
             self.addOutputChannel(name=channel.name, unit='A',
                                   recordingData=np.full(len(self.inputChannels[0].recordingData), np.nan, dtype=np.float64))
 
@@ -1630,20 +1650,23 @@ class MScan(Scan):
 
     def _preflight(self):
         """Read-only validation shared by the idle status and actual Start."""
-        detector = self._detector()
-        self._registered(detector)
+        modules = self._modules()
+        for c in modules:
+            self._registered(c)
         plan = self._prepare()
-        self._check_detectors([detector])
-        plan['detectors'] = [detector]
-        plan['extra_detectors'] = self._extra_detectors(detector)
-        plan['detector_identity'] = (detector.getDevice(), detector.module_address(), detector.name)
-        self._cadence_epoch(detector.getDevice())
-        plan['detector_interval_ms'] = float(detector.getDevice().interval)
-        plan['metadata']['detector'] = dict(device=detector.getDevice().name, module=detector.module_address(), channel=detector.name,
-                                          interval_ms=plan['detector_interval_ms'])
-        plan['metadata']['extra_detectors'] = [dict(module=c.module_address(), channel=c.name) for c in plan['extra_detectors']]
+        self._check_detectors(modules)
+        device = modules[0].getDevice()
+        plan['detectors'] = modules
+        plan['detector_identity'] = (device, [(c.module_address(), c.name) for c in modules])
+        self._cadence_epoch(device)
+        plan['detector_interval_ms'] = float(device.interval)
+        plan['metadata']['detector'] = dict(
+            device=device.name, interval_ms=plan['detector_interval_ms'],
+            modules=[dict(module=c.module_address(), channel=c.name) for c in modules],
+            windows='DMMR time axis, shared by every recorded module; a tick is valid when at least one module '
+                    'has a new reading. Each module is averaged over the same windows.')
         if plan['mode'] == self.CONTINUOUS:
-            plan['metadata']['detector_cadence'] = self._require_time_step(detector, plan['average'])
+            plan['metadata']['detector_cadence'] = self._require_time_step(modules, plan['average'])
         return plan
 
     def initScan(self):
@@ -1658,23 +1681,24 @@ class MScan(Scan):
         self._last_scan_status = ''
         try:
             self._plan = self._preflight()
-            name = self._plan['detectors'][0].name
+            if self._plan.get('headroom_warning'):
+                self.print(f'Warning: {self._plan["headroom_warning"]}', flag=PRINT.WARNING)
+            configured = [c.name for c in self._plan['detectors']]
             self.addInputChannels()
             self.addOutputChannels()
             self.toggleDisplay(visible=True)
             self.updateFile()
             self.populateDisplayChannel()
-            configured = [name, *[c.name for c in self._plan['extra_detectors']]]
             if [c.name for c in self.outputChannels] != configured:
-                raise ScanError(f'Measured signal {name} must be available and recording.')
-            self._plan['detectors'] = [self.outputChannels[0].sourceChannel]
-            self._plan['extra_detectors'] = [c.sourceChannel for c in self.outputChannels[1:]]
+                raise ScanError(f'DMMR modules {", ".join(configured)} must be available and recording.')
+            self._plan['detectors'] = [c.sourceChannel for c in self.outputChannels]
             self._check_detectors()
             n, rails, outputs = len(self.inputChannels[0].recordingData), len(self._plan['rails']), len(configured)
             self._validation = dict(status='running', error='', point_status=['not acquired'] * n,
                 rail_v=np.full((n, rails), np.nan), rail_i=np.full((n, rails), np.nan),
                 window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
-                samples=np.zeros((n, outputs), dtype=np.int64), finite_samples=np.zeros((n, outputs), dtype=np.int64))
+                samples=np.zeros((n, outputs), dtype=np.int64), finite_samples=np.zeros((n, outputs), dtype=np.int64),
+                rail_dropout=np.full((n, rails), np.nan), low_headroom=np.zeros(n, dtype=bool))
             if self._plan.get('offsets'):
                 k = len(self._plan['offsets'])  # One column per rod pair.
                 self._validation.update(offset_v=np.full((n, k), np.nan), offset_target=np.full((n, k), np.nan))
@@ -1803,6 +1827,90 @@ class MScan(Scan):
                             f'Ilim {ilim * 1000:g} mA; point not acquired. MScan does not switch HV OFF.')
         return current
 
+    @staticmethod
+    def _rail_headroom(rail):
+        """Present dropout of a PSU rail (V, NaN when not reported) and its range (True Full, False Half, None)."""
+        ctrl, number = rail['controller'], rail['number']
+        try:
+            dropout = float((getattr(ctrl, 'dropout_values', None) or {}).get(number, math.nan))
+        except (TypeError, ValueError):
+            dropout = math.nan
+        full = (getattr(ctrl, 'full_range_by_channel', None) or {}).get(number)
+        return dropout, None if full is None else bool(full)
+
+    @staticmethod
+    def _range_text(full):
+        return 'Full range' if full else 'Half range' if full is False else 'range unknown'
+
+    def _headroom_ceiling(self, rails):
+        """Highest output each rail can reach at its present load: output + dropout. The load only grows
+        with A, and the internal supply only falls with the load, so no larger amplitude is reachable."""
+        ceilings = []
+        for r in rails:
+            dropout, full = self._rail_headroom(r)
+            monitor = float(getattr(r['channel'], 'monitor', math.nan))
+            if math.isfinite(dropout) and dropout >= 0 and math.isfinite(monitor):
+                ceilings.append((abs(monitor) + dropout, r, full))
+        return min(ceilings, key=lambda item: item[0]) if ceilings else None
+
+    def _headroom_advice(self, rail, full):
+        return (f'Switch {rail["device"].name} to Full range or lower Amplitude to.' if full is False
+                else 'Lower Amplitude to, or the RF load (frequency).')
+
+    def _headroom_guard(self):
+        """Stop at once when a rail is out of tolerance with no regulator headroom left: it cannot reach its target.
+
+        Two different PSU readings in a row are required, so a single reading never stops the scan; a rail still
+        rising keeps its headroom. Without this the scan waited for the whole settle timeout (2026-11-03).
+        """
+        p = self._plan
+        if not p or not p.get('rails'):
+            return
+        state = p.setdefault('headroom_lost', {})
+        samples = p.setdefault('headroom_samples', deque(maxlen=4096))
+        now = time.time()
+        dropouts = []
+        for rail, expected in zip(p['rails'], p['expected']):
+            c = rail['channel']
+            dropout, full = self._rail_headroom(rail)
+            dropouts.append(dropout)
+            try:
+                v = float(c.monitor)
+            except (TypeError, ValueError):
+                v = math.nan
+            lost = (math.isfinite(dropout) and math.isfinite(v) and dropout < self.HEADROOM_LOST_V
+                    and abs(v - expected) > p['tolerance'])
+            if not lost:
+                state.pop(rail['name'], None)
+                continue
+            seen = state.setdefault(rail['name'], set())
+            seen.add((v, dropout))
+            if len(seen) >= 2:
+                try:
+                    current = f', {float(c.current_readback) * 1000:.0f} mA'
+                except (TypeError, ValueError):
+                    current = ''
+                raise ScanError(f'{c.name} cannot reach {expected:g} V: {rail["device"].name} has no headroom left '
+                                f'(dropout {dropout:.2f} V at {v:.2f} V{current}, {self._range_text(full)}). '
+                                + self._headroom_advice(rail, full))
+        samples.append((now, dropouts))
+
+    def _store_headroom(self, index, start, end):
+        """Lowest dropout of each rail over the point window, and whether the point was measured below HEADROOM_LOW_V."""
+        validation, p = self._validation, self._plan or {}
+        if 'rail_dropout' not in validation:
+            return
+        samples = [d for t, d in p.get('headroom_samples', ()) if start <= t <= end]
+        if not samples and p.get('headroom_samples'):
+            samples = [p['headroom_samples'][-1][1]]  # PSU polls are slower than short windows.
+        if not samples:
+            return
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)  # A rail that never reported its dropout.
+            lowest = np.nanmin(np.asarray(samples, dtype=float), axis=0)
+        validation['rail_dropout'][index] = lowest
+        validation['low_headroom'][index] = bool(np.any(lowest < self.HEADROOM_LOW_V))
+
     def _associated_rails(self, amx, selected):
         """Resolve the actual shared Channels without driver calls or commands."""
         names = [str(getattr(amx, attr)) for attr in ('psu_ch01', 'psu_ch23')
@@ -1842,6 +1950,7 @@ class MScan(Scan):
         links = [(attr, str(getattr(amx, attr))) for attr in ('psu_ch01', 'psu_ch23')
                  if (0 if attr == 'psu_ch01' else 2) in selected]
         rails = self._associated_rails(amx, selected)
+        headroom_warning = None
         for r in rails:
             c, psu, ctrl = r['channel'], r['device'], r['controller']
             if not hasattr(c, 'readback_status') or c.unit != 'V' or not c.useMonitors:
@@ -1872,6 +1981,19 @@ class MScan(Scan):
             self._check_current(c, ilim)
             if r['token'].is_set():
                 raise ScanError(f'{c.name}: output shutdown requested.')
+            dropout, full = self._rail_headroom(r)
+            if math.isfinite(dropout) and dropout >= 0:
+                level = abs(float(c.monitor))
+                ceiling = level + dropout
+                if high > ceiling - self.HEADROOM_START_V:
+                    raise ScanError(f'{c.name}: at most about {ceiling:.0f} V at its present load '
+                                    f'({self._range_text(full)}, dropout {dropout:.1f} V), not Amplitude to {high:g} V '
+                                    f'with {self.HEADROOM_START_V:g} V of headroom. ' + self._headroom_advice(r, full))
+                margin = self.HEADROOM_START_V + self.HEADROOM_SAG * max(0., high - level)
+                if headroom_warning is None and high > ceiling - margin:
+                    headroom_warning = (f'{c.name}: about {ceiling:.0f} V reachable now ({self._range_text(full)}), '
+                                        'less under load: ' + ('Full range recommended.' if full is False
+                                                               else 'Amplitude to is close to the PSU ceiling.'))
             r.update(initial=initial, ilim=ilim, current_capacity=imax,
                      voltage_capacity=float(c.hardware_voltage_limit),
                      request_revision=c.voltage_request_revision, confirmed_vset=initial)
@@ -1882,6 +2004,7 @@ class MScan(Scan):
         return dict(amx=amx, offsets=offsets, amx_controller=amx.controller, amx_backend=amx.controller.device,
             selected=selected, links=links, waveform=waveform, rails=rails,
             expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),
+            headroom_warning=headroom_warning,
             tolerance=float(self.voltage_tolerance), average=duration, wait=float(self.settling_s), mode=mode,
             metadata=dict(amx=amx.name, outputs=self.amx_outputs, waveform=json.loads(waveform), links=links,
                 mode=mode, passes=self._passes(), points_per_pass=len(self._scan_steps()) // self._passes(),
@@ -1898,7 +2021,10 @@ class MScan(Scan):
                 rails=[dict(channel=r['name'], psu=r['device'].name, rail='Vpos' if r['number'] == 0 else 'Vneg',
                             initial_vset=r['initial'], final_vset=r['initial'],
                             voltage_limit_v=r['voltage_capacity'], ilim_a=r['ilim'],
-                            current_limit_a=r['current_capacity']) for r in rails],
+                            current_limit_a=r['current_capacity'],
+                            full_range=self._rail_headroom(r)[1],
+                            dropout_at_start_v=(lambda d: d if math.isfinite(d) else None)(self._rail_headroom(r)[0]))
+                       for r in rails],
                 amplitude_definition='Vpos=+A, Vneg=-A relative to PSU reference; external offset not included',
                 offset=None if not offsets else dict(
                     coefficient=offsets[0]['factor'], fixed_v=offsets[0]['fixed'],
@@ -1967,6 +2093,7 @@ class MScan(Scan):
             ready &= (fresh and math.isfinite(current) and current >= 0 and math.isfinite(v)
                       and v >= 0 and abs(v - expected) <= p['tolerance'])
         ready = self._offset_observation() and ready
+        self._headroom_guard()
         return ready, np.asarray(measured), np.asarray(currents), time.time()
 
     def _command(self, targets, latest=None, *, offsets=()):
@@ -2015,34 +2142,39 @@ class MScan(Scan):
         return started, time.time()
 
     def _check_detectors(self, sources=None):
-        for source in self._plan['detectors'] if sources is None else sources:
+        """At Start every recorded module must be ready; during the scan only the DMMR itself must keep
+        recording: a module that stops reading gives NaN in its own column and never stops the scan."""
+        modules = self._plan['detectors'] if sources is None else sources
+        if not modules:
+            raise ScanError('Enable at least one DMMR module in the DMMR plugin.')
+        device = modules[0].getDevice()
+        for source in modules:
             self._registered(source)
-            device = source.getDevice()
-            if not self._is_dmmr(source):
-                raise ScanError(f'{source.name}: select a real DMMR current module.')
-            identity = self._plan.get('detector_identity') if sources is None else None
-            if identity and (device is not identity[0] or source.module_address() != identity[1] or source.name != identity[2]):
-                raise ScanError('DMMR module identity changed during the scan.')
-            if sources is None and 'detector_interval_ms' in self._plan and float(device.interval) != self._plan['detector_interval_ms']:
-                raise ScanError('DMMR interval changed during the scan. Restart with the new cadence.')
-            if not source.enabled:
-                raise ScanError(f'{source.name}: enable the detector channel.')
-            if not source.initialized:
-                raise ScanError(f'{source.name}: initialize the detector.')
-            if not source.acquiring:
-                raise ScanError(f'{source.name}: start detector acquisition.')
-            if not device.recording:
-                raise ScanError(f'{source.name}: start detector recording.')
-            if not hasattr(device, 'time') or not hasattr(source, 'values'):
+            if not self._is_dmmr(source) or source.getDevice() is not device:
+                raise ScanError(f'{source.name}: not a current module of the recorded DMMR.')
+            if not hasattr(source, 'values'):
                 raise ScanError(f'{source.name}: a timestamped Channel history is required.')
+            if sources is not None:
+                if not source.initialized:
+                    raise ScanError(f'{source.name}: initialize the DMMR.')
+                if not source.acquiring:
+                    raise ScanError(f'{source.name}: start DMMR acquisition.')
+        identity = self._plan.get('detector_identity') if sources is None else None
+        if identity and (device is not identity[0]
+                         or [(c.module_address(), c.name) for c in modules] != identity[1]):
+            raise ScanError('DMMR module identity changed during the scan.')
+        if sources is None and 'detector_interval_ms' in self._plan and float(device.interval) != self._plan['detector_interval_ms']:
+            raise ScanError('DMMR interval changed during the scan. Restart with the new cadence.')
+        if not device.recording:
+            raise ScanError('DMMR: start recording.')
+        if not hasattr(device, 'time'):
+            raise ScanError('DMMR: a timestamped history is required.')
 
     def _history_start(self):
         self._check_detectors()
-        baselines = []
-        for c in self._plan['detectors']:
-            t = c.getDevice().time.get(length=1)
-            baselines.append((id(c.values), float(t[-1]) if len(t) else None))
-        return time.time(), baselines
+        t = self._plan['detectors'][0].getDevice().time.get(length=1)  # One DMMR time axis for all modules.
+        baseline = float(t[-1]) if len(t) else None
+        return time.time(), [(id(c.values), baseline) for c in self._plan['detectors']]
 
     def _window_samples(self, start, end, baselines, *, closed=True):
         self._check_detectors()
@@ -2134,7 +2266,6 @@ class MScan(Scan):
             self._pause()
 
     def _store_point(self, index, start, end, volts, currents, values, *, continuous=False, offsets=()):
-        values = [*values, *self._extra_values(start, end)]
         validation = self._validation
         validation['window_start'][index], validation['window_end'][index] = start, end
         validation['rail_v'][index], validation['rail_i'][index] = volts, currents
@@ -2144,9 +2275,19 @@ class MScan(Scan):
         for j, (mean, count, finite) in enumerate(values):
             self.outputChannels[j].recordingData[index] = mean
             validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
+        self._store_headroom(index, start, end)
+        # Acquired when at least one module read something in the window, like the native engine's DMMR clock.
         validation['point_status'][index] = (('acquired during sweep' if continuous else 'acquired')
-            if math.isfinite(values[0][0]) else 'invalid detector data')  # The reference module decides.
+            if any(math.isfinite(mean) for mean, _, _ in values) else 'invalid detector data')
         self.signalComm.scanUpdateSignal.emit(False)
+
+    def _report_low_headroom(self):
+        flags = np.asarray(self._validation.get('low_headroom', []), dtype=bool)
+        if flags.any() and self.inputChannels:
+            amplitudes = np.asarray(self.inputChannels[0].recordingData, dtype=float)[flags]
+            shown = ', '.join(f'{a:g}' for a in amplitudes[:6]) + (', …' if len(amplitudes) > 6 else '')
+            self.print(f'{len(amplitudes)} point(s) measured with less than {self.HEADROOM_LOW_V:g} V of PSU headroom '
+                       f'(A = {shown} V): the RF amplitude may not have been regulated there.', flag=PRINT.WARNING)
 
     def _pass_label(self, index, count):
         passes = int(((self._plan or {}).get('metadata') or {}).get('passes') or 1)
@@ -2166,9 +2307,9 @@ class MScan(Scan):
     def _continuous_command(self, amplitude, latest=None, *, window_start=None):
         if latest is not None and time.monotonic() >= latest:
             raise ScanError('Continuous time step missed. Increase Time step; no catch-up command sent.')
-        # Validate the live detector cadence on Qt as well as in preflight.
-        # No new voltage command may outrun the selected module's data.
-        self._require_time_step(self._plan['detectors'][0], self._plan['average'], window_start)
+        # Validate the live DMMR cadence on Qt as well as in preflight.
+        # No new voltage command may outrun the DMMR data.
+        self._require_time_step(self._plan['detectors'], self._plan['average'], window_start)
         # The deadline is checked on Qt, immediately before any setpoint write;
         # a late queued callback must not issue a catch-up command.
         return self._command([float(amplitude)] * len(self._plan['rails']), latest=latest,
@@ -2181,20 +2322,22 @@ class MScan(Scan):
         # samples may have been lost, and _window_samples must fail closed.
         cursor = [(identity, start) for identity, _ in baselines] if raw['detector_time'] else baselines
         def read():
-            samples = self._window_samples(start, cutoff, cursor, closed=False)[0]
+            samples = self._window_samples(start, cutoff, cursor, closed=False)
             latest = self._plan['detectors'][0].getDevice().time.get(length=1)
             return samples, float(latest[-1]) if len(latest) else -math.inf
-        (times, currents), watermark = self._gui(read, cancel=cancel)
-        raw['detector_time'].extend(times.tolist())
-        raw['detector_current'].extend(currents.tolist())
+        samples, watermark = self._gui(read, cancel=cancel)
+        raw['detector_time'].extend(samples[0][0].tolist())
+        # One row per DMMR tick, one column per recorded module.
+        raw['detector_current'].extend(np.column_stack([values for _, values in samples]).tolist())
         return watermark
 
     def _continuous_windows(self, pending, raw, watermark):
         while pending and watermark >= pending[0][2]:
             index, start, end, volts, currents, offsets = pending.popleft()
             left, right = (bisect_right(raw['detector_time'], t) for t in (start, end))
-            values = self._average_samples(np.asarray(raw['detector_current'][left:right]))
-            self._store_point(index, start, end, volts, currents, [values], continuous=True, offsets=offsets)
+            block = np.asarray(raw['detector_current'][left:right], dtype=float).reshape(-1, len(self._plan['detectors']))
+            values = [self._average_samples(block[:, j]) for j in range(block.shape[1])]
+            self._store_point(index, start, end, volts, currents, values, continuous=True, offsets=offsets)
 
     def _run_continuous(self, steps):
         p = self._plan
@@ -2282,7 +2425,7 @@ class MScan(Scan):
                     # jitter. Actual command intervals are saved as measured.
                     next_deadline = last_command + duration
                 else:
-                    self._gui(lambda: self._require_time_step(p['detectors'][0], duration, begin))
+                    self._gui(lambda: self._require_time_step(p['detectors'], duration, begin))
                     end = clock['cutoff'] = time.time()
                 if end <= begin:
                     raise ScanError('System clock moved backwards during continuous acquisition.')
@@ -2321,6 +2464,7 @@ class MScan(Scan):
                 if status == 'not acquired':
                     validation['point_status'][index] = validation['status']
                     break
+            self._report_low_headroom()
             self._bridge.status.emit(validation['status'].capitalize() +
                                      (': ' + validation['error'] if validation['error'] else ''))
             self.signalComm.updateRecordingSignal.emit(False)
@@ -2364,6 +2508,8 @@ class MScan(Scan):
                     validation['status'], validation['error'] = failure
                 if validation['status'] == 'error':
                     self.print(f'Scan aborted: {validation["error"]}', flag=PRINT.ERROR)
+                if np.any(validation.get('low_headroom', ())):
+                    self._report_low_headroom()
                 # The engine already marks the point it stopped on: mark one only when it could not
                 # (2026-11-02 lab files: two points read "error" after one failed).
                 if validation['status'] not in validation['point_status']:
@@ -2559,17 +2705,24 @@ class MScan(Scan):
             group.attrs['status'] = self._validation['status']
             group.attrs['error'] = self._validation['error']
             group.attrs['setup'] = json.dumps(self._plan['metadata'], allow_nan=False)
-            group.attrs['reference_channel'] = self.outputChannels[0].name if self.outputChannels else ''
-            group.attrs['extra_channels'] = json.dumps([c.name for c in self.outputChannels[1:]])
-            group.attrs['channels'] = ('The reference DMMR module defines each window and its validity; the other enabled '
-                'modules are averaged over the same windows (start, end] and never stop the scan. Samples and '
-                'finite_samples have one column per output channel. NaN samples are recorder ticks without a new '
-                'reading and are skipped; an infinite sample invalidates its point.')
+            group.attrs['modules'] = json.dumps([c.name for c in self.outputChannels])
+            group.attrs['channels'] = ('Every enabled DMMR module is recorded, in the order of modules; no module is a '
+                'reference. Each is averaged over the same windows (start, end] of the DMMR time axis. Samples and '
+                'finite_samples have one column per module. NaN samples are recorder ticks without a new reading and '
+                'are skipped; an infinite sample invalidates that module\'s point. A point is acquired when at least '
+                'one module has a reading in its window.')
             for key in ('rail_v', 'rail_i', 'window_start', 'window_end', 'samples', 'finite_samples'):
                 group.create_dataset(key, data=self._validation[key])
             group.create_dataset('point_status', data=self._validation['point_status'], dtype=h5py.string_dtype('utf-8'))
             group['rail_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
             group['rail_i'].attrs['Unit'] = 'A (PSU readback at end of integration, not detector current)'
+            if 'rail_dropout' in self._validation:
+                group.create_dataset('rail_dropout', data=self._validation['rail_dropout'])
+                group['rail_dropout'].attrs['Unit'] = ('V (lowest PSU regulator headroom, dropout, over the point window, '
+                                                       'one column per rail; NaN when not reported)')
+                group.create_dataset('low_headroom', data=np.asarray(self._validation['low_headroom'], dtype=bool))
+                group['low_headroom'].attrs['Description'] = (f'True where a rail had less than {self.HEADROOM_LOW_V:g} V '
+                                                              'of headroom: the RF amplitude may not have been regulated.')
             if 'offset_v' in self._validation:
                 for key in ('offset_v', 'offset_target'):
                     group.create_dataset(key, data=self._validation[key])
@@ -2584,13 +2737,16 @@ class MScan(Scan):
                     data = np.asarray(values, dtype=bool if key == 'psu_ready' else float)
                     if key in ('psu_v', 'psu_i', 'psu_target'):
                         data = data.reshape(-1, self._validation['rail_v'].shape[1])
+                    if key == 'detector_current':
+                        data = data.reshape(-1, max(1, len(self.outputChannels)))
                     if key in ('offset_v', 'offset_target') and np.ndim(self._validation.get('offset_v')) == 2:
                         data = data.reshape(-1, self._validation['offset_v'].shape[1])
                     raw.create_dataset(key, data=data)
                 raw.attrs['timestamps'] = 'PC/Explorer times; not hardware-synchronized ADC timestamps.'
                 raw.attrs['commands'] = 'GUI dispatch of sequential rail requests; not hardware write/settling times.'
                 raw.attrs['readbacks'] = 'Snapshots of shared PSU channels, NaN while unavailable. No interpolation.'
-                raw['detector_current'].attrs['Unit'] = 'A (raw DMMR samples, no background subtraction)'
+                raw['detector_current'].attrs['Unit'] = ('A (raw DMMR samples at detector_time, one column per module '
+                                                         'as in Validation modules; no background subtraction)')
                 raw['psu_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
                 raw['psu_i'].attrs['Unit'] = 'A (PSU current, not detector current)'
                 raw['psu_target'].attrs['Unit'] = 'V (requested PSU magnitudes)'
@@ -2627,7 +2783,7 @@ class MScan(Scan):
                     # current measurement is invented for their old points.
                     self._validation['rail_i'] = (group['rail_i'][:] if 'rail_i' in group
                         else np.full_like(self._validation['rail_v'], np.nan))
-                    for key in ('offset_v', 'offset_target'):
+                    for key in ('offset_v', 'offset_target', 'rail_dropout', 'low_headroom'):
                         if key in group:
                             self._validation[key] = group[key][:]
                     if 'Continuous' in group:
@@ -2642,7 +2798,7 @@ class MScan(Scan):
 passes = PASSES  # the same sweep repeated in this file
 x = np.asarray(inputChannels[0].recordingData)
 n = len(x) // passes
-for output in outputChannels:  # The reference DMMR module first, in A in the file.
+for output in outputChannels:  # Every recorded DMMR module, in A in the file.
     y = np.asarray(output.recordingData).reshape(passes, n) * 1e12
     line, = ax.plot(x[:n], np.nanmean(y, axis=0), marker='.', markersize=4, label=output.name)
     for single in y if passes > 1 else ():

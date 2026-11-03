@@ -108,7 +108,6 @@ def mscan_rig(mscan_module):
     detector_device = NS(name='DMMR', initialized=True, acquiring=True, recording=True, time=History(), interval=2)
     detector = NS(name='Detector', real=True, unit='A', module_address=lambda: 3, enabled=True, initialized=True, acquiring=True,
                   values=History(), getDevice=lambda: detector_device)
-    scan.detector_module = 'Module 3 — Detector'
     detector.getValues = lambda **kw: detector.values.get()
     all_channels = [c for p in psus for c in p.channels] + [detector]
     manager = NS(plugins=[amx, *psus, scan])
