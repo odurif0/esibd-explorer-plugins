@@ -322,6 +322,8 @@ def test_slower_configured_polling_cannot_use_old_fast_history(mscan_continuous)
 
 @pytest.mark.parametrize('problem', ['no-history', 'one-value', 'nan', 'infinity', 'misaligned',
                                     'timestamps', 'stale', 'no-interval'])
+# 'timestamps': only repeated stamps left, so fewer than two valid ticks. A single repeated or earlier
+# stamp in a longer history is skipped instead (test_mscan_dmmr_timestamps.py).
 
 
 def test_unavailable_module_cadence_blocks_continuous_before_commands(mscan_continuous, problem):
@@ -331,7 +333,7 @@ def test_unavailable_module_cadence_blocks_continuous_before_commands(mscan_cont
     if problem == 'nan': r.rig.detector.values.data = [np.nan] * 3
     if problem == 'infinity': r.rig.detector.values.data = [np.inf] * 3
     if problem == 'misaligned': r.rig.detector.values.data.pop()
-    if problem == 'timestamps': r.rig.detector_device.time.data[-1] = r.rig.detector_device.time.data[-2]
+    if problem == 'timestamps': r.rig.detector_device.time.data[1:] = [r.rig.detector_device.time.data[0]] * 2
     if problem == 'stale': r.clock.now += 3.
     if problem == 'no-interval': r.rig.detector_device.interval = np.nan
     with pytest.raises(r.rig.module.ScanError):

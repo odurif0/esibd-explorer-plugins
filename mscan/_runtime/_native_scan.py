@@ -25,6 +25,8 @@ import math
 import time
 from threading import Event
 
+import numpy as np
+
 
 
 def _manual(channel):
@@ -192,9 +194,14 @@ class NativeScanAdapter:
         modules = plan['detectors']
         if not modules:
             raise RuntimeError('Native MScan requires at least one recorded DMMR module')
-        device, times, valid = scan._dmmr_clock(modules)
+        # Records with a repeated or earlier timestamp are skipped here: the engine rejects a history
+        # that does not increase, and one such record used to block every later scan (2026-11-03).
+        device, times, columns, _ = scan._dmmr_history(modules)
+        valid = np.zeros(len(times), dtype=bool)
+        for values in columns:
+            valid |= np.isfinite(values)
         _, since = scan._cadence_epoch(device)
-        self._record_raw(modules, times)
+        self._record_raw(times, columns)
         # The DMMR clock, not a module: 0 A where a recorded module has a new reading, NaN elsewhere.
         detector = dict(identity=_identity(device, device.time, *modules) + ':'
                         + ','.join(f'{c.module_address()}={c.name}' for c in modules) + ':' + device.name,
@@ -228,20 +235,17 @@ class NativeScanAdapter:
                     other_scan_running=any(p is not scan and hasattr(p, 'finished') and not p.finished
                                            and hasattr(p, 'runScan') for p in scan.pluginManager.plugins))
 
-    def _record_raw(self, modules, times):
+    def _record_raw(self, times, columns):
         """Keep each module's value at every new DMMR tick (GUI thread)."""
-        import numpy as np
         last = self._raw_times[-1] if self._raw_times else self._raw_since
         first = int(np.searchsorted(times, last, side='right'))
         if first >= len(times):
             return
-        columns = [np.asarray(c.getValues(subtractBackground=False), dtype=float)[first:len(times)] for c in modules]
         self._raw_times.extend(float(t) for t in times[first:])
-        self._raw_rows.extend(np.column_stack(columns).tolist())
+        self._raw_rows.extend(np.column_stack([values[first:] for values in columns]).tolist())
 
     def _raw_modules(self, times, count):
         """Rows of module values at the engine's raw tick times; NaN for a tick this adapter never saw."""
-        import numpy as np
         known = np.asarray(self._raw_times, dtype=float)
         rows = np.full((len(times), count), np.nan)
         if len(known) and len(times):
@@ -503,7 +507,6 @@ class NativeScanAdapter:
                 raise
         def finish():
             self._require_current('before native completion')
-            import numpy as np
             # result['data'] is the DMMR clock: the module columns were filled point by point.
             validation = result['validation']
             for key, value in list(validation.items()):
