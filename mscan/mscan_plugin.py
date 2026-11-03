@@ -24,7 +24,8 @@ import warnings
 import h5py
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHeaderView, QSizePolicy
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHeaderView, QSizePolicy,
+                             QTreeWidgetItem)
 
 from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
@@ -259,6 +260,24 @@ class _Settings(SettingsManager):
         scan.notes = str(old_value('Notes', Parameter.VALUE) or '')
         super().updateSettings(items, file)
 
+    def requireParentItem(self, name, parentItem):
+        # Display-only groups: setting keys (INI sections, HDF5 'MScan/Settings/<key>') stay flat,
+        # so files written before and after the grouping (2026-11-03) read the same.
+        group = self.parentPlugin.GROUP_OF.get(name)
+        if group is None:
+            return super().requireParentItem(name, parentItem)
+        for i in range(parentItem.childCount()):
+            child = parentItem.child(i)
+            if not isinstance(child, Parameter) and child.text(0) == group:
+                return child
+        item = QTreeWidgetItem(parentItem, [group])
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        item.setFirstColumnSpanned(True)
+        font = item.font(0)
+        font.setBold(True)
+        item.setFont(0, font)
+        return item
+
     def saveSettings(self, file=None, useDefaultFile=False):
         file = self._settings_path(file, useDefaultFile, save=True)
         if file is None:
@@ -330,6 +349,7 @@ class MScan(Scan):
     OFFSET_MINIMUM = 'Minimum U'
     OFFSET_FIXED = 'Fixed offset'
     OFFSET_READBACK = 'Offset readback'
+    FILTER_PREVIEW = 'Filter preview'
     NO_OFFSET = 'None'
     NO_SIGNAL = 'Select DMMR module'
     NO_PAIR = 'Select AMX pair'
@@ -340,6 +360,30 @@ class MScan(Scan):
     PAIRS = {'CH0-CH1': (0, 1), 'CH2-CH3': (2, 3)}
     POLL_S = .05
     PICOAMPERE = 1e12  # Plot unit; files keep amperes.
+    # Panel layout (user request 2026-11-03: the flat list was not intuitive). Status first, next to
+    # Start; then what to choose, in the order a scan is prepared; live readings last. None: top level.
+    LAYOUT = (
+        (None, (STATUS,)),
+        ('Setup', (AMX, OUTPUTS, SUPPLIES, FREQUENCY, DETECTOR, DMMR_INTERVAL, CADENCE, FILE_LABEL)),
+        ('Amplitude scan', (AMPLITUDE_LIMITS, CURRENT_LIMITS, MODE, START, STOP, STEP, RATE, TIME_STEP, PASSES,
+                            SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE)),
+        ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
+                         FILTER_PREVIEW)),
+        ('Live readback', (SUPPLY_READBACK, OFFSET_READBACK, FINAL_VOLTAGES, SAMPLES)),
+    )
+    GROUP_OF = {key: group for group, keys in LAYOUT if group for key in keys}
+    # Read-only rows whose text wraps over several lines.
+    WRAPPED = (STATUS, SUPPLIES, FREQUENCY, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
+               CURRENT_LIMITS, OFFSET_READBACK, SUPPLY_READBACK, FILTER_PREVIEW)
+    SQUARE_WAVE_APEX = .2153  # Largest U/V transmitted by an ideal 50 % square wave (docs/mscan_quadrupole.pdf).
+    # Displayed names where they differ from the setting keys, which files keep unchanged.
+    # The mass filter is named after its physics (U, k, δ, x), not after the AMPR "offset" (2026-11-03).
+    LABELS = {INTEGRATION: 'Measurement per point (s)', RATE: 'Sweep rate (V/s)',
+              TIMEOUT: 'Settle timeout (s)', TOLERANCE: 'Voltage tolerance (V)', FREQUENCY: 'AMX frequency',
+              OFFSET: 'Rod pair 1 (AMPR)', OFFSET_2: 'Rod pair 2 (AMPR)', OFFSET_FACTOR: 'U/V ratio k',
+              OFFSET_RESOLUTION: 'Resolution δ (V)', OFFSET_MINIMUM: 'Minimum U (V)',
+              OFFSET_FIXED: 'Axis potential x (V)', FILTER_PREVIEW: 'Preview',
+              SUPPLY_READBACK: 'PSU rails', OFFSET_READBACK: 'Rod pairs (AMPR)'}
 
     class Display(Scan.Display):
         def closeGUI(self):
@@ -432,6 +476,8 @@ class MScan(Scan):
         self._ready = False
         self.displayDefault = ''  # Plot selection only; never an acquisition setting.
         self.notes = ''
+        self._collapsed_groups = set()  # Groups the operator folded, kept when settings are reloaded.
+        self._arranging = False
         super().__init__(**kwargs)
         self.useDisplayChannel = False  # Every recorded DMMR module is plotted, with a legend.
         self._bridge = _GuiBridge(self)
@@ -549,55 +595,52 @@ class MScan(Scan):
         settings[self.OFFSET] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel', event=self._offset_changed,
             toolTip='AMPR channel (module, channel) of quadrupole rod pair 1. During the scan it is set to '
-                    'Fixed offset + max(Minimum U, U/V × A − Resolution offset) at every amplitude (U: DC, V: RF amplitude), '
+                    'x + U, with U = max(Minimum U, k × A − δ), at every amplitude A, '
                     'then verified: the AMPR hardware '
                     'setpoint must confirm the scan target and its Monitor must be within Voltage tolerance before '
                     'acquisition. Normal completion restores its initial value; Stop/error holds the last value. '
-                    'None: not driven.')
+                    'None: not driven, only the RF amplitude is swept.')
         settings[self.OFFSET_2] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel_2', event=self._offset_changed,
-            toolTip='AMPR channel of quadrupole rod pair 2, set to Fixed offset − max(Minimum U, U/V × A − Resolution offset): '
-                    'the same fixed offset, the '
-                    'variable part of opposite sign. Verified, recorded and restored like pair 1. None: only pair 1 is driven.')
+            toolTip='AMPR channel of quadrupole rod pair 2, set to x − U: the same axis potential, the DC of '
+                    'opposite sign. Verified, recorded and restored like pair 1. None: only pair 1 is driven.')
         settings[self.OFFSET_FACTOR] = parameterDict(value=.2, minimum=-100., maximum=100.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_factor', event=self._offset_changed,
             instantUpdate=False, displayDecimals=4,
-            toolTip='U/V: ratio of the variable DC part U to the RF amplitude V (here the scanned amplitude A). '
-                    'Its limit is about 0.215 for an ideal 50 % square wave: above it nothing is transmitted. '
-                    '0: no DC between the pairs, RF-only. '
+            toolTip='k = U/V: ratio of the DC U to the RF amplitude V (here the scanned amplitude A). It sets the '
+                    'resolution: for an ideal 50 % square wave nothing is transmitted above about 0.215, and '
+                    'm/Δm ≈ 0.157 / (0.2153 − k), about 10 at 0.20 and 30 at 0.21. '
+                    '0: no DC between the pairs, RF only. Negative: the pairs are swapped. '
+                    'Not the α of textbooks, which is the Mathieu parameter a (k = a / 2q). '
                     'Each commanded value is rounded to the AMPR channel display precision.')
         settings[self.OFFSET_RESOLUTION] = parameterDict(value=0., minimum=0., maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_resolution', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='δ, in V, subtracted from U/V × A with opposite signs on the two pairs: it acts on the filter, unlike '
-                    'Fixed offset. With U/V at its limit, a peak keeps about the same width in A over the scan, about '
+            toolTip='δ, in V, subtracted from k × A, so it acts on U and on the filter, unlike the axis potential x. '
+                    'With k at its limit, a peak keeps about the same width in A over the scan, about '
                     '6.4 × δ for an ideal square wave. 0: straight line through zero.')
         settings[self.OFFSET_MINIMUM] = parameterDict(value=.5, minimum=.001, maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_minimum', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='Smallest DC between a pair and the fixed offset, in V. At zero DC the filter would pass every heavy '
+            toolTip='Smallest U, in V. At zero DC the filter would pass every heavy '
                     'ion, so the DC never reaches zero during a scan, as on commercial instruments. Peaks whose tip lies '
-                    'below (Minimum U + δ) / (U/V) are not filtered reliably. Not used when U/V is 0.')
+                    'below (Minimum U + δ) / k are not filtered reliably. Not used when k is 0.')
         settings[self.OFFSET_FIXED] = parameterDict(value=0., minimum=-1000., maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_fixed', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='DC offset common to both rod pairs, in V, constant during the scan: it sets the potential of the '
-                    'axis, so the ion energy, not the mass filter. Added to the variable part of each pair (pair 1 +, '
-                    'pair 2 −). 0: no fixed part.')
+            toolTip='x, in V: DC common to both rod pairs, constant during the scan. It is the potential of the '
+                    'quadrupole axis, so it sets the ion energy, not the mass filter: keep the value the rods hold '
+                    'outside a scan. Pair 1 is set to x + U, pair 2 to x − U.')
+        settings[self.FILTER_PREVIEW] = parameterDict(value='No rod pair selected', parameterType=PARAMETERTYPE.LABEL,
+            indicator=True, restore=False,
+            toolTip='What the scan will apply, computed from these settings over Amplitude from/to: U at both ends '
+                    'and the potential of each rod pair. The resolution assumes an ideal 50 % square wave with an '
+                    'amplitude A on the rods, which is not verified on this set-up. Display only, never a command.')
         settings[self.OFFSET_READBACK] = parameterDict(value='Not driven', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='Offset channel readback: AMPR Monitor (measured) and its setpoint. During a scan: scan target, '
+            toolTip='Rod pair channels: AMPR Monitor (measured) and setpoint. During a scan: scan target, '
                     'Monitor and whether the AMPR confirmed the target. Display only, never a command.')
-        order = (self.FILE_LABEL, self.AMX, self.OUTPUTS, self.SUPPLIES, self.SUPPLY_READBACK, self.FREQUENCY,
-                 self.DETECTOR, self.DMMR_INTERVAL,
-                 self.AMPLITUDE_LIMITS, self.CURRENT_LIMITS, self.MODE, self.START, self.STOP, self.STEP, self.PASSES,
-                 self.RATE,
-                 self.OFFSET, self.OFFSET_2, self.OFFSET_FACTOR, self.OFFSET_RESOLUTION, self.OFFSET_MINIMUM,
-                 self.OFFSET_FIXED,
-                 self.OFFSET_READBACK,
-                 self.FINAL_VOLTAGES,
-                 self.SETTLING, self.INTEGRATION, self.TIME_STEP, self.CADENCE, self.SAMPLES,
-                 self.SCANTIME, self.STATUS, self.TIMEOUT, self.TOLERANCE)
+        order = [key for _, keys in self.LAYOUT for key in keys]
         return {key: settings[key] for key in order}
 
     def initGUI(self):
@@ -608,10 +651,12 @@ class MScan(Scan):
         self.settingsTree = TreeWidget()
         self.settingsTree.setMinimumWidth(200)
         self.settingsTree.setHeaderLabels(['msScan', 'Value'])
-        self.settingsTree.setRootIsDecorated(False)
+        self.settingsTree.setRootIsDecorated(True)  # Fold arrows of the setting groups.
         self.settingsTree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.settingsTree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.settingsTree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.settingsTree.itemCollapsed.connect(lambda item: self._group_folded(item, True))
+        self.settingsTree.itemExpanded.connect(lambda item: self._group_folded(item, False))
         self.addContentWidget(self.settingsTree)
         self._layout_timer = QTimer(self._bridge)
         self._layout_timer.setSingleShot(True)
@@ -671,10 +716,15 @@ class MScan(Scan):
         action = getattr(self, 'recordingAction', None)
         if action is not None:
             action.setText('Stop scan' if self.recording else 'Start scan')
-            action.setToolTip(action.toolTipTrue if self.recording else action.toolTipFalse)
             # Stop remains available throughout the run, even if a source fails.
             # A new scan must wait for the previous worker and file save to finish.
-            action.setEnabled(self.recording or (self.finished and self._ready))
+            enabled = self.recording or (self.finished and self._ready)
+            tip = action.toolTipTrue if self.recording else action.toolTipFalse
+            if not enabled:
+                # A greyed button says why, without scrolling to the Status row.
+                tip = f'{tip}\n\n{getattr(self, "scan_status", "")}'.strip()
+            action.setToolTip(tip)
+            action.setEnabled(enabled)
 
     def _format_settings(self):
         # Preserve old step/time ratios, including when Qt interprets the text
@@ -683,13 +733,7 @@ class MScan(Scan):
         spin = self.settingsMgr.settings[self.RATE].spin
         spin.textFromValue = lambda value: f'{value:.15f}'.rstrip('0').rstrip('.')
         spin.setValue(spin.value())
-        labels = {self.INTEGRATION: 'Measurement per point (s)', self.RATE: 'Sweep rate (V/s)',
-                  self.TIMEOUT: 'Settle timeout (s)', self.TOLERANCE: 'Voltage tolerance (V)',
-                  self.OFFSET: 'Quadrupole offset, pair 1 (AMPR)', self.OFFSET_2: 'Quadrupole offset, pair 2 (AMPR)',
-                  self.OFFSET_FACTOR: 'Offset coefficient (U/V)', self.OFFSET_RESOLUTION: 'Resolution offset δ (V)',
-                  self.OFFSET_MINIMUM: 'Minimum U (V)',
-                  self.OFFSET_FIXED: 'Fixed offset (V)'}
-        for key, label in labels.items():
+        for key, label in self.LABELS.items():
             self.settingsMgr.settings[key].setText(0, label)  # labels, not INI/HDF5 keys
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for spin in self.settingsTree.findChildren(QAbstractSpinBox):
@@ -699,16 +743,34 @@ class MScan(Scan):
             combo.setMaximumWidth(16777215)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
-        for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
-                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK,
-                    self.SUPPLY_READBACK):
+        for key in self.WRAPPED:
             label = self.settingsMgr.settings[key].label
             label.setMaximumHeight(16777215)
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             label.setProperty('mscanWrappedLabel', True)
             label.installEventFilter(self)
+        self._unfold_groups()
         self._layout_readonly_fields()
+
+    def _groups(self):
+        root = self.settingsTree.invisibleRootItem()
+        return [item for item in (root.child(i) for i in range(root.childCount())) if not isinstance(item, Parameter)]
+
+    def _unfold_groups(self):
+        # Settings (re)loads rebuild the tree folded: open every group the operator did not fold.
+        self._arranging = True
+        try:
+            for item in self._groups():
+                item.setExpanded(item.text(0) not in self._collapsed_groups)
+        finally:
+            self._arranging = False
+
+    def _group_folded(self, item, folded):
+        manager = getattr(self, 'settingsMgr', None)
+        if self._arranging or self.loading or manager is None or manager.loading or isinstance(item, Parameter):
+            return
+        (self._collapsed_groups.add if folded else self._collapsed_groups.discard)(item.text(0))
 
     def eventFilter(self, obj, event):
         # Defer height changes until QTreeWidget has finished updating editors.
@@ -729,9 +791,7 @@ class MScan(Scan):
         label.setFixedHeight(max(0, label.heightForWidth(label.width())))
 
     def _layout_readonly_fields(self):
-        for key in (self.SUPPLIES, self.FREQUENCY, self.STATUS, self.CADENCE, self.SAMPLES,
-                    self.SCANTIME, self.AMPLITUDE_LIMITS, self.FINAL_VOLTAGES, self.CURRENT_LIMITS, self.OFFSET_READBACK,
-                    self.SUPPLY_READBACK):
+        for key in self.WRAPPED:
             label = self.settingsMgr.settings[key].label
             self._fit_readonly_label(label)
         self.settingsTree.scheduleDelayedItemsLayout()
@@ -818,12 +878,12 @@ class MScan(Scan):
             matches = [c for c in self.pluginManager.DeviceManager.channels() if self._is_ampr(c)
                        and selection in (self._offset_label(c), c.name)]
             if len(matches) != 1:
-                raise ScanError(f'Quadrupole offset channel {selection} is unavailable or ambiguous. Check the AMPR channels.')
+                raise ScanError(f'Rod pair channel {selection} is unavailable or ambiguous. Check the AMPR channels.')
             sources.append((matches[0], sign))
         if sources and sources[0][1] < 0:
-            raise ScanError('Select the quadrupole offset channel of pair 1; pair 2 alone is not driven.')
+            raise ScanError('Select the AMPR channel of rod pair 1; pair 2 alone is not driven.')
         if len(sources) == 2 and sources[0][0] is sources[1][0]:
-            raise ScanError('Quadrupole offset pairs 1 and 2 must be two different AMPR channels.')
+            raise ScanError('Rod pairs 1 and 2 must be two different AMPR channels.')
         return sources
 
     def _offset_fixed(self):
@@ -832,7 +892,7 @@ class MScan(Scan):
         except (TypeError, ValueError):
             fixed = math.nan
         if not math.isfinite(fixed):
-            raise ScanError('Fixed offset must be finite.')
+            raise ScanError('Axis potential x must be finite.')
         return fixed
 
     def _offset_resolution(self):
@@ -841,7 +901,7 @@ class MScan(Scan):
         except (TypeError, ValueError):
             resolution = math.nan
         if not math.isfinite(resolution) or resolution < 0:
-            raise ScanError('Resolution offset δ must be finite and not negative.')
+            raise ScanError('Resolution δ must be finite and not negative.')
         return resolution
 
     def _offset_minimum(self):
@@ -892,7 +952,7 @@ class MScan(Scan):
         except (AttributeError, TypeError, ValueError):
             factor = math.nan
         if not math.isfinite(factor):
-            raise ScanError('Offset coefficient U/V must be finite.')
+            raise ScanError('U/V ratio k must be finite.')
         fixed, resolution, floor = self._offset_fixed(), self._offset_resolution(), self._offset_minimum()
         return [self._offset_pair_plan(c, sign, factor, fixed, resolution, floor, low, high) for c, sign in sources]
 
@@ -916,7 +976,7 @@ class MScan(Scan):
         # Monotonic in A, so the two ends of the span bound the whole scan.
         first, last = sorted(self._offset_value(fixed, sign, factor, resolution, floor, a) for a in (low, high))
         if first < minimum or last > maximum:
-            raise ScanError(f'{c.name}: offset U = {first:g}–{last:g} V '
+            raise ScanError(f'{c.name}: rod pair potential {first:g}–{last:g} V '
                             f'({self._offset_formula(fixed, sign, factor, resolution, floor)}) exceeds '
                             f'allowed {minimum:g}–{maximum:g} V.')
         initial = self._number(c, 'value', 'offset setpoint', nonnegative=False)
@@ -989,7 +1049,7 @@ class MScan(Scan):
         """Name the offset when it, rather than the PSU, is what is not confirmed."""
         for o in (self._plan or {}).get('offsets') or []:
             if not o['ready']:
-                return ScanError(f'Quadrupole offset {o["name"]}: target {o["expected"]:g} V not confirmed by the AMPR '
+                return ScanError(f'Rod pair {o["pair"]} {o["name"]}: target {o["expected"]:g} V not confirmed by the AMPR '
                                  f'or Monitor {o["observed"]:g} V outside tolerance. {message}')
         return ScanError(message)
 
@@ -1003,17 +1063,56 @@ class MScan(Scan):
         sources = self._offset_sources()
         if not sources:
             return 'Not driven'
-        factor, fixed = float(self.offset_factor), self._offset_fixed()
-        resolution, floor = self._offset_resolution(), self._offset_minimum()
-        lines = []
+        return '\n'.join(f'{c.name} (pair {1 if sign > 0 else 2}): Monitor {float(c.monitor):+.3f} V, '
+                         f'set {float(c.value):+g} V' for c, sign in sources)
+
+    def _filter_preview_text(self):
+        """What the scan will apply to the rod pairs, from the settings alone: no device is read."""
+        sources = self._offset_sources()
+        if not sources:
+            return 'No rod pair selected: only the RF amplitude is swept, no DC follows A.'
+        try:
+            factor = float(self.offset_factor)
+        except (AttributeError, TypeError, ValueError):
+            factor = math.nan
+        if not math.isfinite(factor):
+            raise ScanError('U/V ratio k must be finite.')
+        fixed, resolution, floor = self._offset_fixed(), self._offset_resolution(), self._offset_minimum()
+        low, high = float(self.start), float(self.stop)
+        if not (math.isfinite(low) and math.isfinite(high)):
+            raise ScanError('Amplitude from/to must be finite.')
+        if factor == 0:
+            if len(sources) == 2:
+                return f'RF only (k = 0): both pairs held at x = {fixed:g} V, no DC between the pairs.'
+            return (f'k = 0: pair 1 held at x = {fixed:g} V. Pair 2 not driven: '
+                    'the DC between the pairs depends on its potential.')
+        u = [max(floor, abs(factor) * a - resolution) for a in (low, high)]
+        line = f'{abs(factor):g} × A − {resolution:g}' if resolution else f'{abs(factor):g} × A'
+        lines = [f'U = max({floor:g}, {line}) = {u[0]:g} → {u[1]:g} V for A = {low:g} → {high:g} V']
         for c, sign in sources:
-            lines.append(f'{c.name}: Monitor {float(c.monitor):+.3f} V, set {float(c.value):+g} V')
-            if all(math.isfinite(float(v)) for v in (self.start, self.stop)):
-                first, last = (self._offset_value(fixed, sign, factor, resolution, floor, v)
-                               for v in (self.start, self.stop))
-                lines.append(f'Scan: U = {self._offset_formula(fixed, sign, factor, resolution, floor)} '
-                             f'= {first:+g} … {last:+g} V')
+            first, last = (self._offset_value(fixed, sign, factor, resolution, floor, a) for a in (low, high))
+            lines.append(f'Pair {1 if sign > 0 else 2} = x {"+" if sign * factor > 0 else "−"} U = '
+                         f'{first:+g} → {last:+g} V')
+        if len(sources) == 1:
+            lines.append('Pair 2 not driven: the DC between the pairs also depends on its potential.')
+        if factor < 0:
+            lines.append('k < 0: pairs swapped, pair 1 below x.')
+        if abs(factor) >= self.SQUARE_WAVE_APEX:
+            lines.append(f'|k| ≥ {self.SQUARE_WAVE_APEX:g}: above the apex of an ideal 50 % square wave, '
+                         'no ion is expected through the filter.')
+        elif resolution == 0 and abs(factor) >= .15:
+            lines.append(f'm/Δm ≈ {.157 / (self.SQUARE_WAVE_APEX - abs(factor)):.2g} '
+                         '(ideal square wave, rods at amplitude A)')
         return '\n'.join(lines)
+
+    def _refresh_filter_preview(self):
+        try:
+            text = self._filter_preview_text()
+        except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            text = f'Unavailable: {exc}'
+        setting = self.settingsMgr.settings[self.FILTER_PREVIEW]
+        if setting.value != text:
+            setting.value = text
 
     def estimateScanTime(self):
         if not all(hasattr(self, attr) for attr in ('start', 'stop', 'step', 'settling_s', 'integration_s')):
@@ -1238,10 +1337,9 @@ class MScan(Scan):
                 else:
                     offsets = [(c.name, float(c.value), 1 if sign > 0 else 2) for c, sign in self._offset_sources()]
                 for name, value, pair in offsets:
-                    label = 'quadrupole offset' if len(offsets) == 1 else f'quadrupole offset, pair {pair}'
-                    lines.append(f'{name}: {value:+g} V ({label})')
+                    lines.append(f'{name}: {value:+g} V (rod pair {pair})')
             except ScanError:
-                lines.append('Quadrupole offset: unavailable')
+                lines.append('Rod pairs: unavailable')
         return '\n'.join(lines) or 'Unavailable'
 
     def _refresh_completion(self, rails, *, running=False):
@@ -1420,6 +1518,7 @@ class MScan(Scan):
         self._refresh_completion(rails)
         self._refresh_readback(rails)
         self._refresh_offset_readback()
+        self._refresh_filter_preview()  # Frozen during a scan with the settings it shows.
         # Same preflight as Start, but do not initialize data, bind a plan, log
         # warnings or touch a device. Keep the last outcome (including save errors).
         try:
@@ -1440,7 +1539,11 @@ class MScan(Scan):
         if not self.finished:
             self.print('Cannot load settings while a scan is running or being saved.', flag=PRINT.WARNING)
             return
-        super().loadSettings(file=file, useDefaultFile=useDefaultFile)
+        self._arranging = True  # Scan.loadSettings unfolds every group; keep the operator's choice.
+        try:
+            super().loadSettings(file=file, useDefaultFile=useDefaultFile)
+        finally:
+            self._arranging = False
         self._format_settings()
         self.toggleAdvanced()
         self._refresh_interface()
@@ -1803,8 +1906,8 @@ class MScan(Scan):
                     pairs=[dict(pair=o['pair'], channel=o['name'], ampr=o['device'].name, module=o['key'][0],
                                 ampr_channel=o['key'][1], sign=int(o['sign']), initial_v=o['initial'], final_v=o['initial'])
                            for o in offsets],
-                    definition='Pair 1: U = fixed + max(minimum U, coefficient (U/V) × RF amplitude A − resolution offset); '
-                               'pair 2: U = fixed − the same term. '
+                    definition='U = max(minimum_u_v, coefficient × RF amplitude A − resolution_offset_v); pair 1 = fixed_v + U, '
+                               'pair 2 = fixed_v − U (coefficient = k = U/V; fixed_v = axis potential x). '
                                'Commanded on each AMPR channel at each amplitude (rounded to its display precision); '
                                'verified by its setpoint readback and Monitor. offset_v and offset_target have one '
                                'column per pair.'),
@@ -1871,7 +1974,7 @@ class MScan(Scan):
         # current-limit writes: use the standard Channel.value path only.
         planned, offsets = self._plan.get('offsets') or [], list(offsets or ())
         if len(planned) != len(offsets):
-            raise ScanError('Quadrupole offset targets missing or unexpected; no scan command sent.')
+            raise ScanError('Rod pair targets missing or unexpected; no scan command sent.')
         if 'detector_interval_ms' in self._plan:
             self._check_detectors()
         self._observation()
@@ -2470,7 +2573,7 @@ class MScan(Scan):
             if 'offset_v' in self._validation:
                 for key in ('offset_v', 'offset_target'):
                     group.create_dataset(key, data=self._validation[key])
-                group['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of each quadrupole offset channel, one column per pair)'
+                group['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of each rod pair channel, one column per pair)'
                 group['offset_target'].attrs['Unit'] = ('V (DC offset commanded on each AMPR channel, one column per pair: '
                                                         'pair 1 fixed + max(U_min, U/V × A − δ), pair 2 fixed − the same term)')
             for key in ('window_start', 'window_end'):
@@ -2492,7 +2595,7 @@ class MScan(Scan):
                 raw['psu_i'].attrs['Unit'] = 'A (PSU current, not detector current)'
                 raw['psu_target'].attrs['Unit'] = 'V (requested PSU magnitudes)'
                 if 'offset_v' in raw:
-                    raw['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of each quadrupole offset channel, one column per pair)'
+                    raw['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of each rod pair channel, one column per pair)'
                     raw['offset_target'].attrs['Unit'] = 'V (offset commanded on each AMPR channel, one column per pair)'
                 for key in ('command_start', 'command_end', 'detector_time', 'psu_time'):
                     raw[key].attrs['Unit'] = 's since Unix epoch'

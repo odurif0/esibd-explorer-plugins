@@ -37,15 +37,43 @@ The v0.5 native port has local mock-channel, Wine and Explorer 1.0.2 software
 validation. Real-hardware qualification remains pending; complete it before
 routine experimental use. These checks do not certify physical shutdown.
 
+## Panel
+
+**Status** is the first row, next to **Start scan**: it says **Ready to scan** or why a
+scan cannot start, and a greyed **Start scan** shows the same reason in its tooltip. The
+other rows are in four groups, in the order a scan is prepared:
+
+- **Setup**: AMX, connectors, the PSU they drive, AMX frequency, DMMR module and interval,
+  file name.
+- **Amplitude scan**: allowed range and PSU Ilim, mode, amplitudes, timing, duration.
+- **Mass filter**: the AMPR channels of the two rod pairs, k, δ, Minimum U, axis potential
+  x, and a **Preview** of what the scan will apply.
+- **Live readback**: PSU rails, rod pair channels, values restored after completion, samples
+  at the last point.
+
+A folded group stays folded when settings are reloaded. Groups and displayed names are
+display only: settings files and HDF5 scans keep the earlier keys, so files written before
+and after this layout read the same. The mass filter rows keep these keys:
+
+| Displayed | Key in INI and `MScan/Settings` |
+|---|---|
+| Rod pair 1 (AMPR) | `Quadrupole offset` |
+| Rod pair 2 (AMPR) | `Quadrupole offset pair 2` |
+| U/V ratio k | `Offset coefficient` |
+| Resolution δ (V) | `Resolution offset` |
+| Minimum U (V) | `Minimum U` |
+| Axis potential x (V) | `Fixed offset` |
+| Live readback → Rod pairs (AMPR) | `Offset readback` |
+
 ## Use
 
 1. Configure the PSU associations in AMX Settings and establish the waveform.
    Turn ON the required PSU rails and AMX. Start DMMR acquisition and recording.
-2. Choose **AMX** (`AMX_A`, `AMX_B` or `AMX_HD`) and one pair of **AMX connectors**:
-   **CH0-CH1** or **CH2-CH3**.
+2. In **Setup**, choose **AMX** (`AMX_A`, `AMX_B` or `AMX_HD`) and one pair of **AMX
+   connectors**: **CH0-CH1** or **CH2-CH3**.
    **Driven PSU** lists the supply channels swept together; shared outputs are
-   identified too. **Fixed frequency** comes from the AMX output readback, not
-   an assumed oscillator frequency. Per-edge compensation delays are allowed
+   identified too. **AMX frequency** comes from the AMX output readback, not
+   an assumed oscillator frequency; MScan never changes it. Per-edge compensation delays are allowed
    and retained in the scan metadata; their exact phase is not inferred.
    Changing them during a scan aborts it. Update AMX and MScan together.
 3. Select **DMMR module**, shown as its physical number and channel name.
@@ -57,59 +85,67 @@ routine experimental use. These checks do not certify physical shutdown.
    No placeholder `Detector` is used.
    **DMMR interval (ms)** edits the live DMMR acquisition/recording setting,
    shared by **all** its modules. It does not change the ADC configuration.
-4. Set **Amplitude from / to (V)** within **Allowed amplitude (V)**.
-   The voltage range and **PSU Ilim** are grouped together above the scan settings.
-   **After completion** shows each channel's return voltage and live measured
+4. In **Amplitude scan**, set **Amplitude from / to (V)** within **Allowed amplitude (V)**.
+   The voltage range and **PSU Ilim** are the first two rows of the group.
+   **After completion** (Live readback) shows each channel's return voltage and live measured
    current, e.g. `PSU_D_CH0: +4 V, Iget 32 mA`.
-5. Optional: **Quadrupole offset, pair 1 (AMPR)** and **pair 2 (AMPR)** select the
-   AMPR channels (module and channel) of the two rod pairs; **None** (default)
-   leaves them alone. During the scan, at every amplitude and together with the PSU
-   rails, the pairs are set to **Fixed offset (V)** ± max(**Minimum U (V)**, **Offset
-   coefficient (U/V)** × A − **Resolution offset δ (V)**), + for pair 1 and − for pair 2.
-   U/V defaults to 0.2 (negative swaps the pairs, 0 is RF-only), the two offsets to 0 V and
-   Minimum U to 0.5 V. Pair 2 alone is refused; pair 1 alone works as before. **Offset
-   readback** shows each channel's AMPR Monitor and setpoint; during a scan, its
-   target and whether the AMPR confirmed it. See *Quadrupole offset* below.
-6. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
+5. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
    or **Continuous**, with **Sweep rate (V/s)** and **Time step (s)**.
    Set the timing fields shown for that mode, described below.
+6. Optional, in **Mass filter**: **Rod pair 1 (AMPR)** and **Rod pair 2 (AMPR)** select the
+   AMPR channels (module and channel) of the two rod pairs; **None** (default)
+   leaves them alone, and only the RF amplitude is swept. During the scan, at every amplitude
+   and together with the PSU rails, pair 1 is set to x + U and pair 2 to x − U, with
+   U = max(**Minimum U**, **k** × A − **δ**) and x the **Axis potential**.
+   k defaults to 0.2 (negative swaps the pairs, 0 is RF only), δ and x to 0 V and
+   Minimum U to 0.5 V. Pair 2 alone is refused; pair 1 alone works as before.
+   **Preview** shows, before Start, U and both pair potentials at Amplitude from and to,
+   says when the filter is RF only or when one pair is not driven, warns when k is above the
+   apex of an ideal square wave, and estimates m/Δm when k is near it and δ is 0.
+   **Rod pairs (AMPR)** in Live readback shows each channel's AMPR Monitor and setpoint;
+   during a scan, its target and whether the AMPR confirmed it. See *Mass filter* below.
 7. When **Status** shows **Ready to scan**, click **Start scan** in this panel.
    It becomes **Stop scan**. Explorer's general acquisition button starts device
    recording, not the amplitude scan.
 
-## Quadrupole offset
+## Mass filter
 
-Each offset channel is an ordinary AMPR channel: switch it ON, in manual (not
+Each rod pair channel is an ordinary AMPR channel: switch it ON, in manual (not
 equation) control, with its AMPR ON. Start is refused if its target over the requested
 amplitude span leaves that channel's Min/Max or the AMPR module rating,
 if its initial value could not be restored there, or if its current setpoint is
 not confirmed by the AMPR. At each amplitude, the rails are commanded first, then
-the offset (rounded to the AMPR channel's display precision). No point is
+the rod pairs (rounded to the AMPR channel's display precision). No point is
 acquired (and, in continuous mode, no next command is sent) until the AMPR has
 confirmed **that** target by its hardware setpoint readback and its Monitor is
-within **Voltage tolerance**; a small offset step is not "confirmed" by tolerance
-alone. An offset edited or failing outside the scan, an AMPR OFF or a switch to
+within **Voltage tolerance**; a small step is not "confirmed" by tolerance
+alone. A rod pair edited or failing outside the scan, an AMPR OFF or a switch to
 equation control aborts the scan; a settling timeout names the channel not ready, with
-its Monitor and target. Normal completion restores each initial offset with the PSU
-setpoints; Stop/error holds the last values. The HDF5 file keeps the coefficient, both
-offsets and each pair's channel, sign and initial value in the setup, and per point
-the commanded offsets (`offset_target`) and their Monitors (`offset_v`), one column per
+its Monitor and target. Normal completion restores each initial value with the PSU
+setpoints; Stop/error holds the last values. The HDF5 file keeps k (`coefficient`), x
+(`fixed_v`), δ, Minimum U and each pair's channel, sign and initial value in the setup, and per
+point the commanded potentials (`offset_target`) and their Monitors (`offset_v`), one column per
 pair; continuous scans also keep them in the raw observations.
 
-Only the part of opposite sign filters masses. **Fixed offset** is the potential of the
-axis, so it sets the ion energy: keep it at the value the rods hold outside a scan. U/V
+Only U, of opposite sign on the two pairs, filters masses. The **axis potential x** is the
+potential of the quadrupole axis, so it sets the ion energy: keep it at the value the rods hold
+outside a scan. k = U/V
 sets the line in the stability diagram: for an ideal 50 % square wave nothing passes above
-about 0.215, and the resolution m/Δm is about 0.157 / (0.2153 − U/V), so about 10 at 0.20
-and 30 at 0.21. These values assume that the amplitude on the rods equals A: raise U/V until
-the signal disappears at U/V = c to measure the ratio, c / 0.2153. With δ = 0, peaks widen
-in proportion to A; with U/V at that limit, they keep about the same width, about 6.4 × δ in
-A. δ must stay small: it is not the fixed offset, and adding it with the wrong sign closes the
-filter. As on commercial instruments, set U/V and δ on a light and a heavy known ion: the straight
+about 0.215, and the resolution m/Δm is about 0.157 / (0.2153 − k), so about 10 at 0.20
+and 30 at 0.21. These values assume that the amplitude on the rods equals A: raise k until
+the signal disappears at k = c to measure the ratio, c / 0.2153. With δ = 0, peaks widen
+in proportion to A; with k at that limit, they keep about the same width, about 6.4 × δ in
+A. δ must stay small: it is not the axis potential, and adding it with the wrong sign closes the
+filter. As on commercial instruments, set k and δ on a light and a heavy known ion: the straight
 line only approaches the ideal curve between them.
+
+Rod potentials, scan law, parameters and their physical effect are described in
+[docs/mscan_quadrupole.pdf](../docs/mscan_quadrupole.pdf). k = U/V is not the α of textbook
+quadrupole papers, where α is the Mathieu parameter a and U/V = α/(2q).
 
 **Minimum U** keeps the DC from reaching zero: at zero DC every heavy ion would pass, so a spectrum
 would start with a wide plateau. Commercial instruments do the same ("Zero Blast Suppression" in
-the SRS RGA manual). Peaks whose tip lies below (Minimum U + δ) / (U/V) are not filtered reliably,
+the SRS RGA manual). Peaks whose tip lies below (Minimum U + δ) / k are not filtered reliably,
 and a small signal can remain at the start of a scan, where ions are not filtered as in theory.
 
 Explorer's own msScan has no such formula: it sweeps one channel, and any DC follows
@@ -250,7 +286,7 @@ Controls are locked until acquisition and saving finish.
 - **Autoscale** (title bar of the plot): the view follows the data, also during a
   scan. Zooming or panning switches to manual scale; a click follows the data again.
   **Data to Clipboard** copies the amplitude and each current in pA.
-- **PSU readback** shows each driven rail live: measured voltage (Monitor) and the
+- **PSU rails** (Live readback) shows each driven rail live: measured voltage (Monitor) and the
   setpoint confirmed by the PSU.
 - Each scan is saved to `<Data path>/MScan/<YYYY-MM-DD>/` as
   `<date>_<time>[_<File name>]_PSU-<X>_<from>-<to>V.h5`, for example
