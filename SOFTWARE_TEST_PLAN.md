@@ -345,7 +345,13 @@ and one ending a few volts below the reachable value starts with a warning. In F
 output + dropout in PSU_A (the internal supply) and the `max` of `PSU Ilim` (about 500 mA?), then scan
 50–300 V: no stop, and `low_headroom` stays false. Set `Plot axis` to m/z: the axis reads `m/z (Th)`
 with both rod pairs, `Low-mass cut-off` without; adjust r0 on a known ion. If `DMMR data interval`
-reports skipped records, note the time: MScan must keep scanning, and the next scan must start. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
+reports skipped records, note the time: MScan must keep scanning, and the next scan must start.
+During a long scan with a DMMR history of several hours, `Samples at last point` must stay close to
+the number of DMMR ticks per window (2026-11-03: about half of them were empty). ESI: a lost reply
+in a poll must log `ESI reply lost, port resynchronized and read again` as a warning, without
+`Communication lost`; ramp HV1 to 900 V and back once to check that outputs, readbacks and the OFF
+discharge check behave as with v0.5.8. AMX HD: `AMX reply lost` warnings must become rare; after a
+config load or a timing edit, the CH0–CH3 table must show the new timing at the next housekeeping. After an interrupted scan, only one point reads `error`. Keep Explorer busy for a few seconds
 (copy a plot, open a large file) while the AMX polls: no AMX worker stops with `exit=75`.
 In MScan, select the AMX HD while it holds its standby config: the message names `CH0: Not enabled`
 and the state, not `AMX waveform readback is unavailable`. On the AMX HD, `Reading the AMX HD config names` appears at connection and timing is enabled about

@@ -168,3 +168,18 @@ def test_shutdown_clears_current_measurements():
     controller.updateValues()
     assert all(np.isnan(ch.monitor) for ch in channels)
     assert all(np.isnan(ch.value) for ch in channels[3:])
+
+
+def test_a_reply_read_again_by_the_worker_is_a_warning_not_a_lost_communication():
+    # 2026-11-03: seven lost replies on GetHeatCtrl*Limit, each logged as an error with HV possibly energized.
+    module, channels, controller = rig()
+    printed = []
+    controller.print = lambda message, flag=None: printed.append((message, flag))
+    recovered = dict(snapshot(), read_recovery="ESI COM_ESI_CTRL_GetHeatCtrlPowerLimit failed: -10 (Error receiving command)")
+    controller.device = SimpleNamespace(collect_diagnostics=lambda **kw: recovered)
+    controller.readNumbers()
+    controller.updateValues()
+    assert channels[3].monitor == 2.5e-9
+    assert printed == [("ESI reply lost, port resynchronized and read again: "
+                        "ESI COM_ESI_CTRL_GetHeatCtrlPowerLimit failed: -10 (Error receiving command)", module.PRINT.WARNING)]
+    assert controller.main_state != "Communication lost" and not controller._output_cancel.is_set()

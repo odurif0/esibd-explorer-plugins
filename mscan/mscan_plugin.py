@@ -1001,7 +1001,9 @@ class MScan(Scan):
                 times, values = times[first:n], values[first:n]
                 keep = self._increasing(times)
                 times, values = times[keep], values[keep]
-                lo, hi = np.searchsorted(times, (start, end), side='right')
+                # (start, end], like the engine. Its bounds come back through JSON, which may move them by
+                # one float step: a record within 1 µs of a bound is on the engine's side of it.
+                lo, hi = np.searchsorted(times, (start + 1e-6, end + 1e-6), side='right')
                 results.append(self._average_samples(values[lo:hi]))
             except (AttributeError, TypeError, ValueError):
                 results.append((np.nan, 0, 0))

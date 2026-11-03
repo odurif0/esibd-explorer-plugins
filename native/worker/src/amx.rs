@@ -116,7 +116,15 @@ pub struct Controller {
     burst_timers: Option<u32>,
     receive_fault: Option<String>,
     pending_recovery: Option<String>,
+    /// HD timer registers of the last housekeeping, see `HD_TIMER_REFRESH`.
+    hd_timers: Option<(std::time::Instant, Value)>,
 }
+
+/// The HD timers (delay, width, burst) were read at every housekeeping: about 3 reads per timer, most of
+/// the HD traffic, and 60 of its 66 lost replies on 2026-11-03 (each costing a 1.5 s DLL wait). They only
+/// change through this worker (the port is exclusive), so any write empties the cache and they are read
+/// again at least this often.
+const HD_TIMER_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Controller {
     pub fn new(config: &Value, dll: Box<dyn Dll>) -> Result<Self> {
@@ -177,6 +185,7 @@ impl Controller {
             recording: false,
             errors,
             burst_timers: None,
+            hd_timers: None,
             receive_fault: None,
             pending_recovery: None,
         })
@@ -268,6 +277,7 @@ impl Controller {
     }
 
     pub(crate) fn write(&mut self, suffix: &str, tail: &[Value], ctx: &Context) -> Result<()> {
+        self.hd_timers = None; // Any write may change a timer: read them again.
         let reply = self.raw(suffix, tail, ctx)?;
         check_status(reply.status, suffix)?;
         outputs(reply, 0)?;
@@ -328,6 +338,7 @@ impl Controller {
             self.read("SetBaudRate", &[json!(self.baudrate)], 1, ctx)?;
             self.connected = true;
             self.burst_timers = None;
+            self.hd_timers = None;
             self.pending_recovery = None;
             // A vendor failure is fatal. The reference tolerates probe
             // exceptions on a usable transport and warns about an alien ID.
@@ -1127,6 +1138,13 @@ impl Controller {
         let period = self.oscillator_period(ctx)?;
         snapshot["oscillator"] =
             json!({"period": period, "frequency_hz": float(CLOCK / (period as f64 + 2.0))});
+        if self.hd
+            && let Some((read_at, pulsers)) = &self.hd_timers
+            && read_at.elapsed() < HD_TIMER_REFRESH
+        {
+            snapshot["pulsers"] = pulsers.clone();
+            return Ok(snapshot);
+        }
         let count = if self.hd {
             let count = self.read("GetTimerCount", &[json!(0)], 1, ctx)?;
             uint(&count[0], "timer count", 65535)?
@@ -1187,6 +1205,9 @@ impl Controller {
             pulsers.push(row);
         }
         snapshot["pulsers"] = json!(pulsers);
+        if self.hd {
+            self.hd_timers = Some((std::time::Instant::now(), snapshot["pulsers"].clone()));
+        }
         if !self.hd {
             let mut switches = Vec::new();
             for number in 0..4 {

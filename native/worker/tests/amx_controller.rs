@@ -532,6 +532,14 @@ fn batch_call_counts_define_outer_deadlines_independently_of_per_dll_watchdogs()
         rpc(device.as_mut(), "get_product_info", &[], json!({})).unwrap();
         assert_eq!(state.lock().unwrap().calls.len(), 6);
         for timers in [2, 4] {
+            // A write empties the HD timer cache: this housekeeping reads every timer again.
+            rpc(
+                device.as_mut(),
+                "set_device_enabled",
+                &[json!(false)],
+                json!({}),
+            )
+            .unwrap();
             {
                 let mut state = state.lock().unwrap();
                 state.calls.clear();
@@ -1935,6 +1943,14 @@ fn hd_reads_the_burst_register_only_on_timers_that_have_one() {
     state.lock().unwrap().timer_count = 4;
     let calls = state.lock().unwrap().calls.len();
     for _ in 0..2 {
+        // A write empties the HD timer cache: each housekeeping reads the timers again.
+        rpc(
+            device.as_mut(),
+            "set_device_enabled",
+            &[json!(false)],
+            json!({}),
+        )
+        .unwrap();
         let snapshot = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
         let bursts: Vec<_> = snapshot["pulsers"]
             .as_array()
@@ -2288,4 +2304,35 @@ fn unexpected_identity_is_logged_as_warning_and_state_maps_keep_integer_keys() {
             );
         }
     }
+}
+
+#[test]
+fn hd_timers_are_read_again_after_a_write_not_at_every_housekeeping() {
+    // 2026-11-03 lab: 60 of the 66 lost HD replies were timer reads made at every housekeeping.
+    let (mut device, state) = case(true);
+    connect(device.as_mut());
+    let delays = |state: &Arc<Mutex<Instrument>>| -> usize {
+        let state = state.lock().unwrap();
+        state
+            .calls
+            .iter()
+            .filter(|(symbol, _)| symbol.ends_with("GetTimerDelay"))
+            .count()
+    };
+    let first = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+    let read = delays(&state);
+    assert!(read > 0);
+    let second = rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+    assert_eq!(
+        delays(&state),
+        read,
+        "the second housekeeping reuses the timers"
+    );
+    assert_eq!(first["pulsers"], second["pulsers"]);
+    rpc(device.as_mut(), "load_config", &[json!(3)], json!({})).ok();
+    rpc(device.as_mut(), "collect_housekeeping", &[], json!({})).unwrap();
+    assert!(
+        delays(&state) > read,
+        "a write or config load reads them again"
+    );
 }

@@ -1204,6 +1204,29 @@ impl Controller {
         Ok(json!({"controller": controller, "modules": integer_map(&modules)}))
     }
 
+    /// The poll only reads. A lost reply (2026-11-03 lab: `GetHeatCtrl*Limit` -10 seven times, each
+    /// reported as an error with HV possibly energized, and recovered at the next poll) now purges the
+    /// port and reads the diagnostics once more; the snapshot reports the lost reply. A second failure,
+    /// a poisoned transport or a cancellation fails as before. Output commands are never repeated.
+    fn diagnostics_with_recovery(&mut self, ctx: &Context) -> Result<Value> {
+        match self.diagnostics(ctx) {
+            Err(error)
+                if [-10, -11, -12].contains(&self.last_status)
+                    && !self.transport_poisoned
+                    && !ctx.is_cancelled() =>
+            {
+                self.recover(ctx, true)?;
+                self.last_status = 0;
+                let mut snapshot = self.diagnostics(ctx)?;
+                if let Some(map) = snapshot.as_object_mut() {
+                    map.insert("read_recovery".to_owned(), json!(error.message));
+                }
+                Ok(snapshot)
+            }
+            other => other,
+        }
+    }
+
     fn diagnostics(&mut self, ctx: &Context) -> Result<Value> {
         let state = self.complete_state(ctx, true)?;
         let enabled = boolean(&self.scalar("COM_ESI_CTRL_GetEnable", json!(false), ctx, true)?)?;
@@ -1650,7 +1673,7 @@ impl Backend for Controller {
             }
             "discover_modules" => self.discover(ctx),
             "collect_identity" => self.identity(ctx),
-            "collect_diagnostics" => self.diagnostics(ctx),
+            "collect_diagnostics" => self.diagnostics_with_recovery(ctx),
             "configure_hv_max_voltage_steps" => {
                 let step = arguments
                     .optional("max_step_v")
