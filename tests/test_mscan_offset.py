@@ -4,6 +4,8 @@ User request (2026-10-08): select the AMPR module/channel of the quadrupole offs
 proportionality coefficient (default 0.2), and make sure the applied offset equals A × coefficient.
 User request (2026-11-02): the two rod pairs each have their DC channel; a fixed offset common to
 both, and the variable part of opposite sign: pair 1 = fixed + U/V × A, pair 2 = fixed − U/V × A.
+User request (2026-11-03): the panel names them after the physics (rod pairs, U, k, δ, axis potential x)
+and previews what a scan will apply; the setting keys and file fields keep their old names.
 """
 import json
 from types import SimpleNamespace as NS
@@ -79,7 +81,7 @@ def test_no_point_is_acquired_until_the_ampr_confirms_the_offset(mscan_rig, prob
     prepare(mscan_rig)
     mscan_rig.scan.runScan(lambda: True)
     v = mscan_rig.scan._validation
-    assert v['status'] == 'error' and 'Quadrupole offset Q_offset' in v['error'], v
+    assert v['status'] == 'error' and 'Rod pair 1 Q_offset' in v['error'], v
     assert np.isnan(mscan_rig.scan.outputChannels[0].recordingData).all()
     assert channel.writes == [2.]  # No restoration after an error; the offset is held.
 
@@ -174,7 +176,7 @@ def test_continuous_mode_aborts_when_the_offset_lags(mscan_continuous):
     r.scan._plan = r.scan._preflight()
     r.scan._validation.update(offset_v=np.full((3, 1), np.nan), offset_target=np.full((3, 1), np.nan))
     v = run(r)
-    assert v['status'] == 'error' and 'Quadrupole offset' in v['error'], v
+    assert v['status'] == 'error' and 'Rod pair 1 Q_offset' in v['error'], v
     assert channel.writes == [2.]
 
 
@@ -199,12 +201,17 @@ def test_hdf5_keeps_offset_readback_target_and_metadata(mscan_rig, tmp_path):
 def test_readback_and_completion_texts(mscan_rig):
     add_offset(mscan_rig)
     s = mscan_rig.scan
-    assert s._offset_readback_text() == 'Q_offset: Monitor +5.000 V, set +5 V\nScan: U = max(0.5, 0.2 × A) = +2 … +6 V'
+    assert s._offset_readback_text() == 'Q_offset (pair 1): Monitor +5.000 V, set +5 V'
+    assert s._filter_preview_text().splitlines() == [
+        'U = max(0.5, 0.2 × A) = 2 → 6 V for A = 10 → 30 V', 'Pair 1 = x + U = +2 → +6 V',
+        'Pair 2 not driven: the DC between the pairs also depends on its potential.',
+        'm/Δm ≈ 10 (ideal square wave, rods at amplitude A)']
     prepare(mscan_rig)
     assert s._offset_readback_text(running=True).startswith('Q_offset: target +5 V')
-    assert s._completion_text(s._plan['rails'], running=True).splitlines()[-1] == 'Q_offset: +5 V (quadrupole offset)'
+    assert s._completion_text(s._plan['rails'], running=True).splitlines()[-1] == 'Q_offset: +5 V (rod pair 1)'
     s.offset_channel = s.NO_OFFSET
     assert s._offset_readback_text() == 'Not driven'
+    assert s._filter_preview_text() == 'No rod pair selected: only the RF amplitude is swept, no DC follows A.'
 
 
 def two_pairs(r, factor=.2, fixed=10.):
@@ -249,8 +256,8 @@ def test_two_pairs_in_continuous_mode(mscan_continuous):
 
 @pytest.mark.parametrize(('change', 'message'), [
     ('pair-2-alone', 'pair 1'), ('same-channel', 'two different'), ('pair-2-range', 'exceeds allowed'),
-    ('fixed', 'Fixed offset must be finite'), ('resolution-sign', 'Resolution offset'),
-    ('resolution-nan', 'Resolution offset'), ('resolution-range', 'exceeds allowed'),
+    ('fixed', 'Axis potential x must be finite'), ('resolution-sign', 'Resolution δ'),
+    ('resolution-nan', 'Resolution δ'), ('resolution-range', 'exceeds allowed'),
     ('minimum-zero', 'Minimum U'), ('minimum-nan', 'Minimum U'),
 ])
 def test_two_pair_preflight_blocks_before_any_command(mscan_rig, change, message):
@@ -298,11 +305,14 @@ def test_two_pair_readback_and_completion_texts(mscan_rig):
     two_pairs(mscan_rig)
     s = mscan_rig.scan
     assert s._offset_readback_text().splitlines() == [
-        'Q_offset: Monitor +5.000 V, set +5 V', 'Scan: U = 10 + max(0.5, 0.2 × A) = +12 … +16 V',
-        'Q_offset_2: Monitor -4.000 V, set -4 V', 'Scan: U = 10 − max(0.5, 0.2 × A) = +8 … +4 V']
+        'Q_offset (pair 1): Monitor +5.000 V, set +5 V', 'Q_offset_2 (pair 2): Monitor -4.000 V, set -4 V']
+    assert s._filter_preview_text().splitlines() == [
+        'U = max(0.5, 0.2 × A) = 2 → 6 V for A = 10 → 30 V',
+        'Pair 1 = x + U = +12 → +16 V', 'Pair 2 = x − U = +8 → +4 V',
+        'm/Δm ≈ 10 (ideal square wave, rods at amplitude A)']
     prepare(mscan_rig)
     assert s._completion_text(s._plan['rails'], running=True).splitlines()[-2:] == [
-        'Q_offset: +5 V (quadrupole offset, pair 1)', 'Q_offset_2: -4 V (quadrupole offset, pair 2)']
+        'Q_offset: +5 V (rod pair 1)', 'Q_offset_2: -4 V (rod pair 2)']
 
 
 def test_the_resolution_offset_acts_with_opposite_signs_and_stops_at_the_minimum_u(mscan_rig):
@@ -311,8 +321,10 @@ def test_the_resolution_offset_acts_with_opposite_signs_and_stops_at_the_minimum
     first, second = two_pairs(mscan_rig)
     s = mscan_rig.scan
     s.offset_resolution = 3.
-    assert s._offset_readback_text().splitlines()[1::2] == [
-        'Scan: U = 10 + max(0.5, 0.2 × A − 3) = +10.5 … +13 V', 'Scan: U = 10 − max(0.5, 0.2 × A − 3) = +9.5 … +7 V']
+    # No resolution estimate: with δ the width in A stays about constant, m/Δm changes along the scan.
+    assert s._filter_preview_text().splitlines() == [
+        'U = max(0.5, 0.2 × A − 3) = 0.5 → 3 V for A = 10 → 30 V',
+        'Pair 1 = x + U = +10.5 → +13 V', 'Pair 2 = x − U = +9.5 → +7 V']
     mscan_rig.on_pause = mscan_rig.offset.settle
     prepare(mscan_rig)
     s.runScan(lambda: True)
@@ -326,7 +338,11 @@ def test_the_resolution_offset_acts_with_opposite_signs_and_stops_at_the_minimum
 def test_a_zero_coefficient_is_rf_only(mscan_rig):
     first, second = two_pairs(mscan_rig, factor=0., fixed=15.)
     s = mscan_rig.scan
-    assert 'Scan: U = 15 = +15 … +15 V' in s._offset_readback_text()
+    assert s._filter_preview_text() == 'RF only (k = 0): both pairs held at x = 15 V, no DC between the pairs.'
+    s.offset_channel_2 = s.NO_OFFSET  # With one pair, pair 2 keeps its own value: not RF only.
+    assert s._filter_preview_text() == ('k = 0: pair 1 held at x = 15 V. Pair 2 not driven: '
+                                        'the DC between the pairs depends on its potential.')
+    s.offset_channel_2 = s._offset_label(second)
     mscan_rig.on_pause = mscan_rig.offset.settle
     prepare(mscan_rig)
     s.runScan(lambda: True)
@@ -340,3 +356,29 @@ def test_a_negative_coefficient_keeps_swapping_the_pairs_with_a_resolution_offse
     prepare(mscan_rig)
     mscan_rig.scan.runScan(lambda: True)
     assert channel.writes == [-4., -9., -14., 5.]
+
+
+@pytest.mark.parametrize(('factor', 'expected'), [
+    (-.2, ['U = max(0.5, 0.2 × A) = 2 → 6 V for A = 10 → 30 V', 'Pair 1 = x − U = +8 → +4 V',
+           'Pair 2 = x + U = +12 → +16 V', 'k < 0: pairs swapped, pair 1 below x.',
+           'm/Δm ≈ 10 (ideal square wave, rods at amplitude A)']),
+    (.22, ['U = max(0.5, 0.22 × A) = 2.2 → 6.6 V for A = 10 → 30 V', 'Pair 1 = x + U = +12.2 → +16.6 V',
+           'Pair 2 = x − U = +7.8 → +3.4 V',
+           '|k| ≥ 0.2153: above the apex of an ideal 50 % square wave, no ion is expected through the filter.']),
+    (.1, ['U = max(0.5, 0.1 × A) = 1 → 3 V for A = 10 → 30 V', 'Pair 1 = x + U = +11 → +13 V',
+          'Pair 2 = x − U = +9 → +7 V']),  # Far from the apex the estimate is too rough to show.
+])
+def test_the_preview_names_swapped_pairs_closed_filter_and_resolution(mscan_rig, factor, expected):
+    two_pairs(mscan_rig, factor=factor)
+    assert mscan_rig.scan._filter_preview_text().splitlines() == expected
+
+
+def test_the_preview_reports_invalid_settings_instead_of_values(mscan_rig):
+    two_pairs(mscan_rig)
+    s = mscan_rig.scan
+    s.offset_fixed = float('nan')
+    with pytest.raises(mscan_rig.module.ScanError, match='Axis potential x must be finite'):
+        s._filter_preview_text()
+    s.offset_fixed, s.offset_factor = 10., float('nan')
+    with pytest.raises(mscan_rig.module.ScanError, match='U/V ratio k must be finite'):
+        s._filter_preview_text()

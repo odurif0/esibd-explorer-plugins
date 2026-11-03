@@ -975,6 +975,17 @@ def run(scenario, target, app_holder=None):
     assert measured.text(0) == 'DMMR module'
     assert measured.fixedItems
     assert measured.value == scan.NO_SIGNAL
+    # Panel layout (user request 2026-11-03): Status first, next to Start, then four open groups.
+    tree, named = scan.settingsTree, scan.settingsMgr.settings
+    assert tree.indexOfTopLevelItem(named[scan.STATUS]) == 0
+    groups = [tree.topLevelItem(i) for i in range(1, tree.topLevelItemCount())]
+    assert [g.text(0) for g in groups] == ['Setup', 'Amplitude scan', 'Mass filter', 'Live readback']
+    assert all(g.isExpanded() and g.isFirstColumnSpanned() and g.font(0).bold() for g in groups)
+    assert named[scan.OFFSET_FIXED].parent() is groups[2] and named[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
+    assert named[scan.OFFSET_FACTOR].text(0) == 'U/V ratio k'
+    assert named[scan.FILTER_PREVIEW].value.startswith('No rod pair selected')
+    if not start_button.isEnabled():  # A greyed Start says why, without scrolling to Status.
+        assert scan.scan_status in start_button.toolTip(), (scan.scan_status, start_button.toolTip())
     assert 'Module 3 — DMMR_M03' in measured.items
     assert not any('PSU' in item for item in measured.items)
     assert 'Detector' not in measured.items
@@ -1557,8 +1568,10 @@ def run(scenario, target, app_holder=None):
             assert 'Iget' in label.toolTip() and 'measured now' in label.toolTip() and 'not a prediction' in label.toolTip()
             assert '64 mA (max 1000 mA)' in limits.value
             def grouped_limits():
-                index = scan.settingsTree.indexOfTopLevelItem
-                assert index(limits) == index(scan.settingsMgr.settings[scan.AMPLITUDE_LIMITS]) + 1
+                allowed = scan.settingsMgr.settings[scan.AMPLITUDE_LIMITS]
+                group = allowed.parent()
+                assert group is not None and group.text(0) == 'Amplitude scan' and limits.parent() is group
+                assert group.indexOfChild(limits) == group.indexOfChild(allowed) + 1
             grouped_limits()
             assert scan.scan_status == 'Ready to scan', scan.scan_status
             calls = list(hw.calls)
@@ -2157,10 +2170,22 @@ def run(scenario, target, app_holder=None):
         amx.psu_ch23 = 'None'
         scan.amx_outputs = 'CH0-CH1'
         # Labels remain human-readable after another real settings reconstruction.
+        readback_group = scan.settingsMgr.settings[scan.SAMPLES].parent()
+        scan.settingsTree.collapseItem(readback_group)  # the operator folds one group
         scan.saveSettings(file=target / 'roundtrip.ini')
         scan.loadSettings(file=target / 'roundtrip.ini')
         assert scan.displayDefault == 'DMMR_M03'
         assert scan.settingsMgr.settings[scan.DETECTOR].text(0) == 'DMMR module'
+        # Groups are display only: the file keeps flat keys, and a reload keeps the folded group.
+        sections = configparser.ConfigParser(interpolation=None)
+        sections.read(target / 'roundtrip.ini', encoding='utf-8')
+        assert {scan.OFFSET_FIXED, scan.START, scan.STATUS} <= set(sections.sections())
+        assert not any('/' in section for section in sections.sections())
+        folded = {g.text(0): g.isExpanded() for g in (scan.settingsTree.topLevelItem(i)
+                  for i in range(1, scan.settingsTree.topLevelItemCount()))}
+        assert folded == {'Setup': True, 'Amplitude scan': True, 'Mass filter': True, 'Live readback': False}, folded
+        assert scan.settingsMgr.settings[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
+        scan.settingsTree.expandItem(scan.settingsMgr.settings[scan.SAMPLES].parent())
         assert scan.channelTree is None
         # Select another physical module through the actual combo, then run a
         # second scan: module 5 must supply its own (doubled) current, not M03's.
