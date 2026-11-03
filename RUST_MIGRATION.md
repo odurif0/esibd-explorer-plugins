@@ -74,11 +74,14 @@ The 2026-11-03 scans, on v0.5.8, led to these changes. None is validated on hard
   later scan was refused, even after restarting the DMMR plugin: MScan sent the whole history to the
   worker, which rejects a history that does not increase. Such a record is now skipped with its values
   wherever MScan reads the history; `DMMR data interval` gives their number.
-- **m/z:** an `m/z` group gives the field radius r0 (Q2: 5 mm, provisional), the m/z range of the
-  scan, and a plot axis in A or m/z: m/z = 4 e A / (q r0² (2π f)²) for an ideal square wave, with q
-  the centre of the stable band at U/A for each point, or the low-mass cut-off when RF only. The
-  file keeps A and adds `Validation/mz` with the formula and values used. Theory until r0 is
-  calibrated on a known ion.
+- **m/z:** an `m/z` group gives the field radius r0, the RF attenuation factor (rod amplitude / A),
+  the m/z range of the scan, and a plot axis in A or m/z: m/z = 4 e V / (q r0² (2π f)²) for an ideal
+  square wave, with V the attenuated amplitude and q the centre of the stable band at U/V for each
+  point, or the low-mass cut-off when RF only. The file keeps A and adds `Validation/mz` with the
+  formula and values used. Defaults calibrated on 2026-11-03 with the Agilent G2421A tuning mix,
+  whose ions 622, 922, 1522 and 2122 are the M03 peaks at 400, 450 and 500 kHz: RF attenuation
+  factor 0.978 and r0 2.625 mm (effective; the 5 mm given for Q2 disagrees by a factor 3.5). The
+  filter closes at k = 0.2153 × 0.978 = 0.2105; the preview and Start warn above it.
 - **Panel:** `Status` first, next to Start (a greyed Start says why); settings in foldable groups
   Setup, Amplitude scan, Mass filter, m/z, Live readback; the mass filter named after its physics
   (rod pairs, U/V ratio k, resolution δ, minimum U, axis potential x) with a `Preview` of U and both

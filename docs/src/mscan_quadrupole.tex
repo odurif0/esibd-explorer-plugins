@@ -163,9 +163,11 @@ $R\approx0.157/(0.2153-k)$. $R$ is $m/\Delta m$ of the band at fixed $A$.}
   \left(\frac{4\,\mathrm{mm}}{r_0}\right)^{\!2}\left(\frac{500\,\mathrm{kHz}}{f}\right)^{\!2},
 \end{equation}
 about $4.56\,A$ at $k=0.2$ for $r_0=4$\,mm and 500\,kHz. MScan computes it at every point, with
-$\bar q$ from $U/A$ there, the AMX frequency and the \setting{r0} setting (5\,mm for Q2, provisional), shows
-it as \setting{m/z range} and on the plot (\setting{Plot axis}), and saves it as \texttt{Validation/mz}.
-Calibrating $r_0$ on one known ion also absorbs the unverified ratio $V_0/A$. In RF-only mode ($k=0$) ions with
+$\bar q$ from $U/V_0$ there, the AMX frequency, \setting{r0} and the \setting{RF attenuation factor}
+$c=V_0/A$, shows it as \setting{m/z range} and on the plot (\setting{Plot axis}), and saves it as
+\texttt{Validation/mz}. On 2026-11-03 the Agilent G2421A tuning mix gave its ions 622, 922, 1522 and
+2122 on Q2 at 400, 450 and 500\,kHz: $c=0.978$ (band widths at $k=0.20$, transmission at $k=0.21$)
+and an effective $r_0=2.625$\,mm, now the defaults. The filter then closes at $k=0.2153\,c=0.2105$. In RF-only mode ($k=0$) ions with
 $m/z<3.43\,A$ (same units) are rejected, so a spectrum of several species is a staircase: each species
 removes a step at its cut-off amplitude $A_c$, and its peak at $k=0.2$ lies near $0.753\,A_c$.
 The mass window scales as $A/f^2$: at fixed $A_\text{max}$, 300\,kHz reaches 2.8 times and 200\,kHz

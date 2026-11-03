@@ -63,7 +63,7 @@ def test_the_scale_row_gives_the_mz_range_of_the_scan(mscan_rig):
     # No rod pair: RF only, the low-mass cut-off.
     assert s._mz_scale_text().splitlines() == [
         'A = 10 → 30 V ≈ m/z 22 → 66 (low-mass cut-off, RF only)',
-        '500 kHz, r0 5 mm; theory until r0 is calibrated']
+        '500 kHz, r0 5 mm, RF attenuation factor 1']
     first, second = add_offset(mscan_rig, factor=.2, fixed=10.), add_offset(mscan_rig, factor=.2, fixed=10., pair=2)
     s.offset_minimum, s.offset_resolution = .5, 0.
     assert s._mz_scale_text().splitlines()[0] == 'A = 10 → 30 V ≈ m/z 29 → 88 (peak centre)'
@@ -106,3 +106,27 @@ def test_the_plot_axis_and_the_file_use_the_scan_settings(mscan_rig, tmp_path):
         assert (definition['frequency_hz'], definition['r0_mm'], definition['factor']) == (5e5, 5., .2)
         assert 'centre of the transmitted band' in f['MScan/Validation/mz'].attrs['Unit']
     assert all(c.writes for c in two)
+
+
+@pytest.mark.parametrize(('frequency', 'amplitudes'), [
+    (500e3, [62.0, 92.0, 151.9, 212.0]), (450.45e3, [50.2, 74.6, 123.3, 170.6]), (400e3, [None, 58.7, 96.8, 135.0]),
+])
+def test_the_default_calibration_puts_the_tuning_mix_on_its_masses(mscan_module, frequency, amplitudes):
+    # 2026-11-03, k = 0.21: the M03 peaks of the Agilent G2421A tuning mix at three RF frequencies.
+    M = mscan_module.MScan
+    for amplitude, expected in zip(amplitudes, (622.03, 922.01, 1521.97, 2121.93)):
+        if amplitude is None:
+            continue
+        shown = mscan_module.mz_from_amplitude([amplitude], frequency_hz=frequency, r0_mm=M.DEFAULT_R0_MM, factor=.21,
+                                               attenuation=M.DEFAULT_RF_ATTENUATION)[0]
+        assert shown == pytest.approx(expected, rel=6e-3)
+
+
+def test_the_rod_amplitude_sets_both_the_scale_and_the_filter_line(mscan_module):
+    mz = mscan_module.mz_from_amplitude
+    plain = mz([100.], frequency_hz=5e5, r0_mm=5., factor=.2)[0]
+    attenuated = mz([100.], frequency_hz=5e5, r0_mm=5., factor=.2, attenuation=.978)[0]
+    # The rods see 97.8 V: a lighter ion, and U/V = 0.2045 moves the band centre up.
+    assert attenuated < .978 * plain
+    assert np.isnan(mz([100.], frequency_hz=5e5, r0_mm=5., factor=.211, attenuation=.978)).all()
+    assert np.isfinite(mz([100.], frequency_hz=5e5, r0_mm=5., factor=.211)).all()

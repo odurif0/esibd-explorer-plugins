@@ -48,7 +48,8 @@ other rows are in four groups, in the order a scan is prepared:
 - **Amplitude scan**: allowed range and PSU Ilim, mode, amplitudes, timing, duration.
 - **Mass filter**: the AMPR channels of the two rod pairs, k, δ, Minimum U, axis potential
   x, and a **Preview** of what the scan will apply.
-- **m/z**: the field radius r0, the plot abscissa (A or m/z) and the m/z range of the scan.
+- **m/z**: the field radius r0, the RF attenuation factor, the plot abscissa (A or m/z) and the m/z
+  range of the scan.
 - **Live readback**: PSU rails, rod pair channels, values restored after completion, samples
   at the last point.
 
@@ -254,12 +255,21 @@ spectrum against it (user request 2026-11-03). For an ideal 50 % square wave:
   or with k = 0 (RF only) there are no peaks: the axis is the **low-mass cut-off** (q = 0.712).
   With one driven pair the DC between the pairs is unknown and no m/z is given; above the apex
   (about 0.2153) nothing is transmitted.
-- **r0 (mm)** is the field radius, from the axis to the inner surface of a rod: 5 mm for Q2,
-  provisional. m/z varies as 1/r0², so 1 % on r0 is 2 % on m/z.
+- **RF attenuation factor** is the RF amplitude actually seen by the rods divided by A (1: no loss).
+  It enters q and U/V, so the filter closes at k = 0.2153 × factor; the preview and Start warn
+  above it. To measure it, raise k on a peak until the signal disappears: factor = that k / 0.2153.
+- **r0 (mm)** is the field radius, from the axis to the inner surface of a rod. m/z varies as
+  1/r0², so 1 % on r0 is 2 % on m/z. Calibrate on a known peak by setting r0 to
+  r0 × √(m/z shown / m/z known); one peak fixes the scale at every amplitude, frequency and k.
 
-This is theory until it is checked on a known ion: the amplitude on the rods is assumed equal to
-A, which is not verified. r0 absorbs that ratio too, so calibrate on a known peak by setting
-r0 to r0 × √(m/z shown / m/z known); one peak fixes the scale at every amplitude, frequency and k.
+**Defaults, calibrated on 2026-11-03** (Q2, AMX HD, 400–500 kHz) with the Agilent ESI tuning mix
+G2421A: the M03 peaks are its ions at m/z 622, 922, 1522 and 2122, and they fall on the same m/z at
+500, 450 and 400 kHz. The band widths at k = 0.20 and the transmission at k = 0.21 give an RF
+attenuation factor of **0.978**; r0 then fits the 15 peaks with **2.625 ± 0.003 mm**, and each
+lands within 0.6 % of its mass. That r0 is effective: the 5 mm given for Q2 disagrees by a factor
+3.5 in m/z, unexplained (is 5 mm the distance between opposite rods? is the RF frequency half the
+displayed one?). Measure both again for another quadrupole, AMX or frequency range.
+Resolution measured that day (m/Δm at half height): 12–16 at k = 0.20, 35–55 at k = 0.21.
 A scan is converted with its own settings, saved in the file, not with the panel's current ones.
 The file always keeps A as the axis and adds `Validation/mz` (NaN where not transmitted or
 unknown), with the formula and the values used in its `Definition` attribute. MScan gives m/z, not
