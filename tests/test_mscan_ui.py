@@ -653,7 +653,7 @@ def test_native_command_dispatch_still_expires_without_late_write(mscan_module, 
     ('setpoint-channel', '1'), ('setpoint-panel', '1'), ('setpoint-roundtrip', '1'), ('setpoint-hardware', '1'),
     ('setpoint-display', '1'), ('setpoint-display', '1.5'),
     ('dmmr-interval', '1'), ('dmmr-interval', '1.5'),
-    ('rate-legacy-ini', '1'), ('rate-legacy-hdf', '1'),
+    ('rate-legacy-ini', '1'), ('rate-legacy-hdf', '1'), ('map-line', '1'),
 ])
 
 
@@ -989,7 +989,7 @@ def run(scenario, target, app_holder=None):
     tree, named = scan.settingsTree, scan.settingsMgr.settings
     assert tree.indexOfTopLevelItem(named[scan.STATUS]) == 0
     groups = [tree.topLevelItem(i) for i in range(1, tree.topLevelItemCount())]
-    assert [g.text(0) for g in groups] == ['Setup', 'Amplitude scan', 'Mass filter', 'm/z', 'Live readback']
+    assert [g.text(0) for g in groups] == ['Setup', 'Amplitude scan', 'Mass filter', 'm/z', 'Map', 'Live readback']
     assert all(g.isExpanded() and g.isFirstColumnSpanned() and g.font(0).bold() for g in groups)
     assert named[scan.OFFSET_FIXED].parent() is groups[2] and named[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
     assert named[scan.OFFSET_FACTOR].text(0) == 'U/V ratio k'
@@ -1859,6 +1859,14 @@ def run(scenario, target, app_holder=None):
         thread = scan.runThread
         assert thread is not None
     else:
+        if scenario == 'map-line':
+            # One line of a map (v0.5.10): explicit points and the measurement-driven step on M03.
+            request = dict(id=3, stage='B', role='ladder', point='P1', variant='', kind='amplitude', f_hz=500e3,
+                           k=float(scan.offset_factor), delta_v=0., energy_ev=26., x_v=float(scan.offset_fixed),
+                           q1_dc_v=36., stub_v=20., amplitude_v=0., axis=[30. + 2. * i for i in range(51)],
+                           adaptive=True, coarse=4, ions=[], expected_s=10., seconds=0., predicted=0., label='ladder')
+            scan._configure_map_line(request, dict(name='ui-map', detector='M03', point_s=.03, settle_s=.01))
+            assert scan.integration_s == .03 and scan.passes == 1 and scan.file_label == 'ui-map-L0003-ladder'
         scan.recording = True
         scan.initData()
         assert scan.initScan(), f'initScan failed: {scan.scan_status}'
@@ -1934,6 +1942,23 @@ def run(scenario, target, app_holder=None):
     assert not thread.is_alive(), 'Scan worker hung'
     timer.stop()
     app.processEvents()
+    if scenario == 'map-line':
+        result = scan._map_line_result()
+        statuses = list(scan._validation['point_status'])
+        assert result['status'] == 'completed', (result['status'], result['error'])
+        assert result['axis'] == [30. + 2. * i for i in range(51)]
+        measured = [i for i, status in enumerate(statuses) if status == 'acquired']
+        assert statuses.count('skipped') >= 10 and measured[0] == 0 and measured[-1] == 50, statuses
+        assert all(i in measured for i in range(18, 23)), 'every point of the peak at 70 V is measured'
+        assert all(np.isfinite(result['signal'][i]) for i in measured), result['signal']
+        assert scan._plan['metadata']['map_line']['id'] == 3 and scan._plan['metadata']['axis'] == 'amplitude'
+        name = scan._scan_file().name  # This harness saves to a fixed file; the map name is MScan's own.
+        assert 'ui-map-L0003-ladder' in name and name.endswith('_30-130V.h5'), name
+        scan._end_map_line()
+        assert scan._line is not None or scan.finished  # Cleared once the save has finished.
+        scan.closeGUI()
+        window.close()
+        return 0
     if scenario == 'auto-save':
         deadline = time.monotonic() + 5
         while not scan.finished and time.monotonic() < deadline:
@@ -2187,7 +2212,7 @@ def run(scenario, target, app_holder=None):
         assert not any('/' in section for section in sections.sections())
         folded = {g.text(0): g.isExpanded() for g in (scan.settingsTree.topLevelItem(i)
                   for i in range(1, scan.settingsTree.topLevelItemCount()))}
-        assert folded == {'Setup': True, 'Amplitude scan': True, 'Mass filter': True, 'm/z': True, 'Live readback': False}, folded
+        assert folded == {'Setup': True, 'Amplitude scan': True, 'Mass filter': True, 'm/z': True, 'Map': True, 'Live readback': False}, folded
         assert scan.settingsMgr.settings[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
         scan.settingsTree.expandItem(scan.settingsMgr.settings[scan.SAMPLES].parent())
         assert scan.channelTree is None

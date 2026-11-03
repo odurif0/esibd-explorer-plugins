@@ -366,6 +366,31 @@ can be clicked (same list on the PSUs). If `AMX reply lost, port resynchronized`
 readbacks go on without `Failed to read AMX housekeeping`. OFF during a connection prints `AMX
 connection stopped: OFF was requested`, and OFF during a lost reply no longer kills the worker.
 
+## MScan map (v0.5.10)
+
+In the order of the plan (Section 9): each step only after the previous one passed.
+
+0. **Soak test** (Section 9 of the plan), on the lab PC without the instrument:
+   `python tools/soak_mscan_map.py mscan/plans/q2_map.toml --speed 1 --out soak` for the whole map;
+   `soak.csv` must show flat memory, threads and open files, and the map must end `done`.
+1. **Check and Simulate, instrument ready.** Map plan = `q2_check_1h.toml`. Check must say `ready to
+   start` with the PSU in Full range; switch it to Half range: Check asks for Full range. Lower Ilim
+   below what Check asks: Check names the Ilim to set. Simulate: a few dozen lines, about 1 h.
+2. **One hour on the instrument** (`q2_check_1h.toml`). Start map, leave the PC alone. Watch `Map
+   status` and `status.json`: a reference window, the stopping cut (Q1_DC goes to 38 V and back),
+   the first P1 ladder lines. Each line is a normal MScan file; the map folder has `journal.json`,
+   `map.h5` and `map.log`. At the end: `report.json` with `x_stop` near Q1_DC and `thermalized`
+   true, `figures.png`, and Q1_DC, the stubs, the AMX frequency and MScan's settings back to their
+   values before Start.
+3. **Faults.** During a map: let the spray drift out of its window (the map pauses, then repeats the
+   line); press Stop during a line (the line stops like a scan, then the settings return to Start;
+   the rails hold if the line was interrupted). Resume: the same folder continues from the last
+   finished line, with the next line number.
+4. **Four hours** (`q2_check_4h.toml`): the P1 and P5 ladders, closing found on both (c from the
+   closing, in `report.json`), two repeats each, a verification line near R = 40 and two stub cuts.
+5. **The full map** (`q2_map.toml`): about 40–65 h (Check gives the simulator's estimate), the PC kept awake (`powercfg /requests` names
+   MScan map). The best scan ends the map with `best_settings.ini`.
+
 ## Transmission optimizer
 
 - **Simulation first:** tick **Simulation**, run the total ion current, then a selected

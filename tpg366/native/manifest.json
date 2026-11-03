@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "aabb3736e667c01bf4e7d8075abd02d0ccffbc0f6eb4865374f69d3ed50977ef",
-    "size_bytes": 12346967,
-    "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
+    "sha256": "c5bd2e7f76338adcea2a03d902d6c4223d28e336d8501b60f4526c7d78d17b69",
+    "size_bytes": 12388908,
+    "source_data_sha256": "872051dd0b079417f858e2686ecbdf61fd2cf0d8c06d72114c84291612a3556a",
     "vendored": true
   },
-  "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
+  "source_data_sha256": "872051dd0b079417f858e2686ecbdf61fd2cf0d8c06d72114c84291612a3556a",
   "targets": {
     "linux-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-tpg366-worker",
       "sha256": "0940906d33b0c40d6c6e34cfcd50647fffa6d204282163492acc98ff1408edbe",
       "size_bytes": 643152,
-      "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
+      "source_data_sha256": "872051dd0b079417f858e2686ecbdf61fd2cf0d8c06d72114c84291612a3556a",
       "target": "x86_64-unknown-linux-gnu"
     },
     "windows-x86_64": {
@@ -30,9 +30,9 @@
         "tpg366"
       ],
       "file": "esibd-tpg366-worker.exe",
-      "sha256": "c09bfc27cf7fa31f50d4b7669db98bf81eba1e7c2335261dd478f967b92de4a7",
+      "sha256": "35114a1c75d1cc3f9aa6cda174cf96e7fe9898754ee92c2b8d3bfe3e037c50fd",
       "size_bytes": 568320,
-      "source_data_sha256": "02fcb88c0f75e8ca8ed6f26b978b6670e35cfe69917a42d173ff4ca9c868dcd9",
+      "source_data_sha256": "872051dd0b079417f858e2686ecbdf61fd2cf0d8c06d72114c84291612a3556a",
       "target": "x86_64-pc-windows-gnu"
     }
   },

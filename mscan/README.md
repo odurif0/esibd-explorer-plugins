@@ -382,6 +382,60 @@ Controls are locked until acquisition and saving finish.
   and the scan was lost. The plot now changes nothing on a refused close, and a
   plot fault never prevents the save.
 
+## Map of Q2 (v0.5.10)
+
+A **map** runs a plan file line by line, with no operator, to find, prove and record the best
+scan of the quadrupole (`docs/quadrupole_optimization_plan.md`). Every line is an ordinary MScan
+scan, started and saved like one from Start, with all of its checks; the decisions belong to the
+MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
+
+- **Map plan**: the plan file (TOML). Templates in `plans/`: `q2_check_1h.toml` (stopping cut and
+  the start of the P1 ladder, about 1 h), `q2_check_4h.toml` (P1 and P5 ladders, about 4 h) and
+  `q2_map.toml` (the full map, every key with its default: about 40 h in the simulator when R follows the
+  RF cycles, about 65 h when R is capped near 45 and the map searches longer). Change a copy.
+- **Map status**: stage, line, point and what the map waits for; the same in `status.json`.
+- Toolbar: **Check** (the plan against the instrument: what to change before Start, and the time
+  the Q2 simulator takes), **Simulate** (the plan against the simulator, no hardware), **Resume**
+  (a stopped map, from its folder) and **Start map / Stop** (clock icon).
+
+Before Start map, prepare the instrument as for a scan: AMX HD ON with its RF config (50 % duty,
+100 MHz clock), PSU in Full range with an Ilim above what Check asks, AMPR ON with `Q1_DC`,
+`Ap_Q1_Q2`, `Stub_Entry_Q2`, `Stub_Exit_Q2` and both rod pairs in manual control, DMMR recording,
+TPG366 acquiring, ESI spraying from the syringe. Select the rod pairs in **Mass filter** as for a
+scan. From Start map on, nothing waits for a human:
+
+- **Lines.** The stopping cut along x (it fixes the ion energy E = e·(x_stop − x)); at each design
+  point a ladder in k up to the closing, two repeats, a verification line at the computed (k*, δ*)
+  and a cut along the entry stub; then the outer search in (f, E), an out-of-sample check, a local
+  check and the best scan, repeated. A reference window on 922 every five lines corrects the drift.
+- **Settings a line does not sweep** are set first and confirmed: the AMX frequency (through the
+  AMX HD plugin, which keeps the duty cycle), `Q1_DC`, the entry stub (x + 0.42·(Ap − x)) and
+  `Stub_Exit_Q2` (x − 15 V). MScan's own settings (k, δ, x, timing, file name, notes) are set for
+  each line and return to the operator's values at the end.
+- **New line axes** of the MScan worker: x (stopping cut), the entry stub and the AMX frequency
+  (frequency lines at fixed A and U), besides A. Amplitude lines use the measurement-driven step:
+  coarse (A/(2·R_max)) where the selected module (`detector`, M03) is flat, every fine point (A/(8·R_max))
+  where it changes by more than 3σ of the point means (never less than 1 fA) and 10 % of the local
+  height; the points never measured are `skipped`.
+- **Faults.** A failed line (spray outside ±20 % of its value at Start, a worker or detector fault,
+  a line slower than twice its expected time) is measured again; the same line failing three
+  times, or three failed lines within one hour, stop the map. A line a limit forbids (PSU headroom,
+  Ilim, AMPR limits) closes that setting and the map goes on. Before each line the spray must be in
+  its window; the map waits up to 30 min for it.
+- **Safe stop** (Stop, a fault, the end): the AMX frequency, `Q1_DC`, the stubs and MScan's settings
+  return to Start. The PSU rails and the rod pairs stay as the last line left them: restored at the
+  end of a completed line, held after a line fault, as for any MScan scan. Ranges, Ilim and the ESI
+  are never touched. The PC is kept from idle sleep for the whole map.
+- **Files.** Each line is a normal file in `<Data path>/MScan/<date>/` named
+  `<date_time>_<map>-L<line>-<role>_PSU-X_<span>.h5`, with the line request in `Validation`
+  (`map_line`). The map folder `<Data path>/MScan/maps/<date_time>_<name>/` holds `plan.toml`,
+  `journal.json` (the whole state; `.bak` is the previous one), `status.json`, `map.log`, `map.h5`
+  (every line: axis, signal, sigma, spray, request and analysis), and at the end `report.json`
+  (laws, points, search, checks, best scan), `figures.png` and `best_settings.ini` (load it to
+  repeat the best scan).
+- **Resume** continues from the last finished line of the journal, after a safe stop, an Explorer
+  crash or a power cut; a line cut in the middle is measured again.
+
 ## Files and upgrades
 
 The scan file retains planned amplitudes, current averages, sample counts,
