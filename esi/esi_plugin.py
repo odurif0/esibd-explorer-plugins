@@ -2778,6 +2778,11 @@ class ESIController(DeviceController):
                     and self.main_state not in (_ESI_STOPPING, "Shutdown unconfirmed", _ESI_DISCONNECTED_UNCONFIRMED)):
                 recovered = self.main_state == _ESI_COMMUNICATION_LOST
                 self._apply_snapshot(snapshot, observed_at=observed_at, stability_generation=stability_generation)
+                if isinstance(snapshot, dict) and snapshot.get("read_recovery"):
+                    # The worker purged the port and read the poll again (2026-11-03: seven lost replies on
+                    # the heater limit reads, each reported as an error with HV possibly energized).
+                    self.print(f"ESI reply lost, port resynchronized and read again: {snapshot['read_recovery']}",
+                               flag=PRINT.WARNING)
                 if recovered:
                     if self.initialized and self.controllerParent.isOn():
                         self._output_cancel = Event()

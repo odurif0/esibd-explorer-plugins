@@ -2339,3 +2339,52 @@ fn a_second_receive_error_on_the_same_measurement_still_leaves_off_unconfirmed()
     assert!(error.message.contains("-10"), "{}", error.message);
     assert_eq!(rig.count("COM_ESI_CTRL_Close"), 0);
 }
+
+#[test]
+fn a_reply_lost_in_a_poll_is_read_again_and_reported_not_failed() {
+    // 2026-11-03 lab: GetHeatCtrlVoltage/Current/PowerLimit -10 seven times; each poll failed with
+    // "HV may remain energized" and the next one recovered.
+    let mut rig = Rig::connected(true);
+    rig.inject(
+        "COM_ESI_CTRL_GetHeatCtrlPowerLimit",
+        1,
+        -10,
+        vec![json!(0.0)],
+    );
+    let before = rig.calls().len();
+    let snapshot = rig.call("collect_diagnostics", &[], json!({})).unwrap();
+    assert!(
+        snapshot["read_recovery"]
+            .as_str()
+            .unwrap()
+            .contains("COM_ESI_CTRL_GetHeatCtrlPowerLimit failed: -10"),
+        "{snapshot}"
+    );
+    let calls = rig.calls();
+    assert!(
+        calls[before..]
+            .iter()
+            .any(|(name, _)| name == "COM_ESI_CTRL_Purge"),
+        "the port is purged before reading again"
+    );
+    assert!(
+        !calls[before..].iter().any(|(name, _)| output_command(name)),
+        "a recovery commands nothing"
+    );
+    let snapshot = rig.call("collect_diagnostics", &[], json!({})).unwrap();
+    assert!(snapshot.get("read_recovery").is_none(), "reported once");
+    // A second failure in the same poll still fails it.
+    rig.inject(
+        "COM_ESI_CTRL_GetHeatCtrlPowerLimit",
+        1,
+        -10,
+        vec![json!(0.0)],
+    );
+    rig.inject(
+        "COM_ESI_CTRL_GetHeatCtrlPowerLimit",
+        2,
+        -10,
+        vec![json!(0.0)],
+    );
+    assert!(rig.call("collect_diagnostics", &[], json!({})).is_err());
+}

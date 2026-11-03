@@ -231,7 +231,11 @@ I/O operation first uses the manufacturer's `Purge` recovery routine. The failed
 command is not retried, except within the OFF discharge check: a measurement step
 (ADC selection, ready flags or ADC read, never an output command) that gets a
 receive error (-10/-11/-12) is purged and repeated once. On 2026-10-26 a single -10
-to an ADC selection left an OFF unconfirmed. Successful readback resets the consecutive-error count;
+to an ADC selection left an OFF unconfirmed. The periodic readback only reads: a receive error
+there purges the port and reads the whole poll once more, then logs `ESI reply lost, port
+resynchronized and read again` as a warning (2026-11-03: seven lost replies on the heater limit
+reads, each reported as an error with HV possibly energized and recovered at the next poll). A
+second failure still reports the lost readback. Successful readback resets the consecutive-error count;
 persistent errors close communication. Output requests are logged with their
 module, ON/OFF state and target so future failures can be correlated with HT clicks.
 

@@ -36,8 +36,23 @@ manifests all identify raw source data
 
 ## v0.5.9 Update (2026-11-03)
 
-The 2026-11-03 scans, on v0.5.8, led to these changes, all in MScan (Python only; no worker
-rebuilt). None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each check.
+The 2026-11-03 scans, on v0.5.8, led to these changes. None is validated on hardware yet;
+`SOFTWARE_TEST_PLAN.md` lists each check.
+
+- **MScan loaded Explorer's GUI thread:** at every 50 ms poll it converted and sent the whole DMMR
+  history to its worker (about 120 ms of Python and 2.5 MB of JSON for 100 000 records). Over the day
+  the recordings bunched up: 25 to 55 % of the DMMR ticks had no new reading, so 11 to 47 points per
+  scan had none at 0.5 s per point, and repeated timestamps appeared. MScan now reads the last minute
+  at least (about 5 ms and 14 kB per poll).
+- **DMMR timestamps:** a record stamped equal to, or less than 0.1 s before, the previous one (the
+  15.6 ms resolution of `time.time()` on Windows before Python 3.13) is moved 1 µs after it; a larger
+  step back is left alone and skipped by MScan.
+- **ESI lost replies:** seven lost replies on the heater limit reads (`GetHeatCtrl*Limit`, -10) were
+  each reported as an error with HV possibly energized, then recovered at the next poll. The worker
+  now purges the port and reads the poll once more, and the plugin logs a warning.
+- **AMX HD lost replies:** 60 of the 66 lost replies were timer reads (delay, width, burst) made at
+  every housekeeping, each costing a 1.5 s DLL wait. The worker reads them again after any write or
+  config load and at least every 30 s; they only change through this plugin.
 
 - **PSU headroom:** a 50–300 V scan stopped at 250 V after a 30 s settle timeout. The PSU log shows
   why: PSU_A was in Half range, its dropout (internal supply − output, the third value of
@@ -71,9 +86,8 @@ rebuilt). None is validated on hardware yet; `SOFTWARE_TEST_PLAN.md` lists each 
 - **Documentation:** `docs/mscan_quadrupole.pdf` describes the rod potentials, the scan law, its
   parameters and their effect, with sources in `docs/src`.
 
-The native workers, manifests and source archives are those of v0.5.8; the ABI, source and worker
-checks pass. The release validation (`pytest -q --all-siblings` on Explorer 1.0.2) passed 5839 tests
-with 10 skipped and no failure. No instrument is opened. Hardware validation is still pending.
+All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux for
+TPG366, MScan and Transmission). RUST_VALIDATION_LINE
 
 ## v0.5.8 Update (2026-11-02)
 

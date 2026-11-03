@@ -211,7 +211,9 @@ Important points:
 
 The channels cover timers 0–3; the housekeeping snapshot reads every timer the
 controller reports (`get_timer_count()`), and the CH0–CH3 table decodes whichever
-timers the outputs actually use. Each timer channel exposes:
+timers the outputs actually use. The timer registers (delay, width, burst) are read again after
+any write or config load and at least every 30 s, not at every housekeeping: they only change
+through this plugin, and on 2026-11-03 these reads drew 60 of the 66 lost replies (1.5 s each). Each timer channel exposes:
 
 - duty-cycle setpoint in percent
 - `Keep`: what a `Freq` change preserves (`duty` or `width`)

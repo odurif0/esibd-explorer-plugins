@@ -96,7 +96,10 @@ slower than recording; it leaves a NaN gap instead. Identical currents from
 separate polling cycles are kept. This does **not** establish fresh ADC
 conversions: manual polling has no conversion timestamp, and the firmware's
 ready-flag behavior still needs a hardware check. Recorded times are Explorer
-recording times, not simultaneous conversion times for all modules.
+recording times, not simultaneous conversion times for all modules. A record stamped equal to, or
+less than 0.1 s before, the previous one (records bunched by a busy GUI thread, within the 15.6 ms
+resolution of `time.time()` on Windows before Python 3.13) is moved 1 µs after it; a larger step back
+(a clock adjustment) is left alone. On 2026-11-03 one such record made MScan refuse every later scan.
 
 ## Live Plot
 

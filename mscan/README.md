@@ -208,6 +208,11 @@ The **msScan** settings list belongs to this scan; Explorer's global
   amplitude plus one settling per pass and the final settling. Approach/return, communication,
   scheduling and waiting for the last DMMR sample add time. **Continuous is not
   inherently faster**: duration depends on voltage step and timing.
+- MScan reads the recent DMMR history only (the last minute at least, more when a point window or
+  the DMMR interval needs it). Until 2026-11-03 it converted and sent the whole history to its
+  worker at every 50 ms poll: about 120 ms of Python and 2.5 MB of JSON for 100 000 records, which
+  saturated Explorer's GUI thread over a day; recordings then bunched up into empty readings (25 to
+  55 % of the ticks that day) and repeated timestamps.
 - Explorer stamps each DMMR record with the PC clock. A record whose stamp is not later than every
   earlier one (a clock adjustment, or two records within the clock resolution) is skipped with its
   values; **DMMR data interval** says how many. On 2026-11-03 one such record made MScan refuse

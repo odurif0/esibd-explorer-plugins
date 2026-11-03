@@ -190,7 +190,9 @@ try:
                     adapter = adapter_module.NativeScanAdapter(native.scan, rpc, raw_json=raw_json)
                     result = adapter.run()
                     assert result['validation']['status'] == reference_status, (mode, fault, result)
-                    assert result['data'] == pytest.approx(reference_data, nan_ok=True), (mode, fault, result['data'],reference_data)
+                    # The engine times the windows on the DMMR clock; the adapter averages each module.
+                    data = native.scan.outputChannels[0].recordingData
+                    assert data == pytest.approx(reference_data, nan_ok=True), (mode, fault, data, reference_data)
                     assert native.rig.psus[0].writes == reference_writes, (mode, fault, native.rig.psus[0].writes, reference_writes)
                     assert native.rig.psus[1].writes == []
                     assert native.rig.psus[0].isOn()
@@ -203,7 +205,8 @@ try:
                     if reference_status != 'completed':
                         assert not any(target > 30 for _, target in native.rig.psus[0].writes)
                     else:
-                        assert result['data'] == pytest.approx([10,20,30])
+                        assert native.scan.outputChannels[0].recordingData == pytest.approx([10,20,30])
+                        assert result['data'] == pytest.approx([0,0,0])  # The clock: a reading in every window.
                         page = adapter.export_result(page_size=1)
                         assert page['data'] == result['data']
                         if mode == module.MScan.CONTINUOUS:
@@ -211,8 +214,11 @@ try:
                             assert len(raw['psu_time']) == len(raw['psu_v'])
                             assert len(raw['detector_current']) > 0
                             assert np.all(np.diff(raw['detector_time']) > 0)
+                            # One row per raw tick, one column per recorded module (here one).
+                            assert np.shape(raw['detector_current']) == (len(raw['detector_time']), 1)
                             for key, values in raw.items():
-                                np.testing.assert_array_equal(page['validation']['continuous'][key], values)
+                                if key != 'detector_current':  # The engine holds the clock; the adapter the modules.
+                                    np.testing.assert_array_equal(page['validation']['continuous'][key], values)
                     old_session = result['session']
                     adapter.reset()
                     assert proxy.get_attribute('state') == 'idle'
