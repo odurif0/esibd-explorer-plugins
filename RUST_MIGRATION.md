@@ -96,7 +96,11 @@ The 2026-11-03 scans, on v0.5.8, led to these changes. None is validated on hard
   parameters and their effect, with sources in `docs/src`.
 
 All 15 deployed workers were rebuilt with Rust 1.98.1 (Windows linked with Zig 0.14.1; Linux for
-TPG366, MScan and Transmission). RUST_VALIDATION_LINE
+TPG366, MScan and Transmission). The Rust suite passes 344 tests; Clippy (`-D warnings`), formatting
+and the ABI/source/family/worker checks pass. The release validation (`pytest -q --all-siblings`
+on Explorer 1.0.2) passed 5861 tests with 10 skipped and no failure. All nine Windows workers pass
+the constructor-only Wine checks and the three Linux workers the Linux ones; no instrument is
+opened. Hardware validation is still pending.
 
 ## v0.5.8 Update (2026-11-02)
 
