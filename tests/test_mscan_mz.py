@@ -1,4 +1,4 @@
-"""m/z from the RF amplitude in MScan (user request 2026-11-03; Q2 r0 = 5 mm, provisional).
+"""m/z from the RF amplitude in MScan (user request 2026-11-03; Q2: 5 mm between opposite rods, r0 2.5 mm).
 
 Ideal 50 % square wave: m/z = 4 e A / (q r0² (2π f)²), q the centre of the stable band on the
 scan line a = 2 (U/A) q, or the low-mass cut-off q = 0.712 when RF only. Values checked against

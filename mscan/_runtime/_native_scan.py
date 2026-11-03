@@ -228,6 +228,7 @@ class NativeScanAdapter:
                           initialized=bool(ctrl.initialized and ctrl.device is not None), on=bool(device.isOn()),
                           busy=_busy(ctrl, _AMPR_BUSY), shutdown=bool(ctrl._setpoint_cancel.is_set()),
                           state=state, value=float(channel.value), monitor=float(channel.monitor), min=low, max=high))
+        scan._sample_context()  # ESI and TPG366 read live from their plugins, at every poll.
         if guard:
             scan._headroom_guard()  # A PSU without headroom stops the scan now, not after the settle timeout.
         self._sequence += 1
@@ -382,6 +383,8 @@ class NativeScanAdapter:
                     scan.outputChannels[j].recordingData[index] = mean
                     validation['samples'][index, j], validation['finite_samples'][index, j] = count, finite
                 scan._store_headroom(index, point['window_start'], point['window_end'])
+                scan._store_context(index, point['window_start'], point['window_end'])
+                scan._store_samples(index, point['window_start'], point['window_end'])
                 self._updated.add(index)
                 validation['point_status'][index] = point['status']
                 if point.get('offsets'):
@@ -520,9 +523,13 @@ class NativeScanAdapter:
                     for j, (mean, count, finite) in enumerate(self.scan._module_values(float(start), float(end))):
                         self.scan.outputChannels[j].recordingData[index] = mean
                         previous['samples'][index, j], previous['finite_samples'][index, j] = count, finite
-            for key in ('samples', 'finite_samples', 'rail_dropout', 'low_headroom'):
+                    self.scan._store_context(index, float(start), float(end))
+                    self.scan._store_samples(index, float(start), float(end))
+            for key in ('samples', 'finite_samples', 'rail_dropout', 'low_headroom', 'context'):
                 if key in previous:  # One column per module or rail, computed here, not by the engine.
                     validation[key] = np.asarray(previous[key])
+            if 'raw_samples' in previous:
+                validation['raw_samples'] = previous['raw_samples']  # Records per point index.
             if 'continuous' in validation:
                 for key, value in validation['continuous'].items():
                     validation['continuous'][key] = np.asarray(value)

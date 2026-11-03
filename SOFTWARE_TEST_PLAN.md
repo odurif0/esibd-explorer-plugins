@@ -349,7 +349,11 @@ factor (0.978), the tuning-mix peaks must read 622, 922, 1522 and 2122 within ab
 the preview and Start must warn that no ion will pass. If `DMMR data interval`
 reports skipped records, note the time: MScan must keep scanning, and the next scan must start.
 During a long scan with a DMMR history of several hours, `Samples at last point` must stay close to
-the number of DMMR ticks per window (2026-11-03: about half of them were empty). ESI: a lost reply
+the number of DMMR ticks per window (2026-11-03: about half of them were empty). With the ESI and the
+TPG366 acquiring but not recording in Explorer, write a note in Setup `Notes` and scan: the file has
+`Validation/Context/ESI/…` and `Context/TPG366/…` with one finite value per point and the spray
+current of the ESI panel, `Validation/Samples` with the DMMR records and ranges, and the note in the
+`MScan` attributes. Turn the TPG366 off: `Status` warns `TPG366 not acquiring` and its columns are NaN. ESI: a lost reply
 in a poll must log `ESI reply lost, port resynchronized and read again` as a warning, without
 `Communication lost`; ramp HV1 to 900 V and back once to check that outputs, readbacks and the OFF
 discharge check behave as with v0.5.8. AMX HD: `AMX reply lost` warnings must become rare; after a

@@ -80,12 +80,18 @@ The 2026-11-03 scans, on v0.5.8, led to these changes. None is validated on hard
   point, or the low-mass cut-off when RF only. The file keeps A and adds `Validation/mz` with the
   formula and values used. Defaults calibrated on 2026-11-03 with the Agilent G2421A tuning mix,
   whose ions 622, 922, 1522 and 2122 are the M03 peaks at 400, 450 and 500 kHz: RF attenuation
-  factor 0.978 and r0 2.625 mm (effective; the 5 mm given for Q2 disagrees by a factor 3.5). The
+  factor 0.978 and r0 2.625 mm (effective; 5 % above the nominal 2.5 mm of Q2). The
   filter closes at k = 0.2153 × 0.978 = 0.2105; the preview and Start warn above it.
 - **Panel:** `Status` first, next to Start (a greyed Start says why); settings in foldable groups
   Setup, Amplitude scan, Mass filter, m/z, Live readback; the mass filter named after its physics
   (rod pairs, U/V ratio k, resolution δ, minimum U, axis potential x) with a `Preview` of U and both
   pair potentials. Setting keys in settings files and scans are unchanged.
+- **Scan record:** each point also keeps the ESI and TPG366 channels (spray current and HV, heater,
+  pressures; `Validation/Context`), read live from their plugins at every poll, so they need not be
+  recording; `Status` warns when one is not acquiring. `Validation/Samples` keeps every DMMR record behind the
+  means with its range. `Validation/setup` adds the RF frequency and duty as numbers, the plugin
+  version and the SHA-256 of the MScan code and worker, and the new Setup **Notes** (`Scan notes`).
+  Its `calibration` no longer says `not m/z`: A in V, m/z in `Validation/mz` when known.
 - **Documentation:** `docs/mscan_quadrupole.pdf` describes the rod potentials, the scan law, its
   parameters and their effect, with sources in `docs/src`.
 

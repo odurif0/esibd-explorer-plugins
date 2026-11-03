@@ -192,7 +192,7 @@ def test_hdf5_preserves_missing_points_measurements_metadata_and_status(mscan_ri
         assert f['MScan/Validation'].attrs['status'] == 'stopped'
         assert np.isnan(f['MScan/Output Channels/Detector'][1:]).all()
         assert np.isnan(f['MScan/Validation/rail_v'][1:]).all()
-        assert 'not m/z' in f['MScan/Validation'].attrs['setup']
+        assert 'Amplitude A in V; m/z, when known, in Validation/mz' in f['MScan/Validation'].attrs['setup']
     s.file = path
     assert s.loadDataInternal()
     assert s._validation['status'] == 'stopped'
