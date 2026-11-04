@@ -55,6 +55,10 @@ The map of Q2 (`docs/quadrupole_optimization_plan.md`, revision 2). Not validate
 - **MScan:** group Map, Check/Simulate/Resume/Start map, `_runtime/_map_runner.py` (journal written
   atomically, faults, spray guard, safe stop, keep-awake, `map.h5`, report and figures), k with five
   decimals, plan templates in `mscan/plans/`.
+- **Validation (2026-11-04, commit 0219ccf):** Rust 357 passed (clippy clean); Python 5880 passed,
+  10 skipped (`--all-siblings`, Explorer 1.0.2), including the map runner against the real engine and
+  a map line in the real Explorer; all 15 workers rebuilt, Wine and Linux smoke passed, `map_check`
+  answered by the deployed Windows and Linux MScan workers. Hardware: not tested.
 
 ## v0.5.9 Update (2026-11-03)
 
