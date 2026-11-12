@@ -489,7 +489,10 @@ macro_rules! defaults {
 }
 
 defaults!(Bounds {
-    f_khz: [f64; 2] = [100.0, 1000.0],
+    // 2026-11-12: at k = 0.200, 2122 sits at 339 V at 640 kHz and 922–2122 are above 20 V at
+    // 250 kHz. The RF current follows from f and A (≈ 1.47 nA/(Hz·V) · f · A, 307 mA at 600 kHz
+    // and 348 V): an Ilim of 330 mA, set by the operator; P9 (900 kHz) needed 490 mA.
+    f_khz: [f64; 2] = [250.0, 640.0],
     energy_ev: [f64; 2] = [3.0, 30.0],
     delta_v: [f64; 2] = [0.0, 2.0],
     stub_below_q1_v: f64 = 1.0,
@@ -498,7 +501,7 @@ defaults!(Bounds {
 defaults!(Design {
     // (f kHz, E eV) of the amplitude-scan points, then (A V, E eV) of the frequency-scan points.
     amplitude: Vec<[f64; 2]> = vec![[500.0, 26.0], [500.0, 12.0], [500.0, 5.0], [300.0, 26.0],
-        [300.0, 9.4], [300.0, 4.3], [550.0, 26.0], [550.0, 8.0], [900.0, 26.0], [200.0, 26.0]],
+        [300.0, 9.4], [300.0, 4.3], [550.0, 26.0], [550.0, 8.0]],
     frequency: Vec<[f64; 2]> = vec![[110.0, 26.0], [110.0, 8.0]],
 });
 
@@ -594,18 +597,27 @@ fn default_follow() -> BTreeMap<String, f64> {
 defaults!(MapConfig {
     name: String = "q2-map".to_owned(),
     mix: Vec<f64> = default_mix(),
-    best_scan_range: [f64; 2] = [322.0, 2722.0],
+    // 2026-11-04: 322 sits unresolved on the low-A background at k = 0.200 and 2722 never rose
+    // above the noise (nor on 2026-11-03); an ion the beam lacks makes every point infeasible.
+    best_scan_range: [f64; 2] = [622.0, 2122.0],
     r_target: f64 = 40.0,
         r_max: f64 = 100.0,
     r_noise: f64 = 0.10,
     a_range_v: [f64; 2] = [20.0, 348.0],
+    // An amplitude line spans the best-range ions it holds ± this fraction of their amplitude
+    // (within a_range_v): each peak, its ±6 % search window and baseline on both sides at R ≈ 10.
+    a_margin: f64 = 0.20,
     min_ions_in_line: usize = 2,
     reference_every: usize = 5,
-    spray_window_percent: f64 = 20.0,
+    // 2026-11-04: the ESI current went 42 → 48 → 36 nA while the M03 peaks stayed within 2 %.
+    spray_window_percent: f64 = 40.0,
     seed: u64 = 1,
     detector: String = "M03".to_owned(),
     point_s: f64 = 0.8,
     settle_s: f64 = 0.3,
+    // Command and readback confirmation of each point, until the map has timed its own points
+    // (2026-11-04: a line took 2.02 s per point + 15.5 s).
+    point_overhead_s: f64 = 0.9,
     q2_length_m: f64 = 0.15,
     max_failures: usize = 3,
     max_lines: usize = 600,
@@ -1397,6 +1409,9 @@ pub fn analyse(cfg: &MapConfig, req: &Request, result: &LineResult) -> Analysis 
 
 // ---------------------------------------------------------------- the journal, read back
 
+/// Seconds per line besides its points: approach, static settings, file (2026-11-04: 15.5 s).
+const LINE_S: f64 = 15.0;
+
 const ROLE_REFERENCE: &str = "reference";
 const ROLE_STOPPING: &str = "stopping";
 const ROLE_LADDER: &str = "ladder";
@@ -1579,14 +1594,40 @@ impl<'a> View<'a> {
         self.current_at(f_hz, a) <= 0.95 * self.inst.ilim_a
     }
 
-    fn line_time(&self, points: usize) -> f64 {
-        points as f64 * (self.cfg.point_s + self.cfg.settle_s) + 15.0
+    /// Seconds per measured point: the map's own step lines once they hold 100 points, else
+    /// point_s + settle_s + point_overhead_s. Never below point_s + settle_s.
+    fn per_point(&self) -> f64 {
+        let floor = self.cfg.point_s + self.cfg.settle_s;
+        let prior = floor + self.cfg.point_overhead_s.max(0.0);
+        let (mut seconds, mut points) = (0.0, 0usize);
+        for (_, r) in self.done() {
+            if matches!(
+                r.request.kind.as_str(),
+                KIND_AMPLITUDE | KIND_OFFSET | KIND_EXTRA
+            ) && r.analysis.measured >= 10
+                && r.duration_s > LINE_S
+            {
+                seconds += r.duration_s - LINE_S;
+                points += r.analysis.measured;
+            }
+        }
+        if points < 100 {
+            return prior;
+        }
+        (seconds / points as f64).clamp(floor, 4.0 * prior)
     }
 
-    /// Mix ions inside a 20–348 V amplitude line at (f, k, δ), with their expected amplitude.
+    fn line_time(&self, points: usize) -> f64 {
+        points as f64 * self.per_point() + LINE_S
+    }
+
+    /// Mix ions inside the amplitude range at (f, k, δ), with their expected amplitude.
     fn ions_in_line(&self, f_hz: f64, k: f64, delta: f64) -> Vec<(f64, f64)> {
+        self.ions_between(f_hz, k, delta, self.cfg.a_range_v)
+    }
+
+    fn ions_between(&self, f_hz: f64, k: f64, delta: f64, [lo, hi]: [f64; 2]) -> Vec<(f64, f64)> {
         let filter = self.cfg.filter(k, delta);
-        let [lo, hi] = self.cfg.a_range_v;
         self.cfg
             .mix
             .iter()
@@ -1597,6 +1638,34 @@ impl<'a> View<'a> {
                     .map(|a| (*m, a))
             })
             .collect()
+    }
+
+    /// The amplitudes of a line at (f, k, δ): the best-range ions in a_range_v ± a_margin, within
+    /// a_range_v; all of a_range_v when it holds none. P1 (500 kHz, k = 0.200): 50–248 V of 20–348 V.
+    fn amplitude_extent(&self, f_hz: f64, k: f64, delta: f64) -> [f64; 2] {
+        let [lo, hi] = self.cfg.a_range_v;
+        let best: Vec<f64> = self
+            .ions_in_line(f_hz, k, delta)
+            .into_iter()
+            .filter(|(m, _)| self.cfg.in_best_range(*m))
+            .map(|(_, a)| a)
+            .collect();
+        let (Some(first), Some(last)) = (
+            best.iter().copied().reduce(f64::min),
+            best.iter().copied().reduce(f64::max),
+        ) else {
+            return [lo, hi];
+        };
+        let m = self.cfg.a_margin.max(0.0);
+        [
+            round_to((first / (1.0 + m)).max(lo), 0.01),
+            round_to((last * (1.0 + m)).min(hi), 0.01),
+        ]
+    }
+
+    /// The top of the amplitude lines of a point at f, for its RF current.
+    fn amplitude_top(&self, f_hz: f64) -> f64 {
+        self.amplitude_extent(f_hz, self.cfg.ladder.first_k, 0.0)[1]
     }
 
     fn base_request(&self, stage: &str, role: &str, point: &str, variant: &str) -> Request {
@@ -1625,10 +1694,10 @@ impl<'a> View<'a> {
         stub: Option<f64>,
     ) -> Request {
         let x = self.x_for(energy);
-        let [lo, hi] = self.cfg.a_range_v;
-        let axis = amplitude_grid(lo, hi, self.cfg.r_max, self.cfg.coarse);
+        let extent = self.amplitude_extent(f_hz, k, delta);
+        let axis = amplitude_grid(extent[0], extent[1], self.cfg.r_max, self.cfg.coarse);
         let ions: Vec<f64> = self
-            .ions_in_line(f_hz, k, delta)
+            .ions_between(f_hz, k, delta, extent)
             .iter()
             .map(|p| p.0)
             .collect();
@@ -2311,7 +2380,7 @@ impl View<'_> {
             return None;
         }
         if let Mode::Amplitude(f) = spec.mode {
-            let top = self.cfg.a_range_v[1];
+            let top = self.amplitude_top(f);
             if !self.reachable(f, top) {
                 return None; // Closed before the first line: the PSU cannot reach the top of it.
             }
@@ -3010,11 +3079,15 @@ impl<'a> Engine<'a> {
             .fold(0.0, f64::max);
         let noise = self.rel_noise();
         let mut steps = Vec::new();
-        for spec in &self.search {
+        let last = self.search.len().saturating_sub(1);
+        for (i, spec) in self.search.iter().enumerate() {
             let Some(p) = self.result(&spec.id) else {
                 continue;
             };
-            if !p.complete {
+            // Only the last point can still be measuring. An earlier one is a step even when a
+            // lower target (0.9 × the highest R reached) asks it for one more line: otherwise
+            // it hid every later step from max_ladders and the search ran to max_lines.
+            if !p.complete && i == last {
                 break;
             }
             let predicted = self
@@ -3085,8 +3158,11 @@ impl<'a> Engine<'a> {
                 {
                     continue;
                 }
-                let (f, e) = (round_to(10f64.powf(lf), 1e3), round_to(10f64.powf(le), 0.1));
-                if !self.view.reachable(f, self.cfg().a_range_v[1]) {
+                // Whole kHz inside the domain: rounding never steps past its edge.
+                let f = round_to(10f64.powf(lf), 1e3)
+                    .clamp((f_lo / 1e3).ceil() * 1e3, (f_hi / 1e3).floor() * 1e3);
+                let e = round_to(10f64.powf(le), 0.1);
+                if !self.view.reachable(f, self.view.amplitude_top(f)) {
                     continue;
                 }
                 if let Some(m) = self.predict_merit(f, e, &quadratic)
@@ -3136,7 +3212,7 @@ impl<'a> Engine<'a> {
             if f < domain.0 || f > domain.1 || e < e_lo || e > e_hi {
                 continue;
             }
-            if !self.view.reachable(f, self.cfg().a_range_v[1]) {
+            if !self.view.reachable(f, self.view.amplitude_top(f)) {
                 continue;
             }
             let near = self.points.iter().any(|p| {
@@ -3181,7 +3257,7 @@ impl<'a> Engine<'a> {
             let (u, v) = sobol2(i);
             let f = round_to(f_lo * (f_hi / f_lo).powf(u), 1e3);
             let e = round_to(e_lo * (e_hi / e_lo).powf(v), 0.1);
-            if !self.view.reachable(f, self.cfg().a_range_v[1]) {
+            if !self.view.reachable(f, self.view.amplitude_top(f)) {
                 continue;
             }
             let (k, delta, predicted) = if let Some(s) = self.laws.predict(&self.view, f, e) {
@@ -3319,7 +3395,7 @@ impl<'a> Engine<'a> {
                 || (k - o.k).abs() > 1e-7
                 || (d - o.delta_v).abs() > 1e-6
                 || (s - o.stub_v).abs() > 1e-6;
-            if !changed || s >= q1 || !self.view.reachable(f, self.cfg().a_range_v[1]) {
+            if !changed || s >= q1 || !self.view.reachable(f, self.view.amplitude_top(f)) {
                 continue;
             }
             for repeat in 0..l.repeats.max(1) {
@@ -3917,7 +3993,9 @@ impl Q2Sim {
             ..LineResult::default()
         };
         let top = match req.kind.as_str() {
-            KIND_AMPLITUDE => self.inst.current_per_hz_v * req.f_hz * self.cfg.a_range_v[1],
+            KIND_AMPLITUDE => {
+                self.inst.current_per_hz_v * req.f_hz * req.axis.iter().copied().fold(0.0, f64::max)
+            }
             KIND_FREQUENCY => {
                 self.inst.current_per_hz_v
                     * req.axis.last().copied().unwrap_or(0.0)
@@ -4001,8 +4079,9 @@ impl Q2Sim {
         result.spray = vec![45e-9 * (1.0 + 0.01 * self.rng.normal()); 3];
         let per_point = self.cfg.point_s
             + self.cfg.settle_s
+            + self.cfg.point_overhead_s.max(0.0)
             + if req.kind == KIND_FREQUENCY { 1.5 } else { 0.0 };
-        result.duration_s = count as f64 * per_point + 15.0;
+        result.duration_s = count as f64 * per_point + LINE_S;
         self.clock += result.duration_s;
         result
     }
@@ -4068,6 +4147,12 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
                 .to_owned(),
         );
     }
+    if !(cfg.a_margin >= 0.0 && cfg.a_margin <= 1.0) {
+        problems.push("a_margin must lie between 0 and 1.".to_owned());
+    }
+    if !(cfg.point_overhead_s >= 0.0 && cfg.point_overhead_s.is_finite()) {
+        problems.push("point_overhead_s must be zero or positive.".to_owned());
+    }
     if !(cfg.r_target > 1.0 && cfg.r_max >= cfg.r_target) {
         problems.push("r_target must exceed 1 and r_max must be at least r_target.".to_owned());
     }
@@ -4112,7 +4197,7 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
                 cfg.min_ions_in_line
             ));
         }
-        let current = view.current_at(f, a_hi);
+        let current = view.current_at(f, view.amplitude_top(f));
         worst = worst.max(current);
         let x = view.x_for(e);
         table.push(json!({"point": id, "mode": "amplitude", "f_khz": p[0], "energy_ev": e, "x_v": x,
@@ -4154,7 +4239,8 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
     if worst > 0.95 * inst.ilim_a {
         let f_ok = 0.95 * inst.ilim_a / (inst.current_per_hz_v * a_hi);
         problems.push(format!(
-            "The plan needs about {:.0} mA of RF current: raise Ilim to {:.0} mA (now {:.0} mA), or limit f to {:.0} kHz.",
+            "The RF current reaches about {:.0} mA (it follows from f and A): set Ilim to at least {:.0} mA on the PSU \
+             yourself (now {:.0} mA; MScan never changes Ilim), or limit f to {:.0} kHz in the plan.",
             worst * 1e3,
             (worst / 0.95 * 1e3 / 10.0).ceil() * 10.0,
             inst.ilim_a * 1e3,
@@ -4469,7 +4555,8 @@ fn simulate(plan: Plan, inst: Instrument, opts: &SimOptions) -> Value {
             json!({"id": r.request.id, "stage": r.request.stage, "role": r.request.role,
                 "point": r.request.point, "variant": r.request.variant, "kind": r.request.kind,
                 "f_khz": r.request.f_hz / 1e3, "energy_ev": r.request.energy_ev, "k": r.request.k,
-                "delta_v": r.request.delta_v, "outcome": r.outcome, "duration_s": r.duration_s})
+                "delta_v": r.request.delta_v, "outcome": r.outcome, "duration_s": r.duration_s,
+                "expected_s": r.request.expected_s})
         })
         .collect();
     let mut out = json!({
@@ -4507,8 +4594,22 @@ pub fn call(method: &str, args: &[Value], kwargs: &Value) -> Option<Result<Value
                         ..SimOptions::default()
                     };
                     let s = simulate(plan.clone(), inst, &opts);
-                    json!({"lines": s["lines"].as_array().map_or(0, Vec::len),
-                        "total_s": s["total_s"], "outcome": s["outcome"], "reason": s["reason"]})
+                    let lines = s["lines"].as_array().cloned().unwrap_or_default();
+                    // The simulated lines, each timed by the line model (2026-11-04: it matched the
+                    // instrument; the simulator's clean peaks need about 30 % fewer points).
+                    let total: f64 = lines
+                        .iter()
+                        .map(|l| {
+                            let took = l["duration_s"].as_f64().unwrap_or(0.0);
+                            if l["outcome"] == json!(DONE) {
+                                took.max(l["expected_s"].as_f64().unwrap_or(0.0))
+                            } else {
+                                took
+                            }
+                        })
+                        .sum();
+                    json!({"lines": lines.len(), "total_s": total, "simulated_s": s["total_s"],
+                        "outcome": s["outcome"], "reason": s["reason"]})
                 } else {
                     Value::Null
                 };

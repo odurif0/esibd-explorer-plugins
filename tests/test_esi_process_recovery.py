@@ -1,10 +1,12 @@
 """Native facade selection and legacy Python-worker fault references."""
 
+import contextlib
 import hashlib
 import importlib.util
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -580,3 +582,193 @@ class Controller:
         assert len(proxy._stderr_tail) <= 8192
     finally:
         proxy.close()
+
+
+class _VanishingController:
+    """An ESI whose OFF reads its outputs back OFF, reports the discharge, then vanishes (-100)."""
+
+    def __init__(self, error, *, report=True):
+        self.error, self.report, self.closed = error, report, []
+        self.connected, self._transport_poisoned = True, False
+
+    def disconnect(self, timeout_s, on_discharge):
+        if self.report:  # The runtime reports only after HV, heater and global enable read back OFF.
+            on_discharge({"consecutive": 0, "limit_v": 10.0, "modules": {
+                1: {"positive_v": 23.475, "negative_v": -19.897, "measured_a": -6.47e-10},
+                2: {"positive_v": -0.046, "negative_v": -0.048, "measured_a": 0.0}}})
+        raise RuntimeError(self.error)
+
+    def force_close_transport(self, timeout_s=None):
+        self.closed.append("force")
+        return True
+
+    def close(self):
+        self.closed.append("close")
+
+
+def _off_controller(module, device):
+    parent = SimpleNamespace(connect_timeout_s=.2, recording=True)
+    c = module.ESIController(parent)
+    c.device, c.initialized = device, True
+    messages = []
+    c.print = lambda message, **kwargs: messages.append((message, kwargs.get("flag")))
+    c._restore_off_ui_state = c._restore_on_ui_state = lambda **kwargs: None
+    return c, messages
+
+
+def test_controller_switched_off_after_outputs_off_is_not_an_unconfirmed_shutdown():
+    """2026-11-11 lab: switched off 12 s into the discharge check, the ESI said "HV may remain energized"."""
+    module = _load_plugin()
+    device = _VanishingController("ESI COM_ESI_CTRL_GetModuleDataReadyFlags failed: -100 (Device not connected)")
+    c, messages = _off_controller(module, device)
+    assert c._shutdown_communication_unlocked() is False
+    text = " ".join(message for message, _ in messages)
+    assert "HV may remain energized" not in text and "switched off or its cable unplugged" in text
+    assert "HV1 POS +23.5 V / NEG -19.9 V" in text
+    # Released at once (a retry OFF hung 7 s on Purge), no "shutdown unconfirmed".
+    assert device.closed[0] == "force" and c.device is None
+    assert not c.shutdown_unconfirmed and "controller lost at" in c.discharge_unverified
+    assert c.main_state == module._ESI_DISCONNECTED_DISCHARGE
+    assert "ON reconnects" in text and not any(flag == module.PRINT.ERROR for _, flag in messages)
+
+
+@pytest.mark.parametrize("error,report", [
+    ("ESI COM_ESI_CTRL_GetModuleDataReadyFlags failed: -100 (Device not connected)", False),  # outputs not yet OFF
+    ("ESI COM_ESI_CTRL_GetModuleDataReadyFlags failed: -10 (Timeout)", True),  # controller still there
+])
+def test_other_off_failures_stay_unconfirmed(error, report):
+    module = _load_plugin()
+    device = _VanishingController(error, report=report)
+    c, messages = _off_controller(module, device)
+    c._shutdown_communication_unlocked()
+    assert any("HV may remain energized" in message for message, _ in messages)
+    assert c.shutdown_unconfirmed and not c.discharge_unverified
+    assert c.main_state in ("Shutdown unconfirmed", module._ESI_DISCONNECTED_UNCONFIRMED)
+
+
+def test_on_with_the_controller_switched_off_runs_no_off_sequence(monkeypatch):
+    """2026-11-11 lab: ON while the box was off; Open blocked, then an OFF sequence reported an unconfirmed shutdown."""
+    module = _load_plugin()
+
+    class Unreachable:
+        connected, _transport_poisoned, _open_failed, _opening_in_progress, _failed_open_released = (
+            False, True, False, False, False)
+
+        def __init__(self, **kwargs):
+            self.closed = []
+
+        def connect(self, **kwargs):
+            raise RuntimeError("esi native worker transport is unusable: COM_ESI_CTRL_Open blocked past its "
+                               "native I/O deadline (5s); worker terminated")
+
+        def force_close_transport(self, timeout_s=None):
+            self.closed.append("force")
+            return True
+
+        def close(self):
+            self.closed.append("close")
+
+    monkeypatch.setattr(module, "_get_esi_driver_class", lambda: Unreachable)
+    parent = SimpleNamespace(connect_timeout_s=.2, com=16, baudrate=230400,
+                             pluginManager=SimpleNamespace(Settings=SimpleNamespace(dataPath="/tmp")))
+    c = module.ESIController(parent)
+    c.discharge_unverified = "controller lost at 13:38:54"
+    messages = []
+    c.print = lambda message, **kwargs: messages.append(message)
+    c._restore_off_ui_state = c._restore_on_ui_state = lambda **kwargs: None
+    c.shutdownCommunication = lambda: pytest.fail("no OFF sequence on a connection that never opened")
+    c.runInitialization()
+    assert c.device is None and not c.initializing
+    assert c.main_state == module._ESI_DISCONNECTED_DISCHARGE  # What was known before the attempt.
+    assert not c.shutdown_unconfirmed
+    assert not any("OFF requested" in m or "could not be confirmed" in m for m in messages)
+    assert any("Is the controller switched on?" in m for m in messages), messages
+
+
+def test_reconnection_supersedes_a_cut_discharge_check():
+    module = _load_plugin()
+    device = object.__new__(module.ESIDevice)
+    device.com, device.interlock_state, device.heat_status = 16, "OK", ""
+    device.main_state = module._ESI_DISCONNECTED_DISCHARGE
+    device.shutdown_unconfirmed, device.discharge_unverified = False, "controller lost at 13:38:54"
+    assert "#975a16" in device._status_badge_style()  # amber, not the red of an unconfirmed shutdown
+    assert "discharge not measured to the end (controller lost at 13:38:54)" in device._status_summary_text()
+    c = module.ESIController(SimpleNamespace())
+    c.discharge_unverified = "controller lost at 13:38:54"
+    c.device, c.resume_session, c._initialization_generation = object(), False, None
+    messages = []
+    c.print = lambda message, **kwargs: messages.append(message)
+    c.controllerParent.ensureFixedChannels = lambda **kwargs: None
+    c.controllerParent.isOn = lambda: False
+    c.initializeValues = c.startAcquisition = lambda **kwargs: None
+    c._sync_status = lambda: None
+    c.initComplete()
+    assert not c.discharge_unverified and any("superseded" in m for m in messages)
+
+
+def _explorer_start_acquisition(self):
+    """Explorer 1.0.2 DeviceController.startAcquisition, with the gap that let two callers both start."""
+    if self.acquisitionThread and self.acquisitionThread.is_alive():
+        self.acquiring = False
+        self.acquisitionThread.join(timeout=5)
+    time.sleep(.05)
+    self.acquisitionThread = threading.Thread(target=self.runAcquisition, daemon=True)
+    self.acquiring = True
+    self.acquisitionThread.start()
+
+
+class _TimeoutLock:
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def acquire_timeout(self, timeout, timeoutMessage=""):
+        acquired = self._lock.acquire(timeout=timeout)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._lock.release()
+
+
+def _polling_controller(module):
+    c = module.ESIController(SimpleNamespace())
+    c.initialized, c.acquisitionThread, c.lock = True, None, _TimeoutLock()
+    c.getDevice = lambda: SimpleNamespace(interval=10)
+    polls = []
+    c.readNumbers = lambda: polls.append((threading.current_thread(), time.monotonic()))
+    return c, polls
+
+
+def test_concurrent_acquisition_starts_poll_the_esi_once(monkeypatch):
+    """2026-11-11 lab: after an OFF/ON, the ON thread and Explorer's recording start each started a loop:
+    two polls per second, lock timeouts at every lost reply and 50 MB of worker log per hour."""
+    module = _load_plugin()
+    base = next(c for c in module.ESIController.__mro__[1:] if "startAcquisition" in vars(c))
+    monkeypatch.setattr(base, "startAcquisition", _explorer_start_acquisition)
+    c, polls = _polling_controller(module)
+    c.startAcquisition()  # the loop of the previous connection
+    time.sleep(.05)
+    barrier = threading.Barrier(2)
+    starters = [threading.Thread(target=lambda: (barrier.wait(), c.startAcquisition())) for _ in range(2)]
+    for thread in starters:
+        thread.start()
+    for thread in starters:
+        thread.join(5)
+    time.sleep(.2)
+    since = time.monotonic() - .1
+    pollers = {thread for thread, at in polls if at > since}
+    c.acquiring = False
+    assert pollers == {c.acquisitionThread}, pollers
+
+
+def test_a_superseded_acquisition_loop_stops():
+    module = _load_plugin()
+    c, polls = _polling_controller(module)
+    c.acquiring = True
+    c.acquisitionThread = old = threading.Thread(target=c.runAcquisition, daemon=True)
+    old.start()
+    time.sleep(.05)
+    c.acquisitionThread = threading.current_thread()  # a newer loop took over
+    old.join(1)
+    assert not old.is_alive() and c.acquiring

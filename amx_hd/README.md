@@ -136,8 +136,9 @@ flattened into a frequency: those outputs are reported as such, with the reason
 in the tooltip. Hi-Z never implies 0 V.
 
 The routing registers are read only while the controller is ON (`STATE_ON`),
-right after each ON/config load and then every 5 s; timing edits invalidate the
-table until the next readback. Viewing the panel never writes to the controller.
+right after each ON/config load, at the poll after any write of this plugin (frequency, timing,
+enable) and otherwise every 30 s (5 s until 2026-11-11, when these reads took 7 of the day's 11
+lost replies); timing edits invalidate the table until the next readback. Viewing the panel never writes to the controller.
 
 ### Timer timing
 
@@ -176,7 +177,7 @@ the channel table.
 
 The table states the expected signal from registers; it is not a waveform
 measurement. Check it once with an oscilloscope on each output before relying on
-it (see `SOFTWARE_TEST_PLAN.md`).
+it.
 
 ## AMX HD Configurations
 

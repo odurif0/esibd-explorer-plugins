@@ -10,7 +10,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, current_thread
 from typing import Any, cast
 
 import numpy as np
@@ -2175,6 +2175,27 @@ class AMPRChannel(Channel):
         return changed
 
 
+def _wait_for_poll(controller: Any, seconds: float) -> None:
+    """Sleep until the next poll, or until a verified write asks for one at once (``_poll_now``).
+
+    2026-11-04: after each MScan write, the point waited for the next 1 s poll to see a fresh readback:
+    about 0.5 s of the 0.9 s spent per point outside the measurement.
+    """
+    wake = controller.__dict__.setdefault("_poll_now", Event())
+    deadline = time.monotonic() + max(0.0, seconds)
+    while controller.acquiring and not wake.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, 0.05))
+    wake.clear()
+
+
+def _request_poll(controller: Any) -> None:
+    """A verified write: its readback is published by a poll now, not at the end of the interval."""
+    controller.__dict__.setdefault("_poll_now", Event()).set()
+
+
 class AMPRController(DeviceController):
     """AMPR hardware controller used by the ESIBD Explorer plugin."""
 
@@ -2400,10 +2421,25 @@ class AMPRController(DeviceController):
             if self._begin_transition(True):
                 self.toggleOnFromThread(parallel=True)
 
+    def startAcquisition(self) -> None:
+        """Explorer's start, one caller at a time.
+
+        Explorer checks for a running loop, then starts one, without a lock. On 2026-11-11 the ESI's ON
+        thread and Explorer's recording start ran it at once and two loops polled the device (lock
+        timeouts, five times more lost replies). This device also restarts its loop from a worker thread.
+        """
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            super().startAcquisition()
+
+    def _superseded_loop(self) -> bool:
+        """A newer acquisition loop runs: this one ends, so the device is polled by one loop only."""
+        owner = getattr(self, "acquisitionThread", None)
+        return isinstance(owner, Thread) and owner is not current_thread() and owner.is_alive()
+
     def runAcquisition(self) -> None:
         """Poll AMPR readbacks, holding the controller lock for one module at a time."""
         token = self._native_session_token
-        while self.acquiring and token is self._native_session_token:
+        while self.acquiring and token is self._native_session_token and not self._superseded_loop():
             started = time.monotonic()
             try:
                 # A whole 12-module cycle under one lock made setpoint writes,
@@ -2412,7 +2448,7 @@ class AMPRController(DeviceController):
                 if self.acquiring and token is self._native_session_token:
                     self.signalComm.updateValuesSignal.emit()
             finally:
-                time.sleep(max(0.0, _AMPR_MONITOR_INTERVAL_S - (time.monotonic() - started)))
+                _wait_for_poll(self, _AMPR_MONITOR_INTERVAL_S - (time.monotonic() - started))
 
     def _poll_cancelled(self, poll_token: object | None) -> bool:
         """True when the acquisition poll that owns ``poll_token`` was stopped."""
@@ -2655,6 +2691,7 @@ class AMPRController(DeviceController):
                     # Release ownership atomically: an edit arriving now must
                     # either belong to this worker or start the next one.
                     self._setpoint_thread = None
+                    _request_poll(self)  # The Monitor of the written outputs, without waiting a cycle.
                     return
             try:
                 with self._controller_lock_section("Waiting to send AMPR setpoints.", log_timeout=False):

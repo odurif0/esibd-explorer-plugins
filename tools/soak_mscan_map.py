@@ -7,7 +7,7 @@ handles and the runner's timing stay flat. No Explorer and no hardware: a fake M
 line with a spectrum of the tuning mix after the line's expected duration divided by ``--speed``.
 
     python3 tools/soak_mscan_map.py mscan/plans/q2_map.toml --speed 1 --out soak
-    python3 tools/soak_mscan_map.py mscan/plans/q2_check_1h.toml --speed 60   # a quick rehearsal
+    python3 tools/soak_mscan_map.py mscan/plans/q2_check_2h.toml --speed 60   # a quick rehearsal
 
 Faults are injected (``--fail-every``): a failed line every n lines, which the map measures again.
 ``soak.csv`` in the output folder gets one row per line: time, line, outcome, the process memory

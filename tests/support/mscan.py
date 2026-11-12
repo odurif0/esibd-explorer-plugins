@@ -153,6 +153,34 @@ def mscan_rig(mscan_module):
 
 
 @pytest.fixture
+def mscan_virtual_clock(mscan_rig, monkeypatch):
+    """The stepped rig on a virtual clock: each pause advances it by its wait and the DMMR records one sample.
+
+    On the real clock (2 ms pauses, 12 ms windows) a loaded machine could stretch one pause past a whole
+    window, which then held no sample (2026-11-12, full suite: point 0 of the detector read NaN).
+    """
+    r, s = mscan_rig, mscan_rig.scan
+    clock = NS(now=0., epoch=r.detector_device.time.data[-1] + .01)
+    clock.wall = lambda: clock.epoch + clock.now
+    monkeypatch.setattr(r.module, 'time', NS(time=clock.wall, monotonic=lambda: clock.now))
+
+    def pause(seconds=None):
+        r.on_pause()
+        if s._cancel.is_set():
+            raise r.module.ScanStopped('Scan stopped.')
+        clock.now += s.POLL_S if seconds is None else max(seconds, 1e-8)
+        for p in r.psus:
+            p.controller._manual_apply_worker_running = False
+            for c in p.channels:
+                c.monitor = c.value
+                c.voltage_setpoint_readback = c.value
+        r.detector_device.time.data.append(clock.wall())
+        r.detector.values.data.append(r.current())
+    s._pause = pause
+    return clock
+
+
+@pytest.fixture
 def mscan_continuous(mscan_rig, monkeypatch):
     s = mscan_rig.scan
     clock = NS(now=0., epoch=mscan_rig.detector_device.time.data[-1], jump=0.)

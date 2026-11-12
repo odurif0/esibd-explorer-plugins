@@ -2330,6 +2330,34 @@ fn one_receive_error_on_a_discharge_measurement_is_purged_and_repeated_once() {
     assert_eq!(rig.count("COM_ESI_CTRL_Close"), 1);
 }
 
+// 2026-11-11 lab: a single -13 (a reply to another command) to GetModuleDataReadyFlags during the
+// discharge check left an OFF unconfirmed with "HV may remain energized"; the retry OFF verified it.
+#[test]
+fn a_mismatched_reply_on_a_discharge_measurement_is_purged_and_repeated_once() {
+    for status in [-13, -14] {
+        let mut rig = Rig::connected(false);
+        rig.inject(
+            "COM_ESI_CTRL_GetModuleDataReadyFlags",
+            1,
+            status,
+            vec![json!(0)],
+        );
+        assert_eq!(rig.call("disconnect", &[], json!({})).unwrap(), json!(true));
+        let calls = rig.calls();
+        let failed = calls
+            .iter()
+            .position(|(name, _)| name == "COM_ESI_CTRL_GetModuleDataReadyFlags")
+            .unwrap();
+        assert_eq!(calls[failed + 1].0, "COM_ESI_CTRL_Purge", "status {status}");
+        assert_eq!(calls[failed + 2], calls[failed]);
+        assert!(
+            !calls[failed..].iter().any(|(name, _)| output_command(name)),
+            "only the read is repeated"
+        );
+        assert_eq!(rig.count("COM_ESI_CTRL_Close"), 1);
+    }
+}
+
 #[test]
 fn a_second_receive_error_on_the_same_measurement_still_leaves_off_unconfirmed() {
     let mut rig = Rig::connected(false);
@@ -2373,18 +2401,66 @@ fn a_reply_lost_in_a_poll_is_read_again_and_reported_not_failed() {
     );
     let snapshot = rig.call("collect_diagnostics", &[], json!({})).unwrap();
     assert!(snapshot.get("read_recovery").is_none(), "reported once");
-    // A second failure in the same poll still fails it.
+    // A second failure in the same poll still fails it (a read made at every poll).
     rig.inject(
-        "COM_ESI_CTRL_GetHeatCtrlPowerLimit",
+        "COM_ESI_CTRL_GetHeatCtrlHeaterPower",
         1,
         -10,
         vec![json!(0.0)],
     );
     rig.inject(
-        "COM_ESI_CTRL_GetHeatCtrlPowerLimit",
+        "COM_ESI_CTRL_GetHeatCtrlHeaterPower",
         2,
         -10,
         vec![json!(0.0)],
     );
     assert!(rig.call("collect_diagnostics", &[], json!({})).is_err());
+}
+
+// 2026-11-11 lab: all 18 lost replies of the day hit the heater limit and target reads, made at
+// every 1 s poll although only a command changes them.
+#[test]
+fn the_poll_reads_the_heater_configuration_again_only_after_a_heater_write() {
+    let mut rig = Rig::connected(true);
+    let configuration = [
+        "COM_ESI_CTRL_GetHeatCtrlHwLimits",
+        "COM_ESI_CTRL_GetHeatCtrlVoltageLimit",
+        "COM_ESI_CTRL_GetHeatCtrlCurrentLimit",
+        "COM_ESI_CTRL_GetHeatCtrlPowerLimit",
+        "COM_ESI_CTRL_GetHeatCtrlHeaterTemperature",
+    ];
+    let first = rig.call("collect_diagnostics", &[], json!({})).unwrap();
+    let read = |rig: &Rig| {
+        configuration
+            .iter()
+            .map(|s| rig.count(s))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(read(&rig), vec![1; 5]);
+    for _ in 0..3 {
+        let again = rig.call("collect_diagnostics", &[], json!({})).unwrap();
+        assert_eq!(
+            again["heat"]["power_limit_w"],
+            first["heat"]["power_limit_w"]
+        );
+        assert_eq!(
+            again["heat"]["hardware_limits"],
+            first["heat"]["hardware_limits"]
+        );
+    }
+    assert_eq!(read(&rig), vec![1; 5], "the next polls reuse it");
+    assert_eq!(
+        rig.count("COM_ESI_CTRL_GetHeatCtrlMonitoring"),
+        4,
+        "measurements are read every poll"
+    );
+    rig.call("configure_heat_limits", &[], json!({"power_w": 10.0}))
+        .unwrap();
+    let before = read(&rig);
+    rig.call("collect_diagnostics", &[], json!({})).unwrap();
+    let after = read(&rig);
+    assert!(
+        after.iter().zip(&before).all(|(a, b)| a == &(b + 1)),
+        "a heater write is followed by a live read: {before:?} -> {after:?}"
+    );
 }

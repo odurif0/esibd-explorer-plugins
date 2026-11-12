@@ -17,7 +17,7 @@ from support.qt import run_probe
 ROOT = Path(__file__).resolve().parents[1]
 STABILITY_CASES = ("heat_stable", "heat_stabilizing", "heat_stale", "heat_expired", "heat_reset")
 HEAT_CASES = (*STABILITY_CASES, "heat_controls", "heat_failed_edit", "heat_active", "heat_blocked", "heat_invalid_sensor", "heat_unknown", "heat_poll_error", "heat_off", "heat_stuck_off", "heat_quantized")
-CASES = ("widgets", "status_warning", "panel", "groups", "horizontal", "vertical", "stacked", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
+CASES = ("widgets", "status_warning", "panel", "groups", "horizontal", "vertical", "stacked", "output_off", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -82,7 +82,7 @@ def probe(case, output):
     ns["PlotDataItem"] = pg.PlotDataItem
     plugins.LiveDisplay = type("HostLiveDisplay", (), {
         name: extract("plugins.py", name, "LiveDisplay")
-        for name in ("getGroups", "initFig", "updateStackedViews", "updateMouseEnabled", "plot", "plotGroup", "plotChannel")
+        for name in ("getGroups", "initFig", "clearPlot", "updateStackedViews", "updateMouseEnabled", "plot", "plotGroup", "plotChannel")
     })
     from explorer_host import has_method
     if has_method(host, "Plugin", "getQtPen"):  # Explorer 1.0.1 plotGroup builds pens through it
@@ -142,7 +142,6 @@ def probe(case, output):
         channel.time = device.time
         channel.displayGroup = "ESI"
         channel.getDevice = lambda: device
-        channel.convertDataDisplay = lambda data: data
         channel.getValues = lambda *args, ch=channel, **kw: ch.values.get()
         channel.getQtLineStyle = lambda: QtCore.Qt.PenStyle.SolidLine
         channel.smooth, channel.linewidth, channel.logY = 0, 2, False
@@ -555,22 +554,31 @@ def probe(case, output):
     live.print = device.print
     live.waitForCondition = lambda **kw: True
     live.livePlotWidgets = []
-    live.clearPlot = lambda: live.livePlotWidgets.clear()
+    live.plotSplitter = live.stackedGraphicsLayoutWidget = None  # Explorer's clearPlot deletes them
     window = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(window)
     live.addContentWidget = layout.addWidget
     window.resize(900, 720)
 
+    hv1, hv2, heat, hv1_i, hv2_i = device.channels
     if case == "groups":
-        for state in live.GroupActionState:
+        for state in live.GroupActionState:  # one tab per quantity, whatever Explorer's grouping
             live.groupAction.state = state
             groups = live.getGroups()
             assert live.channelGroups is groups
-            assert len(groups) == 3
-            for channels in groups.values():
-                assert len({ch.unit for ch in channels}) == 1
-        device.channels[3].display = False
-        assert all(device.channels[3] not in group for group in live.getGroups().values())
+            assert list(groups.items()) == [("Current (nA)", [hv1_i, hv2_i]), ("Voltage (V)", [hv1, hv2]),
+                                            ("Temperature (degC)", [heat])], (state, groups)
+        # HV2 output switched OFF: its current leaves the plot, curve included.
+        removed = []
+        hv2_i.plotCurve = SimpleNamespace(curveParent=SimpleNamespace(removeItem=removed.append))
+        hv2.enabled = False
+        assert list(live.getGroups().items()) == [("Current (nA)", [hv1_i]), ("Voltage (V)", [hv1]),
+                                                  ("Temperature (degC)", [heat])]
+        assert hv2_i.plotCurve is None and removed
+        hv1_i.display = heat.enabled = False
+        assert list(live.getGroups().items()) == [("Voltage (V)", [hv1])]
+        hv1.enabled = False
+        assert live.getGroups() == {}
         return 0
 
     if case == "recording":
@@ -603,8 +611,8 @@ def probe(case, output):
             assert group["ESI_HV1_I"].attrs["Unit"] == "original"
         return 0
 
-    if case in ("horizontal", "vertical", "stacked"):
-        live.stackAction.state = getattr(live.StackActionState, case.upper())
+    if case in ("horizontal", "vertical", "stacked", "output_off"):
+        live.stackAction.state = getattr(live.StackActionState, "VERTICAL" if case == "output_off" else case.upper())
     else:
         # One current trace lets us test degenerate auto-range without another
         # signal at a different current level hiding the regression.
@@ -619,7 +627,7 @@ def probe(case, output):
     axes = {device.name: (0, None, 1, device.time.get())}
     live.getTimeAxes = lambda: axes
     if case == "manual":
-        live.livePlotWidgets[0].setYRange(-1e-8, 1e-8, padding=0)
+        live.livePlotWidgets[0].setYRange(-10, 10, padding=0)  # nA
     before = live.livePlotWidgets[0].viewRange()[1]
     live.plot(apply=True)
     window.show()
@@ -628,16 +636,57 @@ def probe(case, output):
         item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
         if getattr(item, "groupLabel", None) is not None and item.legend is not None:
             assert item.groupLabel.sceneBoundingRect().bottom() <= item.legend.sceneBoundingRect().top()
+    # One tab per quantity, whatever the stack mode; the current first, selected, at full height.
+    def tab_names():
+        return [live.plotTabs.tabText(index) for index in range(live.plotTabs.count())]
+    every = case in ("horizontal", "vertical", "stacked", "output_off")
+    assert tab_names() == (["Current", "Voltage", "Temperature"] if every else ["Current"])
+    assert live.stackAction.state == live.StackActionState.HORIZONTAL
+    assert len(live.livePlotWidgets) == live.plotTabs.count()
+    assert live.plotTabs.currentWidget() is live.livePlotWidgets[0]
+    assert live.livePlotWidgets[0].height() > .85 * window.height(), (live.livePlotWidgets[0].height(), window.height())
     for channel in device.channels:
         if channel.display:
             assert channel.plotCurve is not None
             x, y = channel.plotCurve.getData()
             np.testing.assert_array_equal(x, device.time.get())
-            np.testing.assert_allclose(y, np.log10(channel.values.get()) if case == "log" else channel.values.get(), atol=1e-18)
-            assert f"({channel.unit})" in channel.plotCurve.name()
+            # Currents are drawn in nA (user, 2026-11-11); the channel itself keeps amperes.
+            shown = channel.values.get() * (1e9 if channel.unit == "A" else 1)
+            np.testing.assert_allclose(y, np.log10(shown) if case == "log" else shown, rtol=1e-6, atol=1e-18)
+            assert f"({channel.getDisplayUnit()})" in channel.plotCurve.name()
+        else:
+            assert channel.plotCurve is None, channel.name
+    if case == "output_off":
+        live.plotTabs.setCurrentIndex(1)  # the operator looks at the voltages
+        hv2.enabled = False  # HV2 output OFF: its current and voltage leave the plots
+        live.plot(apply=True)
+        app.processEvents()
+        assert hv2_i.plotCurve is None and hv2.plotCurve is None and hv1_i.plotCurve is not None
+        item = live.livePlotWidgets[0]
+        item = item.getPlotItem() if hasattr(item, "getPlotItem") else item
+        assert [label.text for _, label in item.legend.items] == ["ESI_HV1_I (nA)"]
+        # Explorer keeps every QTabBar of the window (toggleTitleBar(update=True)) and walks the list
+        # when a dock moves: a rebuilt plot must not leave its deleted tab bar there (2026-11-11 lab).
+        old_bar = live.plotTabs.tabBar()
+        live.pluginManager.tabBars = window.findChildren(QtWidgets.QTabBar)
+        assert any(bar is old_bar for bar in live.pluginManager.tabBars)
+        heat.enabled = False  # one tab less: the plots are rebuilt, the Voltage tab stays selected
+        live.plot(apply=True)
+        app.processEvents()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete.value)
+        app.processEvents()
+        assert not any(bar is old_bar for bar in live.pluginManager.tabBars)
+        for bar in live.pluginManager.tabBars:
+            bar.count()  # Explorer's toggleTitleBar: raised RuntimeError on the deleted bar
+        assert tab_names() == ["Current", "Voltage"]
+        assert live.plotTabs.tabText(live.plotTabs.currentIndex()) == "Voltage"
+        assert heat.plotCurve is None and hv1.plotCurve is not None
+        hv1.enabled = False  # both outputs and the heater OFF: nothing to plot
+        live.plot(apply=True)
+        assert live.livePlotWidgets == [] and live.plotTabs is None and hv1_i.plotCurve is None
     if case == "constant":
         low, high = live.livePlotWidgets[0].viewRange()[1]
-        assert low < 2.5e-9 < high and high - low < 1e-8, (low, high)
+        assert low < 2.5 < high and high - low < 10, (low, high)  # 2.5 nA on a nA axis
         assert live.livePlotWidgets[0].getViewBox().autoRangeEnabled()[1]
     elif case == "manual":
         assert live.livePlotWidgets[0].viewRange()[1] == before

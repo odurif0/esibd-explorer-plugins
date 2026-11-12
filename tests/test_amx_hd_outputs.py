@@ -368,3 +368,30 @@ def test_crash_resume_reads_the_running_timing_and_routing(hd):
     controller._apply_snapshot(snapshot)
     assert [r["frequency"] for r in controller.output_rows] == ["10 kHz"] * 4
     controller._sync_loaded_config_to_gui(snapshot)  # Raised "timing readback is incomplete".
+
+
+def test_routing_is_read_again_every_30_s_and_at_the_poll_after_a_write(hd, monkeypatch):
+    """2026-11-11 lab: re-read every 5 s, the routing took 7 of the day's 11 lost AMX replies."""
+    _, parent, controller = make_case("amx_hd")
+    device = RoutingDevice()
+    clock = [1000.]
+    monkeypatch.setattr(hd.time, "monotonic", lambda: clock[0])
+    running = snapshot()
+    controller.hd_routing, controller._hd_routing_time = None, 0.
+    controller._refresh_hd_routing(device, running)
+    reads = len(device.calls)
+    assert reads and controller.hd_routing is not None
+    clock[0] += 29.
+    controller._refresh_hd_routing(device, running)
+    assert len(device.calls) == reads, "kept for 30 s"
+    clock[0] += 2.
+    controller._refresh_hd_routing(device, running)
+    assert len(device.calls) > reads, "read again after 30 s"
+    reads = len(device.calls)
+    kept = controller.hd_routing
+    controller._native_backend = lambda device: None  # an inline facade: the call goes to the device
+    writer = SimpleNamespace(set_frequency_khz=lambda *args, **kwargs: 0)
+    controller._device_call(writer, "set_frequency_khz", 450., timeout_s=1.)
+    assert controller.hd_routing is kept, "the rest of the write sequence still reads it"
+    controller._refresh_hd_routing(device, running)
+    assert len(device.calls) > reads, "the poll after a write reads it again"

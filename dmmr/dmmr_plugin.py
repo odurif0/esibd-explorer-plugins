@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Event, Lock, RLock
+from threading import Event, Lock, RLock, Thread, current_thread
 from typing import Any, cast
 
 import numpy as np
@@ -3497,17 +3497,32 @@ class DMMRController(DeviceController):
             if self._begin_transition(True):
                 self.toggleOnFromThread(parallel=True)
 
+    def startAcquisition(self) -> None:
+        """Explorer's start, one caller at a time.
+
+        Explorer checks for a running loop, then starts one, without a lock. On 2026-11-11 the ESI's ON
+        thread and Explorer's recording start ran it at once and two loops polled the device (lock
+        timeouts, five times more lost replies). This device also restarts its loop from a worker thread.
+        """
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            super().startAcquisition()
+
+    def _superseded_loop(self) -> bool:
+        """A newer acquisition loop runs: this one ends, so the device is polled by one loop only."""
+        owner = getattr(self, "acquisitionThread", None)
+        return isinstance(owner, Thread) and owner is not current_thread() and owner.is_alive()
+
     def runAcquisition(self) -> None:
         """Own the polling lock once, as in the AMPR/AMX acquisition loops."""
         token = self._native_session_token
-        while self.acquiring and token is self._native_session_token:
+        while self.acquiring and token is self._native_session_token and not self._superseded_loop():
             started = time.monotonic()
             try:
                 with self._controller_lock_section(
                     "Could not acquire lock to acquire DMMR data.",
                     log_timeout=False,
                 ):
-                    if not self.acquiring or token is not self._native_session_token:
+                    if not self.acquiring or token is not self._native_session_token or self._superseded_loop():
                         break
                     if getTestMode():
                         self.fakeNumbers()

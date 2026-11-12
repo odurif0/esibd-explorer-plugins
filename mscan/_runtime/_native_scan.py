@@ -27,6 +27,13 @@ from threading import Event
 
 import numpy as np
 
+# Noise floor (A) of the measurement-driven step: the noise between neighbouring points of a flat M03
+# signal, not the DMMR resolution. Map q2-check-1h, 2026-11-04: the standard error of a point from its
+# 5 DMMR readings was 14 fA, but neighbouring points of the flat tails differed by 20–60 fA (spray and
+# detector fluctuations between points). With the former 1 fA floor, 44 % of the flat steps counted as a
+# change: the ladder lines measured half of their fine grid, ran 31 min instead of the expected 14 and were
+# stopped. With 50 fA, the step replayed on those lines measures about a third of the grid.
+STEP_NOISE_FLOOR_A = 5e-14
 
 
 def _manual(channel):
@@ -140,9 +147,10 @@ class NativeScanAdapter:
         settings = dict(points=[float(v) for v in line['axis']], axis=line['kind'],
                         amplitude=float(line.get('amplitude_v') or 0.) if line['kind'] != 'amplitude' else math.nan)
         if line.get('adaptive'):
-            # A change counts only above 3 sigma of the point means, and never below the DMMR resolution
-            # (1 fA): flat tails stay coarse even where the readings repeat exactly.
-            settings['adaptive'] = dict(coarse=int(line.get('coarse') or 4), sigma=3., fraction=.1, noise_floor=1e-15)
+            # A change counts only above 3 sigma of the point means, sigma never below the noise between
+            # neighbouring points: flat tails stay coarse.
+            settings['adaptive'] = dict(coarse=int(line.get('coarse') or 4), sigma=3., fraction=.1,
+                                        noise_floor=STEP_NOISE_FLOOR_A)
         return settings
 
     def _bind(self):
