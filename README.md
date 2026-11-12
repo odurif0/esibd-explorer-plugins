@@ -4,30 +4,6 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 13 device plugins and two standalone scan plugins (15 folders).
 
-Version v0.5 introduces isolated native workers for all 15 plugins; v0.5.1 adds
-the AMX HD output panel (also usable by MScan) and fixes ESI config loading;
-v0.5.2 optimizes Transmission on a single detector while the spray is stable,
-with each RF amplitude set as an AMX output, and logs the ESI serial errors;
-v0.5.3 fixes what the first lab runs showed: faster AMPR edits and OFF, lost AMPR
-replies recovered, AMX frequency changes that keep the duty cycle and a simpler AMX
-panel, PSU values kept after a shutdown, a non-blocking ESI OFF and compact native logs;
-v0.5.4 makes MScan record every enabled DMMR module in pA with readable file names and
-repeated passes, lets Transmission and MScan use AMPR channels without equation, links
-two PSU channels and keeps an ESI OFF check from freezing Explorer; v0.5.5 also links
-their ON/OFF and Range, and shows the PSU interlock loops and the AMX HD interlock function;
-v0.5.6 keeps Explorer responsive during the general Close communication, lets Transmission
-move PSU amplitudes, and fixes what the lab logs of 2026-10-28/30 showed; v0.5.7 fixes what
-the first run of the AMX HD on the instrument showed; v0.5.8 recovers AMX and PSU reads after a lost
-reply, reconnects after `Communication lost` without restarting Explorer, keeps the AMX and PSU config lists in place while they are open, and lets MScan drive both
-quadrupole rod pairs with a fixed offset; v0.5.9 regroups the MScan panel, records every DMMR module,
-checks the PSU headroom (Half/Full range) and gives an m/z axis.
-Each plugin keeps its Python Explorer interface and owns a separate Rust worker;
-no Explorer fork, external Python, private interpreter or shared device process
-is needed. **Real-hardware qualification is pending.** Local software, simulated
-instrument and target-Explorer checks do not certify physical shutdown or safe
-access. See [RUST_MIGRATION.md](RUST_MIGRATION.md) for validation and remaining
-hardware checks; qualify the devices before routine experimental use.
-
 ## Available Plugins
 
 | Plugin   | Description |
@@ -50,7 +26,7 @@ hardware checks; qualify the devices before routine experimental use.
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.9.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.10.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -84,188 +60,75 @@ hardware checks; qualify the devices before routine experimental use.
 4. **Select the correct COM port** in the plugin settings for each device
    you want to control. That's it!
 
-For amplitude scans, see [MScan](mscan/README.md). Its axis is in volts, without
-m/z calibration. **Stopping a scan does not turn the HV outputs off.**
+For amplitude scans and maps of the quadrupole, see [MScan](mscan/README.md). Its axis is the RF
+amplitude in volts, or m/z. **Stopping a scan does not turn the HV outputs off.**
 
 To optimize the transmission through the inlet, funnel and quadrupoles, see
-[Transmission](transmission/README.md): describe the beamline once, choose the total
-ion current or a mass selected by a quadrupole (peak picked on an MScan spectrum or a
-quick sweep, in volts), choose the stages, then Optimize. It drives only the mapped
-channels, in small verified steps, measures only while the spray current is stable
-(30–60 nA by default), and can run on a built-in simulated beamline.
-
-## Host fixes and hardware validation
-
-`install_explorer_fixes.py` installs the targeted Explorer fixes for small-current
-cursor labels, incomplete channel names, UTF-8 configuration reading and the order
-of tabbed plugin docks (Explorer forgets a manual order at each restart; with the
-fix it is saved at closing and reapplied once the plugins are loaded, and plugins
-added since go last). Run it
-with Explorer's Python environment after closing Explorer and its notebooks;
-`--check` is read-only, and the original sources are backed up. Run it again after
-every Explorer update: upgrading Explorer replaces the patched files (the fixes
-are not yet in Explorer 1.0.2). It does not open
-instruments. Software validation is separate from the physical checks listed in
-[SOFTWARE_TEST_PLAN.md](SOFTWARE_TEST_PLAN.md).
-
-## Setpoint entry
-
-Press Enter, Tab, or click outside a numeric field to apply its contents.
-An action that uses the setpoint also reads the current field text, even if
-it does not move keyboard focus. OFF stops without first applying a new target.
-Acquisition refreshes do not replace text while you are editing it.
+[Transmission](transmission/README.md). It drives only the mapped channels, in small verified
+steps, and measures only while the spray current is stable.
 
 ## ON / OFF
 
-For **TPG366**, ON/OFF starts or stops acquisition and the USB connection.
-It never switches gauges or changes controller settings.
+- **ON** connects and runs the device's startup sequence. Check each output's readback: ON does
+  not necessarily enable every channel.
+- **OFF** requests and verifies the shutdown, then closes communication (**Disconnected**).
+- **Shutdown unconfirmed**: the shutdown could not be verified; communication stays open for
+  another OFF.
+- **Disconnected: shutdown unconfirmed**: the device's worker was released, which says nothing
+  about the outputs. Make the instrument safe locally before reconnecting or touching it.
 
-For the other device plugins:
+For TPG366, ON/OFF only starts or stops the pressure readings.
 
-- **ON** connects and runs the configured startup sequence. Check each output's
-  readback: ON does not necessarily enable every channel (for example, PSU
-  standby configuration `-1` keeps the outputs disabled).
-- **OFF** requests and verifies shutdown, then closes communication. Success is
-  shown as **Disconnected**; the next ON reconnects.
-- If shutdown cannot be verified while communication is still usable,
-  **Shutdown unconfirmed** keeps the connection available for another OFF attempt.
-  This button state is not confirmation that outputs are enabled.
-- If a worker crashes, exceeds its deadline or is forcibly disconnected,
-  **Disconnected: shutdown unconfirmed** means that its process was released,
-  not that hardware outputs are OFF. The button is OFF and a new ON creates a
-  fresh worker. Make the instrument safe locally before reconnecting or touching it.
+A verified disable is not proof of a complete electrical discharge. ESI checks both HV polarities
+against 10 V before disconnecting (see [ESI](esi/README.md)); this is not a safe-access
+certification.
 
-**Every device is isolated in its own native process.** Stopping one plugin does
-not stop the others, even if a vendor DLL never returns. Late results from the old
-connection cannot reactivate its button or replacement. Writes are never replayed
-automatically after a worker failure. TPG366 is read-only; its worker failure
-stops acquisition and invalidates readings, without changing gauge settings.
+Each device runs in its own process, so stopping or losing one plugin does not stop the others,
+and a write is never replayed after a failure. While a device is connected, its plugin keeps
+Windows from sleeping on idle; disable sleep in the power plan of the lab PC as well. Worker logs
+are written to `<Explorer data path>/logs/<device>/`.
 
-**Standalone Explorer needs no additional Python installation.** The plugin-local
-worker executable loads its own bundled DLL or serial protocol. A missing or
-modified binary fails connection visibly; there is no interpreter lookup, host
-launcher, inline DLL fallback or dependency on another plugin. Keep the complete
-plugin folder, including `native/manifest.json`, binaries, sources and notices.
-The current `STATE_ON` badge is green; a previous unconfirmed shutdown remains
-separately visible as a warning icon and red summary until discharge is verified.
-ESI checks are described in [ESI](esi/README.md). Worker logs are stored under
-`<Explorer data path>/logs/<device>/native/<family>/`, with an 8 MiB cap per session,
-not in the installed plugin folder. Existing logs are retained. Logs are always
-written, so the device plugins do not offer Explorer's per-device `Logging`
-setting, which they never read; console detail is set by `General/Log level`.
-
-A failed initial port opening uses **Connection pending** instead, with the
-DMMR button OFF rather than falsely indicating initialized operation. OFF or
-closing communication cleans up that opening without output commands. The
-driver instance and port reservation remain until closure or process termination
-is confirmed. This does not confirm the hardware output state. A cancelled
-connection cannot publish a late initialized state. A new ON explicitly reconnects
-after cleanup; the blocked call is contained inside the retired worker.
-
-While a device's port is open (from ON until its closure is confirmed,
-including an unconfirmed shutdown), its plugin asks Windows not to sleep on
-idle: a sleeping PC leaves the outputs in their last state with no software
-supervision. `powercfg /requests` lists each connected device under SYSTEM
-("ESIBD Explorer: …"). A manual sleep, a closed lid or the power button are not
-prevented; disable sleep in the power plan of the lab PC as well.
+A numeric field is applied with Enter, Tab or a click outside it.
 
 ### After an Explorer crash
 
-A software crash does not interrupt an experiment: the instruments keep running.
-Each device plugin records, while it is ON, a small file
-`<Explorer config path>/<device>.session.json` (port, recording). OFF,
-disconnection and a normal Explorer close remove it. When Explorer starts and
-finds such a record left by a crashed Explorer for the same COM port, the plugin
-reconnects by itself and **adopts the hardware state unchanged**: no startup
-sequence, no forced OFF, no config load, no ramp and no re-applied setpoint. The
-channel values are aligned to the setpoints the device reports, and recording
-restarts if it was on. DMMR and TPG366 resume with their normal ON (measurement
-only). A device that was OFF is not contacted. A normal start keeps every device
-OFF; ESI outputs and PSU panels start as described in their READMEs.
-
-If the instrument was powered off meanwhile, the resume ends like a failed ON;
-a timed-out worker is retired instead of requiring an Explorer restart.
-
-For HV devices, a verified disable is **not proof of complete electrical
-discharge**. ESI additionally checks both HV polarities on each module against
-its 10 V shutdown criterion before disconnecting (see `esi/README.md`). This
-software check is not a safe-access certification. Use the device-specific
-safety procedure before touching hardware.
+The instruments keep running. At the next start, each device that was ON reconnects by itself and
+adopts the hardware state unchanged: no startup sequence, no forced OFF, no ramp. A device that was
+OFF is not contacted, and a normal start keeps every device OFF.
 
 ## Requirements
 
-- ESIBD Explorer `1.0.2` on Windows
-- Windows 10 or later, x86-64, for the bundled vendor DLLs and native workers
-  ([Rust target requirements](https://doc.rust-lang.org/rustc/platform-support.html)).
-  No additional Python or Rust installation is needed to run a complete plugin folder.
-- Linux x86-64 workers are also supplied for TPG366, MScan and Transmission.
-  The currently built binaries require glibc 2.34 (TPG366/MScan) or 2.35
-  (Transmission), plus the system `libgcc_s`; Transmission also uses `libm`.
-  These are measured binary requirements, not Rust's generic Linux minimum.
-  DLL-backed hardware remains Windows-only. Rust and Cargo are build tools only.
-
+- ESIBD Explorer `1.0.2` on Windows 10 or later (x86-64). No additional Python or Rust
+  installation is needed: each plugin folder brings its own worker executable.
+- Linux x86-64 workers are also supplied for TPG366, MScan and Transmission (glibc 2.35 or later).
 
 ## Notebooks
 
-All notebooks are in [`notebooks/`](notebooks/README.md): ESI and AMX HD hardware
-probes, the DMMR zero check, ESI heater characterization and the
-pressure–temperature protocol. Run them outside Explorer, with `notebooks/`
-beside the plugin folders. Notebooks are not included in the plugin release ZIP.
+The hardware probes and characterization notebooks are in [`notebooks/`](notebooks/README.md).
+They are not part of the release ZIP.
 
-## Running Tests
+## Development
 
-Development checks run from the repository root:
-
-```bash
-python3 -m pytest -q                     # default: behaviour tests on canonical copies (~25 min)
-python3 -m pytest -q -m "not slow"       # without real Explorer/Qt subprocesses (~6 min)
-python3 -m pytest -q --all-siblings      # release validation: every sibling copy too
-ESIBD_RELEASE_ZIP=/path/to/esibd-explorer-plugins-vX.Y.Z.zip python3 -m pytest -q tests/test_release_archive_integrity.py
-```
-
-Use the v0.5.9 native archive for release checks, selected explicitly with
-`ESIBD_RELEASE_ZIP`. The historical v0.4.2 ZIP is intentionally unchanged and
-cannot validate the native bundle. The v0.5.9 tag message gives the archive's
-SHA-256; earlier packaging-test evidence is recorded in
-[RUST_MIGRATION.md](RUST_MIGRATION.md).
-
-The real-Explorer tests use the installed `esibd-explorer` (or
-`ESIBD_EXPLORER_SOURCE` / `ESIBD_QT_PYTHON`). They validate the release host only
-when that is Explorer `1.0.2`; the session header shows the host and the summary
-warns otherwise. Use a dedicated environment, and require it for release checks:
+Tests run locally (no CI):
 
 ```bash
 python3 -m venv .venv-explorer && .venv-explorer/bin/pip install -r requirements-dev.txt
-ESIBD_REQUIRE_TARGET_HOST=1 .venv-explorer/bin/python -m pytest -q
+.venv-explorer/bin/python -m pytest -q                    # canonical plugin copies
+.venv-explorer/bin/python -m pytest -q -m "not slow"      # without the real Explorer/Qt probes
+.venv-explorer/bin/python -m pytest -q --all-siblings     # release validation
 ```
 
-Sibling plugins (`ampr_b`, `amx_b`, `psu_b`–`psu_e`) are copies of their
-canonical plugin. Edit the canonical one, then run
-`python3 tools/sync_family_siblings.py` (`--check` reports drift only). Because
-parity tests guarantee identical copies, behaviour tests run on the canonical
-copy unless `--all-siblings` is given. Tests run locally only (no CI);
-use `--all-siblings` with Explorer 1.0.2 before a release.
+`ampr_b`, `amx_b` and `psu_b`–`psu_e` are copies of `ampr_a`, `amx_a` and `psu_a`: edit the
+canonical plugin, then run `python3 tools/sync_family_siblings.py`.
 
-Native development checks and local packaging:
+Native workers:
 
 ```bash
-python3 tools/generate_native_abi.py --check
 cargo test --locked --offline --manifest-path native/Cargo.toml --features test-backend
 python3 tools/build_native_workers.py --target x86_64-pc-windows-gnu --deploy
 python3 tools/build_native_workers.py --check
-python3 tools/sync_native_sources.py --check
-python3 tools/sync_family_siblings.py --check
+python3 tools/build_release.py X.Y.Z
 ```
 
-The build selects one family per executable and records binary/source hashes.
-Native sources and third-party notices accompany each plugin; GPL corresponding
-sources for MScan and TPG366 include vendored build dependencies. See
-[native/LICENSES.md](native/LICENSES.md). Source availability is not a hardware
-qualification or an automatic release.
-
-Tests remain in this repository's `tests/` directory. They are not part of plugin folders or release archives.
-Code shared by several test modules lives in `tests/support/` (fixtures are registered in
-`tests/conftest.py`); test modules never import one another. Unit tests import the plugins
-against `tests/support/explorer.py`, a small stand-in for the Explorer 1.0.2 API whose names
-and constants `tests/test_fake_explorer.py` compares with the installed host; real-Qt probes
-run through `support.qt.run_probe`.
+Each plugin carries its native sources and third-party notices; see
+[native/LICENSES.md](native/LICENSES.md).
