@@ -32,6 +32,7 @@ def _load_tpg366(monkeypatch):
     core.PLUGINTYPE = SimpleNamespace(OUTPUTDEVICE="Output device")
     core.getTestMode, core.parameterDict = (lambda: False), (lambda **kwargs: kwargs)
     plugins.Device = type("Device", (), {})
+    plugins.LiveDisplay = type("LiveDisplay", (), {})
     monkeypatch.setitem(sys.modules, "esibd.core", core)
     monkeypatch.setitem(sys.modules, "esibd.plugins", plugins)
     monkeypatch.setitem(sys.modules, "serial", sys.modules.get("serial") or ModuleType("serial"))

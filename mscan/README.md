@@ -395,34 +395,29 @@ scan of the quadrupole (`docs/quadrupole_optimization_plan.md`). Every line is a
 scan, started and saved like one from Start, with all of its checks; the decisions belong to the
 MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
 
-- **Map plan**: the plan file (TOML). Templates in `plans/`: `q2_check_2h.toml` (stopping cut and
-  the P1 ladder up to the R_target region, about 2 h), `q2_check_6h.toml` (P1 and P5 ladders, about
-  6 h) and `q2_map.toml` (the full map, every key with its default: f 250–640 kHz, about 45–55 h,
-  Ilim at least 330 mA; P9 at 900 kHz and P10 at 200 kHz were dropped on 2026-11-12).
-  Change a copy. Until 2026-11-04 the first two were named after their planned 1 h and 4 h.
+- **Map plan**: the plan of the next map (TOML). Templates in `plans/`, named by content:
+  `q2_P1_2h.toml` (stopping cut and the P1 ladder, about 2 h), `q2_P1_P5_6h.toml` (P1 and P5
+  ladders, about 6 h) and `q2_full.toml` (the full map, about 45–55 h, Ilim at least 330 mA; it lists
+  every key with its default). Change a copy, kept outside the plugin folder. Until 2026-11-12 they
+  were q2_check_2h, q2_check_6h and q2_map.
+- **Map…** (the only map button): a dialog to start a **new map** with a plan (Choose… to pick
+  another) or to **resume** a map that did not complete (the newest is proposed; Choose… for
+  another folder). A new map is checked first against the instrument (what to change, lines and
+  time, in the console) and starts only if nothing must change. While a map runs, the button is
+  **Stop map**. A running map keeps the plan it started with.
 - **Map status**: stage, line, point and what the map waits for; the same in `status.json`. A
   finished map shows when and after how many lines (`stopped at 14:35 after 0 lines: …`).
-- Buttons, between Map plan and Map status (named buttons of the group, not toolbar icons, since
-  2026-11-12: on 2026-11-11 the play icon of Start scan was taken for the start of the 2 h plan):
-  **Check** (asks for the plan file, opened on the loaded one, and checks it against the
-  instrument: what to change before Start, and the time of the lines the Q2 simulator decides, each
-  timed like on the instrument), **Simulate** (the loaded plan against the simulator, no hardware),
-  **Start map / Stop map** and **Resume** (a stopped map, from its folder). Simulate and
-  Start map use the loaded plan without asking, and their tooltips name it; they ask for a file only
-  when no plan is loaded. To run another plan after a map, Check it first. A running map keeps the
-  plan it started with. The toolbar keeps Start scan alone.
 
-Before Start map, prepare the instrument as for a scan: AMX HD ON with its RF config (50 % duty,
-100 MHz clock), PSU in Full range with an Ilim above what Check asks (set it on the PSU yourself:
+Before Map…, prepare the instrument as for a scan: AMX HD ON with its RF config (50 % duty,
+100 MHz clock), PSU in Full range with an Ilim above what the check asks (set it on the PSU yourself:
 the RF current follows from f and A, and Ilim is the operator's safeguard, which MScan reads but never
 changes), AMPR ON with `Q1_DC`,
 `Ap_Q1_Q2`, `Stub_Entry_Q2`, `Stub_Exit_Q2` and both rod pairs in manual control, DMMR recording,
 TPG366 acquiring, ESI spraying from the syringe. Select the rod pairs in **Mass filter** as for a
-scan. Start scan is locked from the click on Start map until the map ends: its first engine
-call can take about 30 s on the worker's first launch after an install (an antivirus check), and
-on 2026-11-11 a Start scan clicked during that wait stopped the map at its first engine call. A
-second click on Start map during the start stops the map once it has started. From Start map on,
-nothing waits for a human:
+scan. Start scan is locked from the start of a map until it ends: its first engine call can take
+about 30 s on the worker's first launch after an install (an antivirus check). A second click on
+the button during the start stops the map once it has started. From then on, nothing waits for a
+human:
 
 - **Lines.** The stopping cut along x (it fixes the ion energy E = e·(x_stop − x)); at each design
   point a ladder in k up to the closing, two repeats, a verification line at the computed (k*, δ*)
@@ -443,8 +438,12 @@ nothing waits for a human:
 - **Time.** A line takes 15 s plus its points at `point_s + settle_s + point_overhead_s` each
   (0.8 + 0.3 + 0.9 = 2.0 s; 2026-11-04: 2.02 s and 15.5 s). Once its lines hold 100 points, the map
   times its own: the estimates and the time left follow the instrument.
-- **Faults.** A failed line (spray outside ±40 % of its value during the last reference line that
-  found its peak, or at Start before the first one, a worker or detector fault,
+- **Spray.** The ESI current must stay within ±`spray_window_percent` (40 %) of a reference: the
+  current at Start (or at Resume), then the mean of this run's last reference line that found its
+  peak. `spray_range_na = [30, 60]` in the plan sets a fixed range in nA instead. The window in use
+  is said in the console and `map.log` whenever it changes. Each Start or Resume takes its own
+  reference (2026-11-12: after a map stopped on its window, the next maps kept that window).
+- **Faults.** A failed line (spray outside its window over the line, a worker or detector fault,
   no new point for 5 min, or a line longer than all the points of its axis would take at
   `point_s + settle_s + 2 s` each) is measured again. A line slower than its estimate is not a
   fault (2026-11-04: three good lines were stopped at twice an estimate that counted 1.1 s per

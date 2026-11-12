@@ -11,7 +11,7 @@ from support.qt import dispose_windows, run_probe
 
 
 def _map_buttons(scan):
-    """The named map buttons of the Map group, between Map plan and Map status (one row only)."""
+    """The Map… button of the Map group, between Map plan and Map status (one row only)."""
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QToolButton
     status = scan.settingsMgr.settings[scan.MAP_STATUS]
@@ -939,7 +939,7 @@ def run(scenario, target, app_holder=None):
         assert parsed['Info']['Plugin'] == 'MScan Settings'
         scan.settingsMgr.loadSettings(useDefaultFile=True)
         assert (scan.start, scan.stop, scan.step) == (72.5, 122.5, 2.5)
-        assert [b.text() for b in _map_buttons(scan)] == ['Check', 'Simulate', 'Start map', 'Resume']
+        assert [b.text() for b in _map_buttons(scan)] == ['Map…']
         assert (scan.settling_s, scan.integration_s) == (.4, 2.5)
         assert scan.amx_name == 'AMX_A' and scan.amx_outputs == 'CH2-CH3'
         assert scan._modules() == [detector]
@@ -948,7 +948,7 @@ def run(scenario, target, app_holder=None):
         imported_bytes = exported.read_bytes()
         scan.loadSettings(file=exported)
         assert exported.read_bytes() == imported_bytes
-        assert [b.text() for b in _map_buttons(scan)] == ['Check', 'Simulate', 'Start map', 'Resume']
+        assert [b.text() for b in _map_buttons(scan)] == ['Map…']
         assert scan._modules() == [detector]
         # Invalid UTF-8 must not discard settings or overwrite the source file.
         broken = target / 'broken.ini'
@@ -986,32 +986,33 @@ def run(scenario, target, app_holder=None):
     start_button = scan.titleBar.widgetForAction(scan.recordingAction)
     assert start_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
     assert start_button.text() == 'Start scan'
-    # Map plans (lab 2026-11-04): Check loads a plan (no extra icon: Start scan keeps its width in a
-    # narrow dock), and the toolbar names the loaded plan, also when its path is typed in the panel.
-    assert not hasattr(scan, 'mapLoadAction')
-    assert 'choose the plan file' in scan.mapCheckAction.toolTip(), scan.mapCheckAction.toolTip()
-    assert 'No plan loaded' in scan.mapAction.toolTip(), scan.mapAction.toolTip()
+    # One Map… button in the Map group, none in the toolbar (user, 2026-11-12); its tooltip names the plan,
+    # also when its path is typed in the panel.
+    assert not {'mapLoadAction', 'mapCheckAction', 'mapSimulateAction', 'mapResumeAction'} & set(vars(scan))
+    assert scan.mapAction not in scan.titleBar.actions()
+    buttons = _map_buttons(scan)
+    assert [b.text() for b in buttons] == ['Map…'] and 'No plan loaded' in buttons[0].toolTip()
     plan_field = scan.settingsMgr.settings[scan.MAP_PLAN]
-    plan_field.line.setText(str(ROOT / 'mscan' / 'plans' / 'q2_check_2h.toml'))
+    plan_field.line.setText(str(ROOT / 'mscan' / 'plans' / 'q2_P1_2h.toml'))
     plan_field.line.userEditingFinished.emit()
-    assert scan._map_loaded_plan() == ROOT / 'mscan' / 'plans' / 'q2_check_2h.toml'
-    for action in (scan.mapCheckAction, scan.mapSimulateAction, scan.mapAction):
-        assert 'q2_check_2h.toml' in action.toolTip(), action.toolTip()
+    assert scan._map_loaded_plan() == ROOT / 'mscan' / 'plans' / 'q2_P1_2h.toml'
+    assert 'q2_P1_2h.toml' in buttons[0].toolTip(), buttons[0].toolTip()
+    from PyQt6.QtWidgets import QDialog
+    accept = QDialog.exec
+    QDialog.exec = lambda self: QDialog.DialogCode.Accepted  # The dialog builds; OK keeps New map.
+    try:
+        assert scan._map_choice() == ('new', ROOT / 'mscan' / 'plans' / 'q2_P1_2h.toml')
+    finally:
+        QDialog.exec = accept
     plan_field.line.setText('')
     plan_field.line.userEditingFinished.emit()
     assert 'No plan loaded' in scan.mapAction.toolTip()
-    # Map buttons (user request 2026-11-12): named, in the Map group, none in the toolbar (on 2026-11-11 the
-    # play icon was taken for the start of the 2 h plan).
-    assert not {scan.mapCheckAction, scan.mapSimulateAction, scan.mapResumeAction, scan.mapAction} & set(scan.titleBar.actions())
-    buttons = _map_buttons(scan)
-    assert [b.text() for b in buttons] == ['Check', 'Simulate', 'Start map', 'Resume']
-    assert 'No plan loaded' in buttons[2].toolTip() and 'resume a stopped map' in buttons[3].toolTip()
     scan.mapAction.state = True
-    assert buttons[2].text() == 'Stop map' and 'safe stop' in buttons[2].toolTip()
+    assert buttons[0].text() == 'Stop map' and buttons[0].toolTip() == scan.MAP_STOP_TOOLTIP
     scan.mapAction.state = False
-    assert buttons[2].text() == 'Start map'
+    assert buttons[0].text() == 'Map…'
     scan._place_map_buttons()
-    assert len(_map_buttons(scan)) == 4  # Placed again, never twice.
+    assert len(_map_buttons(scan)) == 1  # Placed again, never twice.
     scan.statusAction = NS(setVisible=lambda *a: None)
     manager.loading = False
     manager.Settings.loading = False

@@ -808,6 +808,27 @@ def providePlugins() -> "list[type[Plugin]]":
     """Return the plugins provided by this module."""
     return [DMMRDevice]
 
+_LIVE_PLOT_MINUTES = "30"
+
+
+def _offer_thirty_minutes(display) -> None:
+    """Live plot: offer 30 min in its length menu and select it once (user, 2026-11-12).
+
+    Explorer offers 0.2 to 1440 min without 30 and starts at 2 min. The menu is saved with its items,
+    so once 30 is there the operator's later choice stays.
+    """
+    combo = getattr(display, "displayTimeComboBox", None)
+    setting = getattr(combo, "setting", None)
+    if setting is None or combo.findText(_LIVE_PLOT_MINUTES) != -1:
+        return
+    values = [float(text) for text in setting.items]
+    combo.insertItem(next((i for i, value in enumerate(values) if value > 30), len(values)), _LIVE_PLOT_MINUTES)
+    setting.loading = True  # As Explorer restores it: saved with the items, no replot before the display exists.
+    try:
+        setting.value = _LIVE_PLOT_MINUTES
+    finally:
+        setting.loading = False
+
 
 class _DMMRLiveDisplay(LiveDisplay):
     """Show currents in pA and keep the last acquisition visible, without changing stored amperes.
@@ -821,6 +842,10 @@ class _DMMRLiveDisplay(LiveDisplay):
     """
 
     PICOAMPERE = 1e12
+
+    def initGUI(self) -> None:
+        super().initGUI()
+        _offer_thirty_minutes(self)
 
     def initFig(self) -> None:
         super().initFig()

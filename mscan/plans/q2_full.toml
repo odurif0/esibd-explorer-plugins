@@ -3,7 +3,7 @@
 # map engine uses when it is left out; change a copy of this file, not the file itself.
 
 [map]
-name = "q2-map"
+name = "q2-full"
 mix = [118.09, 322.05, 622.03, 922.01, 1521.97, 2121.93, 2721.89]  # Agilent G2421A, m/z
 best_scan_range = [622, 2122]   # the merit and R_target apply to the mix ions in this range (2026-11-04:
                                 # 322 unresolved on the background, 2722 never above the noise)
@@ -14,7 +14,9 @@ a_range_v = [20, 348]           # the amplitude lines stay inside (PSU in Full r
 a_margin = 0.2                  # a line spans its best-range ions ± 20 % of their amplitude
 min_ions_in_line = 2
 reference_every = 5             # one reference window every 5 lines
-spray_window_percent = 40       # around the ESI current at Start (2026-11-04: 42 → 48 → 36 nA, beam within 2 %)
+spray_window_percent = 40       # ± around the ESI current at Start, then at the last reference line that saw
+                                # the beam (2026-11-04: 42 → 48 → 36 nA, beam within 2 %)
+spray_range_na = []             # or a fixed ESI current range instead, e.g. [30, 60] (nA)
 seed = 1
 detector = "M03"                # the DMMR module the measurement-driven step follows
 point_s = 0.8                   # measurement time per point (s)

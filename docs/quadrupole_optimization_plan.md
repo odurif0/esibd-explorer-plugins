@@ -543,15 +543,15 @@ lose nothing, and Resume is the same call as a normal step.
    - PSU_A in Full range with its Ilim;
    - AMPR ON;
    - DMMR recording, TPG366 acquiring, ESI spraying from the syringe.
-2. In MScan, open the Map group and choose a plan file. Three templates are provided:
-   - `q2_check_2h.toml`: stopping cut and the P1 ladder up to the R_target region (about 2 h);
-   - `q2_check_6h.toml`: P1 and P5 ladders (about 6 h);
-   - `q2_map.toml`: the full map.
-3. **Check**, at load and again at Start, validates the worst case of the hard bounds and lists what to
-   change. **Simulate** runs the plan against the Q2 simulator without touching the hardware and shows
-   the lines and the time it would take.
-4. **Start map**. From then on nothing waits for a human. The MScan settings are locked, and a manual
-   change of a driven channel causes a safe stop.
+2. In MScan, Map group, click **Map…** and choose a new map with a plan (or resume a stopped map).
+   Three templates are provided:
+   - `q2_P1_2h.toml`: stopping cut and the P1 ladder up to the R_target region (about 2 h);
+   - `q2_P1_P5_6h.toml`: P1 and P5 ladders (about 6 h);
+   - `q2_full.toml`: the full map.
+3. The plan is checked first: the worst case of the hard bounds, what to change, and the lines and time
+   the Q2 simulator decides. The map starts only if nothing must change.
+4. From then on nothing waits for a human. The MScan settings are locked, and a manual change of a
+   driven channel causes a safe stop. The button becomes **Stop map**.
 5. Follow the progress in the panel: stage, line, point (f, E, k), laws and remaining time. A status file
    and the log in `<Data path>/logs/mscan/` can be read remotely.
 6. Files:

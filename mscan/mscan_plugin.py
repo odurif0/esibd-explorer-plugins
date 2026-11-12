@@ -27,7 +27,7 @@ import warnings
 import h5py
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QGridLayout, QHeaderView,
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
                              QSizePolicy, QToolButton, QTreeWidgetItem, QWidget)
 
 from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
@@ -407,15 +407,11 @@ class MScan(Scan):
     # an ordinary scan of this plugin. The decisions belong to the MScan worker (mscan_map).
     MAP_PLAN = 'Map plan'
     MAP_STATUS = 'Map status'
-    MAP_TOOLTIPS = dict(
-        check='Map: choose the plan file (opened on {plan}) and check it against the instrument (what to change '
-              'before Start). Simulate and Start map then use it.',
-        simulate='Map: run {plan} against the Q2 simulator, without hardware (lines and time).',
-        toggle='Map: start {plan}, line by line, with no operator.')
-    # Named buttons of the Map group, not toolbar icons (user request 2026-11-12): on 2026-11-11 the
-    # operator started the 2 h plan with the play icon (Start scan) instead of the clock (Start map).
-    MAP_BUTTONS = (('mapCheckAction', 'Check'), ('mapSimulateAction', 'Simulate'),
-                   ('mapAction', 'Start map'), ('mapResumeAction', 'Resume'))
+    # One Map… button in the Map group, not in the toolbar (user, 2026-11-12: on 2026-11-11 the play icon was
+    # taken for the start of a plan, then four map buttons were found confusing). It starts a new map, checked
+    # first, or resumes a stopped one; while a map runs it stops it.
+    MAP_TOOLTIP = ('Start a new map (its plan is checked first) or resume a stopped one.')
+    MAP_STOP_TOOLTIP = 'Stop the map safely.'
     MAP_BUTTON_ROW = 'mscan-map-buttons'
     # Devices whose channels are recorded with each point, as the beam conditions of the scan
     # (user, 2026-11-03: "le suivi de l'ESI est important"): spray HV and current, pressures. Read live from
@@ -516,12 +512,12 @@ class MScan(Scan):
         def initGUI(self):
             super().initGUI()
             self.titleBarLabel.setText(self.scan.TITLE)
-            self.addAction(event=self.copy_data, toolTip='Data to Clipboard (amplitude and each current in pA).',
+            self.addAction(event=self.copy_data, toolTip='Data to Clipboard (currents in pA).',
                            icon=self.dataClipboardIcon, before=self.copyAction)
             self.autoscaleAction = self.addStateAction(event=self.autoscale_changed,
-                toolTipFalse='Manual scale: zoom and pan are kept. Click to follow the data again.',
+                toolTipFalse='Manual scale. Click to follow the data.',
                 iconFalse=self.makeCoreIcon('scaleX_manual.png'),
-                toolTipTrue='Automatic scale: the plot follows the data. Zooming or panning switches to manual.',
+                toolTipTrue='Automatic scale. Zoom or pan switches to manual.',
                 iconTrue=self.makeCoreIcon('scaleX_auto.png'), before=self.copyAction, restore=False)
             self.autoscaleAction.state = True
 
@@ -599,202 +595,125 @@ class MScan(Scan):
         settings = {}
         settings[self.MODULES] = parameterDict(value='No DMMR module enabled', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='Every enabled current module of the DMMR is recorded, each in its own column and plot line: '
-                    'enable or disable modules in the DMMR plugin. Point windows follow the DMMR time axis, shared '
-                    'by all modules. A module without a reading in a window gives NaN for that point only and '
-                    'never stops the scan. DMMR acquisition and recording must already be active.')
+            toolTip='Every enabled DMMR current module is recorded; enable modules in the DMMR plugin.')
         settings[self.AMX] = parameterDict(value='None', items=', '.join(['None', *self.AMX_PLUGINS]),
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_name', event=self._setup_changed,
-            toolTip='AMX with PSU associations already configured in its Settings. No automatic ON or config load.')
+            toolTip='AMX that drives the quadrupole; its PSU associations are set in its Settings.')
         settings[self.OUTPUTS] = parameterDict(value='CH0-CH1', items=', '.join([self.NO_PAIR, *self.PAIRS]),
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_outputs', event=self._setup_changed,
-            toolTip='Outputs wired to this quadrupole. Both rails of each associated PSU are swept together. Other outputs sharing these supplies are also affected.')
+            toolTip='AMX outputs wired to the quadrupole; both rails of each associated PSU are swept.')
         settings[self.MODE] = parameterDict(value=self.STEPPED, items=f'{self.STEPPED},{self.CONTINUOUS}',
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='scan_mode', event=self._mode_changed,
-            toolTip='Step by step: settle, then measure at each amplitude. Continuous: PC-timed voltage increments '
-                    'with acquisition during transitions; not a hardware-synchronized analogue ramp. '
-                    'The horizontal axis is commanded amplitude, not a simultaneous voltage/current measurement.')
+            toolTip='Step by step: settle, then measure at each amplitude. Continuous: measure while the amplitude moves.')
         settings[self.TIME_STEP] = parameterDict(value=1., minimum=.001, maximum=3600., unit='s',
             parameterType=PARAMETERTYPE.FLOAT, attr='time_step_s', event=self.estimateScanTime,
             instantUpdate=False, displayDecimals=3,
-            toolTip='Continuous only: requested interval between voltage commands. DMMR samples are averaged '
-                    'over each actual command interval, including transitions. Does not change DMMR sampling. '
-                    'Must cover the selected module\'s valid data interval (see DMMR data interval); '
-                    'unknown cadence or a shorter step blocks Start. No new valid sample blocks the next command. '
-                    'A final interval is measured at the last amplitude. PC jitter may lengthen an interval, '
-                    'never shorten the next to catch up. A whole missed interval or an unfinished PSU move '
-                    'aborts the scan without skipping commands. Actual timestamps are saved.')
+            toolTip='Continuous: time between amplitude commands; at least the DMMR data interval.')
         settings[self.RATE] = parameterDict(value=1., minimum=.000001, maximum=1e6,
             parameterType=PARAMETERTYPE.FLOAT, attr='sweep_rate', event=self.estimateScanTime,
             instantUpdate=False, displayDecimals=15, unit='V/s',
-            toolTip='Continuous only: positive requested sweep speed in V/s. Direction follows Amplitude from/to. '
-                    'Command increment = Sweep rate × Time step; the stepped-mode Amplitude step is ignored. '
-                    'PC-timed, sequential PSU writes, not a verified analogue slew rate or synchronized ramp.')
+            toolTip='Continuous: sweep speed.')
         settings[self.PASSES] = parameterDict(value=1, minimum=1, maximum=1000,
             parameterType=PARAMETERTYPE.INT, attr='passes', event=self.estimateScanTime, instantUpdate=False,
-            toolTip='The same sweep is repeated this many times in one file. Each pass is kept; the plot shows '
-                    'every pass faintly and their mean. Step by step: each pass returns to the start like any '
-                    'other step. Continuous: each pass ends like a single sweep, then returns to the start and '
-                    'settles (Initial/final settling) before sweeping again.')
+            toolTip='Sweeps in one file; the plot shows each pass and their mean.')
         settings[self.DMMR_INTERVAL] = parameterDict(value=1000, minimum=100, maximum=10000,
             parameterType=PARAMETERTYPE.INT, event=self._dmmr_interval_changed,
             instantUpdate=False, restore=False, unit='ms',
-            toolTip='Live DMMR software interval, shared by ALL its modules and recording. '
-                    'Edits use the existing DMMR setting and its allowed range; no ON/OFF or ADC setting is changed. '
-                    'The delay is applied after module reads, so actual sample intervals can be longer. '
-                    'Explorer normally permits 100–10000 ms (1000 ms default), not a hardware sampling-rate guarantee. '
-                    'Loading a scan file never applies its saved interval to DMMR. Cannot edit during a scan.')
+            toolTip='DMMR polling interval, shared by ALL its modules (software, not a hardware sampling-rate).')
         for key, value, attr in ((self.START, 50., 'start'), (self.STOP, 200., 'stop'), (self.STEP, 1., 'step')):
             settings[key] = parameterDict(value=value, minimum=.000001 if key == self.STEP else 0., maximum=1e6,
                 parameterType=PARAMETERTYPE.FLOAT, attr=attr, event=self.estimateScanTime, instantUpdate=False,
-                displayDecimals=3, unit='V', toolTip='Amplitude A: rail levels -A / +A, not peak-to-peak voltage.')
+                displayDecimals=3, unit='V', toolTip='RF amplitude A: the rails are at −A and +A.')
         for key, value, attr, tooltip in (
-            (self.SETTLING, .5, 'settling_s', 'Continuous time within voltage tolerance after the PSU commands finish. '
-                'Step by step: at every point and on return. Continuous: only at the start and on return.'),
-            (self.INTEGRATION, 1., 'integration_s', 'Time window for averaging new DMMR samples, after settling. '
-                'This does not change DMMR sampling. Empty or invalid windows are saved as NaN.'),
+            (self.SETTLING, .5, 'settling_s', 'Time within tolerance before measuring (continuous: at the start and on return).'),
+            (self.INTEGRATION, 1., 'integration_s', 'Averaging window of the DMMR samples at each point.'),
         ):
             settings[key] = parameterDict(value=value, minimum=.001, maximum=3600., unit='s',
                 parameterType=PARAMETERTYPE.FLOAT, attr=attr, event=self.estimateScanTime,
                 instantUpdate=False, displayDecimals=3, toolTip=tooltip)
         for key, value, attr, tooltip in (
-            (self.CADENCE, 'Select a DMMR module', None, 'Intervals between the last 21 valid recorded samples of the selected module, '
-                'not empty recorder ticks. The minimum continuous Time step is the larger of the configured DMMR polling '
-                'interval and the longest observed interval, rounded up to milliseconds. At least two fresh valid samples '
-                'are required. This observed software bound does not certify an ADC conversion rate or future timing.'),
-            (self.SAMPLES, 'Not acquired', None, 'Number of finite/total DMMR samples used at the last acquired point.'),
-            (self.SCANTIME, 'Unavailable', 'scantime', 'Step by step: all settling and measurement windows plus final settling. '
-                'Continuous: one time step per amplitude, including the last, plus one settling per pass '
-                'and the final settling. '
-                'Approach/return, communication and waiting for DMMR data add time. Neither mode is inherently faster.'),
+            (self.CADENCE, 'Select a DMMR module', None, 'Observed interval between valid DMMR samples; it bounds the continuous time step.'),
+            (self.SAMPLES, 'Not acquired', None, 'Valid/total DMMR samples at the last point.'),
+            (self.SCANTIME, 'Unavailable', 'scantime', 'Minimum duration; communication and data waits add time.'),
         ):
             settings[key] = parameterDict(value=value, parameterType=PARAMETERTYPE.LABEL,
                 indicator=True, restore=False, attr=attr, toolTip=tooltip)
         settings[self.TIMEOUT] = parameterDict(value=30., minimum=.1, maximum=3600., unit='s',
             parameterType=PARAMETERTYPE.FLOAT, attr='settle_timeout', advanced=True,
-            toolTip='Abort if voltage settling or fresh detector data takes longer than this timeout.')
+            toolTip='Abort when settling or fresh detector data takes longer.')
         settings[self.TOLERANCE] = parameterDict(value=1., minimum=.001, maximum=100., unit='V',
             parameterType=PARAMETERTYPE.FLOAT, attr='voltage_tolerance', advanced=True,
-            toolTip='Allowed absolute difference between each measured PSU magnitude and its requested value.')
+            toolTip='Allowed difference between measured and requested PSU voltage.')
         settings[self.STATUS] = parameterDict(value='Idle', parameterType=PARAMETERTYPE.LABEL,
             attr='scan_status', indicator=True, restore=False,
-            toolTip='Readiness is checked from existing device/channel states, without any hardware command. '
-                    'Normal completion restores the original PSU setpoints. Stop/error holds the last setpoints; HV stays ON.')
+            toolTip='Readiness of the scan. Stop or error keeps the last setpoints.')
         settings[self.SUPPLIES] = parameterDict(value='Select an AMX', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='Both listed PSU setpoints follow A. Physical rails are -A / +A relative to the PSU reference. '
-                    'All AMX connectors sharing a listed PSU are affected. This display never commands a device.')
+            toolTip='PSU channels set to −A and +A.')
         settings[self.SUPPLY_READBACK] = parameterDict(value='Select an AMX', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='Live readback of each driven PSU rail: measured voltage (Monitor) and the setpoint confirmed by the PSU. '
-                    'Display only; it never commands a device.')
+            toolTip='Measured voltage and confirmed setpoint of each driven rail.')
         settings[self.FILE_LABEL] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='file_label',
-            toolTip='Optional name added to each scan file: <Data path>/MScan/<date>/<date_time>_<name>_PSU-<X>_<from>-<to>V.h5. '
-                    'Letters, digits, - and _ are kept; other characters become -.')
+            toolTip='Optional name added to the file names (letters, digits, - and _).')
         settings[self.SCAN_NOTES] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='scan_notes',
-            toolTip='Free text saved with each scan: sample, dilution, conditions (e.g. "Agilent G2421A tuning mix"). '
-                    'Kept in the file as MScan notes and in Validation/setup.')
+            toolTip='Free text saved with each scan (sample, conditions).')
         settings[self.FREQUENCY] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
-            indicator=True, restore=False, toolTip='Read from AMX. Frequency, duty cycle and routing stay fixed; change them in AMX, not here.')
+            indicator=True, restore=False, toolTip='Read from the AMX; change it there.')
         for key, tooltip in (
-            (self.AMPLITUDE_LIMITS, 'Intersection of all selected PSU hardware voltage limits and Explorer channel limits. '
-                'Read-only: choose the sweep with Amplitude from/to. Change channel Min/Max in PSU; the hardware ceiling cannot be overridden. '
-                'Read for the current range; unavailable limits block Start. This is a setpoint range, not a guarantee of regulation under load.'),
-            (self.FINAL_VOLTAGES, 'Normal completion restores these initial PSU voltage setpoints (V), even outside the scan interval. '
-                'Signed levels relative to the PSU reference. Iget (mA) is the PSU current measured now, '
-                'not a prediction of current after the return. It updates during the scan; the return voltage stays fixed. '
-                'Stop/error does not restore or switch HV OFF.'),
-            (self.CURRENT_LIMITS, 'Hardware-read Ilim and maximum programmable current, in CH0/CH1 order. MScan never changes Ilim. '
-                'A measured current at or above Ilim blocks/aborts acquisition. Foldback can limit below Ilim; voltage must also stay in tolerance. '
-                'This is not a fast overcurrent protection or a guarantee against transients.'),
+            (self.AMPLITUDE_LIMITS, 'Allowed amplitude range: PSU and channel limits.'),
+            (self.FINAL_VOLTAGES, 'Restored after a completed scan. Iget: current measured now, not a prediction.'),
+            (self.CURRENT_LIMITS, 'Ilim read from the PSU (set it there). A current at Ilim stops the scan.'),
         ):
             settings[key] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
                 indicator=True, restore=False, toolTip=tooltip)
         settings[self.OFFSET] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel', event=self._offset_changed,
-            toolTip='AMPR channel (module, channel) of quadrupole rod pair 1. During the scan it is set to '
-                    'x + U, with U = max(Minimum U, k × A − δ), at every amplitude A, '
-                    'then verified: the AMPR hardware '
-                    'setpoint must confirm the scan target and its Monitor must be within Voltage tolerance before '
-                    'acquisition. Normal completion restores its initial value; Stop/error holds the last value. '
-                    'None: not driven, only the RF amplitude is swept.')
+            toolTip='AMPR channel of rod pair 1, set to x + U. None: RF only.')
         settings[self.OFFSET_2] = parameterDict(value=self.NO_OFFSET, items=self.NO_OFFSET,
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='offset_channel_2', event=self._offset_changed,
-            toolTip='AMPR channel of quadrupole rod pair 2, set to x − U: the same axis potential, the DC of '
-                    'opposite sign. Verified, recorded and restored like pair 1. None: only pair 1 is driven.')
+            toolTip='AMPR channel of rod pair 2, set to x − U. None: pair 1 only.')
         settings[self.OFFSET_FACTOR] = parameterDict(value=.2, minimum=-100., maximum=100.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_factor', event=self._offset_changed,
             instantUpdate=False, displayDecimals=5,
-            toolTip='k = U/V: ratio of the DC U to the RF amplitude V (here the scanned amplitude A). It sets the '
-                    'resolution: for an ideal 50 % square wave nothing is transmitted above about 0.215, and '
-                    'm/Δm ≈ 0.157 / (0.2153 − k), about 10 at 0.20 and 30 at 0.21. '
-                    '0: no DC between the pairs, RF only. Negative: the pairs are swapped. '
-                    'Not the α of textbooks, which is the Mathieu parameter a (k = a / 2q). '
-                    'Each commanded value is rounded to the AMPR channel display precision.')
+            toolTip='k = U/A; sets the resolution (no transmission above about 0.215).')
         settings[self.OFFSET_RESOLUTION] = parameterDict(value=0., minimum=0., maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_resolution', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='δ, in V, subtracted from k × A, so it acts on U and on the filter, unlike the axis potential x. '
-                    'With k at its limit, a peak keeps about the same width in A over the scan, about '
-                    '6.4 × δ for an ideal square wave. 0: straight line through zero.')
+            toolTip='Subtracted from k·A: U = max(Minimum U, k·A − δ).')
         settings[self.OFFSET_MINIMUM] = parameterDict(value=.5, minimum=.001, maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_minimum', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='Smallest U, in V. At zero DC the filter would pass every heavy '
-                    'ion, so the DC never reaches zero during a scan, as on commercial instruments. Peaks whose tip lies '
-                    'below (Minimum U + δ) / k are not filtered reliably. Not used when k is 0.')
+            toolTip='Smallest U during the scan.')
         settings[self.OFFSET_FIXED] = parameterDict(value=0., minimum=-1000., maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_fixed', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='x, in V: DC common to both rod pairs, constant during the scan. It is the potential of the '
-                    'quadrupole axis, so it sets the ion energy, not the mass filter: keep the value the rods hold '
-                    'outside a scan. Pair 1 is set to x + U, pair 2 to x − U.')
+            toolTip='Axis potential x, common to both rod pairs; it sets the ion energy.')
         settings[self.FILTER_PREVIEW] = parameterDict(value='No rod pair selected', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='What the scan will apply, computed from these settings over Amplitude from/to: U at both ends '
-                    'and the potential of each rod pair. The resolution assumes an ideal 50 % square wave with an '
-                    'amplitude A on the rods, which is not verified on this set-up. Display only, never a command.')
+            toolTip='U and rod pair potentials at both ends of the scan.')
         settings[self.OFFSET_READBACK] = parameterDict(value='Not driven', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='Rod pair channels: AMPR Monitor (measured) and setpoint. During a scan: scan target, '
-                    'Monitor and whether the AMPR confirmed the target. Display only, never a command.')
+            toolTip='Measured and requested potential of each rod pair.')
         settings[self.MZ_R0] = parameterDict(value=self.DEFAULT_R0_MM, minimum=.1, maximum=100., unit='mm',
             parameterType=PARAMETERTYPE.FLOAT, attr='mz_r0_mm', event=self._mz_changed, instantUpdate=False,
             displayDecimals=3,
-            toolTip='Field radius of the quadrupole: distance from its axis to the inner surface of a rod. '
-                    'm/z varies as A / r0², so 1 % on r0 is 2 % on m/z. Default 2.625 mm: calibrated on Q2 on '
-                    '2026-11-03 with the Agilent G2421A tuning mix (622, 922, 1522, 2122) and the RF attenuation '
-                    'factor 0.978. It is an effective value, 5 % above the nominal 2.5 mm of Q2 (5 mm between '
-                    'opposite rods). To calibrate on a known peak, set r0 to r0 × √(m/z shown / m/z known).')
+            toolTip='Effective field radius. Calibration: r0 × √(m/z shown / m/z known).')
         settings[self.MZ_ATTENUATION] = parameterDict(value=self.DEFAULT_RF_ATTENUATION, minimum=.5, maximum=1.5,
             parameterType=PARAMETERTYPE.FLOAT, attr='rf_attenuation', event=self._mz_changed, instantUpdate=False,
             displayDecimals=3,
-            toolTip='RF amplitude actually seen by the rods divided by A (1: no loss). Default 0.978: measured '
-                    'on Q2 with the AMX HD at 400-500 kHz on 2026-11-03, from the band widths at k = 0.20 and '
-                    'the transmission at k = 0.21. The filter closes at k = 0.2153 × this factor (0.2105), '
-                    'and the m/z uses the attenuated amplitude. To measure it: on a peak, raise k until the signal '
-                    'disappears; the factor is that k / 0.2153. Measure it again for another quadrupole, AMX or '
-                    'frequency range: edge rounding matters more at high frequency.')
+            toolTip='RF amplitude on the rods divided by A (1: no loss).')
         settings[self.MZ_AXIS] = parameterDict(value=self.AXIS_AMPLITUDE, items=f'{self.AXIS_AMPLITUDE},{self.AXIS_MZ}',
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='mz_axis', event=self._mz_changed,
-            toolTip='Abscissa of the plot. m/z is computed from A, the AMX frequency, r0 and the mass filter '
-                    'settings of the scan. The file always keeps A, and adds the m/z in Validation/mz.')
+            toolTip='Plot abscissa: amplitude or m/z; the file keeps both.')
         settings[self.MZ_SCALE] = parameterDict(value='Unavailable', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
-            toolTip='m/z at Amplitude from/to: the centre of the transmitted band for an ideal 50 % square wave, '
-                    'or the low-mass cut-off when RF only. m/z = 4 e A / (q r0² (2π f)²), with q the centre of the '
-                    'stable band on the scan line a = 2 (U/A) q (docs/mscan_quadrupole.pdf). Theory: exact only once '
-                    'r0 is calibrated on a known peak.')
+            toolTip='m/z at both ends of the scan (ideal 50 % square wave).')
         settings[self.MAP_PLAN] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='map_plan',
             event=self._map_plan_changed,
-            toolTip='Plan file (TOML) of a map: mscan/plans/q2_map.toml, q2_check_2h.toml or q2_check_6h.toml, or '
-                    'your own copy. Check asks for it (opened on the loaded plan) and validates it against the '
-                    'instrument, Simulate runs it against the Q2 simulator without hardware, Start map runs it '
-                    'line by line with no operator.')
+            toolTip='Plan file of the next map.')
         settings[self.MAP_STATUS] = parameterDict(value='No map', parameterType=PARAMETERTYPE.LABEL, indicator=True,
             restore=False, attr='map_status',
-            toolTip='The running map: stage, line, point and what it waits for. The same in status.json of the '
-                    'map folder (<Data path>/MScan/maps/), with its journal, map.h5 and log.')
+            toolTip='State of the running or last map.')
         order = [key for _, keys in self.LAYOUT for key in keys]
         return {key: settings[key] for key in order}
 
@@ -823,31 +742,18 @@ class MScan(Scan):
         self.settingsMgr.init()
         self.addAction(event=lambda: self.loadSettings(file=None), toolTip='Load msScan settings.', icon=self.makeCoreIcon('blue-folder-import.png'))
         self.addAction(event=lambda: self.saveSettings(file=None), toolTip='Export msScan settings.', icon=self.makeCoreIcon('blue-folder-export.png'))
-        # Check loads the plan (always its file dialog). The map actions are buttons of the Map group
-        # (_place_map_buttons), not toolbar icons: the toolbar keeps Start scan alone.
-        self.mapCheckAction = self.addAction(event=lambda: self._map_action('check'),
-            toolTip=self.MAP_TOOLTIPS['check'].format(plan='the plans folder'), icon=self.makeCoreIcon('check.png'))
-        self.mapSimulateAction = self.addAction(event=lambda: self._map_action('simulate'),
-            toolTip=self.MAP_TOOLTIPS['simulate'].format(plan='the plan'), icon=self.makeCoreIcon('chart.png'))
-        self.mapResumeAction = self.addAction(event=lambda: self._map_action('resume'),
-            toolTip='Map: resume a stopped map from its folder (its journal).',
-            icon=self.makeCoreIcon('arrow-circle-315.png'))
-        self.mapAction = self.addStateAction(event=lambda: self._map_action('toggle'),
-            toolTipFalse=self.MAP_TOOLTIPS['toggle'].format(plan='the plan file'), iconFalse=self.makeCoreIcon('clock.png'),
-            toolTipTrue='Map: safe stop (the current line stops like a scan, the settings return to Start).',
-            iconTrue=self.makeCoreIcon('stop.png'))
-        for attr, text in self.MAP_BUTTONS:
-            action = getattr(self, attr)
-            tip = action.getToolTip()
-            if self.titleBar is not None:
-                self.titleBar.removeAction(action)
-            action.setText(text)
-            action.setToolTip(tip)  # An action without its own tooltip would show its text.
-        self.mapAction.toggled.connect(lambda state: self.mapAction.setText('Stop map' if state else 'Start map'))
+        # The Map… button lives in the Map group (_place_map_buttons): the toolbar keeps Start scan alone.
+        self.mapAction = self.addStateAction(event=lambda: self._map_action(),
+            toolTipFalse=self.MAP_TOOLTIP, iconFalse=self.makeCoreIcon('clock.png'),
+            toolTipTrue=self.MAP_STOP_TOOLTIP, iconTrue=self.makeCoreIcon('stop.png'))
+        if self.titleBar is not None:
+            self.titleBar.removeAction(self.mapAction)
+        self.mapAction.setText('Map…')
+        self.mapAction.toggled.connect(lambda state: self.mapAction.setText('Stop map' if state else 'Map…'))
         self._map_plan_changed()
         self.recordingAction = self.addStateAction(event=self.toggleRecording,
-            toolTipFalse='Start the AMX/PSU scan, recording every enabled DMMR module.', iconFalse=self.makeCoreIcon('play.png'),
-            toolTipTrue='Stop the scan; hold the last PSU setpoints. HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
+            toolTipFalse='Start the scan.', iconFalse=self.makeCoreIcon('play.png'),
+            toolTipTrue='Stop the scan; HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
         self.loading = False
         self.estimateScanTime()
         self.dummyInitialization()
@@ -932,14 +838,14 @@ class MScan(Scan):
         self._layout_readonly_fields()
 
     def _place_map_buttons(self):
-        """Check, Simulate, Start map and Resume as named buttons in the Map group, between plan and status.
+        """The Map… button in the Map group, between plan and status.
 
         Explorer rebuilds the settings tree on every settings load, so the row is placed again each time.
         """
         manager, tree = getattr(self, 'settingsMgr', None), getattr(self, 'settingsTree', None)
         if (manager is None or tree is None or self.MAP_STATUS not in manager.settings
-                or any(getattr(self, attr, None) is None for attr, _ in self.MAP_BUTTONS)):
-            return  # The first settings load comes before the actions.
+                or getattr(self, 'mapAction', None) is None):
+            return  # The first settings load comes before the action.
         status = manager.settings[self.MAP_STATUS]
         group = status.parent()
         if group is None:
@@ -959,22 +865,21 @@ class MScan(Scan):
         item.setFirstColumnSpanned(True)
         box = QWidget()
         box.setObjectName(self.MAP_BUTTON_ROW)
-        grid = QGridLayout(box)
-        grid.setContentsMargins(0, 2, 0, 2)
-        grid.setSpacing(4)
-        for i, (attr, _) in enumerate(self.MAP_BUTTONS):  # Check, Simulate / Start map, Resume
-            button = QToolButton(box)
-            button.setDefaultAction(getattr(self, attr))
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            button.setObjectName(f'{self.MAP_BUTTON_ROW}/{attr}')
-            grid.addWidget(button, i // 2, i % 2)
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 2, 0, 2)
+        button = QToolButton(box)
+        button.setDefaultAction(self.mapAction)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        button.setMinimumWidth(120)
+        button.setObjectName(f'{self.MAP_BUTTON_ROW}/mapAction')
+        row.addWidget(button)
+        row.addStretch(1)
         tree.setItemWidget(item, 0, box)
-        # The panel's style sheet sizes the buttons only once polished inside the tree: measure them then,
-        # or the second row overlaps Map status.
-        for widget in (box, *box.findChildren(QToolButton)):
+        # The panel's style sheet sizes the button only once polished inside the tree: measure it then,
+        # or the row overlaps Map status.
+        for widget in (box, button):
             widget.ensurePolished()
-        grid.invalidate()
+        row.invalidate()
         item.setSizeHint(0, box.sizeHint())
 
     def _groups(self):
@@ -3379,12 +3284,8 @@ class MScan(Scan):
         path = Path(str(getattr(self, 'map_plan', '') or '').strip())
         return path if str(path) not in ('', '.') and path.is_file() else None
 
-    def _map_plan_path(self):
-        """The loaded plan; the file dialog only when none is loaded (or its file is gone)."""
-        return self._map_loaded_plan() or self._map_load_plan()
-
     def _map_load_plan(self):
-        """Load the plan of the next map (Check): always the file dialog, opened on the plan loaded now.
+        """Choose the plan of the next map (Choose… in the Map dialog), opened on the plan loaded now.
 
         Lab 2026-11-04: once a plan had run, Start map ran it again at once and loading another one meant
         typing its path. A running map keeps the plan it started with (copied into its folder).
@@ -3397,112 +3298,142 @@ class MScan(Scan):
         self.map_plan = chosen
         self._map_plan_changed()
         running = self._map_runner is not None and self._map_runner.running
-        self.print(f'Map plan loaded: {Path(chosen).name} ({chosen}). '
-                   + ('The running map keeps its plan; this one is for the next map.' if running
-                      else 'Simulate and Start map use it.'))
+        self.print(f'Map plan loaded: {Path(chosen).name} ({chosen}).'
+                   + (' The running map keeps its plan; this one is for the next map.' if running else ''))
         return Path(chosen)
 
     def _map_plan_changed(self):
-        """Name the loaded plan in the map button tooltips, so Start map never runs a plan the operator did not see."""
-        plan = self._map_loaded_plan()
-        for what, attr in (('check', 'mapCheckAction'), ('simulate', 'mapSimulateAction'), ('toggle', 'mapAction')):
-            action = getattr(self, attr, None)
-            if action is None:
-                continue  # Settings load before the toolbar.
-            if what == 'check':
-                text = self.MAP_TOOLTIPS[what].format(plan=plan.name if plan is not None else 'the plans folder')
-                text += f' Plan loaded: {plan}.' if plan is not None else ' No plan loaded.'
-            else:
-                text = self.MAP_TOOLTIPS[what].format(plan=plan.name if plan is not None else 'the plan file')
-                text += (f' Plan loaded: {plan}; Check loads another one.' if plan is not None
-                         else ' No plan loaded: Check (or this button) asks for it.')
-            if what == 'toggle':
-                action.toolTipFalse = text
-                if action.state:
-                    continue  # The Stop tooltip stays until the map ends.
-            action.setToolTip(text)
+        """Name the loaded plan in the Map… tooltip, so a map never runs a plan the operator did not see."""
+        plan, action = self._map_loaded_plan(), getattr(self, 'mapAction', None)
+        if action is None:
+            return  # Settings load before the action.
+        action.toolTipFalse = self.MAP_TOOLTIP + (f' Plan: {plan.name}.' if plan is not None else ' No plan loaded.')
+        if not action.state:
+            action.setToolTip(action.toolTipFalse)  # The Stop tooltip stays until the map ends.
 
-    def _map_action(self, what):
-        """Check, Simulate, Resume and Start/Stop of a map (GUI thread; the work runs in its own thread)."""
+    def _map_last_unfinished(self):
+        """The newest map folder that did not complete (stopped, or left running by a crash), with its status."""
+        maps = Path(self.pluginManager.Settings.dataPath) / self.FOLDER / 'maps'
+        for folder in sorted((p for p in maps.glob('*') if (p / 'journal.json').is_file()), reverse=True):
+            with contextlib.suppress(OSError, ValueError, TypeError):
+                status = json.loads((folder / 'status.json').read_text(encoding='utf-8'))
+                if status.get('state') == 'done':
+                    return None  # The newest map completed: nothing to resume by default.
+                when = time.strftime('%H:%M', time.localtime(float(status.get('time') or 0.)))
+                lines = len(json.loads((folder / 'journal.json').read_text(encoding='utf-8')).get('records') or [])
+                return folder, f'{status.get("state", "stopped")} at {when} after {lines} line{"" if lines == 1 else "s"}'
+        return None
+
+    def _map_choice(self):
+        """The Map… dialog: a new map with a plan, or the resumption of a stopped map. None when cancelled."""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QGridLayout, QLabel, QPushButton, QRadioButton
+        dialog = QDialog(getattr(self.pluginManager, 'mainWindow', None))
+        dialog.setWindowTitle('Map')
+        plan, last = [self._map_loaded_plan()], self._map_last_unfinished()
+        folder, folder_text = [last[0] if last else None], [last[1] if last else '']
+        new, resume = QRadioButton('New map with the plan', dialog), QRadioButton('Resume the map', dialog)
+        plan_label, folder_label = QLabel(dialog), QLabel(dialog)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+
+        def show():
+            plan_label.setText(plan[0].name if plan[0] is not None else 'none chosen')
+            folder_label.setText(f'{folder[0].name} ({folder_text[0]})' if folder[0] is not None else 'none stopped')
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+                (new.isChecked() and plan[0] is not None) or (resume.isChecked() and folder[0] is not None))
+
+        def choose_plan():
+            chosen = self._map_load_plan()
+            if chosen is not None:
+                plan[0] = chosen
+                new.setChecked(True)
+            show()
+
+        def choose_folder():
+            chosen = QFileDialog.getExistingDirectory(dialog, 'Map to resume', str(
+                folder[0].parent if folder[0] is not None else Path(self.pluginManager.Settings.dataPath) / self.FOLDER / 'maps'))
+            if chosen:
+                folder[0], folder_text[0] = Path(chosen), 'chosen'
+                resume.setChecked(True)
+            show()
+        grid = QGridLayout(dialog)
+        for row, (radio, label, choose) in enumerate(((new, plan_label, choose_plan), (resume, folder_label, choose_folder))):
+            button = QPushButton('Choose…', dialog)
+            button.clicked.connect(choose)
+            radio.toggled.connect(lambda _checked: show())
+            grid.addWidget(radio, row, 0)
+            grid.addWidget(label, row, 1)
+            grid.addWidget(button, row, 2)
+        grid.addWidget(buttons, 2, 0, 1, 3)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        new.setChecked(True)
+        show()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return ('new', plan[0]) if new.isChecked() else ('resume', folder[0])
+
+    def _map_action(self):
+        """The Map… button (GUI thread): stops a running map, else starts a new map or resumes a stopped one.
+
+        A new map is checked first (what to change, lines and time) and starts only if nothing must change.
+        The work runs in its own thread: the MScan worker can take 30 s on its first launch after an install.
+        """
         runner = self._map_runner_instance()
-        if getattr(self, '_map_starting', False):
-            if what == 'toggle':  # Clicked again during the start: stop as soon as the map has started.
-                self._map_stop_after_start = True
-                self.print('The map stops as soon as it has started.')
-            else:
-                self.print('A map is starting: wait for its first line.', flag=PRINT.WARNING)
-            return
-        if what == 'toggle' and runner.running:
-            runner.stop()
+        if getattr(self, '_map_starting', False):  # Clicked again during the start: stop once started.
+            self._map_stop_after_start = True
+            self.print('The map stops as soon as it has started.')
             return
         if runner.running:
-            self.print('A map is running: stop it first.', flag=PRINT.WARNING)
+            runner.stop()
             return
         if not self.finished:
             self.print('Finish the scan before a map.', flag=PRINT.WARNING)
-            if what == 'toggle':
-                self.mapAction.state = False
+            self.mapAction.state = False
             return
-        if what == 'resume':
-            folder = QFileDialog.getExistingDirectory(None, 'Map to resume', str(
-                Path(self.pluginManager.Settings.dataPath) / self.FOLDER / 'maps'))
-            if not folder:
-                return
-            plan = None
-        else:
-            plan = self._map_load_plan() if what == 'check' else self._map_plan_path()
-            if plan is None:
-                if what == 'toggle':
-                    self.mapAction.state = False
-                return
-            folder = None
+        choice = self._map_choice()
+        if choice is None:
+            self.mapAction.state = False
+            return
+        kind, path = choice
+        plan, folder = (Path(path), None) if kind == 'new' else (None, Path(path))
+        self.mapAction.state = True
 
         def report(text, flag=PRINT.MESSAGE):
             self._queue_completion(lambda: self.print(text, flag=flag))
 
-        starting = what in ('toggle', 'resume')
-        if starting:
-            self._map_starting, self._map_stop_after_start = True, False
-            self.map_status = 'starting: plan, instrument and map engine'
-            self.print('Map starting: the MScan worker answers within seconds, or about 30 s on its first '
-                       'launch after an install (antivirus check). Start scan is locked meanwhile.')
+        def not_started(status):
+            self._queue_completion(lambda: (setattr(self.mapAction, 'state', False), setattr(self, 'map_status', status)))
+
+        self._map_starting, self._map_stop_after_start = True, False
+        self.map_status = 'starting: plan, instrument and map engine'
+        self.print('Map starting: the MScan worker answers within seconds, or about 30 s on its first '
+                   'launch after an install (antivirus check). Start scan is locked meanwhile.')
 
         def work():
             try:
-                if what == 'check':
+                if plan is not None:
                     result = runner.check(plan)
                     report(self._map_check_text(result), PRINT.WARNING if result['problems'] else PRINT.MESSAGE)
-                elif what == 'simulate':
-                    result = runner.simulate(plan)
-                    # Each simulated line timed like on the instrument (its estimate): the simulator's clean
-                    # peaks need about 30 % fewer points than M03 did on 2026-11-04.
-                    hours = sum(max(float(line['duration_s']), float(line.get('expected_s') or 0.))
-                                if line['outcome'] == 'done' else float(line['duration_s'])
-                                for line in result['lines']) / 3600
-                    report(f'Map simulated (hypothesis H1): {result["outcome"]}, {len(result["lines"])} lines, '
-                           f'about {hours:.1f} h on the instrument; {result["reason"]}')
-                else:
-                    folder_used = runner.start(plan, resume=folder)
-                    report(f'Map started ({plan.name}) in {folder_used}' if plan is not None
-                           else f'Map resumed in {folder_used}')
-                    if getattr(runner, 'notice', ''):
-                        report(runner.notice, PRINT.WARNING)
-                    if getattr(self, '_map_stop_after_start', False):
-                        runner.stop()
+                    if result['problems']:
+                        not_started(f'not started: {plan.name} needs changes (see the console)')
+                        return
+                folder_used = runner.start(plan, resume=folder)
+                report(f'Map started ({plan.name}) in {folder_used}' if plan is not None
+                       else f'Map resumed in {folder_used}')
+                if getattr(runner, 'notice', ''):
+                    report(runner.notice, PRINT.WARNING)
+                if getattr(self, '_map_stop_after_start', False):
+                    runner.stop()
             except Exception as exc:  # noqa: BLE001 - reported, never raised into Qt
-                report(f'Map {what}: {exc}', PRINT.WARNING)
-                if what in ('toggle', 'resume'):
-                    self._queue_completion(lambda: setattr(self.mapAction, 'state', False))
+                report(f'Map not started: {exc}', PRINT.WARNING)
+                not_started(f'not started: {exc}')
             finally:
-                if starting:
-                    self._map_starting = False  # runner.running takes over once the map thread runs
-        if what == 'resume':
-            self.mapAction.state = True
-        threading.Thread(target=work, name=f'MScan map {what}', daemon=True).start()
+                self._map_starting = False  # runner.running takes over once the map thread runs
+        threading.Thread(target=work, name='MScan map start', daemon=True).start()
 
     @staticmethod
     def _map_check_text(result):
-        lines = ['Map check: ' + ('ready to start.' if not result['problems'] else 'change this before Start:')]
+        lines = ['Map check: ' + ('ready, starting.' if not result['problems'] else 'not started; change this first:')]
         lines += [f'  - {p}' for p in result['problems']]
         lines += [f'  ! {w}' for w in result['warnings']]
         estimate = result.get('estimate') or {}

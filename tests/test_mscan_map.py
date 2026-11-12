@@ -61,27 +61,27 @@ INSTRUMENT = dict(q1_dc_v=36.0, ap_q1_q2_v=34.0, x_v=10.0, ilim_a=0.5, psu_max_v
                   clock_hz=100e6, f_hz=500e3, frequency_writable=True, free_disk_bytes=1e12)
 
 
-@pytest.mark.parametrize('name', ['q2_map.toml', 'q2_check_2h.toml', 'q2_check_6h.toml'])
+@pytest.mark.parametrize('name', ['q2_full.toml', 'q2_P1_2h.toml', 'q2_P1_P5_6h.toml'])
 def test_plan_templates_are_valid_and_ready_for_a_nominal_instrument(engine, name):
     plan = RUNNER.load_plan(PLANS / name)
     check = engine('map_check', plan, INSTRUMENT)
     assert check['problems'] == [], check['problems']
     assert check['estimate']['outcome'] in ('done', 'stop')
     hours = check['estimate']['total_s'] / 3600
-    expected = {'q2_map.toml': (35, 75), 'q2_check_2h.toml': (1.5, 2.7), 'q2_check_6h.toml': (4.5, 7.5)}[name]
+    expected = {'q2_full.toml': (35, 75), 'q2_P1_2h.toml': (1.5, 2.7), 'q2_P1_P5_6h.toml': (4.5, 7.5)}[name]
     assert expected[0] < hours < expected[1], f'{name}: {hours:.1f} h simulated'
 
 
 def test_full_plan_template_lists_every_key_with_the_engine_default(engine):
-    plan = RUNNER.load_plan(PLANS / 'q2_map.toml')
+    plan = RUNNER.load_plan(PLANS / 'q2_full.toml')
     normalized = engine('map_check', {}, INSTRUMENT)['plan']
-    assert normalized == engine('map_check', plan, INSTRUMENT)['plan'], 'q2_map.toml differs from the defaults'
+    assert normalized == engine('map_check', plan, INSTRUMENT)['plan'], 'q2_full.toml differs from the defaults'
     assert set(plan['map']) == set(normalized['map']), 'every key of the engine appears in the template'
 
 
 def test_the_full_plan_asks_the_operator_for_ilim_330_ma_and_mscan_never_writes_it(engine):
     """The RF current follows from f and A; Ilim is the operator's safeguard, set by hand (2026-11-12)."""
-    plan = RUNNER.load_plan(PLANS / 'q2_map.toml')
+    plan = RUNNER.load_plan(PLANS / 'q2_full.toml')
     lab = dict(INSTRUMENT, ilim_a=0.299998, current_per_hz_v=1.47e-9)
     refused = engine('map_check', plan, lab)
     assert any('set Ilim to at least 330 mA on the PSU yourself' in p for p in refused['problems']), refused['problems']
@@ -171,7 +171,8 @@ class FakeMScan:
         else:
             signal = spectrum(request, self.channels['Q1_DC'].value)
             self.result = dict(status='completed', error='', axis=list(axis), signal=list(signal),
-                               sigma=[2e-15] * len(axis), spray=[45e-9] * len(axis), file=f'line{request["id"]}.h5')
+                               sigma=[2e-15] * len(axis), spray=[self._map_spray_now()] * len(axis),
+                               file=f'line{request["id"]}.h5')
         self.finished = True
         return True
 
@@ -243,7 +244,7 @@ def run_map(runner, plan, timeout=600):
 def test_runner_completes_the_one_hour_plan_and_restores_the_start_values(engine, tmp_path):
     scan = FakeMScan(fail_lines={3})
     runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
-    folder = run_map(runner, PLANS / 'q2_check_2h.toml')
+    folder = run_map(runner, PLANS / 'q2_P1_2h.toml')
     status = json.loads((folder / RUNNER.STATUS).read_text())
     assert status['state'] == 'done', status
     journal = json.loads((folder / RUNNER.JOURNAL).read_text())
@@ -288,7 +289,7 @@ def test_safe_stop_then_resume_continues_from_the_journal(engine, tmp_path):
             time.sleep(.3)
         return started
     scan._start_map_line = counting
-    folder = runner.start(PLANS / 'q2_check_2h.toml')
+    folder = runner.start(PLANS / 'q2_P1_2h.toml')
     runner.thread.join(300)
     status = json.loads((folder / RUNNER.STATUS).read_text())
     assert status['state'] == 'stopped' and 'operator' in status['message']
@@ -318,7 +319,7 @@ def test_resume_after_a_crash_restores_the_values_from_before_the_map(engine, tm
             time.sleep(.3)
         return started
     scan._start_map_line = crash
-    folder = runner.start(PLANS / 'q2_check_2h.toml')
+    folder = runner.start(PLANS / 'q2_P1_2h.toml')
     runner.thread.join(300)
     stored = json.loads((folder / RUNNER.START_VALUES).read_text())
     assert stored['channels']['Q1_DC'] == 36. and stored['channels']['__frequency_khz__'] == 500.
@@ -330,6 +331,81 @@ def test_resume_after_a_crash_restores_the_values_from_before_the_map(engine, tm
     resumed.thread.join(600)
     assert scan.channels['Q1_DC'].value == 36. and scan.channels['Stub_Entry_Q2'].value == 20.
     assert scan.frequency == 500e3
+
+
+def test_a_map_stopped_by_its_spray_window_leaves_no_window_to_the_next_one(engine, tmp_path):
+    """2026-11-12 lab: a map stopped when the spray fell below its window; then every Start map, whatever its
+    plan, waited for a spray within that map's window. The runner, shared by the maps of a session, kept that
+    map's spray reference (and its start values to restore)."""
+    scan = FakeMScan()
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    runner.SPRAY_WAIT_S = 0.
+    spray = [45e-9]
+    scan._map_spray_now = lambda: spray[0]
+    original = scan._start_map_line
+
+    def spray_falls_after_the_first_line():
+        started = original()
+        spray[0] = 10e-9
+        return started
+    scan._start_map_line = spray_falls_after_the_first_line
+    first = runner.start(PLANS / 'q2_P1_2h.toml')
+    runner.thread.join(300)
+    status = json.loads((first / RUNNER.STATUS).read_text())
+    assert status['state'] == 'stopped' and 'Spray current outside its window' in status['message'], status
+    scan._start_map_line = original
+    scan.channels['Q1_DC'].value = 38.  # Set by the operator before the next map.
+    done = len(scan.lines_run)
+    second = runner.start(PLANS / 'q2_P1_P5_6h.toml')  # Another plan; the spray is steady at 10 nA.
+    deadline = time.monotonic() + 120
+    while len(scan.lines_run) < done + 2 and runner.running and time.monotonic() < deadline:
+        time.sleep(.02)
+    runner.stop()
+    runner.thread.join(300)
+    status = json.loads((second / RUNNER.STATUS).read_text())
+    assert len(scan.lines_run) >= done + 2 and 'Spray' not in status['message'], status
+    assert runner.spray_reference == 10e-9 and runner._failures == []
+    assert scan.channels['Q1_DC'].value == 38.  # This map's start value, not the 36 V of the first map.
+
+
+def test_a_fixed_spray_range_of_the_plan_replaces_the_window():
+    """User 2026-11-12: a fixed ESI current range in nA, as in Transmission, whatever the spray at Start."""
+    scan, said = FakeMScan(), []
+    scan.print = lambda text, **kw: said.append(text)
+    runner = RUNNER.MapRunner(scan, None, data_path='.')
+    runner.spray_reference = 80e-9  # Outside the range: it no longer matters.
+    runner.journal = dict(plan=dict(map=dict(spray_window_percent=40, spray_range_na=[30, 60])), records=[])
+    assert runner._spray_window() == pytest.approx((30e-9, 60e-9))
+    scan._map_spray_now = lambda: -45e-9
+    runner._wait_for_spray()
+    assert said[-1] == 'Map: spray window 30.0–60.0 nA (fixed range of the plan).'
+    with pytest.raises(RUNNER.LineFailed, match='25.0 nA left its window 30.0–60.0 nA'):
+        runner._check_spray_during([-25e-9] * 5)
+
+
+def test_a_resumed_map_centres_the_spray_window_on_the_current_it_finds(tmp_path):
+    """2026-11-12 lab: a Resume compared the spray with a reference line of the earlier run (36 nA) and waited
+    for a current the ESI no longer gave; the window is that run's, until a reference line of this one."""
+    scan, said = FakeMScan(), []
+    scan.print = lambda text, **kw: said.append(text)
+    scan._map_spray_now = lambda: -60e-9
+    runner = RUNNER.MapRunner(scan, None, data_path=tmp_path)
+    runner.folder = tmp_path
+
+    def reference(spray, line):
+        return dict(request=dict(role='reference', id=line), outcome='done',
+                    analysis=dict(spray_mean=spray, peaks=[dict(mz=922.01, found=True)]))
+    plan = json.loads(json.dumps(dict(map=dict(spray_window_percent=40, channels=dict(q1_dc='Q1_DC', stub_entry='Stub_Entry_Q2'),
+                                                follow={}))))
+    runner.journal = dict(plan=plan, records=[reference(-36e-9, 1)])
+    runner._capture_start_values()  # Resume: the ESI now gives 60 nA.
+    assert runner._spray_window() == pytest.approx((36e-9, 84e-9))
+    runner._wait_for_spray()  # Not blocked.
+    assert said[-1] == 'Map: spray window 36.0–84.0 nA (±40 % of 60.0 nA, ESI current at Resume).'
+    runner.journal['records'].append(reference(-50e-9, 7))  # This run's first reference line.
+    assert runner._spray_window() == pytest.approx((30e-9, 70e-9)) and runner.spray_source == 'reference line 7'
+    with pytest.raises(RUNNER.LineFailed, match=r'20.0 nA left its window 30.0–70.0 nA'):
+        runner._check_spray_during([-20e-9] * 5)
 
 
 def test_resume_plans_with_the_ilim_the_operator_set_on_the_psu_since_start(engine, tmp_path):
@@ -346,7 +422,7 @@ def test_resume_plans_with_the_ilim_the_operator_set_on_the_psu_since_start(engi
             time.sleep(.3)
         return started
     scan._start_map_line = stop_at_two
-    folder = runner.start(PLANS / 'q2_check_2h.toml')
+    folder = runner.start(PLANS / 'q2_P1_2h.toml')
     runner.thread.join(300)
     assert runner.notice == ''
     frozen = json.loads((folder / RUNNER.JOURNAL).read_text())['instrument']
@@ -371,7 +447,7 @@ def test_resume_plans_with_the_ilim_the_operator_set_on_the_psu_since_start(engi
 def test_unreachable_point_closes_and_the_map_goes_on(engine, tmp_path):
     scan = FakeMScan(unreachable_points={'P1'})
     runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
-    folder = run_map(runner, PLANS / 'q2_check_6h.toml')
+    folder = run_map(runner, PLANS / 'q2_P1_P5_6h.toml')
     journal = json.loads((folder / RUNNER.JOURNAL).read_text())
     p1 = [r for r in journal['records'] if r['request']['point'] == 'P1']
     assert [r['outcome'] for r in p1] == ['unreachable'], 'P1 closes after its first line'
@@ -382,7 +458,7 @@ def test_unreachable_point_closes_and_the_map_goes_on(engine, tmp_path):
 def test_failed_lines_within_an_hour_stop_the_map(engine, tmp_path):
     scan = FakeMScan(fail_lines={2, 4, 6})
     runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
-    folder = run_map(runner, PLANS / 'q2_check_2h.toml')
+    folder = run_map(runner, PLANS / 'q2_P1_2h.toml')
     status = json.loads((folder / RUNNER.STATUS).read_text())
     assert status['state'] == 'stopped' and 'within one hour' in status['message']
     assert scan.channels['Q1_DC'].value == 36.
@@ -422,7 +498,7 @@ def map_line(kind='amplitude', **extra):
 def test_amplitude_line_replaces_the_steps_and_records_its_request(mscan_rig):
     scan = mscan_rig.scan
     add_offset(mscan_rig)
-    scan._line, scan._line_map = map_line(), dict(name='q2-map', detector='Detector')
+    scan._line, scan._line_map = map_line(), dict(name='q2-full', detector='Detector')
     assert list(scan._scan_steps()) == [20., 22.5, 25.]
     plan = scan._prepare()
     assert plan['requested_range'] == (20., 25.)
@@ -485,7 +561,7 @@ def test_adapter_sends_the_line_points_axis_and_step(mscan_rig):
 def test_check_text_lists_problems_warnings_and_the_estimate(mscan_module):
     text = mscan_module.MScan._map_check_text(dict(problems=['raise Ilim to 450 mA'], warnings=['F1: coarse steps'],
                                                    estimate=dict(lines=210, total_s=36000.)))
-    assert 'change this before Start' in text and '- raise Ilim' in text and '! F1' in text and '10.0 h' in text
+    assert 'not started; change this first' in text and '- raise Ilim' in text and '! F1' in text and '10.0 h' in text
 
 
 class _Action:
@@ -496,95 +572,108 @@ class _Action:
         self.toolTip = text
 
 
-def test_check_always_asks_and_simulate_start_use_the_loaded_plan(mscan_module, monkeypatch, tmp_path):
-    """Lab 2026-11-04: after a map, Start map ran the same plan again and another plan could not be loaded."""
+def test_the_plan_is_chosen_from_the_loaded_one_and_named_in_the_map_tooltip(mscan_module, monkeypatch, tmp_path):
+    """Lab 2026-11-04: after a map, the same plan ran again and another plan could not be loaded."""
     first, second = tmp_path / 'first.toml', tmp_path / 'second.toml'
     first.write_text('', encoding='utf-8')
     second.write_text('', encoding='utf-8')
     scan = mscan_module.MScan.__new__(mscan_module.MScan)
     scan._map_runner, scan.map_plan, printed = None, '', []
     scan.print = lambda text, **kw: printed.append(text)
-    scan.mapCheckAction, scan.mapSimulateAction, scan.mapAction = _Action(), _Action(), _Action()
+    scan.mapAction = _Action()
     asked, answers = [], [str(first), str(second), '', str(first)]
 
     def ask(parent, title, directory, filters):
         asked.append(directory)
         return answers.pop(0), filters
     monkeypatch.setattr(mscan_module, 'QFileDialog', type('Dialog', (), dict(getOpenFileName=staticmethod(ask))))
-
-    assert scan._map_plan_path() == first  # Simulate/Start with nothing loaded: asked once, in the templates.
-    assert Path(asked[0]) == ROOT / 'mscan' / 'plans'
-    assert scan._map_plan_path() == first and len(asked) == 1  # Loaded: used without asking.
-    assert all('first.toml' in a.toolTip for a in (scan.mapCheckAction, scan.mapSimulateAction, scan.mapAction))
-
-    assert scan._map_load_plan() == second  # Check always asks, opened on the loaded plan.
-    assert Path(asked[1]) == first and scan.map_plan == str(second) and scan._map_plan_path() == second
-    assert 'second.toml' in scan.mapAction.toolTipFalse and 'Simulate and Start map use it' in printed[-1]
-
+    scan._map_plan_changed()
+    assert 'No plan loaded' in scan.mapAction.toolTip
+    assert scan._map_load_plan() == first and Path(asked[0]) == ROOT / 'mscan' / 'plans'  # The templates.
+    assert 'first.toml' in scan.mapAction.toolTip
+    assert scan._map_load_plan() == second and Path(asked[1]) == first  # Opened on the loaded plan.
+    assert scan.map_plan == str(second) and printed[-1].startswith('Map plan loaded: second.toml')
     scan.mapAction.state, scan.mapAction.toolTip = True, 'stop'  # A map runs: its Stop tooltip stays.
     scan._map_runner = type('Runner', (), dict(running=True))()
     assert scan._map_load_plan() is None and scan.map_plan == str(second)  # Cancelled: nothing changes.
     assert scan._map_load_plan() == first and scan.mapAction.toolTip == 'stop'
     assert 'first.toml' in scan.mapAction.toolTipFalse and 'for the next map' in printed[-1]
-
     first.unlink()  # A loaded plan whose file is gone is not used.
     assert scan._map_loaded_plan() is None
-    scan._map_plan_changed()
-    assert 'No plan loaded' in scan.mapSimulateAction.toolTip
 
 
-def _map_scan(mscan_module, monkeypatch, plan, runner, answer):
+def test_the_map_dialog_proposes_the_newest_map_that_did_not_complete(mscan_module, tmp_path):
     scan = mscan_module.MScan.__new__(mscan_module.MScan)
-    scan.map_plan, scan._finished, scan._map_runner, scan.printed = str(plan), True, runner, []
+    scan.pluginManager = SimpleNamespace(Settings=SimpleNamespace(dataPath=tmp_path))
+    maps = tmp_path / 'MScan' / 'maps'
+
+    def folder(name, state, lines):
+        path = maps / name
+        path.mkdir(parents=True)
+        (path / 'journal.json').write_text(json.dumps(dict(records=[{}] * lines)), encoding='utf-8')
+        (path / 'status.json').write_text(json.dumps(dict(state=state, time=time.mktime((2026, 11, 12, 13, 40, 0, 0, 0, -1)))),
+                                          encoding='utf-8')
+        return path
+    assert scan._map_last_unfinished() is None
+    stopped = folder('2026-11-12_13-10-00_q2-P1-2h', 'stopped', 5)
+    assert scan._map_last_unfinished() == (stopped, 'stopped at 13:40 after 5 lines')
+    folder('2026-11-12_14-00-00_q2-P1-2h', 'done', 16)
+    assert scan._map_last_unfinished() is None  # The newest map completed: nothing proposed.
+
+
+def _map_scan(mscan_module, monkeypatch, runner, choice):
+    scan = mscan_module.MScan.__new__(mscan_module.MScan)
+    scan.map_plan, scan._finished, scan._map_runner, scan.printed = '', True, runner, []
     scan._queue_completion = lambda action: action()
     scan.print = lambda text, **kw: scan.printed.append(text)
-    scan.mapCheckAction, scan.mapSimulateAction, scan.mapAction = _Action(), _Action(), _Action()
-    scan.asked = []
-
-    def ask(parent, title, directory, filters):
-        scan.asked.append(directory)
-        return answer, filters
-    monkeypatch.setattr(mscan_module, 'QFileDialog', type('Dialog', (), dict(getOpenFileName=staticmethod(ask))))
+    scan.mapAction, scan.map_status = _Action(), ''
+    scan._map_choice = lambda: choice
     monkeypatch.setattr(mscan_module, 'PRINT', type('PRINT', (), dict(MESSAGE='message', WARNING='warning')))
     return scan
 
 
-def test_check_loads_the_chosen_plan_and_simulate_uses_it_without_a_dialog(mscan_module, monkeypatch, tmp_path):
-    loaded, chosen = tmp_path / 'loaded.toml', tmp_path / 'chosen.toml'
-    loaded.write_text('', encoding='utf-8')
-    chosen.write_text('', encoding='utf-8')
-    done, seen = threading.Event(), []
-
-    def check(path):
-        seen.append(('check', path))
-        done.set()
-        return dict(problems=[], warnings=[])
-
-    def simulate(path):
-        seen.append(('simulate', path))
-        done.set()
-        # The simulator's own clock (1 h) and the lines timed like on the instrument (2 h).
-        return dict(outcome='done', reason='map complete', lines=[
-            dict(outcome='done', duration_s=1800., expected_s=3600.),
-            dict(outcome='unreachable', duration_s=1800., expected_s=9e9),
-            dict(outcome='done', duration_s=1800., expected_s=1800.)], total_s=3600.)
-    runner = type('Runner', (), dict(running=False, check=staticmethod(check), simulate=staticmethod(simulate)))()
-    scan = _map_scan(mscan_module, monkeypatch, loaded, runner, str(chosen))
-    scan._map_action('check')
-    assert done.wait(5) and seen == [('check', chosen)] and Path(scan.asked[0]) == loaded
-    assert scan.map_plan == str(chosen)
-    done.clear()
-    monkeypatch.setattr(mscan_module, 'QFileDialog', None)  # Simulate: no dialog any more.
-    scan._map_action('simulate')
-    deadline = time.monotonic() + 5
-    while not any('Map simulated' in text for text in scan.printed) and time.monotonic() < deadline:
+def _wait_for(condition, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
         time.sleep(.01)
-    assert seen[-1] == ('simulate', chosen)
-    assert 'about 2.0 h on the instrument' in scan.printed[-1], scan.printed
+    return condition()
 
-    cancelled = _map_scan(mscan_module, monkeypatch, loaded, runner, '')
-    cancelled._map_action('check')  # Dialog cancelled: no check, the loaded plan stays.
-    assert len(seen) == 2 and cancelled.map_plan == str(loaded)
+
+def test_map_checks_a_new_plan_and_starts_it_only_if_nothing_must_change(mscan_module, monkeypatch, tmp_path):
+    """User 2026-11-12: one Map… button; the check runs before every new map instead of being a button."""
+    plan, stopped = tmp_path / 'plan.toml', tmp_path / 'maps' / 'stopped'
+    plan.write_text('', encoding='utf-8')
+    calls, problems = [], [['set Ilim to at least 330 mA on the PSU yourself']]
+
+    class Runner:
+        running, notice = False, ''
+
+        def check(self, path):
+            calls.append(('check', path))
+            return dict(problems=problems[0], warnings=[], estimate=dict(lines=16, total_s=7560.))
+
+        def start(self, path, resume=None):
+            calls.append(('start', path, resume))
+            return tmp_path / 'maps' / 'new'
+    refused = _map_scan(mscan_module, monkeypatch, Runner(), ('new', plan))
+    refused._map_action()
+    assert _wait_for(lambda: not refused._map_starting)
+    assert calls == [('check', plan)] and refused.mapAction.state is False
+    assert 'not started' in refused.map_status and 'set Ilim' in refused.printed[-1]
+    problems[0] = []
+    started = _map_scan(mscan_module, monkeypatch, Runner(), ('new', plan))
+    started._map_action()
+    assert _wait_for(lambda: len(calls) == 3)
+    assert calls[1:] == [('check', plan), ('start', plan, None)] and started.mapAction.state is True
+    assert any('16 lines, about 2.1 h' in text for text in started.printed)
+    resumed = _map_scan(mscan_module, monkeypatch, Runner(), ('resume', stopped))
+    resumed._map_action()
+    assert _wait_for(lambda: len(calls) == 4)
+    assert calls[3] == ('start', None, stopped)  # A resumed map keeps its own checked plan.
+    cancelled = _map_scan(mscan_module, monkeypatch, Runner(), None)
+    cancelled.mapAction.state = True  # The click toggled the button.
+    cancelled._map_action()
+    assert cancelled.mapAction.state is False and len(calls) == 4
 
 
 def test_start_scan_is_locked_while_the_map_starts(mscan_module, monkeypatch, tmp_path):
@@ -605,17 +694,14 @@ def test_start_scan_is_locked_while_the_map_starts(mscan_module, monkeypatch, tm
 
         def stop(self):
             stopped.append(True)
-    scan = _map_scan(mscan_module, monkeypatch, plan, Runner(), str(plan))
+    scan = _map_scan(mscan_module, monkeypatch, Runner(), ('resume', tmp_path / 'map'))
     scan._recording, scan._line, scan._cancel = False, None, threading.Event()
-    scan.map_status = ''
-    scan._map_action('toggle')
+    scan._map_action()
     assert entered.wait(5) and scan._map_owns_scans()
     scan.recording = True  # Start scan clicked during the start
     scan.toggleRecording()
     assert scan.recording is False and 'starts its own lines' in scan.printed[-1]
-    scan._map_action('check')  # nor a second map action
-    assert 'A map is starting' in scan.printed[-1]
-    scan._map_action('toggle')  # the clock clicked again: stop once started
+    scan._map_action()  # Map… clicked again during the start: stop once started
     release.set()
     deadline = time.monotonic() + 5
     while scan._map_starting and time.monotonic() < deadline:

@@ -36,8 +36,10 @@ def test_dmmr_axis_reads_pa_and_a_colour_change_keeps_stopped_curves(tmp_path):
     assert report.get("code") == 0, (report, result.stdout[-3000:], result.stderr[-3000:])
     assert report["before"] == report["after"] == {"DMMR_M01": True, "DMMR_M02": True}
     assert report["color"] == "#ff0000" and report["recording"] is False
-    # The window ends at the last sample of the stopped acquisition (19 min ago), not now.
-    assert -1300 < report["xrange"][0] < report["xrange"][1] < -1100, report["xrange"]
+    # The window ends at the last sample of the stopped acquisition (19 min ago), not now, and shows the
+    # 30 min before it (the plugins' default display time since 2026-11-12, padding included).
+    start, end = report["xrange"]
+    assert -1200 < end < -1050 and 1800 < end - start < 2000, report["xrange"]
     assert (report["label"], report["units"]) == ("Current", "pA")
     assert report["linear"] == {"left": ["10", "20"], "right": ["10", "20"]}
     assert report["log"] == {"left": ["1·10¹", "1·10²"], "right": ["1·10¹", "1·10²"]}
