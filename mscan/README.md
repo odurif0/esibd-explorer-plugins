@@ -164,8 +164,13 @@ The **msScan** settings list belongs to this scan; Explorer's global
 ## Timing and data
 
 - **Step by step**: wait for the PSU commands to finish and hold all rails within
-  tolerance for **Settling time**, then average new DMMR samples during
-  **Measurement per point**. Repeat at each amplitude; settle again on return.
+  their settling tolerance for **Settling time**, then average new DMMR samples during
+  **Measurement per point**. Repeat at each amplitude; settle again on return. The settling
+  tolerance of a rail is a quarter of the amplitude spacing to the nearest point, at least 0.1 V and
+  0.05 % of the target, at most **Voltage tolerance**. During the window, **Voltage tolerance**
+  applies. With 1 V for 0.2–0.9 V steps, 15 % of the points of the 2026-11-12 map started while the
+  PSU output was still 0.1–0.5 V short of its target. A rail whose target does not change (a
+  stopping or frequency line) is not written again.
 - **Continuous**: enter a positive **Sweep rate (V/s)** and **Time step (s)**.
   The command increment is calculated as **Sweep rate × Time step**; direction
   follows From/To. For example, 5 V/s and 0.2 s give increments of 1 V.
@@ -396,10 +401,11 @@ scan, started and saved like one from Start, with all of its checks; the decisio
 MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
 
 - **Map plan**: the plan of the next map (TOML). Templates in `plans/`, named by content:
-  `q2_P1_2h.toml` (stopping cut and the P1 ladder, about 2 h), `q2_P1_P5_6h.toml` (P1 and P5
-  ladders, about 6 h) and `q2_full.toml` (the full map, about 45–55 h, Ilim at least 330 mA; it lists
-  every key with its default). Change a copy, kept outside the plugin folder. Until 2026-11-12 they
-  were q2_check_2h, q2_check_6h and q2_map.
+  `q2_P1_2h.toml` (stopping cut and the P1 ladder, about 2.5 h), `q2_cycles_6h.toml` (R against
+  the number of RF cycles: ladders at 500 kHz with E 12 and 5 eV and at 300 kHz with 9.4 eV, about
+  6 h) and `q2_full.toml` (the full map, about 45–55 h, Ilim at least 330 mA; it lists every key with
+  its default). Change a copy, kept outside the plugin folder. Until 2026-11-12 they were
+  q2_check_2h, q2_check_6h and q2_map; q2_cycles_6h replaced q2_P1_P5_6h after the 2026-11-12 map.
 - **Map…** (the only map button): a dialog to start a **new map** with a plan (Choose… to pick
   another) or to **resume** a map that did not complete (the newest is proposed; Choose… for
   another folder). A new map is checked first against the instrument (what to change, lines and
@@ -423,6 +429,11 @@ human:
   point a ladder in k up to the closing, two repeats, a verification line at the computed (k*, δ*)
   and a cut along the entry stub; then the outer search in (f, E), an out-of-sample check, a local
   check and the best scan, repeated. A reference window on 922 every five lines corrects the drift.
+- **Peaks.** R = m/Δm is read at the outer half-height edges of each band. The bands are
+  flat-topped with ripples on their high-A side that reproduce from day to day (2026-11-04 and
+  11-12); a ripple below half height no longer cuts the band short. A Gaussian fit made these bands
+  up to 20 % wider. A band with two maxima separated by a dip below 75 % of its height is flagged
+  `split` (m/z 922 at k 0.2094 on 2026-11-12).
 - **Settings a line does not sweep** are set first and confirmed: the AMX frequency (through the
   AMX HD plugin, which keeps the duty cycle), `Q1_DC`, the entry stub (x + 0.42·(Ap − x)) and
   `Stub_Exit_Q2` (x − 15 V). MScan's own settings (k, δ, x, timing, file name, notes) are set for
@@ -436,13 +447,17 @@ human:
   never measured are `skipped`. σ is never less than 50 fA, the noise between neighbouring points
   of a flat M03 signal (2026-11-04; with 1 fA, half of the fine grid was measured).
 - **Time.** A line takes 15 s plus its points at `point_s + settle_s + point_overhead_s` each
-  (0.8 + 0.3 + 0.9 = 2.0 s; 2026-11-04: 2.02 s and 15.5 s). Once its lines hold 100 points, the map
+  (0.8 + 0.3 + 1.4 = 2.5 s; 2026-11-04: 2.02 s and 15.5 s; 2026-11-12: 2.5 s). Once its lines hold 100 points, the map
   times its own: the estimates and the time left follow the instrument.
 - **Spray.** The ESI current must stay within ±`spray_window_percent` (40 %) of a reference: the
   current at Start (or at Resume), then the mean of this run's last reference line that found its
   peak. `spray_range_na = [30, 60]` in the plan sets a fixed range in nA instead. The window in use
   is said in the console and `map.log` whenever it changes. Each Start or Resume takes its own
   reference (2026-11-12: after a map stopped on its window, the next maps kept that window).
+- **A line that cannot start** (a PSU switched OFF after a fault, no readback, DMMR stopped) is
+  tried again for 30 s. The map then stops and says what to fix; that line is not counted, so
+  Map… → Resume continues with it (2026-11-12: after PSU_A went OFF, the map spent its three
+  failures in 4 s).
 - **Faults.** A failed line (spray outside its window over the line, a worker or detector fault,
   no new point for 5 min, or a line longer than all the points of its axis would take at
   `point_s + settle_s + 2 s` each) is measured again. A line slower than its estimate is not a
@@ -485,6 +500,9 @@ written before 2026-11-03 name a reference module (`reference_channel`) and the 
 - **Validation/Samples**: every DMMR record behind the point means: `time`, `point` (its point
   index), `current` and `range` (DMMR measurement range), one column per module. NaN: no new
   reading, or range unknown.
+- **Validation/command_start**, **command_end** (since v0.5.12): when the targets of each point
+  were written (s since the epoch). With `window_start`/`window_end` they split the time of a point
+  into the write, the settling and the step to the next point.
 - In `Validation/setup` (JSON): `rf` (`frequency_hz`, `duty_percent` per selected AMX output,
   null when unknown), `software` (plugin version, SHA-256 of `mscan_plugin.py`,
   `_runtime/_native_scan.py` and of the MScan worker in `native/manifest.json`), `notes` and

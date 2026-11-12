@@ -92,6 +92,13 @@ A limit that adds its own width adds a constant 1/R_cap,i, which shows as the va
 closing. Each ladder thus measures c and R_cap per ion. The fit residuals check whether widths really
 add.
 
+*Measured on 2026-11-12 (P1, 500 kHz, 26 eV):* the slope of 1/R in k gives c = 1.06–1.26 per ion,
+against 0.978 from the band edges (2026-11-03) and from the peak positions (±0.4 % on 2026-11-12):
+the cap does not add a constant 1/R_cap (it grows near the closing). The map therefore takes c only
+from a bracketed closing, else from `calibration.c`, and keeps the slope value as a diagnostic
+(`c_slope` in `report.json`). A slope c set above the true one had sent the next ladders past the
+closing, where no ion passes.
+
 ### 3.3 f and E: one number for the resolution, the RF cycles N
 An ion spends N = f·L·√(m / 2eE) RF cycles in Q2 (L ≈ 15 cm). Few cycles cap the resolution near
 N²/(12–20). If that is what limits R (H4), f and E act on the resolution only through N, and every ion
@@ -247,8 +254,8 @@ In frequency mode (F1, F2) the ladder runs over the same k (U = k·A at fixed A)
 frequency line.
 
 ### C. The laws (fitted after each ladder)
-1. **Closing and cap per ion**: c from the slope of 1/R_i in k, and R_cap,i from its value at the
-   closing (Section 3.2). Is c the same for every ion and every f, i.e. is the attenuation independent
+1. **Closing and cap per ion**: c from the bracketed closing, else the calibration (the slope of 1/R_i
+   in k is biased by the cap), and R_cap,i from 1/R_i − 1/R_ideal (Section 3.2). Is c the same for every ion and every f, i.e. is the attenuation independent
    of f?
 2. **R_cap versus N**: do all ions of all points fall on one curve (P5 against P1, P6 against P2)? If
    yes, the curve's exponent tests H4 (2 expected); ions of different mass at equal N (P2 against P1,
@@ -441,7 +448,7 @@ checks.
   spray_window_percent = 40      # around the ESI current at Start
   point_s = 0.8                  # measurement, settling and command/readback per point (s);
   settle_s = 0.3                 # the map then times its own lines (2026-11-04: 2.02 s per point
-  point_overhead_s = 0.9         # and 15.5 s per line)
+  point_overhead_s = 1.4         # and 15.5 s per line; 2026-11-12: 2.5 s per point)
   seed = 1
 
   [map.bounds]                   # hard limits, checked before Start; the measurement finds the rest
@@ -546,7 +553,8 @@ lose nothing, and Resume is the same call as a normal step.
 2. In MScan, Map group, click **Map…** and choose a new map with a plan (or resume a stopped map).
    Three templates are provided:
    - `q2_P1_2h.toml`: stopping cut and the P1 ladder up to the R_target region (about 2 h);
-   - `q2_P1_P5_6h.toml`: P1 and P5 ladders (about 6 h);
+   - `q2_cycles_6h.toml`: R against the number of RF cycles, ladders at (500 kHz, 12 eV), (500 kHz,
+     5 eV) and (300 kHz, 9.4 eV) (about 6 h);
    - `q2_full.toml`: the full map.
 3. The plan is checked first: the worst case of the hard bounds, what to change, and the lines and time
    the Q2 simulator decides. The map starts only if nothing must change.

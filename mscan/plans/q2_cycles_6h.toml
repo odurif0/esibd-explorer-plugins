@@ -1,0 +1,40 @@
+# R against the number of RF cycles: does lowering E lift the resolution plateau, and at what cost in
+# transmission? Every key left out takes the value of q2_full.toml.
+#
+# 2026-11-12 (500 kHz, E 26 eV): R stops rising near the closing. For m/z 922, R follows
+# 1/R = 1/R_ideal + 1/40, so R 40 cannot be reached there; heavy ions (more cycles) reach 34–36 at
+# k 0.208. The number of cycles in Q2 is n ∝ f·L·√(m/E):
+# - 500 kHz, 12 eV: n × 1.47; predicted R(922) plateau about 90, R 40 near k 0.2085.
+# - 500 kHz, 5 eV: n × 2.28; plateau about 200, R 40 near k 0.2075, if transmission holds.
+# - 300 kHz, 9.4 eV: the same n as 500 kHz and 26 eV. If R depends only on n, its plateau is
+#   about 40 again, and the full map can be planned from n alone.
+# At each point: a k ladder (0.200, 0.2056, 0.2081, 0.2093), the verification line at the computed
+# (k*, δ*) and two entry-stub cuts. The heights at k = 0.200 compare the transmission of the three
+# points; a reference line on 922 every two lines follows the beam (+80 % in 36 min on 11/12).
+
+[map]
+name = "q2-cycles-6h"
+max_lines = 45
+reference_every = 2             # the beam drifted 37 → 66 pA in 36 min on 2026-11-12
+spray_range_na = [30, 300]      # ESI current (nA). 2026-11-12, 1100 V: 60–180 nA. Below 30 nA the beam
+                                # was weak (24 pA at 14 nA). Set it to the spray of the day before Start.
+point_overhead_s = 1.4          # 2026-11-12: 2.5 s per point (the map then times its own lines)
+
+[map.design]
+amplitude = [[500, 12], [500, 5], [300, 9.4]]   # (f kHz, E eV); the first one is also the instrument check
+frequency = []
+
+[map.ladder]
+repeats = 0
+max_lines = 4                   # k = 0.200, 0.2056, 0.2081, 0.2093 (closing near 0.2106)
+
+[map.stopping]
+repeats = 1                     # 922 and 2122, Q1_DC and Q1_DC + 2 V: x_stop of each ion (E per ion)
+x_from_v = 30                   # 2026-11-12: x50 922 35.45 V, 2122 34.9 V; widths 0.4–1.3 V
+x_to_v = 42
+
+[map.stages]
+search = false
+validation = false
+local = false
+best = false

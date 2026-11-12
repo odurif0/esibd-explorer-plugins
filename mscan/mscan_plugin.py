@@ -474,6 +474,7 @@ class MScan(Scan):
     # PSU_A in Half range: the internal supply fell from 256 V at 0 mA to 248.5 V at 150 mA; the output was exact
     # with 2.7 V of headroom, 0.3 V low with 0.9 V and 2 V low with 0.05 V, and the scan waited 30 s for 250 V.
     HEADROOM_START_V = 2.  # Start refused when Amplitude to exceeds output + dropout − this margin.
+    UNCHANGED_RAIL_V = 5e-4  # A rail target closer than this to the channel value is not written again.
     HEADROOM_LOST_V = 1.  # Below this, with the output out of tolerance, the PSU cannot reach its target.
     HEADROOM_LOW_V = 2.  # Points measured below this are flagged (low_headroom).
     # The load still to come lowers the ceiling: 4.3 V for a 206 V rise that day (Half range, 500 kHz), about 2 %.
@@ -2143,6 +2144,7 @@ class MScan(Scan):
             self._validation = dict(status='running', error='', point_status=['not acquired'] * n,
                 rail_v=np.full((n, rails), np.nan), rail_i=np.full((n, rails), np.nan),
                 window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
+                command_start=np.full(n, np.nan), command_end=np.full(n, np.nan),
                 samples=np.zeros((n, outputs), dtype=np.int64), finite_samples=np.zeros((n, outputs), dtype=np.int64),
                 rail_dropout=np.full((n, rails), np.nan), low_headroom=np.zeros(n, dtype=bool),
                 context=np.full((n, len(self._plan.get('context') or [])), np.nan),
@@ -2600,7 +2602,10 @@ class MScan(Scan):
             self._set_map_frequency(float(frequency_hz))
         self._plan['expected'] = list(targets)
         for rail, target in zip(self._plan['rails'], targets):
-            rail['channel'].value = target
+            # A line that keeps A (stopping, frequency) rewrote it at every point: two PSU applies
+            # per point for nothing (2026-11-12 lab). The readback check stays the same.
+            if not abs(float(rail['channel'].value) - target) < self.UNCHANGED_RAIL_V:
+                rail['channel'].value = target
             revision = rail['channel'].voltage_request_revision
             if revision != rail['request_revision']:
                 rail['confirmed_vset'] = None
@@ -2779,7 +2784,10 @@ class MScan(Scan):
             if self._cancel.is_set():
                 raise ScanStopped('Scan stopped.')
             self._bridge.status.emit(f'{self._pass_label(index, len(steps))}{index + 1}/{len(steps)}: settling at {amplitude:g} V')
-            self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails']), offsets=self._offset_target(a)))
+            written = self._gui(lambda a=float(amplitude): self._command([a] * len(p['rails']),
+                                                                         offsets=self._offset_target(a)))
+            if 'command_start' in self._validation:
+                self._validation['command_start'][index], self._validation['command_end'][index] = written
             self._settle(p['wait'])
             self._bridge.status.emit(f'{self._pass_label(index, len(steps))}{index + 1}/{len(steps)}: acquiring at {amplitude:g} V')
             self._store_point(index, *self._measure(), offsets=self._offset_snapshot())
@@ -3714,6 +3722,12 @@ class MScan(Scan):
                 group['offset_v'].attrs['Unit'] = 'V (AMPR Monitor of each rod pair channel, one column per pair)'
                 group['offset_target'].attrs['Unit'] = ('V (DC offset commanded on each AMPR channel, one column per pair: '
                                                         'pair 1 fixed + max(U_min, U/V × A − δ), pair 2 fixed − the same term)')
+            # When each point's targets were written (2026-11-12: 1.25–1.7 s per point outside the window;
+            # with the window times this splits it into writing, settling and the step to the next point).
+            for key in ('command_start', 'command_end'):
+                if key in self._validation:
+                    group.create_dataset(key, data=self._validation[key])
+                    group[key].attrs['Unit'] = 's since Unix epoch (GUI write of the point targets; NaN: not written)'
             for key in ('window_start', 'window_end'):
                 group[key].attrs['Unit'] = 's since Unix epoch'
             if 'continuous' in self._validation:
@@ -3768,7 +3782,8 @@ class MScan(Scan):
                     # current measurement is invented for their old points.
                     self._validation['rail_i'] = (group['rail_i'][:] if 'rail_i' in group
                         else np.full_like(self._validation['rail_v'], np.nan))
-                    for key in ('offset_v', 'offset_target', 'rail_dropout', 'low_headroom'):
+                    for key in ('offset_v', 'offset_target', 'rail_dropout', 'low_headroom', 'command_start',
+                                'command_end'):
                         if key in group:
                             self._validation[key] = group[key][:]
                     if 'Continuous' in group:

@@ -415,6 +415,9 @@ class NativeScanAdapter:
                 index = point['index']
                 for key in ('rail_v', 'rail_i', 'window_start', 'window_end'):
                     validation[key][index] = point[key]
+                for key in ('command_start', 'command_end'):
+                    if key in validation and key in point:
+                        validation[key][index] = point[key]
                 # Every recorded module over the engine's window; the engine's own mean is the clock's.
                 values = scan._module_values(point['window_start'], point['window_end'])
                 for j, (mean, count, finite) in enumerate(values):

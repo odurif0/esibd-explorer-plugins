@@ -619,8 +619,8 @@ defaults!(MapConfig {
     point_s: f64 = 0.8,
     settle_s: f64 = 0.3,
     // Command and readback confirmation of each point, until the map has timed its own points
-    // (2026-11-04: a line took 2.02 s per point + 15.5 s).
-    point_overhead_s: f64 = 0.9,
+    // (2026-11-04: a line took 2.02 s per point + 15.5 s; 2026-11-12: 2.5 s per point).
+    point_overhead_s: f64 = 1.4,
     q2_length_m: f64 = 0.15,
     max_failures: usize = 3,
     max_lines: usize = 600,
@@ -1141,42 +1141,69 @@ fn crossing(pts: &[(f64, f64)], from: usize, step: isize, level: f64, limit: f64
     }
 }
 
-/// Centre and FWHM of a Gaussian fitted to the contiguous points above 30 % of the height around
-/// `top` (quadratic in ln y); None with fewer than four points or no maximum.
-fn gaussian_width(
+/// The outermost `level` crossing on one side of `top`, within `limit` of it. A dip below `level`
+/// narrower than `gap` does not end the peak: the bands of the 2026-11-12 map are flat-topped with
+/// reproducible ripples on their high-A side (the same on 11/04 and 11/12), and some dip below half
+/// height, where the nearest crossing cut the band short.
+fn outer_crossing(
     pts: &[(f64, f64)],
     top: usize,
-    baseline: f64,
-    height: f64,
-) -> Option<(f64, f64)> {
-    let level = baseline + 0.3 * height;
-    let mut lo = top;
-    while lo > 0 && pts[lo - 1].1 > level {
-        lo -= 1;
+    step: isize,
+    level: f64,
+    limit: f64,
+    gap: f64,
+) -> Option<f64> {
+    let x_top = pts[top].0;
+    let mut last_above = top;
+    let mut below = false;
+    let mut i = top as isize;
+    loop {
+        let j = i + step;
+        let ended = j < 0 || j as usize >= pts.len() || (pts[j as usize].0 - x_top).abs() > limit;
+        if !ended {
+            let (x, y) = pts[j as usize];
+            if y >= level {
+                last_above = j as usize;
+                below = false;
+            } else {
+                below = true;
+                if (x - pts[last_above].0).abs() <= gap {
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        if ended && !below {
+            return None;
+        }
+        if ended || below {
+            let next = (last_above as isize + step) as usize;
+            let ((x0, y0), (x1, y1)) = (pts[last_above], pts[next]);
+            let t = (y0 - level) / (y0 - y1);
+            return Some(x0 + t * (x1 - x0));
+        }
+        i = j;
     }
-    let mut hi = top;
-    while hi + 1 < pts.len() && pts[hi + 1].1 > level {
-        hi += 1;
-    }
-    if hi - lo + 1 < 4 {
-        return None;
-    }
-    let x0 = pts[top].0;
-    let rows: Vec<Vec<f64>> = pts[lo..=hi]
+}
+
+/// True when the band between `left` and `right` has two maxima above 90 % of the height separated
+/// by a dip below 75 % of it (seen for m/z 922 at k 0.20936 on 2026-11-12).
+fn split_band(pts: &[(f64, f64)], left: f64, right: f64, baseline: f64, height: f64) -> bool {
+    let inside: Vec<(f64, f64)> = pts
         .iter()
-        .map(|p| vec![1.0, p.0 - x0, (p.0 - x0).powi(2)])
+        .copied()
+        .filter(|(x, _)| *x >= left && *x <= right)
         .collect();
-    let b: Vec<f64> = pts[lo..=hi]
+    let high = baseline + 0.9 * height;
+    let (Some(first), Some(last)) = (
+        inside.iter().position(|p| p.1 >= high),
+        inside.iter().rposition(|p| p.1 >= high),
+    ) else {
+        return false;
+    };
+    inside[first..=last]
         .iter()
-        .map(|p| (p.1 - baseline).max(1e-300).ln())
-        .collect();
-    let x = lstsq(&rows, &b)?;
-    if x[2] >= 0.0 {
-        return None;
-    }
-    let sigma = (-1.0 / (2.0 * x[2])).sqrt();
-    let center = x0 - x[1] / (2.0 * x[2]);
-    ((center - x0).abs() < 3.0 * sigma).then_some((center, 2.354_820_045 * sigma))
+        .any(|p| p.1 < baseline + 0.75 * height)
 }
 
 fn analyse_peaks(cfg: &MapConfig, req: &Request, pts: &[(f64, f64)]) -> (Vec<Peak>, f64) {
@@ -1242,8 +1269,21 @@ fn analyse_peaks(cfg: &MapConfig, req: &Request, pts: &[(f64, f64)]) -> (Vec<Pea
         }
         let half = baseline + 0.5 * height;
         let limit = 0.25 * p;
-        let left = crossing(pts, top, -1, half, limit);
-        let right = crossing(pts, top, 1, half, limit);
+        // The nearest crossings, then the outer ones: ripples narrower than 40 % of the nearest
+        // width (at least 0.5 % of the position) stay inside the band.
+        let (left, right) = match (
+            crossing(pts, top, -1, half, limit),
+            crossing(pts, top, 1, half, limit),
+        ) {
+            (Some(l), Some(r)) => {
+                let gap = (0.4 * (r - l)).max(0.005 * p.abs());
+                (
+                    outer_crossing(pts, top, -1, half, limit, gap).or(Some(l)),
+                    outer_crossing(pts, top, 1, half, limit, gap).or(Some(r)),
+                )
+            }
+            other => other,
+        };
         // Centroid of the points above half height around the top.
         let (mut sw, mut sx) = (0.0, 0.0);
         for &(x, y) in pts {
@@ -1259,16 +1299,14 @@ fn analyse_peaks(cfg: &MapConfig, req: &Request, pts: &[(f64, f64)]) -> (Vec<Pea
         if sw > 0.0 {
             peak.center = sx / sw;
         }
-        // A Gaussian through the points above 30 % of the height refines the half-height width:
-        // the crossings alone follow the noise of the two points around each.
-        let (left, right) = match (left, right, gaussian_width(pts, top, baseline, height)) {
-            (Some(l), Some(r), Some((center, fwhm))) if fwhm > 0.0 && fwhm < 2.0 * (r - l) => {
-                peak.center = center;
-                (Some(center - 0.5 * fwhm), Some(center + 0.5 * fwhm))
-            }
-            other => (other.0, other.1),
-        };
+        // The width is that of the band at half height, from its outer edges: a Gaussian fitted to
+        // these flat-topped, rippled bands made them up to 20 % wider (m/z 922 at k 0.208 on
+        // 2026-11-12: R 20 against 24 from the edges). The adaptive step puts the most points on
+        // the edges, where the crossings are read.
         if let (Some(l), Some(r)) = (left, right) {
+            if split_band(pts, l, r, baseline, height) {
+                peak.flags.push("split".to_owned());
+            }
             peak.fwhm = r - l;
             peak.r = if frequency {
                 let m = |x: f64| 1.0 / (x * x);
@@ -1838,9 +1876,14 @@ struct PointResult {
     empty: bool,
     complete: bool,
     covers_best_range: bool,
-    /// c used for this point's caps: its own (closing, else slope), else the global one.
+    /// c used for this point's caps: its own closing, else the global one.
     c: f64,
     c_source: String,
+    /// c from the slope of 1/R in k (diagnostic only, 0 when none): a resolution cap bends 1/R and
+    /// biases it (2026-11-12, P1 at 26 eV: 1.06–1.26 per ion against 0.978 from the band edges and
+    /// the peak positions). Used to steer the ladders, a slope c above the true one sent them past
+    /// the closing, where no ion passes.
+    c_slope: f64,
     /// c that sets this point's ladder targets: from the points completed before it.
     c_ladder: f64,
     closing_k: f64,
@@ -2211,9 +2254,9 @@ impl View<'_> {
         if let Some(k_c) = closing_of(&bracket, self.cfg.ladder.finest_k) {
             result.c = k_c / APEX;
             result.c_source = "closing".to_owned();
-        } else if let Some(c) = fit_c_slope(&ladder_ions) {
-            result.c = c;
-            result.c_source = "slope".to_owned();
+        }
+        if let Some(c) = fit_c_slope(&ladder_ions) {
+            result.c_slope = c;
         }
         result.closing_k = APEX * result.c;
         result.ions = ladder_ions
@@ -2621,19 +2664,14 @@ fn ion_key(mz: f64) -> String {
 }
 
 impl Laws {
-    /// c of the completed points (closing first), else the plan's.
+    /// c of the closings the completed points bracketed, else the plan's (see `c_slope`).
     fn global_c(plan: f64, points: &[PointResult]) -> f64 {
         let closing: Vec<f64> = points
             .iter()
             .filter(|p| p.complete && p.mode == "amplitude" && p.c_source == "closing")
             .map(|p| p.c)
             .collect();
-        let slope: Vec<f64> = points
-            .iter()
-            .filter(|p| p.complete && p.mode == "amplitude" && p.c_source == "slope")
-            .map(|p| p.c)
-            .collect();
-        median(&closing).or_else(|| median(&slope)).unwrap_or(plan)
+        median(&closing).unwrap_or(plan)
     }
 
     fn fit(cfg: &MapConfig, points: &[PointResult]) -> Self {

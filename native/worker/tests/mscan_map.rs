@@ -520,7 +520,7 @@ fn line_estimates_follow_the_time_the_map_measures() {
     let mut c = Controller::new(&json!({})).unwrap();
     let journal = simulated_journal(&mut c, json!({}));
     let records = journal["records"].as_array().unwrap();
-    // The simulator times a point like the plan's prior (0.8 + 0.3 + 0.9 s): estimates match it.
+    // The simulator times a point like the plan's prior (0.8 + 0.3 + 1.4 s): estimates match it.
     for r in records.iter().filter(|r| r["outcome"] == json!("done")) {
         let (expected, took) = (
             r["request"]["expected_s"].as_f64().unwrap(),
@@ -549,7 +549,7 @@ fn line_estimates_follow_the_time_the_map_measures() {
     let next = call(&mut c, "map_next", &[slow.clone()]).unwrap();
     let request = &next["request"];
     let per_point = seconds / points;
-    assert!((per_point - 3.0).abs() < 0.2, "{per_point}");
+    assert!((per_point - 3.75).abs() < 0.25, "{per_point}");
     if request["kind"] == json!("offset") {
         let n = request["axis"].as_array().unwrap().len() as f64;
         let expected = request["expected_s"].as_f64().unwrap();
@@ -572,4 +572,74 @@ fn line_estimates_follow_the_time_the_map_measures() {
             / (fast["request"]["expected_s"].as_f64().unwrap() - 15.0);
         assert!((ratio - 1.5).abs() < 0.05, "{ratio}");
     }
+}
+
+/// m/z 922 on the 2026-11-12 map (500 kHz, E 26 eV), A (V) and M03 (pA).
+#[rustfmt::skip]
+const BAND_K_0_20806: &[(f64, f64)] = &[
+    (84.335, 7.647), (84.758, 7.575), (85.182, 7.609), (85.609, 7.637), (86.038, 7.666),
+    (86.469, 7.611), (86.902, 7.64), (87.337, 7.697), (87.775, 7.825), (87.994, 7.909),
+    (88.104, 8.005), (88.215, 8.137), (88.435, 8.251), (88.546, 8.476), (88.656, 8.598),
+    (88.767, 8.968), (88.878, 9.175), (88.989, 9.44), (89.101, 10.247), (89.212, 11.724),
+    (89.323, 12.995), (89.435, 14.832), (89.547, 21.585), (89.659, 34.546), (89.771, 41.508),
+    (89.883, 48.034), (89.996, 54.795), (90.108, 54.557), (90.333, 52.436), (90.786, 49.624),
+    (91.013, 54.017), (91.241, 55.959), (91.469, 52.155), (91.583, 48.377), (91.698, 44.036),
+    (92.157, 48.154), (92.388, 50.826), (92.503, 44.818), (92.619, 37.283), (92.735, 31.387),
+    (92.85, 27.573), (93.083, 27.342), (93.199, 33.509), (93.316, 40.275), (93.432, 34.029),
+    (93.549, 22.921), (93.666, 16.139), (93.783, 13.667), (94.018, 11.966), (94.489, 9.953),
+    (94.962, 8.382), (95.438, 8.131), (95.916, 8.096), (96.396, 8.097), (96.879, 7.978),
+    (97.364, 8.053), (97.852, 7.861),
+];
+
+#[rustfmt::skip]
+const BAND_K_0_20936: &[(f64, f64)] = &[
+    (85.308, 7.552), (85.735, 7.566), (86.165, 7.559), (86.596, 7.587), (87.03, 7.557),
+    (87.466, 7.587), (87.904, 7.662), (88.345, 7.773), (88.787, 7.971), (89.009, 8.135),
+    (89.121, 8.241), (89.232, 8.459), (89.343, 8.567), (89.455, 8.775), (89.567, 9.283),
+    (89.679, 9.637), (89.791, 10.965), (89.903, 11.847), (90.016, 14.699), (90.128, 16.445),
+    (90.241, 24.206), (90.354, 29.972), (90.467, 41.592), (90.58, 44.798), (90.806, 46.361),
+    (91.261, 46.725), (91.375, 44.481), (91.489, 40.857), (91.604, 37.814), (91.718, 36.289),
+    (91.948, 39.739), (92.063, 43.875), (92.178, 46.528), (92.293, 46.996), (92.408, 41.613),
+    (92.524, 32.649), (92.639, 27.735), (92.755, 24.757), (92.987, 25.906), (93.104, 32.297),
+    (93.22, 37.515), (93.336, 31.481), (93.453, 19.963), (93.57, 14.548), (93.687, 12.766),
+    (93.921, 11.704), (94.392, 9.214), (94.865, 8.012), (95.34, 8.0), (95.817, 8.014),
+    (96.297, 7.991), (96.78, 7.858), (97.264, 7.997), (97.752, 7.767),
+];
+
+fn band_peak(points: &[(f64, f64)], k: f64) -> Value {
+    use esibd_native_worker::mscan_map::{LineResult, MapConfig, Request, analyse};
+    let req: Request = serde_json::from_value(json!({"kind": "amplitude", "f_hz": 500e3, "k": k,
+        "delta_v": 0.0, "ions": [922.01]}))
+    .unwrap();
+    let result: LineResult = serde_json::from_value(json!({
+        "axis": points.iter().map(|p| p.0).collect::<Vec<_>>(),
+        "signal": points.iter().map(|p| p.1 * 1e-12).collect::<Vec<_>>()}))
+    .unwrap();
+    let analysis = analyse(&MapConfig::default(), &req, &result);
+    serde_json::to_value(&analysis.peaks[0]).unwrap()
+}
+
+#[test]
+fn the_width_of_a_rippled_band_is_read_at_its_outer_half_height_edges() {
+    // The nearest crossing stopped at a ripple below half height (R 29), a Gaussian fitted to the
+    // flat top widened it (R 20); the band at half height runs from 89.6 to 93.5 V.
+    let p = band_peak(BAND_K_0_20806, 0.20806);
+    assert!(p["found"].as_bool().unwrap(), "{p}");
+    let r = p["r"].as_f64().unwrap();
+    assert!((22.0..25.5).contains(&r), "R {r}: {p}");
+    let fwhm = p["fwhm"].as_f64().unwrap();
+    assert!((3.7..4.1).contains(&fwhm), "FWHM {fwhm}: {p}");
+    assert!(p["flags"].as_array().unwrap().is_empty(), "{p}");
+}
+
+#[test]
+fn a_band_with_two_maxima_is_flagged_split() {
+    let p = band_peak(BAND_K_0_20936, 0.20936);
+    assert!(p["found"].as_bool().unwrap(), "{p}");
+    assert!(
+        p["flags"].as_array().unwrap().contains(&json!("split")),
+        "{p}"
+    );
+    let r = p["r"].as_f64().unwrap();
+    assert!((26.0..33.0).contains(&r), "R {r}: {p}");
 }

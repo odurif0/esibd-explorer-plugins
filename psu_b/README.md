@@ -206,9 +206,13 @@ points at or above Ilim. It does not change ranges, Ilim or output enables.
 
 ## Connection Failures
 
-A reply lost during a polling read or while reading the config list leaves the serial link out of
-step: the plugin purges the port, restores the baud rate and reads once more, then logs `PSU reply
-lost, port resynchronized and read again`. These reads command nothing, and a write is never repeated.
+A lost reply leaves the serial link out of step. The plugin purges the port, restores the baud rate
+and repeats the request, then logs `PSU reply lost, port resynchronized and the request repeated`.
+This applies to a polling read or a config-list read, which command nothing. It also applies to an
+apply of Vset/Ilim/ON/OFF or a ramp: these read the hardware state first, write only what differs and
+verify it, so a write that did execute is not sent twice. A second failure switches the outputs OFF,
+after a fresh purge so that the OFF commands are answered correctly. A single `set_channel_voltage` is
+never repeated.
 
 After `Communication lost`, or a shutdown that stayed unconfirmed once the port is released, ON
 reconnects without restarting Explorer. This does not confirm that the outputs were OFF.
