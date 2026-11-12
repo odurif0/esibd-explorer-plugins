@@ -163,6 +163,11 @@ It grows as f·A. From 2026-11-03 (about 150 mA at 250 V, 500 kHz), at 348 V: ab
 PSU range limit (Full range 0.5 A?) bound the high-f end, and so does the AMX HD switch dissipation
 (∝ f·A²), to be checked against its specification.
 
+This current is not a setting: it follows from f and A. The operator sets only its limit, Ilim, by
+hand on the PSU; MScan reads Ilim and never changes it. Measured on 2026-11-04: about
+1.47 nA/(Hz·V), so 307 mA at 600 kHz and 348 V. The lab runs at Ilim 300 mA, so the plan keeps
+f within 250–640 kHz and needs Ilim ≥ 330 mA (2026-11-12). With P9 (900 kHz) it needed 490 mA.
+
 ### 3.8 Starting values (2026-11-03)
 - c = 0.978 ± 0.005 and r0 = 2.625 ± 0.003 mm (Agilent G2421A mix: 622, 922, 1522 and 2122 on M03 at
   400–500 kHz).
@@ -172,7 +177,8 @@ PSU range limit (Full range 0.5 A?) bound the high-f end, and so does the AMX HD
 
 ## 4. Figure of merit
 
-The merit is computed on the mix ions of the **best-scan range** (default 322 to 2722), each with its
+The merit is computed on the mix ions of the **best-scan range** (default 622 to 2122 since 2026-11-04:
+322 sat unresolved on the low-A background and 2722 never rose above the noise), each with its
 local baseline subtracted and its signal divided by the latest reference (drift):
 
 - S_i: peak height above the local baseline (the current transmitted at the peak, comparable between
@@ -207,12 +213,16 @@ something on the instrument has changed. The other points follow in random order
 | P4 | 300 kHz | 26 eV | 622 to 2722 | 16 → 33 | f at fixed E |
 | P5 | 300 kHz | 9.4 eV | 622 to 2722 | 26 → 55 | **same N as P1**: does N alone matter? |
 | P6 | 300 kHz | 4.3 eV | 622 to 2722 | 39 → 82 | **same N as P2**: second test |
-| P7 | 560 kHz | 26 eV | 322 to 2722 | 21 → 62 | top of the mix window |
-| P8 | 560 kHz | 8 eV | 322 to 2722 | 38 → 112 | top of the window, low E |
-| P9 | 900 kHz | 26 eV | 118 to 922 | 21 → 58 (118 → 922) | 622 at N 48 as 2122 in P1: mass at equal N (collisions, H3) |
-| P10 | 200 kHz | 26 eV | 1522 to 2722 | 16 → 22 | low N |
-| F1 | frequency lines, A = 120 V | 26 eV | 322 to 2722 | 37 for every ion | frequency mode |
-| F2 | frequency lines, A = 120 V | 8 eV | 322 to 2722 | 67 for every ion | frequency mode, low E |
+| P7 | 550 kHz | 26 eV | 322 to 2722 | 21 → 61 | top of the mix window |
+| P8 | 550 kHz | 8 eV | 322 to 2722 | 38 → 110 | top of the window, low E |
+| F1 | frequency lines, A = 110 V | 26 eV | 322 to 2722 | 35 for every ion | frequency mode |
+| F2 | frequency lines, A = 110 V | 8 eV | 322 to 2722 | 64 for every ion | frequency mode, low E |
+
+P9 (900 kHz, 26 eV) and P10 (200 kHz, 26 eV) were dropped on 2026-11-12. P9 needed Ilim 490 mA (the
+lab runs at 300 mA), and neither point holds the best range 622–2122 inside 20–348 V. P4 now gives the
+low N (16 for 622). H3 is still tested at equal N with different masses, but at a different E: 922 in P2
+(N 47) against 2122 in P1 (49), 922 in P3 (73) against 2122 in P2 (72), 622 in P8 (52) against 2122 in
+P1 (49). Only P9 compared them at equal N and equal E.
 
 **The ladder at each point** (lines at δ = 0, adaptive):
 1. First line at k = 0.200, a well-known setting (R ≈ 14).
@@ -241,7 +251,8 @@ frequency line.
    closing (Section 3.2). Is c the same for every ion and every f, i.e. is the attenuation independent
    of f?
 2. **R_cap versus N**: do all ions of all points fall on one curve (P5 against P1, P6 against P2)? If
-   yes, the curve's exponent tests H4 (2 expected); P9 tests the mass at equal N (H3).
+   yes, the curve's exponent tests H4 (2 expected); ions of different mass at equal N (P2 against P1,
+   P3 against P2, P8 against P1) test H3.
 3. **Signal at R_target per ion**, as a smooth function of (log f, log E), with the stub at its rule
    or at its optimum if the cuts show one.
 4. **Calibration**: (c, r0) fitted on every line, proposed as new MScan defaults.
@@ -292,7 +303,7 @@ or equal within noise (then that setting is not critical there).
 | Stage | Lines | Time |
 |---|---|---|
 | A. Stopping cut | 8 short curves | 15 min |
-| B. Ladders at 12 points | about 130, plus 24 short stub lines | about 20 h |
+| B. Ladders at 10 points | about 130, plus 24 short stub lines | about 20 h |
 | D. Outer search | 3–6 ladders | 5–10 h |
 | E. Out-of-sample check | 10 | 1.5 h |
 | F. Local check | 20 | 3 h |
@@ -302,7 +313,7 @@ or equal within noise (then that setting is not critical there).
 
 Ways to shorten it, if ever needed:
 - no repeats in the ladders (−3.5 h);
-- drop P6 and P10 (−3.5 h);
+- drop P6 (−1.7 h);
 - 0.5 s per point (−35 %).
 
 The run can also be split at any line boundary and continued with Resume (Section 9).
@@ -313,13 +324,14 @@ The run can also be split at any line boundary and continued with Resume (Sectio
 |---|---|---|
 | H1 | c = 0.978; something mass-independent caps R (U/V noise, waveform) | slope of 1/R gives c ≈ 0.978; R_cap ≈ 45 for every ion, whatever N |
 | H2 | c ≈ 0.99: k = 0.21 was further from the apex | slope gives c ≈ 0.99, closing near k = 0.213, R_cap large |
-| H3 | collisions in Q2 | at equal N, R_cap and S fall with mass (P9 against P1) and with P4 (about 1.5 collisions per pass for 2122 at 1e-4 mbar, 0.15 at 1e-5) |
+| H3 | collisions in Q2 | at equal N, R_cap and S fall with mass (922 in P2 against 2122 in P1, 622 in P8 against 2122 in P1) and with P4 (about 1.5 collisions per pass for 2122 at 1e-4 mbar, 0.15 at 1e-5) |
 | H4 | too few RF cycles | R_cap of every ion and point on one curve, rising as N² (P5 ≡ P1, P6 ≡ P2) |
 
 ## 8. Quality rules
 
-- Spray from the syringe, current within ±20 % of its value at Start (plan setting; the 30–60 nA of the
-  glass emitter no longer applies), otherwise the line is repeated. TPG366 acquiring; a note in each
+- Spray from the syringe, current within ±40 % of its value during the last reference line that found
+  its peak (at Start before the first one; plan setting; the 30–60 nA of the glass emitter no longer
+  applies; 2026-11-04: 42 → 48 → 36 nA while the M03 peaks held within 2 %), otherwise the line is repeated. TPG366 acquiring; a note in each
   file.
 - **Reference**: a 1–2 min window around 922 (500 kHz, k = 0.20, δ = 0, E = 26 eV, A from 80 to 100 V)
   every 5 lines; the signals are divided by it.
@@ -339,14 +351,16 @@ nothing waits for a human.
 
 **Before Start (the only manual part):**
 - PSU_A in Full range;
-- Ilim above the highest current the hard bounds allow;
+- Ilim set by hand on the PSU above the highest RF current the hard bounds allow (330 mA for
+  `q2_map`; MScan reads Ilim and never changes it: it stays the operator's safeguard);
 - ESI spraying steadily from the syringe;
 - TPG366 acquiring, DMMR recording.
 
 The lines are chosen during the run, so the validation checks the **worst case of the hard bounds**:
-Ilim for 1 MHz at 348 V (about 420 mA), AMPR limits for x, the stubs and Q1_DC + 2 V, and disk space for
-the planned maximum. It refuses to start with a list of what to change, for example "raise Ilim to
-450 mA, or limit f to 800 kHz", instead of discovering it at 3 a.m.
+Ilim for the highest f at 348 V (307 mA at 600 kHz), AMPR limits for x, the stubs and Q1_DC + 2 V, and
+disk space for the planned maximum. It refuses to start with a list of what to change, for example
+"set Ilim to at least 330 mA on the PSU yourself (now 300 mA; MScan never changes Ilim), or limit f to
+557 kHz in the plan", instead of discovering it at 3 a.m.
 
 **Everything else is automatic**: frequency changes through the AMX plugin, x and the stubs, k, δ, the
 laws, the outer search, the checks, the best scan.
@@ -358,7 +372,7 @@ laws, the outer search, the checks, the best scan.
 | Lost reply, port resynchronized (PSU, AMX, ESI, AMPR, DMMR) | continues (recovery already in the workers) |
 | DMMR records missing or with a repeated time stamp | continues (skipped, counted) |
 | Spray current outside its window | pauses, waits for it to come back, repeats the line; stops after 30 min outside |
-| Line slower than twice its expected time, or no DMMR reading for 60 s | aborts the line, repeats it once |
+| No new point for 5 min, or a line longer than every point of its axis would take | aborts the line, repeats it once (a line slower than its estimate is not a fault, 2026-11-04) |
 | A worker dies or hangs | reconnects it (the plugins already can), repeats the line; stops after three failures in one hour |
 | PSU without headroom, out of tolerance, Ilim reached | the line stops at once (v0.5.9 guard); that direction is closed as a hardware limit and the run goes on |
 | P1 does not reproduce 2026-11-03 | **safe stop** (instrument changed) |
@@ -417,25 +431,29 @@ checks.
   [map]
   name = "q2-map-2026-11"
   mix = [118.09, 322.05, 622.03, 922.01, 1521.97, 2121.93, 2721.89]   # Agilent G2421A
-  best_scan_range = [322, 2722]  # the merit and R_target apply to the mix ions in this range
+  best_scan_range = [622, 2122]  # the merit and R_target apply to the mix ions in this range
   r_target = 40
   r_max = 100                    # highest R the step must resolve (a specification, not a prediction)
-  a_range_v = [20, 348]          # every amplitude line
+  a_range_v = [20, 348]          # every amplitude line stays inside
+  a_margin = 0.2                 # and spans its best-range ions ± 20 % of their amplitude
   min_ions_in_line = 2
   reference_every = 5
-  spray_window_percent = 20      # around the ESI current at Start
+  spray_window_percent = 40      # around the ESI current at Start
+  point_s = 0.8                  # measurement, settling and command/readback per point (s);
+  settle_s = 0.3                 # the map then times its own lines (2026-11-04: 2.02 s per point
+  point_overhead_s = 0.9         # and 15.5 s per line)
   seed = 1
 
   [map.bounds]                   # hard limits, checked before Start; the measurement finds the rest
-  f_khz = [100, 1000]
+  f_khz = [250, 640]             # Ilim ≥ 330 mA, set on the PSU by the operator
   energy_ev = [3, 30]            # x = x_stop - E
   delta_v = [-2, 2]
   stub_below_q1_v = 1
 
   [map.design]                   # first operating points; the outer search adds more
   amplitude = [[500, 26], [500, 12], [500, 5], [300, 26], [300, 9.4], [300, 4.3],
-               [560, 26], [560, 8], [900, 26], [200, 26]]   # (f kHz, E eV)
-  frequency = [[120, 26], [120, 8]]                          # (A V, E eV)
+               [550, 26], [550, 8]]                         # (f kHz, E eV)
+  frequency = [[110, 26], [110, 8]]                          # (A V, E eV)
 
   [map.ladder]
   first_k = 0.200
@@ -506,7 +524,8 @@ See `mscan/README.md`, section Map of Q2.
 3. Typical P4 with beam (decides H3).
 4. Negative δ: useful in amplitude mode to raise the resolution of the light ions; MScan accepts only
    δ ≥ 0 today.
-5. Best-scan range: 322 to 2722 by default (the mix without 118).
+5. Best-scan range: 622 to 2122 by default since 2026-11-04 (322 unresolved, 2722 not in the beam);
+   put 322 back once a low-E point resolves it.
 
 ## 12. Integration and launch
 
@@ -525,8 +544,8 @@ lose nothing, and Resume is the same call as a normal step.
    - AMPR ON;
    - DMMR recording, TPG366 acquiring, ESI spraying from the syringe.
 2. In MScan, open the Map group and choose a plan file. Three templates are provided:
-   - `q2_check_1h.toml`: stopping cut and part of the P1 ladder;
-   - `q2_check_4h.toml`: P1 and P5 ladders;
+   - `q2_check_2h.toml`: stopping cut and the P1 ladder up to the R_target region (about 2 h);
+   - `q2_check_6h.toml`: P1 and P5 ladders (about 6 h);
    - `q2_map.toml`: the full map.
 3. **Check**, at load and again at Start, validates the worst case of the hard bounds and lists what to
    change. **Simulate** runs the plan against the Q2 simulator without touching the hardware and shows

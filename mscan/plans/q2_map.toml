@@ -5,32 +5,37 @@
 [map]
 name = "q2-map"
 mix = [118.09, 322.05, 622.03, 922.01, 1521.97, 2121.93, 2721.89]  # Agilent G2421A, m/z
-best_scan_range = [322, 2722]   # the merit and R_target apply to the mix ions in this range
+best_scan_range = [622, 2122]   # the merit and R_target apply to the mix ions in this range (2026-11-04:
+                                # 322 unresolved on the background, 2722 never above the noise)
 r_target = 40
 r_max = 100                     # highest R the step must resolve (a specification, not a prediction)
 r_noise = 0.10                  # the solver aims at R_target·(1 + r_noise), a line passes at R_target·(1 − r_noise)
-a_range_v = [20, 348]           # every amplitude line (PSU in Full range)
+a_range_v = [20, 348]           # the amplitude lines stay inside (PSU in Full range)
+a_margin = 0.2                  # a line spans its best-range ions ± 20 % of their amplitude
 min_ions_in_line = 2
 reference_every = 5             # one reference window every 5 lines
-spray_window_percent = 20       # around the ESI current at Start
+spray_window_percent = 40       # around the ESI current at Start (2026-11-04: 42 → 48 → 36 nA, beam within 2 %)
 seed = 1
 detector = "M03"                # the DMMR module the measurement-driven step follows
 point_s = 0.8                   # measurement time per point (s)
 settle_s = 0.3                  # settling time per point (s)
+point_overhead_s = 0.9          # command and readback per point (s), until the map times its own lines
 q2_length_m = 0.15
 max_failures = 3                # the same line failing this many times stops the map
 max_lines = 600
 coarse = 4                      # fine steps per coarse step: coarse A/(2·r_max), fine A/(8·r_max)
 
 [map.bounds]                    # hard limits, checked before Start; the measurement finds the rest
-f_khz = [100, 1000]
+f_khz = [250, 640]              # at k = 0.200: 2122 at 339 V at 640 kHz, 922–2122 above 20 V at 250 kHz;
+                                # the RF current follows from f and A: Ilim ≥ 330 mA, set on the PSU by
+                                # the operator (MScan never changes it)
 energy_ev = [3, 30]             # x = x_stop − E (x_stop from the stopping cut)
 delta_v = [0, 2]
 stub_below_q1_v = 1
 
 [map.design]                    # first operating points; the outer search adds more
 amplitude = [[500, 26], [500, 12], [500, 5], [300, 26], [300, 9.4], [300, 4.3],
-             [550, 26], [550, 8], [900, 26], [200, 26]]   # (f kHz, E eV)
+             [550, 26], [550, 8]]                         # (f kHz, E eV)
 frequency = [[110, 26], [110, 8]]                          # (A V, E eV): frequency lines
 
 [map.ladder]

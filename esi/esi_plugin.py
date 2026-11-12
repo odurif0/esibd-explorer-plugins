@@ -10,7 +10,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, current_thread
 from typing import Any, cast
 
 import numpy as np
@@ -56,6 +56,11 @@ _ESI_DISCHARGING = "OFF: HV discharging"
 _ESI_DISCHARGE_REPORT_S = 10.0
 _ESI_DISCHARGE_WAIT_S = 135.0  # The runtime's 120 s check plus margin.
 _ESI_DISCONNECTED_UNCONFIRMED = "Disconnected: shutdown unconfirmed"
+# The controller vanished (switched off, cable unplugged) during the discharge check, after its HV,
+# heater and global enable had been read back OFF: nothing is generated any more, only the discharge
+# was not measured to the end. 2026-11-11 lab: switched off 12 s into the check (HV1 +23.5 V and
+# falling); the plugin claimed "HV may remain energized", then a retry OFF hung on Purge for 7 s.
+_ESI_DISCONNECTED_DISCHARGE = "Disconnected: discharge unverified"
 _PARAMETER_UNIT_KEY = getattr(Parameter, "UNIT", "Unit")
 _ESI_POWER_ON_ICON = "switch-medium_on.png"
 _ESI_POWER_OFF_ICON = "switch-medium_off.png"
@@ -345,25 +350,117 @@ def _fixed_channel_items(device_name: str) -> list[dict[str, Any]]:
     return channels
 
 
+def _controller_gone(exc: BaseException) -> bool:
+    """The DLL reports the controller absent (-100, Device not connected): switched off or unplugged."""
+    return "failed: -100 " in str(exc) or "-100 (Device not connected)" in str(exc)
+
+
+def _output_selected(device: Any, address: int) -> bool:
+    """True when the HV output of this module is ON ("Output On" checked)."""
+    return any(getattr(ch, "module", None) == address and not _is_current_channel(ch)
+               and getattr(ch, "enabled", False) for ch in device.getChannels())
+
+
+# Tab name and display unit. The HV currents are drawn in nA (user, 2026-11-11); channels, files and
+# every other plugin (MScan, Transmission) keep amperes: ESIChannel.convertDataDisplay scales the plot only.
+_ESI_TABS = (("Current", "nA"), ("Voltage", "V"), ("Temperature", "degC"))
+_ESI_CURRENT_DISPLAY_SCALE = 1e9
+
+
+def _plot_tab_bar(plugin_manager: Any = None):
+    """A tab bar that keeps the window's normal tab style.
+
+    Explorer restyles every QTabBar of its window as a dock tab bar: in icon mode the labels of the
+    unselected tabs become transparent, which would hide the Voltage and Temperature tabs. Explorer
+    also keeps every QTabBar it found in ``pluginManager.tabBars`` and walks that list whenever a dock
+    moves: a rebuilt plot deletes this bar, so it leaves the list when it is destroyed (2026-11-11 lab:
+    "wrapped C/C++ object of type _PlotTabBar has been deleted" in toggleTitleBar).
+    """
+    from PyQt6.QtWidgets import QTabBar
+
+    class _PlotTabBar(QTabBar):
+        def setStyleSheet(self, styleSheet: str | None) -> None:  # noqa: N802 - Qt name
+            pass  # Explorer's dock-tab style does not apply to these tabs.
+
+    bar = _PlotTabBar()
+
+    def forget() -> None:
+        cached = getattr(plugin_manager, "tabBars", None)
+        if isinstance(cached, list):
+            cached[:] = [other for other in cached if other is not bar]
+
+    bar.destroyed.connect(forget)
+    return bar
+
+
 class _ESILiveDisplay(LiveDisplay):
-    """Keep current, voltage and temperature on separate physical axes."""
+    """One tab per quantity, each plot at full height: Current (selected first), Voltage, Temperature.
+
+    2026-11-04 lab: a current was drawn for an output that was OFF, and the plot was split between
+    current and voltage (and temperature), which made the current, the quantity to follow, hard to
+    read. A current is plotted only while its HV output is ON. The tab the operator selects is kept
+    when the plots are rebuilt. Explorer's stack and group buttons do not apply to tabs: hidden.
+    """
+
+    plotTabs = None
+    _selected_tab = "Current"
+
+    def initGUI(self) -> None:
+        super().initGUI()
+        for action in (getattr(self, "stackAction", None), getattr(self, "groupAction", None)):
+            if hasattr(action, "setVisible"):
+                action.setVisible(False)  # tabs replace stacking and grouping
 
     def initFig(self) -> None:
+        from PyQt6.QtWidgets import QTabWidget
+
+        stack = getattr(self, "stackAction", None)
+        if stack is not None:
+            stack.state = self.StackActionState.HORIZONTAL  # one plot widget per group, each with its time axis
+        splitter = getattr(self, "plotSplitter", None)
         super().initFig()
-        for plot in self.livePlotWidgets:
+        if self.plotSplitter is None or self.plotSplitter is splitter:
+            return  # Explorer skipped the rebuild (a plot was in progress): keep the current tabs.
+        self.plotTabs = None
+        if not self.livePlotWidgets:
+            return  # Explorer's "Nothing to plot" label
+        tabs = QTabWidget()
+        tabs.setTabBar(_plot_tab_bar(getattr(self, "pluginManager", None)))
+        tabs.setDocumentMode(True)
+        self.plotSplitter.addWidget(tabs)
+        for label, plot in zip(self.channelGroups, self.livePlotWidgets):
+            tabs.addTab(plot, label.split(" (")[0])
             item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
             if getattr(item, "groupLabel", None) is not None and item.legend is not None:
                 item.legend.setOffset((8, 24))  # Keep the unit heading above the traces' legend.
+                if hasattr(item.legend, "setColumnCount"):
+                    item.legend.setColumnCount(3)
+        names = [tabs.tabText(index) for index in range(tabs.count())]
+        if self._selected_tab in names:
+            tabs.setCurrentIndex(names.index(self._selected_tab))
+        tabs.currentChanged.connect(lambda index, tabs=tabs: self._tab_selected(tabs, index))
+        self.plotTabs = tabs
+
+    def _tab_selected(self, tabs, index: int) -> None:
+        if tabs is self.plotTabs and index >= 0:
+            self._selected_tab = tabs.tabText(index)
 
     def getGroups(self):
-        groups = {}
-        for name, channels in super().getGroups().items():
-            units = dict.fromkeys(channel.unit for channel in channels)
-            if len(units) <= 1:
-                groups[name] = channels
-            else:
-                for unit in units:
-                    groups[f"{name} ({unit})"] = [ch for ch in channels if ch.unit == unit]
+        device = self.parentPlugin
+        own = {id(ch) for ch in device.getChannels()}
+        # Explorer's selection: displayed ('D') and active channels (an output with Output On).
+        shown = [ch for channels in super().getGroups().values() for ch in channels if id(ch) in own]
+        groups, plotted = {}, set()
+        for name, unit in _ESI_TABS:
+            members = [ch for ch in shown if ch.getDisplayUnit() == unit and (
+                _output_selected(device, getattr(ch, "module", None)) if _is_current_channel(ch)
+                else getattr(ch, "enabled", False))]
+            if members:
+                groups[f"{name} ({unit})"] = members
+                plotted.update(id(ch) for ch in members)
+        for channel in device.getChannels():
+            if id(channel) not in plotted and getattr(channel, "plotCurve", None) is not None:
+                channel.clearPlotCurve()  # e.g. the current of an output just switched OFF
         self.channelGroups = groups  # Explorer's plot loop consumes this cache.
         return groups
 
@@ -381,9 +478,9 @@ class _ESILiveDisplay(LiveDisplay):
         bounds = view.childrenBounds()[1]
         if bounds is None or not np.all(np.isfinite(bounds)) or bounds[0] != bounds[1]:
             return
-        # A constant nanoamp current must not inherit pyqtgraph's default 1 A span.
+        # A constant current (nA on this axis) must not inherit pyqtgraph's default span.
         current = float(bounds[0])
-        half_span = 10.0 ** np.floor(np.log10(abs(current))) if current else 1e-12
+        half_span = 10.0 ** np.floor(np.log10(abs(current))) if current else 1e-3
         view.setRange(yRange=(current - half_span, current + half_span),
                       padding=0, disableAutoRange=False)
 
@@ -837,7 +934,7 @@ class ESIDevice(Device):
             background = "#2f855a"
         elif state in ("Disconnected",):
             background = "#718096"
-        elif state == _ESI_STOPPING:
+        elif state in (_ESI_STOPPING, _ESI_DISCONNECTED_DISCHARGE):
             background = "#975a16"
         elif "lost" in state.lower() or "unconfirmed" in state.lower():
             background = "#c53030"
@@ -862,6 +959,8 @@ class ESIDevice(Device):
             parts.append(heat)
         if getattr(self, "shutdown_unconfirmed", False):
             parts.append("Previous HV/heater shutdown unconfirmed")
+        elif getattr(self, "discharge_unverified", ""):
+            parts.append(f"Outputs OFF, discharge not measured to the end ({self.discharge_unverified})")
         return " | ".join(parts)
 
     def _update_heat_stability_display(self) -> None:
@@ -2099,7 +2198,11 @@ class ESIChannel(Channel):
         return "degC" if getattr(self, "module", 2) == _ESI_HEAT_MODULE else "V"
 
     def getDisplayUnit(self) -> str:
-        return self.unit
+        return "nA" if self.is_current_channel() else self.unit
+
+    def convertDataDisplay(self, data: np.ndarray) -> np.ndarray:
+        """Live display only: currents in nA; the channel, its files and its readers keep amperes."""
+        return data * _ESI_CURRENT_DISPLAY_SCALE if self.is_current_channel() else data
 
     def initGUI(self, item: dict) -> None:
         # INI sections are case-insensitive; copying them directly would turn
@@ -2215,6 +2318,7 @@ class ESIController(DeviceController):
         self.initialized = False
         self.main_state = "Disconnected"
         self.shutdown_unconfirmed = False
+        self.discharge_unverified = ""  # When and at what readings the controller vanished mid-check.
         self.discharge_readings: dict[int, dict[str, float]] = {}
         self._discharge_outputs_off = False  # Set by the first discharge report of an OFF.
         self.interlock_state = "n/a"
@@ -2235,6 +2339,27 @@ class ESIController(DeviceController):
         self.available_configs: list[dict[str, Any]] = []
         self.available_configs_text = "n/a"
         self.loaded_config_text = "n/a"
+
+    def startAcquisition(self) -> None:
+        """Explorer's start, one caller at a time.
+
+        2026-11-11 lab: the ON thread (gate ON) and Explorer's recording start ran it at once after an
+        OFF/ON; each saw the old loop end and started its own. Two loops polled the ESI from 15:37 on:
+        2 polls/s, "Could not acquire lock to acquire data" at every lost reply, five times more lost
+        replies, and 50 MB of worker log per hour (the data-ready flags then changed at every poll).
+        """
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            super().startAcquisition()
+
+    def runAcquisition(self) -> None:
+        """Explorer's loop; it ends as soon as a newer loop replaces it, so the ESI is polled once."""
+        me = current_thread()
+        while self.acquiring and getattr(self, "acquisitionThread", None) is me:
+            with self.lock.acquire_timeout(1, timeoutMessage="Could not acquire lock to acquire data") as acquired:
+                if acquired and getattr(self, "acquisitionThread", None) is me:
+                    self.fakeNumbers() if getTestMode() else self.readNumbers()
+                    self.signalComm.updateValuesSignal.emit()
+            time.sleep(self.getDevice().interval / 1000)  # The lock is released before waiting.
 
     def initializeCommunication(self) -> None:
         if self.initializing:
@@ -2271,7 +2396,7 @@ class ESIController(DeviceController):
 
         if getattr(self, '_initial_open_close_requested', False):
             if not self.initialized:
-                self.main_state = _ESI_DISCONNECTED_UNCONFIRMED if self.shutdown_unconfirmed else "Disconnected"
+                self.main_state = self._disconnected_state()
                 self._restore_off_ui_state()
             self._sync_status()
             self.initializing = False
@@ -2285,6 +2410,7 @@ class ESIController(DeviceController):
         self.initialized = False
         self.main_state = "Connecting"
         resumed = self.resume_session
+        opened = False
         try:
             self.print("ESI process isolation: plugin-local native Rust worker.")
             log_dir = Path(self.controllerParent.pluginManager.Settings.dataPath) / "logs" / "esi"
@@ -2303,7 +2429,7 @@ class ESIController(DeviceController):
                 with contextlib.suppress(Exception):
                     device.close()
                 if generation == self._connection_generation:
-                    self.main_state = _ESI_DISCONNECTED_UNCONFIRMED if self.shutdown_unconfirmed else "Disconnected"
+                    self.main_state = self._disconnected_state()
                     self._restore_off_ui_state()
                     self._sync_status()
                 return
@@ -2317,6 +2443,7 @@ class ESIController(DeviceController):
             if resumed:
                 connect_kwargs["preserve_outputs"] = True
             device.connect(**connect_kwargs)
+            opened = True
             if not proceed():
                 return
             if resumed:
@@ -2404,17 +2531,24 @@ class ESIController(DeviceController):
             if generation != self._connection_generation or (device is not None and device is not self.device):
                 return
             if self.device is None:
-                self.main_state = (_ESI_DISCONNECTED_UNCONFIRMED if self.shutdown_unconfirmed else "Disconnected")
+                self.main_state = (self._disconnected_state())
                 self._restore_off_ui_state()
             elif self._initial_open_incomplete():
                 self._dispose_device()  # No HV/heater command after a failed Open.
                 self._restore_off_ui_state()
+            elif not opened and getattr(device, "_transport_poisoned", False):
+                # 2026-11-11 lab: ON with the controller switched off; Open blocked and its worker was
+                # stopped. That connection never answered: release it, never run an OFF sequence on it.
+                self._release_unopened(device)
             else:
                 self.shutdownCommunication()
             self.print(
                 f"ESI initialization failed on COM{int(self.controllerParent.com)}: {exc}\n"
-                "Confirm the configured COM port, power the controller, and close "
-                "the hardware probe and vendor control application before retrying.",
+                + ("Confirm the configured COM port, power the controller, and close "
+                   "the hardware probe and vendor control application before retrying." if opened else
+                   "The controller did not answer. Is the controller switched on? Switch it on, close the "
+                   "hardware probe and the vendor control application, then ON again. No output was switched "
+                   "on by this attempt."),
                 flag=PRINT.ERROR,
             )
         finally:
@@ -2459,6 +2593,11 @@ class ESIController(DeviceController):
                 "ESI initialized with HV and heater outputs forced OFF. "
                 "Use the explicit output controls to energize HV1, HV2, or HEAT."
             )
+            if self.discharge_unverified:
+                self.print(f"The discharge check cut earlier ({self.discharge_unverified}) is superseded: "
+                           "outputs forced OFF again, HV readbacks live.")
+                self.discharge_unverified = ""
+                self._sync_status()
 
     def _adopt_hardware_state(self) -> None:
         """Crash resume: show the ESI as it runs (targets and active outputs); nothing is sent."""
@@ -3135,16 +3274,25 @@ class ESIController(DeviceController):
     def toggleOn(self) -> None:
         target_on = bool(self.controllerParent.isOn())
         if target_on and self.main_state == _ESI_STOPPING and self._discharge_outputs_off:
+            # 2026-11-11 lab: ON was clicked six times during checks and refused each time. It now waits
+            # for the verdict: it reconnects (outputs forced OFF) only after a verified discharge.
             _session_request(self.controllerParent, False)
             self._restore_off_ui_state()
-            self.print("ESI outputs are OFF and the HV discharge check is still running; "
-                       "ON is possible once it ends.", flag=PRINT.WARNING)
+            if not getattr(self, "_on_after_check", False):
+                self._on_after_check = True
+                left = max(0., getattr(self, "_discharge_started_at", time.monotonic())
+                           + _ESI_DISCHARGE_WAIT_S - time.monotonic())
+                self.print("ESI outputs are OFF and the HV discharge check is still running: ON follows "
+                           f"once it verifies the discharge (at most {left:.0f} s). OFF cancels it.")
             return
         if target_on and self.main_state in (_ESI_STOPPING, "Shutdown unconfirmed"):
             self._restore_on_ui_state()
             self.print("ESI cannot reconnect until communication has been released; retry OFF.", flag=PRINT.WARNING)
             return
         if not target_on:
+            if getattr(self, "_on_after_check", False):
+                self._on_after_check = False
+                self.print("The ON queued behind the discharge check is cancelled.")
             self.shutdownCommunication()
             return
         with self._output_lock:
@@ -3434,7 +3582,31 @@ class ESIController(DeviceController):
                 sync()
         _invoke_gui_callback(update)
 
-    def _release_failed_transport(self, device) -> bool:
+    def _release_unopened(self, device) -> bool:
+        """Free the port of a connection whose Open never completed; the output state is as before it."""
+        released = False
+        close_transport = getattr(device, "force_close_transport", None)
+        try:
+            released = (close_transport(timeout_s=float(self.controllerParent.connect_timeout_s)) is True
+                        if callable(close_transport) else True)
+        except Exception as exc:  # noqa: BLE001 - reported, the port stays reserved
+            self.print(f"ESI transport closure failed: {exc}", flag=PRINT.ERROR)
+        if device is not self.device:
+            return released
+        self.initialized = False
+        self.acquiring = False
+        if released:
+            self.device = None
+            with contextlib.suppress(Exception):
+                device.close()
+            self.main_state = self._disconnected_state()
+        else:
+            self.main_state = "Connection pending"
+        self._restore_off_ui_state()
+        self._sync_status()
+        return released
+
+    def _release_failed_transport(self, device, *, outputs_off: bool = False) -> bool:
         """Detach a failed connection, preserving the separate output-state warning."""
         if device is None or device is not self.device:
             return False
@@ -3447,7 +3619,8 @@ class ESIController(DeviceController):
             generation = getattr(self, "_connection_generation", 0)
             self._output_cancel.set()
             self._stop_local_acquisition()
-            self.shutdown_unconfirmed = True
+            if not outputs_off:
+                self.shutdown_unconfirmed = True
             released = False
             close_transport = getattr(device, "force_close_transport", None)
             if callable(close_transport):
@@ -3462,14 +3635,18 @@ class ESIController(DeviceController):
                 with contextlib.suppress(Exception):
                     device.close()
                 self.initialized = False
-                self.main_state = _ESI_DISCONNECTED_UNCONFIRMED
+                self.main_state = self._disconnected_state()
                 self.discharge_readings = {}
                 self.initializeValues(reset=True)
                 self._restore_off_ui_state(connection_generation=generation)
-                self.print("ESI communication released; reconnect this plugin with ON. "
-                           "HV/heater shutdown is unconfirmed; use the hardware interlock/front panel.", flag=PRINT.ERROR)
+                if outputs_off:
+                    self.print("ESI communication released; ON reconnects once the controller is back.")
+                else:
+                    self.print("ESI communication released; reconnect this plugin with ON. "
+                               "HV/heater shutdown is unconfirmed; use the hardware interlock/front panel.",
+                               flag=PRINT.ERROR)
             else:
-                self.main_state = "Shutdown unconfirmed"
+                self.main_state = _ESI_COMMUNICATION_LOST if outputs_off else "Shutdown unconfirmed"
                 self._restore_on_ui_state()
             self._sync_status()
             return released
@@ -3484,7 +3661,9 @@ class ESIController(DeviceController):
             # The runtime checks discharge only after HV, heater and the global enable are verified OFF.
             self._discharge_outputs_off = True
             self._restore_off_ui_state()
-            self.print("ESI outputs OFF; the HV discharge check continues in the background.")
+            # 2026-11-11 lab: the controller was switched off 12 s into the check (HV1 still +23.5 V).
+            self.print("ESI outputs OFF; the HV discharge check continues in the background. Switch the "
+                       "controller off only after \"ESI HV discharge verified\" (about 40 s after 1 kV).")
         self.discharge_readings = report["modules"]
         self.global_enabled = False
         for address, data in self.discharge_readings.items():
@@ -3532,6 +3711,7 @@ class ESIController(DeviceController):
         def progress(report):
             if device is self.device and generation == self._connection_generation:
                 self._on_discharge_progress(report)
+        gone = False
         try:
             result = device.disconnect(
                 timeout_s=float(self.controllerParent.connect_timeout_s),
@@ -3542,13 +3722,26 @@ class ESIController(DeviceController):
             confirmed = True
         except Exception as exc:
             if device is self.device and generation == self._connection_generation:
-                last = (f" Last readings: {self._discharge_readings_text()}."
-                        if self.discharge_readings else "")
-                self.print(
-                    "ESI shutdown could not be confirmed. HV may remain energized; "
-                    f"use the hardware interlock/front panel: {str(exc).rstrip('.')}.{last}",
-                    flag=PRINT.ERROR,
-                )
+                readings = self._discharge_readings_text() if self.discharge_readings else ""
+                last = f" Last readings: {readings}." if readings else ""
+                gone = self._discharge_outputs_off and _controller_gone(exc)
+                if gone:
+                    elapsed = time.monotonic() - self._discharge_started_at
+                    self.discharge_unverified = (f"controller lost at {time.strftime('%H:%M:%S')}"
+                                                 + (f", {readings}" if readings else ""))
+                    self.print(
+                        "ESI controller disconnected during the HV discharge check (switched off or its cable "
+                        f"unplugged), {elapsed:.0f} s after its HV, heater and global enable were read back OFF. "
+                        "Nothing is generated any more; the residual charge keeps bleeding, but its discharge "
+                        f"below 10 V was not measured.{last} ON reconnects once the controller is back.",
+                        flag=PRINT.WARNING,
+                    )
+                else:
+                    self.print(
+                        "ESI shutdown could not be confirmed. HV may remain energized; "
+                        f"use the hardware interlock/front panel: {str(exc).rstrip('.')}.{last}",
+                        flag=PRINT.ERROR,
+                    )
         finally:
             if device is not self.device or generation != self._connection_generation:
                 return False  # A retired reply cannot certify the replacement connection.
@@ -3558,11 +3751,15 @@ class ESIController(DeviceController):
                 self._dispose_device(shutdown_confirmed=True)
                 self.initialized = False
                 self.shutdown_unconfirmed = False
+                self.discharge_unverified = ""
                 self.discharge_readings = {}
                 self._restore_off_ui_state(connection_generation=generation)
             else:
                 backend = getattr(device, '_backend', None)
-                if (callable(getattr(type(backend), 'lifecycle_attribute', None))
+                if gone:
+                    # The DLL blocks on a vanished port (a retry OFF hung 7 s on Purge): release at once.
+                    self._release_failed_transport(device, outputs_off=True)
+                elif (callable(getattr(type(backend), 'lifecycle_attribute', None))
                         and getattr(device, 'connected', False) is True
                         and getattr(device, '_transport_poisoned', False) is False):
                     # A responsive native owner can retry OFF; only its cached
@@ -3578,6 +3775,14 @@ class ESIController(DeviceController):
                            "communication closed.")
             self._discharge_outputs_off = False
             self._sync_status()
+            if getattr(self, "_on_after_check", False):
+                self._on_after_check = False
+                if confirmed:
+                    self.print("ESI ON, queued behind the discharge check: reconnecting.")
+                    _invoke_gui_callback(lambda: self.controllerParent.setOn(True))
+                else:
+                    self.print("The ON queued behind the discharge check is dropped: the discharge was not "
+                               "verified. Check the state, then ON.", flag=PRINT.WARNING)
         return confirmed
 
     def closeCommunication(self) -> None:
@@ -3706,6 +3911,7 @@ class ESIController(DeviceController):
         def update() -> None:
             self.controllerParent.main_state = self.main_state
             self.controllerParent.shutdown_unconfirmed = self.shutdown_unconfirmed
+            self.controllerParent.discharge_unverified = getattr(self, "discharge_unverified", "")
             self.controllerParent.interlock_state = self.interlock_state
             self.controllerParent.detected_modules = self.detected_modules
             self.controllerParent.heat_status = self.heat_status
@@ -3714,6 +3920,11 @@ class ESIController(DeviceController):
                 refresh()
 
         _invoke_gui_callback(update)
+
+    def _disconnected_state(self) -> str:
+        if getattr(self, "shutdown_unconfirmed", False):
+            return _ESI_DISCONNECTED_UNCONFIRMED
+        return _ESI_DISCONNECTED_DISCHARGE if getattr(self, "discharge_unverified", "") else "Disconnected"
 
     def _initial_open_incomplete(self) -> bool:
         return self.device is not None and any(bool(getattr(self.device, name, False)) for name in (

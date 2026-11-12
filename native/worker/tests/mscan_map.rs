@@ -154,7 +154,7 @@ fn check_lists_what_to_change_before_start() {
     weak["full_range"] = json!(false);
     let bad = call(&mut c, "map_check", &[json!({}), weak]).unwrap();
     let text = bad["problems"].to_string();
-    assert!(text.contains("raise Ilim"), "{text}");
+    assert!(text.contains("set Ilim to at least"), "{text}");
     assert!(text.contains("Full range"), "{text}");
     assert!(bad["estimate"].is_null());
     let err = call(
@@ -253,7 +253,10 @@ fn simulated_map_converges_on_a_best_scan_with_faults() {
     let optimum = &report["optimum"];
     let domain = report["domain_hz"].as_array().unwrap();
     let f = optimum["f_hz"].as_f64().unwrap();
-    assert!(f >= domain[0].as_f64().unwrap() - 1.0 && f <= domain[1].as_f64().unwrap() + 1.0);
+    assert!(
+        f >= domain[0].as_f64().unwrap() - 1.0 && f <= domain[1].as_f64().unwrap() + 1.0,
+        "optimum {optimum} outside {domain:?}"
+    );
     assert!((report["stopping"]["x_stop"].as_f64().unwrap() - 35.7).abs() < 0.5);
     assert!(report["stopping"]["thermalized"].as_bool().unwrap());
     let c_fit = report["laws"]["c"].as_f64().unwrap();
@@ -432,4 +435,126 @@ fn explore_validation() {
         println!("V {v}");
     }
     println!("next {}", r["next"]);
+}
+
+fn simulated_journal(c: &mut Controller, plan: Value) -> Value {
+    call(
+        c,
+        "map_simulate",
+        &[
+            plan,
+            instrument(),
+            json!({"hypothesis": "H1", "journal": true, "max_lines": 40}),
+        ],
+    )
+    .unwrap()["journal"]
+        .clone()
+}
+
+#[test]
+fn amplitude_lines_span_the_best_range_ions_with_their_margin() {
+    let mut c = Controller::new(&json!({})).unwrap();
+    let journal = simulated_journal(&mut c, json!({}));
+    let ladder = journal["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["request"])
+        .find(|q| q["role"] == json!("ladder") && q["point"] == json!("P1"))
+        .expect("a P1 ladder line");
+    let axis: Vec<f64> = ladder["axis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    // P1 (500 kHz, k = 0.200): 622 at 61 V and 2122 at 207 V, ± 20 % (2026-11-04: 60.4 and 207 V).
+    let (lo, hi) = (axis[0], *axis.last().unwrap());
+    assert!(
+        (lo - 61.0 / 1.2).abs() < 2.0 && (hi - 207.0 * 1.2).abs() < 6.0,
+        "{lo}–{hi} V"
+    );
+    let ions: Vec<f64> = ladder["ions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap().round())
+        .collect();
+    assert_eq!(ions, vec![622.0, 922.0, 1522.0, 2122.0]);
+    // No best-range ion inside a_range_v: the whole range, as before.
+    let wide = simulated_journal(
+        &mut c,
+        json!({"map": {"best_scan_range": [5000, 6000], "mix": [622.03, 922.01, 5500.0, 5900.0],
+            "stages": {"stopping": false, "search": false, "validation": false, "local": false,
+                "best": false}}}),
+    );
+    let first = wide["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["request"])
+        .find(|q| q["role"] == json!("ladder"))
+        .expect("a ladder line");
+    let axis = first["axis"].as_array().unwrap();
+    assert_eq!(axis[0].as_f64().unwrap(), 20.0);
+    assert!(axis.last().unwrap().as_f64().unwrap() > 340.0);
+}
+
+#[test]
+fn line_estimates_follow_the_time_the_map_measures() {
+    let mut c = Controller::new(&json!({})).unwrap();
+    let journal = simulated_journal(&mut c, json!({}));
+    let records = journal["records"].as_array().unwrap();
+    // The simulator times a point like the plan's prior (0.8 + 0.3 + 0.9 s): estimates match it.
+    for r in records.iter().filter(|r| r["outcome"] == json!("done")) {
+        let (expected, took) = (
+            r["request"]["expected_s"].as_f64().unwrap(),
+            r["duration_s"].as_f64().unwrap(),
+        );
+        if r["request"]["kind"] == json!("offset") {
+            assert!((expected - took).abs() < 1.0, "{expected} vs {took}");
+        }
+    }
+    // Lines that took 1.5 × longer per point: the next estimate follows them.
+    let mut slow = journal.clone();
+    slow["records"].as_array_mut().unwrap().truncate(12);
+    let mut points = 0.0;
+    let mut seconds = 0.0;
+    for r in slow["records"].as_array_mut().unwrap() {
+        let measured = r["analysis"]["measured"].as_f64().unwrap_or(0.0);
+        let took = r["duration_s"].as_f64().unwrap();
+        if r["outcome"] == json!("done") && measured >= 10.0 && took > 15.0 {
+            let longer = 15.0 + 1.5 * (took - 15.0);
+            r["duration_s"] = json!(longer);
+            points += measured;
+            seconds += longer - 15.0;
+        }
+    }
+    assert!(points >= 100.0);
+    let next = call(&mut c, "map_next", &[slow.clone()]).unwrap();
+    let request = &next["request"];
+    let per_point = seconds / points;
+    assert!((per_point - 3.0).abs() < 0.2, "{per_point}");
+    if request["kind"] == json!("offset") {
+        let n = request["axis"].as_array().unwrap().len() as f64;
+        let expected = request["expected_s"].as_f64().unwrap();
+        assert!(
+            (expected - (15.0 + n * per_point)).abs() < 1.0,
+            "{expected}"
+        );
+    } else {
+        let fast = call(
+            &mut c,
+            "map_next",
+            &[{
+                let mut j = journal.clone();
+                j["records"].as_array_mut().unwrap().truncate(12);
+                j
+            }],
+        )
+        .unwrap();
+        let ratio = (request["expected_s"].as_f64().unwrap() - 15.0)
+            / (fast["request"]["expected_s"].as_f64().unwrap() - 15.0);
+        assert!((ratio - 1.5).abs() < 0.05, "{ratio}");
+    }
 }

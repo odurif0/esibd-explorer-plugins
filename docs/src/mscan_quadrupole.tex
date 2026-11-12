@@ -20,7 +20,7 @@
 
 \title{\vspace{-8mm}Quadrupole mass filtering in MScan\\[2pt]
 \large Rod voltages, scan law and parameters}
-\author{ESIBD Explorer Plugins, v0.5.9}
+\author{ESIBD Explorer Plugins, v0.5.10}
 \date{November 2026}
 
 \begin{document}
@@ -28,11 +28,35 @@
 \vspace{-6mm}
 
 \section{Scope}
-MScan sweeps the RF amplitude $A$ of one AMX output (CH0-CH1 or CH2-CH3) and, optionally, the DC of
-the two rod pairs through two AMPR channels. At each amplitude it averages the current of every
-enabled DMMR module, the ion collector among them, and saves current versus $A$ for each. It does not change the AMX frequency, duty
-cycle or routing. The file keeps $A$ as the axis; $m/z$ is derived from it with the settings of the
-scan (Section~\ref{sec:physics}) and saved apart, as \texttt{Validation/mz}.
+A scan sweeps one quantity and, optionally, the DC of the two rod pairs through two AMPR channels.
+The ordinary line sweeps the RF amplitude $A$ of one AMX output (CH0-CH1 or CH2-CH3). A map line
+instead sweeps the axis potential $x$, the entry stub, or the AMX frequency at fixed $A$
+(Section~\ref{sec:axes}). At each point MScan averages the current of every enabled DMMR module, the
+ion collector among them, and saves current versus the swept quantity for each. Apart from the
+frequency line, which sets the AMX oscillator through the AMX HD plugin, a scan does not change the
+AMX frequency, duty cycle or routing. The file keeps the swept quantity as the axis; on an amplitude
+line $m/z$ is derived from it with the settings of the scan (Section~\ref{sec:physics}) and saved
+apart, as \texttt{Validation/mz}.
+
+\section{Scan axes}\label{sec:axes}
+A line sweeps exactly one quantity; every other setting it needs is applied before it starts and
+confirmed (the AMX frequency to $10^{-6}$ relative, the channels to \setting{Voltage tolerance}).
+\begin{itemize}
+\item \textbf{Amplitude line} --- the ordinary scan, and every map line that measures a peak: the RF
+amplitude $A$ of one AMX output, with the DC law of equation~\eqref{eq:law}. It is the only axis
+from which $m/z$ is computed.
+\item \textbf{Axis line} (\texttt{offset}): the common potential $x$ at fixed $A$, so $U$ and the
+rod RF stay constant while only the ion energy changes.
+\item \textbf{Entry-stub line} (\texttt{extra}): the rod pairs at fixed $A$ and $x$, then the
+\setting{Stub\_Entry\_Q2} AMPR channel over its own span.
+\item \textbf{Frequency line} (\texttt{frequency}): the AMX oscillator at fixed $A$, set through the
+AMX HD plugin, which keeps the 50\,\% duty cycle. Since $m/z\propto1/f^2$, it moves the transmitted
+window without touching $U/A$.
+\end{itemize}
+The file keeps the swept quantity as its axis. On an axis or entry-stub line $A$ and $f$ do not
+change, so $m/z$ is the same at every point; on a frequency line it varies as $1/f^2$. Neither axis
+is $A$, so \texttt{Validation/mz} is written for amplitude lines only: elsewhere the axis in the
+file, the recorded $f$ and \texttt{Validation/setup} carry the same information.
 
 \section{Rod potentials}
 The PSU rails of the selected AMX output are set to $V_\text{pos}=+A$ and $V_\text{neg}=-A$; the AMX
@@ -97,7 +121,7 @@ scans keep the earlier keys: \setting{Fixed offset} ($x$), \setting{Offset coeff
 \end{table}
 
 \textbf{Do not confuse $k$ with the $\alpha$ of Steel and Henchman.} Their $\alpha$ is the Mathieu
-parameter $a=8eU/(m r_0^2\Omega^2)$; the ratio they keep constant is $U/V_0=\alpha/(2q)=0.165$ for a
+parameter $a=8eU/(m r_0^2\Omega^2)$; the ratio they keep constant is $U/V_0=\alpha/(2q)=0.1678$ for a
 cosine. Here $k=a/(2q)$, and its useful values are near 0.2 because the wave is square
 (Section~\ref{sec:physics}). Entering 0.233 as $k$ would put the line above the apex: nothing passes.
 
@@ -162,7 +186,8 @@ $R\approx0.157/(0.2153-k)$. $R$ is $m/\Delta m$ of the band at fixed $A$.}
   \frac{m}{z}\,[\mathrm{Th}] \approx 2.444\,\frac{A\,[\mathrm V]}{\bar q}
   \left(\frac{4\,\mathrm{mm}}{r_0}\right)^{\!2}\left(\frac{500\,\mathrm{kHz}}{f}\right)^{\!2},
 \end{equation}
-about $4.56\,A$ at $k=0.2$ for $r_0=4$\,mm and 500\,kHz. MScan computes it at every point, with
+about $4.56\,A$ at $k=0.2$ for $r_0=4$\,mm and 500\,kHz. On an amplitude line MScan computes it at
+every point, with
 $\bar q$ from $U/V_0$ there, the AMX frequency, \setting{r0} and the \setting{RF attenuation factor}
 $c=V_0/A$, shows it as \setting{m/z range} and on the plot (\setting{Plot axis}), and saves it as
 \texttt{Validation/mz}. On 2026-11-03 the Agilent G2421A tuning mix gave its ions 622, 922, 1522 and
@@ -178,8 +203,8 @@ The mass window scales as $A/f^2$: at fixed $A_\text{max}$, 300\,kHz reaches 2.8
 see $cA$, the filter works at $k/c$: at $k=0.20$ it closes completely for $c<0.929$, at $k=0.21$ for
 $c<0.975$. The scan itself measures $c$: raise $k$ until the signal disappears at $k_c$; then
 $c=k_c/0.2153$. Rounded edges matter much less: a trapezoid with rise times of 100, 200, 300 and
-500\,ns at 500\,kHz moves the apex to $k=0.2141$, 0.2111, 0.2064 and 0.1921; an exponential edge
-with $\tau=50$, 100, 150\,ns to 0.2123, 0.2044, 0.1937. With DC coupling, a duty error of 1\,\% moves
+500\,ns at 500\,kHz moves the apex to $k=0.2141$, 0.2110, 0.2063 and 0.1922; an exponential edge
+with $\tau=50$, 100, 150\,ns to 0.2123, 0.2046, 0.1937. With DC coupling, a duty error of 1\,\% moves
 the apex by about $\pm0.018$ in $k$.
 
 \textbf{Resolution $\delta$.}\label{sec:delta} With $\delta=0$ the peak width grows in
@@ -208,12 +233,14 @@ with its peak at 300\,V and $\delta=1$\,V: transmitted from 0 to 4.72\,V with $\
   (\texttt{low\_headroom}). Full range raises the internal supply; check the dropout and the PSU
   temperature at the highest amplitude.
 \item The scan law is applied by two instruments (PSU and AMPR) that must agree to better than 1\,\%
-  in ratio near the apex. Rectangular-wave (digital) quadrupoles can instead keep the amplitude and
-  the DC fixed and sweep the frequency: $U/A$ is then constant by construction and $m/z\propto1/f^2$.
-  MScan does not do this.
+  in ratio near the apex. Rectangular-wave (digital) quadrupoles can avoid that by keeping the
+  amplitude and the DC fixed and sweeping the frequency: $U/A$ is then constant by construction and
+  $m/z\propto1/f^2$. A frequency line does this (Section~\ref{sec:axes}), but only when the AMX HD
+  runs on its \SI{100}{MHz} clock and its frequency can be set from MScan; the ordinary amplitude
+  line, on which every number in this document was measured, keeps $f$ fixed.
 \item A filter without DC is also possible with DC-coupled square waves by changing the duty cycle
   (computed: $R\approx7$ at 60.0\,\%, 12 at 60.5\,\%, 41 at 61.0\,\%; closed above about 61.2\,\%).
-  MScan does not do this either; it leaves the AMX timing unchanged.
+  MScan does not do this: it leaves the AMX timing, and so the duty cycle, unchanged.
 \end{itemize}
 
 \section{Recommended order on a new set-up}

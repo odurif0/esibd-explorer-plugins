@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, current_thread
 from typing import Any, cast
 
 import numpy as np
@@ -140,9 +140,11 @@ _AMX_PANEL_ENABLE_OFF_STYLE = (
     "QPushButton { background-color: #334155; color: #cbd5e1; border: 1px solid #64748b; "
     "border-radius: 4px; padding: 4px 8px; font-weight: 600; }"
 )
-# Routing registers change only through a config load or another program, so
-# they are re-read after every transition and then at this slower cadence.
-_HD_ROUTING_REFRESH_S = 5.0
+# Routing registers change only through a config load or a write of this plugin (the port is
+# exclusive): they are re-read after every transition, the poll after any write, and then at
+# this cadence. 2026-11-11 lab: at 5 s, 7 of the day's 11 lost AMX replies hit these reads
+# (GetTimerTriggerSource); the worker already keeps its timer registers for 30 s.
+_HD_ROUTING_REFRESH_S = 30.0
 # A call that times out stops the plugin's native worker, which releases the COM
 # port, and the next explicit ON starts a fresh worker (2026-10-28 lab: AMX_B
 # reopened COM11 a minute after a blocked Open, in the same Explorer session).
@@ -5555,6 +5557,21 @@ class AMXHDController(DeviceController):
                     device.recording = False
         self.acquiring = False
 
+    def startAcquisition(self) -> None:
+        """Explorer's start, one caller at a time.
+
+        Explorer checks for a running loop, then starts one, without a lock. On 2026-11-11 the ESI's ON
+        thread and Explorer's recording start ran it at once and two loops polled the device (lock
+        timeouts, five times more lost replies). This device also restarts its loop from a worker thread.
+        """
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            super().startAcquisition()
+
+    def _superseded_loop(self) -> bool:
+        """A newer acquisition loop runs: this one ends, so the device is polled by one loop only."""
+        owner = getattr(self, "acquisitionThread", None)
+        return isinstance(owner, Thread) and owner is not current_thread() and owner.is_alive()
+
     def _restart_acquisition_after_transition(self) -> None:
         """Restart acquisition after a transition without joining the old thread.
 
@@ -5564,15 +5581,16 @@ class AMXHDController(DeviceController):
         (in ``collect_housekeeping``), it will see ``acquiring = True`` at the
         top of the next iteration and continue polling.
         """
-        self.acquiring = True
-        old_thread = getattr(self, "acquisitionThread", None)
-        if old_thread is None or not old_thread.is_alive():
-            self.acquisitionThread = Thread(
-                target=self.runAcquisition,
-                name=f"{self.controllerParent.name} acquisitionThread",
-            )
-            self.acquisitionThread.daemon = True
-            self.acquisitionThread.start()
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            self.acquiring = True
+            old_thread = getattr(self, "acquisitionThread", None)
+            if old_thread is None or not old_thread.is_alive():
+                self.acquisitionThread = Thread(
+                    target=self.runAcquisition,
+                    name=f"{self.controllerParent.name} acquisitionThread",
+                )
+                self.acquisitionThread.daemon = True
+                self.acquisitionThread.start()
 
     def runAcquisition(self) -> None:
         """Poll AMX housekeeping and push readbacks to the GUI from the acquisition thread.
@@ -5583,7 +5601,7 @@ class AMXHDController(DeviceController):
         without that, every poll silently aborted on the held lock and left the duty
         monitors and the status badge frozen at their startup snapshot.
         """
-        while self.acquiring:
+        while self.acquiring and not self._superseded_loop():
             started = time.monotonic()
             try:
                 with self._controller_lock_section(
@@ -6238,6 +6256,9 @@ class AMXHDController(DeviceController):
             )
         if token is not None and token.is_set():
             raise RuntimeError("AMX native operation cancelled; shutdown must be verified.")
+        if method.startswith(("set_", "load_")):
+            # Kept for the rest of this write sequence (which reads it); the next poll reads it again.
+            self._hd_routing_time = float("-inf")
         return result
 
     def _cancel_native_operation(self) -> None:

@@ -219,7 +219,9 @@ The **msScan** settings list belongs to this scan; Explorer's global
   earlier one (a clock adjustment, or two records within the clock resolution) is skipped with its
   values; **DMMR data interval** says how many. On 2026-11-03 one such record made MScan refuse
   every later scan (`Invalid or nonmonotonic DMMR timestamps`), even after restarting the DMMR
-  plugin, which keeps its history.
+  plugin, which keeps its history. Each scan file lists the records skipped during the scan in
+  Validation `dmmr_skipped`, as [stamp, delay behind the latest earlier stamp]: 0 s means two
+  records within the clock resolution, a negative delay a clock stepped back (an empty list: none).
 - Only samples timestamped inside the measurement window contribute. The DMMR
   records NaN at each recorder tick without a new reading; those are skipped and
   the point is the mean of the readings present, with **valid / total** samples
@@ -246,7 +248,9 @@ a symmetric 50% waveform can give a transmission curve rather than mass peaks.
 ## m/z
 
 **m/z range** shows the m/z at Amplitude from and to, and **Plot axis** = **m/z** draws the
-spectrum against it (user request 2026-11-03). For an ideal 50 % square wave:
+spectrum against it (user request 2026-11-03). A map line whose axis is x, the entry stub or the
+frequency is always plotted against that axis: its m/z is not a function of it. For an ideal
+50 % square wave:
 
     m/z [Th] = 4 e A / (q r0² (2π f)²) / u ≈ 2.444 · A / q · (4 mm / r0)² · (500 kHz / f)²
 
@@ -273,9 +277,11 @@ waveform, round rods and the rod spacing can each account for that; it is not me
 both again for another quadrupole, AMX or frequency range.
 Resolution measured that day (m/Δm at half height): 12–16 at k = 0.20, 35–55 at k = 0.21.
 A scan is converted with its own settings, saved in the file, not with the panel's current ones.
-The file always keeps A as the axis and adds `Validation/mz` (NaN where not transmitted or
-unknown), with the formula and the values used in its `Definition` attribute. MScan gives m/z, not
-the mass: that needs the charge.
+The file keeps the swept quantity as the axis, and an amplitude line adds `Validation/mz` (NaN
+where not transmitted or unknown), with the formula and the values used in its `Definition`
+attribute. A map line that sweeps x, the entry stub or the frequency does not sweep A, so it gets
+no `Validation/mz`: its axis, the recorded f and `Validation/setup` say what m/z that line had.
+MScan gives m/z, not the mass: that needs the charge.
 
 ## Limits and stopping
 
@@ -389,20 +395,34 @@ scan of the quadrupole (`docs/quadrupole_optimization_plan.md`). Every line is a
 scan, started and saved like one from Start, with all of its checks; the decisions belong to the
 MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
 
-- **Map plan**: the plan file (TOML). Templates in `plans/`: `q2_check_1h.toml` (stopping cut and
-  the start of the P1 ladder, about 1 h), `q2_check_4h.toml` (P1 and P5 ladders, about 4 h) and
-  `q2_map.toml` (the full map, every key with its default: about 40 h in the simulator when R follows the
-  RF cycles, about 65 h when R is capped near 45 and the map searches longer). Change a copy.
-- **Map status**: stage, line, point and what the map waits for; the same in `status.json`.
-- Toolbar: **Check** (the plan against the instrument: what to change before Start, and the time
-  the Q2 simulator takes), **Simulate** (the plan against the simulator, no hardware), **Resume**
-  (a stopped map, from its folder) and **Start map / Stop** (clock icon).
+- **Map plan**: the plan file (TOML). Templates in `plans/`: `q2_check_2h.toml` (stopping cut and
+  the P1 ladder up to the R_target region, about 2 h), `q2_check_6h.toml` (P1 and P5 ladders, about
+  6 h) and `q2_map.toml` (the full map, every key with its default: f 250–640 kHz, about 45–55 h,
+  Ilim at least 330 mA; P9 at 900 kHz and P10 at 200 kHz were dropped on 2026-11-12).
+  Change a copy. Until 2026-11-04 the first two were named after their planned 1 h and 4 h.
+- **Map status**: stage, line, point and what the map waits for; the same in `status.json`. A
+  finished map shows when and after how many lines (`stopped at 14:35 after 0 lines: …`).
+- Buttons, between Map plan and Map status (named buttons of the group, not toolbar icons, since
+  2026-11-12: on 2026-11-11 the play icon of Start scan was taken for the start of the 2 h plan):
+  **Check** (asks for the plan file, opened on the loaded one, and checks it against the
+  instrument: what to change before Start, and the time of the lines the Q2 simulator decides, each
+  timed like on the instrument), **Simulate** (the loaded plan against the simulator, no hardware),
+  **Start map / Stop map** and **Resume** (a stopped map, from its folder). Simulate and
+  Start map use the loaded plan without asking, and their tooltips name it; they ask for a file only
+  when no plan is loaded. To run another plan after a map, Check it first. A running map keeps the
+  plan it started with. The toolbar keeps Start scan alone.
 
 Before Start map, prepare the instrument as for a scan: AMX HD ON with its RF config (50 % duty,
-100 MHz clock), PSU in Full range with an Ilim above what Check asks, AMPR ON with `Q1_DC`,
+100 MHz clock), PSU in Full range with an Ilim above what Check asks (set it on the PSU yourself:
+the RF current follows from f and A, and Ilim is the operator's safeguard, which MScan reads but never
+changes), AMPR ON with `Q1_DC`,
 `Ap_Q1_Q2`, `Stub_Entry_Q2`, `Stub_Exit_Q2` and both rod pairs in manual control, DMMR recording,
 TPG366 acquiring, ESI spraying from the syringe. Select the rod pairs in **Mass filter** as for a
-scan. From Start map on, nothing waits for a human:
+scan. Start scan is locked from the click on Start map until the map ends: its first engine
+call can take about 30 s on the worker's first launch after an install (an antivirus check), and
+on 2026-11-11 a Start scan clicked during that wait stopped the map at its first engine call. A
+second click on Start map during the start stops the map once it has started. From Start map on,
+nothing waits for a human:
 
 - **Lines.** The stopping cut along x (it fixes the ion energy E = e·(x_stop − x)); at each design
   point a ladder in k up to the closing, two repeats, a verification line at the computed (k*, δ*)
@@ -413,13 +433,23 @@ scan. From Start map on, nothing waits for a human:
   `Stub_Exit_Q2` (x − 15 V). MScan's own settings (k, δ, x, timing, file name, notes) are set for
   each line and return to the operator's values at the end.
 - **New line axes** of the MScan worker: x (stopping cut), the entry stub and the AMX frequency
-  (frequency lines at fixed A and U), besides A. Amplitude lines use the measurement-driven step:
+  (frequency lines at fixed A and U), besides A. An amplitude line spans the best-range ions it
+  holds ± `a_margin` (20 %) of their amplitude, inside `a_range_v` (P1: 50–248 V of 20–348 V).
+  Amplitude lines use the measurement-driven step:
   coarse (A/(2·R_max)) where the selected module (`detector`, M03) is flat, every fine point (A/(8·R_max))
-  where it changes by more than 3σ of the point means (never less than 1 fA) and 10 % of the local
-  height; the points never measured are `skipped`.
-- **Faults.** A failed line (spray outside ±20 % of its value at Start, a worker or detector fault,
-  a line slower than twice its expected time) is measured again; the same line failing three
-  times, or three failed lines within one hour, stop the map. A line a limit forbids (PSU headroom,
+  where it changes by more than 3σ of the point means and 10 % of the local height; the points
+  never measured are `skipped`. σ is never less than 50 fA, the noise between neighbouring points
+  of a flat M03 signal (2026-11-04; with 1 fA, half of the fine grid was measured).
+- **Time.** A line takes 15 s plus its points at `point_s + settle_s + point_overhead_s` each
+  (0.8 + 0.3 + 0.9 = 2.0 s; 2026-11-04: 2.02 s and 15.5 s). Once its lines hold 100 points, the map
+  times its own: the estimates and the time left follow the instrument.
+- **Faults.** A failed line (spray outside ±40 % of its value during the last reference line that
+  found its peak, or at Start before the first one, a worker or detector fault,
+  no new point for 5 min, or a line longer than all the points of its axis would take at
+  `point_s + settle_s + 2 s` each) is measured again. A line slower than its estimate is not a
+  fault (2026-11-04: three good lines were stopped at twice an estimate that counted 1.1 s per
+  point). The same line failing
+  three times, or three failed lines within one hour, stop the map. A line a limit forbids (PSU headroom,
   Ilim, AMPR limits) closes that setting and the map goes on. Before each line the spray must be in
   its window; the map waits up to 30 min for it.
 - **Safe stop** (Stop, a fault, the end): the AMX frequency, `Q1_DC`, the stubs and MScan's settings
@@ -432,7 +462,8 @@ scan. From Start map on, nothing waits for a human:
   `journal.json` (the whole state; `.bak` is the previous one), `status.json`, `map.log`, `map.h5`
   (every line: axis, signal, sigma, spray, request and analysis), and at the end `report.json`
   (laws, points, search, checks, best scan), `figures.png` and `best_settings.ini` (load it to
-  repeat the best scan).
+  repeat the best scan). `figures.png` also draws the stopping cut and the reference peak against
+  the ESI current, so a map stopped before its ladders still shows what it measured.
 - **Resume** continues from the last finished line of the journal, after a safe stop, an Explorer
   crash or a power cut; a line cut in the middle is measured again.
 

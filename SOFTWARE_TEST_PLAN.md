@@ -373,10 +373,10 @@ In the order of the plan (Section 9): each step only after the previous one pass
 0. **Soak test** (Section 9 of the plan), on the lab PC without the instrument:
    `python tools/soak_mscan_map.py mscan/plans/q2_map.toml --speed 1 --out soak` for the whole map;
    `soak.csv` must show flat memory, threads and open files, and the map must end `done`.
-1. **Check and Simulate, instrument ready.** Map plan = `q2_check_1h.toml`. Check must say `ready to
+1. **Check and Simulate, instrument ready.** Map plan = `q2_check_2h.toml`. Check must say `ready to
    start` with the PSU in Full range; switch it to Half range: Check asks for Full range. Lower Ilim
-   below what Check asks: Check names the Ilim to set. Simulate: a few dozen lines, about 1 h.
-2. **One hour on the instrument** (`q2_check_1h.toml`). Start map, leave the PC alone. Watch `Map
+   below what Check asks: Check names the Ilim to set. Check: 16 lines, about 2 h.
+2. **Two hours on the instrument** (`q2_check_2h.toml`). Start map, leave the PC alone. Watch `Map
    status` and `status.json`: a reference window, the stopping cut (Q1_DC goes to 38 V and back),
    the first P1 ladder lines. Each line is a normal MScan file; the map folder has `journal.json`,
    `map.h5` and `map.log`. At the end: `report.json` with `x_stop` near Q1_DC and `thermalized`
@@ -386,10 +386,12 @@ In the order of the plan (Section 9): each step only after the previous one pass
    line); press Stop during a line (the line stops like a scan, then the settings return to Start;
    the rails hold if the line was interrupted). Resume: the same folder continues from the last
    finished line, with the next line number.
-4. **Four hours** (`q2_check_4h.toml`): the P1 and P5 ladders, closing found on both (c from the
+4. **Six hours** (`q2_check_6h.toml`): the P1 and P5 ladders, closing found on both (c from the
    closing, in `report.json`), two repeats each, a verification line near R = 40 and two stub cuts.
-5. **The full map** (`q2_map.toml`): about 40–65 h (Check gives the simulator's estimate), the PC kept awake (`powercfg /requests` names
-   MScan map). The best scan ends the map with `best_settings.ini`.
+5. **The full map** (`q2_map.toml`): about 45–55 h (Check times the simulated lines as the instrument measured them on 2026-11-04), the PC kept awake (`powercfg /requests` names
+   MScan map). The best scan ends the map with `best_settings.ini`. With the PSU Ilim at 300 mA, Check
+   refuses and asks for at least 330 mA. Set Ilim on the PSU by hand: MScan never writes it. Check then
+   passes, and the Ilim it reads equals what the PSU shows.
 
 ## Transmission optimizer
 

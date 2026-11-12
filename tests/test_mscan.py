@@ -271,7 +271,7 @@ def use_modules(r, *modules):
         s._validation[key] = np.zeros((3, len(s.outputChannels)), dtype=int)
 
 
-def test_every_enabled_dmmr_module_is_recorded_over_the_same_windows(mscan_rig):
+def test_every_enabled_dmmr_module_is_recorded_over_the_same_windows(mscan_rig, mscan_virtual_clock):
     # 2026-10-26: record every active DMMR module. 2026-11-03: no module is chosen any more.
     s, r = mscan_rig.scan, mscan_rig
     extra = add_module(r, 'DMMR_M05', 5, lambda: np.nan if len(r.detector_device.time.data) % 4 == 0 else 3 * r.current())
@@ -286,7 +286,7 @@ def test_every_enabled_dmmr_module_is_recorded_over_the_same_windows(mscan_rig):
     assert v['point_status'] == ['acquired'] * 3
 
 
-def test_a_module_without_readings_never_invalidates_a_point(mscan_rig):
+def test_a_module_without_readings_never_invalidates_a_point(mscan_rig, mscan_virtual_clock):
     s, r = mscan_rig.scan, mscan_rig
     silent = add_module(r, 'DMMR_M06', 6, lambda: np.nan)
     use_modules(r, silent)
@@ -296,7 +296,7 @@ def test_a_module_without_readings_never_invalidates_a_point(mscan_rig):
     assert (s._validation['finite_samples'][:, 1] == 0).all() and (s._validation['samples'][:, 1] > 0).all()
 
 
-def test_a_point_is_invalid_only_when_no_module_read_anything(mscan_rig):
+def test_a_point_is_invalid_only_when_no_module_read_anything(mscan_rig, mscan_virtual_clock):
     s, r = mscan_rig.scan, mscan_rig
     other = add_module(r, 'DMMR_M07', 7, lambda: 2 * r.current())
     r.detector.getValues = lambda **kw: np.full(len(r.detector.values.data), np.nan)  # The first module reads nothing.
@@ -368,7 +368,7 @@ def test_panel_groups_every_setting_once_without_changing_its_key(mscan_module, 
     monkeypatch.setattr(mscan_module, 'PARAMETERTYPE', NS(COMBO='COMBO', FLOAT='FLOAT', INT='INT', LABEL='LABEL', TEXT='TEXT'))
     settings = M.getDefaultSettings(NS(**{k: getattr(M, k) for k in dir(M) if k.isupper()},
                                        _offset_changed=None, _setup_changed=None, _mz_changed=None,
-                                       _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None))
+                                       _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None, _map_plan_changed=None))
     placed = [key for _, keys in M.LAYOUT for key in keys]
     assert sorted(placed) == sorted(settings) and len(set(placed)) == len(placed)
     assert list(settings)[0] == M.STATUS and M.STATUS not in M.GROUP_OF

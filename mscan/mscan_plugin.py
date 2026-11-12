@@ -27,8 +27,8 @@ import warnings
 import h5py
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHeaderView, QSizePolicy,
-                             QTreeWidgetItem)
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QGridLayout, QHeaderView,
+                             QSizePolicy, QToolButton, QTreeWidgetItem, QWidget)
 
 from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
@@ -320,6 +320,7 @@ class _Settings(SettingsManager):
                 item[Parameter.ITEMS] = ','.join(dict.fromkeys(choices))
         scan.notes = str(old_value('Notes', Parameter.VALUE) or '')
         super().updateSettings(items, file)
+        scan._place_map_buttons()  # The tree was rebuilt: the map buttons are not settings.
 
     def requireParentItem(self, name, parentItem):
         # Display-only groups: setting keys (INI sections, HDF5 'MScan/Settings/<key>') stay flat,
@@ -406,6 +407,16 @@ class MScan(Scan):
     # an ordinary scan of this plugin. The decisions belong to the MScan worker (mscan_map).
     MAP_PLAN = 'Map plan'
     MAP_STATUS = 'Map status'
+    MAP_TOOLTIPS = dict(
+        check='Map: choose the plan file (opened on {plan}) and check it against the instrument (what to change '
+              'before Start). Simulate and Start map then use it.',
+        simulate='Map: run {plan} against the Q2 simulator, without hardware (lines and time).',
+        toggle='Map: start {plan}, line by line, with no operator.')
+    # Named buttons of the Map group, not toolbar icons (user request 2026-11-12): on 2026-11-11 the
+    # operator started the 2 h plan with the play icon (Start scan) instead of the clock (Start map).
+    MAP_BUTTONS = (('mapCheckAction', 'Check'), ('mapSimulateAction', 'Simulate'),
+                   ('mapAction', 'Start map'), ('mapResumeAction', 'Resume'))
+    MAP_BUTTON_ROW = 'mscan-map-buttons'
     # Devices whose channels are recorded with each point, as the beam conditions of the scan
     # (user, 2026-11-03: "le suivi de l'ESI est important"): spray HV and current, pressures. Read live from
     # each plugin at every MScan poll, not from Explorer's history: they need not be recording (user choice).
@@ -578,6 +589,8 @@ class MScan(Scan):
         self._line = None  # The map line being measured (a request of the map engine), else None.
         self._line_map = None
         self._map_runner = None
+        self._map_starting = False  # Start map clicked, its first engine call still running.
+        self._map_stop_after_start = False
         super().__init__(**kwargs)
         self.useDisplayChannel = False  # Every recorded DMMR module is plotted, with a legend.
         self._bridge = _GuiBridge(self)
@@ -773,9 +786,11 @@ class MScan(Scan):
                     'stable band on the scan line a = 2 (U/A) q (docs/mscan_quadrupole.pdf). Theory: exact only once '
                     'r0 is calibrated on a known peak.')
         settings[self.MAP_PLAN] = parameterDict(value='', parameterType=PARAMETERTYPE.TEXT, attr='map_plan',
-            toolTip='Plan file (TOML) of a map: mscan/plans/q2_map.toml, q2_check_1h.toml or q2_check_4h.toml, or '
-                    'your own copy. Check validates it against the instrument, Simulate runs it against the Q2 '
-                    'simulator without hardware, Start map runs it line by line with no operator.')
+            event=self._map_plan_changed,
+            toolTip='Plan file (TOML) of a map: mscan/plans/q2_map.toml, q2_check_2h.toml or q2_check_6h.toml, or '
+                    'your own copy. Check asks for it (opened on the loaded plan) and validates it against the '
+                    'instrument, Simulate runs it against the Q2 simulator without hardware, Start map runs it '
+                    'line by line with no operator.')
         settings[self.MAP_STATUS] = parameterDict(value='No map', parameterType=PARAMETERTYPE.LABEL, indicator=True,
             restore=False, attr='map_status',
             toolTip='The running map: stage, line, point and what it waits for. The same in status.json of the '
@@ -808,19 +823,28 @@ class MScan(Scan):
         self.settingsMgr.init()
         self.addAction(event=lambda: self.loadSettings(file=None), toolTip='Load msScan settings.', icon=self.makeCoreIcon('blue-folder-import.png'))
         self.addAction(event=lambda: self.saveSettings(file=None), toolTip='Export msScan settings.', icon=self.makeCoreIcon('blue-folder-export.png'))
+        # Check loads the plan (always its file dialog). The map actions are buttons of the Map group
+        # (_place_map_buttons), not toolbar icons: the toolbar keeps Start scan alone.
         self.mapCheckAction = self.addAction(event=lambda: self._map_action('check'),
-            toolTip='Map: check the plan file against the instrument (what to change before Start).',
-            icon=self.makeCoreIcon('check.png'))
+            toolTip=self.MAP_TOOLTIPS['check'].format(plan='the plans folder'), icon=self.makeCoreIcon('check.png'))
         self.mapSimulateAction = self.addAction(event=lambda: self._map_action('simulate'),
-            toolTip='Map: run the plan against the Q2 simulator, without hardware (lines and time).',
-            icon=self.makeCoreIcon('chart.png'))
+            toolTip=self.MAP_TOOLTIPS['simulate'].format(plan='the plan'), icon=self.makeCoreIcon('chart.png'))
         self.mapResumeAction = self.addAction(event=lambda: self._map_action('resume'),
             toolTip='Map: resume a stopped map from its folder (its journal).',
             icon=self.makeCoreIcon('arrow-circle-315.png'))
         self.mapAction = self.addStateAction(event=lambda: self._map_action('toggle'),
-            toolTipFalse='Map: start the plan file, line by line, with no operator.', iconFalse=self.makeCoreIcon('clock.png'),
+            toolTipFalse=self.MAP_TOOLTIPS['toggle'].format(plan='the plan file'), iconFalse=self.makeCoreIcon('clock.png'),
             toolTipTrue='Map: safe stop (the current line stops like a scan, the settings return to Start).',
             iconTrue=self.makeCoreIcon('stop.png'))
+        for attr, text in self.MAP_BUTTONS:
+            action = getattr(self, attr)
+            tip = action.getToolTip()
+            if self.titleBar is not None:
+                self.titleBar.removeAction(action)
+            action.setText(text)
+            action.setToolTip(tip)  # An action without its own tooltip would show its text.
+        self.mapAction.toggled.connect(lambda state: self.mapAction.setText('Stop map' if state else 'Start map'))
+        self._map_plan_changed()
         self.recordingAction = self.addStateAction(event=self.toggleRecording,
             toolTipFalse='Start the AMX/PSU scan, recording every enabled DMMR module.', iconFalse=self.makeCoreIcon('play.png'),
             toolTipTrue='Stop the scan; hold the last PSU setpoints. HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
@@ -903,8 +927,55 @@ class MScan(Scan):
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             label.setProperty('mscanWrappedLabel', True)
             label.installEventFilter(self)
+        self._place_map_buttons()
         self._unfold_groups()
         self._layout_readonly_fields()
+
+    def _place_map_buttons(self):
+        """Check, Simulate, Start map and Resume as named buttons in the Map group, between plan and status.
+
+        Explorer rebuilds the settings tree on every settings load, so the row is placed again each time.
+        """
+        manager, tree = getattr(self, 'settingsMgr', None), getattr(self, 'settingsTree', None)
+        if (manager is None or tree is None or self.MAP_STATUS not in manager.settings
+                or any(getattr(self, attr, None) is None for attr, _ in self.MAP_BUTTONS)):
+            return  # The first settings load comes before the actions.
+        status = manager.settings[self.MAP_STATUS]
+        group = status.parent()
+        if group is None:
+            return
+        for i in reversed(range(group.childCount())):
+            child = group.child(i)
+            if child.data(0, Qt.ItemDataRole.UserRole) == self.MAP_BUTTON_ROW:
+                tree.removeItemWidget(child, 0)
+                group.removeChild(child)
+        for old in tree.viewport().findChildren(QWidget, self.MAP_BUTTON_ROW):
+            old.hide()  # A rebuilt tree leaves its former row to a deferred delete: never shown meanwhile.
+            old.deleteLater()
+        item = QTreeWidgetItem()
+        item.setData(0, Qt.ItemDataRole.UserRole, self.MAP_BUTTON_ROW)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        group.insertChild(group.indexOfChild(status), item)
+        item.setFirstColumnSpanned(True)
+        box = QWidget()
+        box.setObjectName(self.MAP_BUTTON_ROW)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(0, 2, 0, 2)
+        grid.setSpacing(4)
+        for i, (attr, _) in enumerate(self.MAP_BUTTONS):  # Check, Simulate / Start map, Resume
+            button = QToolButton(box)
+            button.setDefaultAction(getattr(self, attr))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setObjectName(f'{self.MAP_BUTTON_ROW}/{attr}')
+            grid.addWidget(button, i // 2, i % 2)
+        tree.setItemWidget(item, 0, box)
+        # The panel's style sheet sizes the buttons only once polished inside the tree: measure them then,
+        # or the second row overlaps Map status.
+        for widget in (box, *box.findChildren(QToolButton)):
+            widget.ensurePolished()
+        grid.invalidate()
+        item.setSizeHint(0, box.sizeHint())
 
     def _groups(self):
         root = self.settingsTree.invisibleRootItem()
@@ -1031,7 +1102,22 @@ class MScan(Scan):
         first = self._recent(times, since)
         times, columns = times[first:], [values[first:] for values in columns]
         keep = self._increasing(times)
+        if not keep.all():
+            self._note_skipped_stamps(times, keep)
         return device, times[keep], [values[keep] for values in columns], int(len(times) - keep.sum())
+
+    def _note_skipped_stamps(self, times, keep):
+        """Remember each skipped record once, with how far its stamp lies behind the latest earlier one.
+
+        Saved with the scan (Validation attribute `dmmr_skipped`): 0 s means two records within the clock
+        resolution, a negative value a clock stepped back. Which one it was on 2026-11-03 is still open.
+        """
+        stamps = np.where(np.isfinite(times), times, -np.inf)
+        latest = np.maximum.accumulate(np.r_[-np.inf, stamps[:-1]])
+        seen = self.__dict__.setdefault('_dmmr_skipped', {})
+        for stamp, before in zip(times[~keep], latest[~keep]):
+            if math.isfinite(stamp) and math.isfinite(before) and len(seen) < 1000:
+                seen.setdefault(float(stamp), float(stamp - before))
 
     def _history_span(self, device):
         """How far back the scan needs the DMMR history: a whole point window, and 21 valid samples."""
@@ -2148,6 +2234,7 @@ class MScan(Scan):
             self._plan['detectors'] = [c.sourceChannel for c in self.outputChannels]
             self._check_detectors()
             n, rails, outputs = len(self.inputChannels[0].recordingData), len(self._plan['rails']), len(configured)
+            self._dmmr_skipped = {}  # Records skipped for their timestamp during this scan (_note_skipped_stamps).
             self._validation = dict(status='running', error='', point_status=['not acquired'] * n,
                 rail_v=np.full((n, rails), np.nan), rail_i=np.full((n, rails), np.nan),
                 window_start=np.full(n, np.nan), window_end=np.full(n, np.nan),
@@ -3239,13 +3326,21 @@ class MScan(Scan):
         progress = status.get('progress') or {}
         remaining = progress.get('remaining_s_estimate')
         text = status.get('message', '')
-        if status.get('state') == 'running' and remaining:
+        state = status.get('state', '')
+        if state == 'running' and remaining:
             text += f' (about {float(remaining) / 3600:.1f} h left)'
+        head = state
+        if state in ('done', 'stopped'):
+            # 2026-11-11 lab: "stopped: ScanError ..." of the 14:35 map was still shown while a scan of the
+            # operator ran at 15:50, and read as the map failing then. A final state says when and how far.
+            when = time.strftime('%H:%M', time.localtime(float(status.get('time') or time.time())))
+            lines = status.get('lines')
+            head = f'{state} at {when}' + ('' if lines is None else f' after {lines} line{"" if lines == 1 else "s"}')
         if self.settingsMgr is not None and self.MAP_STATUS in self.settingsMgr.settings:
-            self.map_status = f'{status.get("state", "")}: {text}'
-        if status.get('state') in ('done', 'stopped') and getattr(self, 'mapAction', None) is not None:
+            self.map_status = f'{head}: {text}'
+        if state in ('done', 'stopped') and getattr(self, 'mapAction', None) is not None:
             self.mapAction.state = False
-            self.print(f'Map {status.get("state")}: {text}', flag=PRINT.WARNING if status['state'] == 'stopped' else PRINT.MESSAGE)
+            self.print(f'Map {head}: {text}', flag=PRINT.WARNING if state == 'stopped' else PRINT.MESSAGE)
 
     def _save_map_best_settings(self, best, path):
         """The best scan as an MScan settings file, to load and repeat it later."""
@@ -3264,7 +3359,8 @@ class MScan(Scan):
     def _map_engine(self, method, *args):
         """One map call on a short-lived MScan worker; never while a scan holds its own worker."""
         if getattr(self, '_native_worker', None) is not None:
-            raise ScanError('A scan is running: the map engine waits for it to finish.')
+            raise ScanError('A scan is running: the map engine cannot run beside it. Finish the scan, then '
+                            'Resume the map from its folder.')
         worker = _load_native_runtime('_native_worker').NativeWorkerProxy(
             Path(__file__).resolve().parent, 'mscan', {},
             log_dir=Path(self.pluginManager.Settings.dataPath) / 'logs' / 'mscan')
@@ -3279,20 +3375,63 @@ class MScan(Scan):
             self._map_runner = runtime.MapRunner(self, self._map_engine, data_path=self.pluginManager.Settings.dataPath)
         return self._map_runner
 
-    def _map_plan_path(self):
+    def _map_loaded_plan(self):
         path = Path(str(getattr(self, 'map_plan', '') or '').strip())
-        if str(path) not in ('', '.') and path.is_file():
-            return path
-        chosen, _ = QFileDialog.getOpenFileName(None, 'Map plan', str(Path(__file__).resolve().parent / 'plans'),
-                                                'Map plan (*.toml)')
+        return path if str(path) not in ('', '.') and path.is_file() else None
+
+    def _map_plan_path(self):
+        """The loaded plan; the file dialog only when none is loaded (or its file is gone)."""
+        return self._map_loaded_plan() or self._map_load_plan()
+
+    def _map_load_plan(self):
+        """Load the plan of the next map (Check): always the file dialog, opened on the plan loaded now.
+
+        Lab 2026-11-04: once a plan had run, Start map ran it again at once and loading another one meant
+        typing its path. A running map keeps the plan it started with (copied into its folder).
+        """
+        current = self._map_loaded_plan()
+        chosen, _ = QFileDialog.getOpenFileName(None, 'Map plan', str(
+            current if current is not None else Path(__file__).resolve().parent / 'plans'), 'Map plan (*.toml)')
         if not chosen:
             return None
         self.map_plan = chosen
+        self._map_plan_changed()
+        running = self._map_runner is not None and self._map_runner.running
+        self.print(f'Map plan loaded: {Path(chosen).name} ({chosen}). '
+                   + ('The running map keeps its plan; this one is for the next map.' if running
+                      else 'Simulate and Start map use it.'))
         return Path(chosen)
+
+    def _map_plan_changed(self):
+        """Name the loaded plan in the map button tooltips, so Start map never runs a plan the operator did not see."""
+        plan = self._map_loaded_plan()
+        for what, attr in (('check', 'mapCheckAction'), ('simulate', 'mapSimulateAction'), ('toggle', 'mapAction')):
+            action = getattr(self, attr, None)
+            if action is None:
+                continue  # Settings load before the toolbar.
+            if what == 'check':
+                text = self.MAP_TOOLTIPS[what].format(plan=plan.name if plan is not None else 'the plans folder')
+                text += f' Plan loaded: {plan}.' if plan is not None else ' No plan loaded.'
+            else:
+                text = self.MAP_TOOLTIPS[what].format(plan=plan.name if plan is not None else 'the plan file')
+                text += (f' Plan loaded: {plan}; Check loads another one.' if plan is not None
+                         else ' No plan loaded: Check (or this button) asks for it.')
+            if what == 'toggle':
+                action.toolTipFalse = text
+                if action.state:
+                    continue  # The Stop tooltip stays until the map ends.
+            action.setToolTip(text)
 
     def _map_action(self, what):
         """Check, Simulate, Resume and Start/Stop of a map (GUI thread; the work runs in its own thread)."""
         runner = self._map_runner_instance()
+        if getattr(self, '_map_starting', False):
+            if what == 'toggle':  # Clicked again during the start: stop as soon as the map has started.
+                self._map_stop_after_start = True
+                self.print('The map stops as soon as it has started.')
+            else:
+                self.print('A map is starting: wait for its first line.', flag=PRINT.WARNING)
+            return
         if what == 'toggle' and runner.running:
             runner.stop()
             return
@@ -3311,7 +3450,7 @@ class MScan(Scan):
                 return
             plan = None
         else:
-            plan = self._map_plan_path()
+            plan = self._map_load_plan() if what == 'check' else self._map_plan_path()
             if plan is None:
                 if what == 'toggle':
                     self.mapAction.state = False
@@ -3321,6 +3460,13 @@ class MScan(Scan):
         def report(text, flag=PRINT.MESSAGE):
             self._queue_completion(lambda: self.print(text, flag=flag))
 
+        starting = what in ('toggle', 'resume')
+        if starting:
+            self._map_starting, self._map_stop_after_start = True, False
+            self.map_status = 'starting: plan, instrument and map engine'
+            self.print('Map starting: the MScan worker answers within seconds, or about 30 s on its first '
+                       'launch after an install (antivirus check). Start scan is locked meanwhile.')
+
         def work():
             try:
                 if what == 'check':
@@ -3328,15 +3474,28 @@ class MScan(Scan):
                     report(self._map_check_text(result), PRINT.WARNING if result['problems'] else PRINT.MESSAGE)
                 elif what == 'simulate':
                     result = runner.simulate(plan)
+                    # Each simulated line timed like on the instrument (its estimate): the simulator's clean
+                    # peaks need about 30 % fewer points than M03 did on 2026-11-04.
+                    hours = sum(max(float(line['duration_s']), float(line.get('expected_s') or 0.))
+                                if line['outcome'] == 'done' else float(line['duration_s'])
+                                for line in result['lines']) / 3600
                     report(f'Map simulated (hypothesis H1): {result["outcome"]}, {len(result["lines"])} lines, '
-                           f'about {result["total_s"] / 3600:.1f} h; {result["reason"]}')
+                           f'about {hours:.1f} h on the instrument; {result["reason"]}')
                 else:
                     folder_used = runner.start(plan, resume=folder)
-                    report(f'Map started in {folder_used}')
+                    report(f'Map started ({plan.name}) in {folder_used}' if plan is not None
+                           else f'Map resumed in {folder_used}')
+                    if getattr(runner, 'notice', ''):
+                        report(runner.notice, PRINT.WARNING)
+                    if getattr(self, '_map_stop_after_start', False):
+                        runner.stop()
             except Exception as exc:  # noqa: BLE001 - reported, never raised into Qt
                 report(f'Map {what}: {exc}', PRINT.WARNING)
                 if what in ('toggle', 'resume'):
                     self._queue_completion(lambda: setattr(self.mapAction, 'state', False))
+            finally:
+                if starting:
+                    self._map_starting = False  # runner.running takes over once the map thread runs
         if what == 'resume':
             self.mapAction.state = True
         threading.Thread(target=work, name=f'MScan map {what}', daemon=True).start()
@@ -3348,8 +3507,9 @@ class MScan(Scan):
         lines += [f'  ! {w}' for w in result['warnings']]
         estimate = result.get('estimate') or {}
         if estimate:
+            # total_s: the simulated lines, each timed like on the instrument (2.0 s per point, 15 s per line).
             lines.append(f'  Simulated (H1): {estimate.get("lines", 0)} lines, about '
-                         f'{float(estimate.get("total_s", 0)) / 3600:.1f} h.')
+                         f'{float(estimate.get("total_s", 0)) / 3600:.1f} h on the instrument.')
         return '\n'.join(lines)
 
     @property
@@ -3380,7 +3540,19 @@ class MScan(Scan):
                 setting.setEnabled(value)
         self._update_scan_action()
 
+    def _map_owns_scans(self):
+        """A map is starting or running: it starts its own lines; the operator's Start would stop it."""
+        runner = getattr(self, '_map_runner', None)
+        return bool(getattr(self, '_map_starting', False)) or (runner is not None and runner.running)
+
     def toggleRecording(self):
+        if self.recording and self.finished and getattr(self, '_line', None) is None and self._map_owns_scans():
+            # 2026-11-11 lab: Start map waited 30 s for the first launch of its worker, Start scan was
+            # clicked meanwhile, and the map stopped at its first engine call ("A scan is running").
+            self.recording = False
+            self.print('A map is starting or running: it starts its own lines. Stop the map (clock icon) '
+                       'before a scan of your own.', flag=PRINT.WARNING)
+            return
         if not self.recording:
             self._cancel.set()
         elif self.finished and self.settingsTree:
@@ -3540,6 +3712,9 @@ class MScan(Scan):
             if getattr(self, '_line', None) is not None:
                 group.attrs['map_line'] = json.dumps(self._line, allow_nan=False)
             group.attrs['modules'] = json.dumps([c.name for c in self.outputChannels])
+            # [stamp, stamp − latest earlier stamp] of each DMMR record skipped during the scan: 0 within the
+            # clock resolution, negative after a clock step back (an empty list: none was skipped).
+            group.attrs['dmmr_skipped'] = json.dumps(sorted([t, d] for t, d in (getattr(self, '_dmmr_skipped', None) or {}).items()))
             group.attrs['channels'] = ('Every enabled DMMR module is recorded, in the order of modules; no module is a '
                 'reference. Each is averaged over the same windows (start, end] of the DMMR time axis. Samples and '
                 'finite_samples have one column per module. NaN samples are recorder ticks without a new reading and '
@@ -3551,6 +3726,9 @@ class MScan(Scan):
             group['rail_v'].attrs['Unit'] = 'V (unsigned PSU magnitudes)'
             group['rail_i'].attrs['Unit'] = 'A (PSU readback at end of integration, not detector current)'
             try:
+                # Only an amplitude line sweeps A, so only there is m/z a function of the recorded axis.
+                if (getattr(self, '_line', None) or {}).get('kind', 'amplitude') != 'amplitude':
+                    raise ScanError('The swept axis is not A: m/z is undefined.')
                 inputs = self._mz_inputs(self._scan_metadata())
                 group.create_dataset('mz', data=mz_from_amplitude(
                     np.asarray(self.inputChannels[0].recordingData, dtype=float), **inputs))

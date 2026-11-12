@@ -566,14 +566,16 @@ def test_routine_reads_are_summarized_unless_slow_or_changed(worker, monkeypatch
 
 def test_esi_conversion_ready_flags_are_not_a_state_change(worker, monkeypatch):
     # 2026-10-22 lab: GetCompleteState index 7 toggles 223 <-> 255 on every 1 s poll.
+    # 2026-11-11 lab: its DataFlags (index 0) toggled 15 <-> 13 with HV on: 50 MB of log per hour.
     clock = [time.monotonic()]
     monkeypatch.setattr(TRANSPORT.time, "monotonic", lambda: clock[0])
     worker._log_window_start = clock[0]
-    state = lambda ready, modules=32768: (("COM_ESI_CTRL_GetCompleteState", .003, 0,
-                                           [15, 0, 55, 0, 15, 61452, 0, [15, ready, ready, 0, 12],
-                                            [33024, 49408, modules, 0, 32768]]),)
+    state = lambda ready, modules=32768, flags=15: (("COM_ESI_CTRL_GetCompleteState", .003, 0,
+                                                     [flags, 0, 55, 0, 15, 61452, 0, [15, ready, ready, 0, 12],
+                                                      [33024, 49408, modules, 0, 32768]]),)
     for second in range(30):
-        _finished(worker, "call:collect_diagnostics", symbols=state(223 if second % 2 else 255))
+        _finished(worker, "call:collect_diagnostics",
+                  symbols=state(223 if second % 2 else 255, flags=13 if second % 2 else 15))
     _finished(worker, "call:collect_diagnostics", symbols=state(223, modules=16384))  # a module state changed
     clock[0] += TRANSPORT.LOG_SUMMARY_S
     _finished(worker, "call:collect_diagnostics", symbols=state(255, modules=16384))

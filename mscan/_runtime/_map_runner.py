@@ -145,6 +145,9 @@ class MapRunner:
     SPRAY_WAIT_S = 1800.
     FAILURES_PER_HOUR = 3
     LINE_MARGIN_S = 180.
+    STALL_S = 300.  # A point settles within its 30 s timeout or fails: 5 min without one is a hang.
+    # Between two points, beyond settle_s: readback confirmation (2026-11-04: 1.0 s median, 2.6 s at most).
+    POINT_OVERHEAD_S = 2.
 
     def __init__(self, scan, engine, *, data_path, clock=time.time, monotonic=time.monotonic):
         """``engine(method, *args)`` calls the MScan worker's map methods (one short-lived worker)."""
@@ -156,6 +159,7 @@ class MapRunner:
         self.folder = None
         self.journal = None
         self.status = dict(state='idle', message='')
+        self.notice = ''  # Said to the operator at Start or Resume (a changed Ilim).
         self.start_values = {}
         self.spray_reference = None
         self._failures = []
@@ -183,9 +187,11 @@ class MapRunner:
         """Start a new map from a plan file, or resume the map of folder ``resume``."""
         if self.running:
             raise RuntimeError('A map is already running.')
+        self.notice = ''
         if resume is not None:
             self.folder = Path(resume)
             self.journal = json.loads((self.folder / JOURNAL).read_text(encoding='utf-8'))
+            self.notice = self._follow_operator_ilim()
         else:
             plan = load_plan(plan_path)
             instrument = self.instrument(plan)
@@ -202,6 +208,24 @@ class MapRunner:
         self.thread = threading.Thread(target=self._run, name='MScan map', daemon=True)
         self.thread.start()
         return self.folder
+
+    def _follow_operator_ilim(self) -> str:
+        """Resume plans with the Ilim the PSU has now, not the one frozen at Start.
+
+        Ilim is the operator's safeguard, set by hand on the PSU (user, 2026-11-12); MScan never writes it.
+        A lower Ilim skips the settings above 95 % of it, a higher one opens those it closed. The other
+        readings stay those of Start: they are the map's reference.
+        """
+        frozen = float(self.journal['instrument']['ilim_a'])
+        live = float(self.instrument(self.journal['plan'])['ilim_a'])
+        if math.isclose(live, frozen, rel_tol=1e-6, abs_tol=1e-9):
+            return ''
+        self.journal['instrument']['ilim_a'] = live
+        atomic_json(self.folder / JOURNAL, self.journal)
+        text = (f'Resume: PSU Ilim is {live * 1e3:.0f} mA ({frozen * 1e3:.0f} mA at Start); the map now plans '
+                f'with {live * 1e3:.0f} mA ({"settings above 95 % of it are skipped" if live < frozen else "settings it closed may open"}).')
+        self._log(text)
+        return text
 
     def stop(self):
         """Safe stop: the current line stops like a scan, then the settings return to Start."""
@@ -232,7 +256,7 @@ class MapRunner:
             with contextlib.suppress(Exception):
                 self._finish_report()
             awake.hold(False)
-            self._set_status(state, reason)
+            self._set_status(state, reason, lines=len((self.journal or {}).get('records') or ()))
             self._log(f'{state}: {reason}')
 
     def _loop(self) -> str:
@@ -313,20 +337,47 @@ class MapRunner:
             message = self.scan._gui(lambda: str(getattr(self.scan, 'scan_status', '') or 'MScan did not start'),
                                      cancel=False)
             raise (LineUnreachable if self._unreachable(message) else LineFailed)(message)
-        limit = 2. * float(request.get('expected_s', 600.)) + self.LINE_MARGIN_S
+        # A line stops only when it hangs (no new point), or past the time of every point of its axis.
+        # A line slower than its estimate is not a fault (2026-11-04: three good P1 lines were stopped
+        # because a point took 2.1 s, not the 1.1 s of the estimate).
+        limit = self._line_limit(request)
         begin = self.monotonic()
-        stopped_for_time = False
+        progress, progressed = self._points_done(), begin
+        reason, stop_requested = '', None
         while not self.scan._gui(lambda: bool(self.scan.finished), cancel=False):
-            if self.cancel.is_set() or (not stopped_for_time and self.monotonic() - begin > limit):
-                stopped_for_time = not self.cancel.is_set()
+            now = self.monotonic()
+            done = self._points_done()
+            if done != progress:
+                progress, progressed = done, now
+            if not reason and not self.cancel.is_set():
+                if progress is not None and now - progressed > self.STALL_S:
+                    reason = f'no new point for {self.STALL_S / 60:.0f} min'
+                elif now - begin > limit:
+                    reason = f'line longer than {limit / 60:.0f} min, the time of every point of its axis'
+            if self.cancel.is_set() or reason:
+                stop_requested = now if stop_requested is None else stop_requested
                 self.scan._gui(self.scan._stop_map_line, cancel=False)
-                if self.monotonic() - begin > limit + 120.:
+                if now - stop_requested > 120.:
                     raise SafeStop('The line did not stop within two minutes after Stop.')
             time.sleep(self.POLL_S)
         data = self.scan._gui(self.scan._map_line_result, cancel=False)
-        if stopped_for_time and data['status'] != 'completed':
-            data['error'] = f'line slower than twice its expected {request.get("expected_s", 0):.0f} s'
+        if reason and data['status'] != 'completed':
+            data['error'] = reason
         return data
+
+    def _line_limit(self, request) -> float:
+        """The longest a line may run: every point of its axis at the measured cost of a point."""
+        plan = self.journal['plan']['map']
+        per_point = float(plan.get('point_s', .8)) + float(plan.get('settle_s', .3)) + self.POINT_OVERHEAD_S
+        return (max(2. * float(request.get('expected_s', 600.)), len(request.get('axis') or ()) * per_point)
+                + self.LINE_MARGIN_S)
+
+    def _points_done(self):
+        """Points acquired so far by the running line (None when MScan does not say)."""
+        def count():
+            ends = (getattr(self.scan, '_validation', None) or {}).get('window_end')
+            return None if ends is None else int(np.count_nonzero(np.isfinite(np.asarray(ends, dtype=float))))
+        return self.scan._gui(count, cancel=False)
 
     # ------------------------------------------------------------------ settings a line does not sweep
 
@@ -421,11 +472,27 @@ class MapRunner:
 
     # ------------------------------------------------------------------ spray
 
+    def _spray_basis(self):
+        """The ESI current of the last reference line that found its peak; before one, its value at Start.
+
+        2026-11-04 lab: the ESI current went 42 -> 48 -> 36 nA while the M03 peaks held within 2 %. The
+        reference lines verify the beam; the window then guards against a sudden change from there, not
+        against the slow drift of a spray that still delivers the same beam.
+        """
+        for record in reversed((self.journal or {}).get('records') or []):
+            request, analysis = record.get('request') or {}, record.get('analysis') or {}
+            spray = analysis.get('spray_mean')
+            if (request.get('role') == 'reference' and record.get('outcome') == 'done' and spray
+                    and any(peak.get('found') for peak in analysis.get('peaks') or [])):
+                return abs(float(spray))
+        return self.spray_reference
+
     def _spray_window(self):
-        if self.spray_reference is None or not math.isfinite(self.spray_reference) or self.spray_reference == 0:
+        basis = self._spray_basis()
+        if basis is None or not math.isfinite(basis) or basis == 0:
             return None
         percent = float(self.journal['plan']['map'].get('spray_window_percent', 20.))
-        return abs(self.spray_reference) * (1 - percent / 100), abs(self.spray_reference) * (1 + percent / 100)
+        return abs(basis) * (1 - percent / 100), abs(basis) * (1 + percent / 100)
 
     def _wait_for_spray(self):
         window = self._spray_window()
@@ -494,7 +561,7 @@ class MapRunner:
         report = self.engine('map_report', self.journal)
         atomic_json(self.folder / REPORT, report)
         with contextlib.suppress(Exception):
-            write_figures(report, self.folder / FIGURES)
+            write_figures(report, self.folder / FIGURES, store=self.folder / STORE)
         best = report.get('optimum')
         if best:
             with contextlib.suppress(Exception):
@@ -502,13 +569,41 @@ class MapRunner:
                                cancel=False)
 
 
-def write_figures(report, path):
-    """Convergence, 1/R in k, R_cap in N, signal in E and f, predicted against measured, Pareto front."""
+def stored_lines(store, role=None):
+    """(request, axis, signal, spray, started) of the done lines in map.h5, of one role or all, in order."""
+    lines = []
+    if store is None or not Path(store).is_file():
+        return lines
+    import h5py
+    with h5py.File(store, 'r') as handle:
+        for name in sorted(handle):
+            group = handle[name]
+            request = json.loads(group.attrs['request'])
+            if group.attrs.get('outcome') != 'done' or (role is not None and request.get('role') != role):
+                continue
+            lines.append((request, group['axis'][:], group['signal'][:], group['spray'][:],
+                          float(group.attrs.get('started', 0.))))
+    return lines
+
+
+def write_figures(report, path, store=None):
+    """Convergence, 1/R in k, R_cap in N, signal in E and f, predicted against measured, Pareto front,
+    the stopping cut and the beam against the spray (both from the lines in ``store``, map.h5).
+
+    2026-11-04 lab: a check map that stopped during its ladder gave six empty panels (in Explorer's dark
+    theme), although its stopping cut and reference had been measured: they are drawn now, in light.
+    """
     import matplotlib
     matplotlib.use('Agg', force=False)
+    import matplotlib.style
+    with matplotlib.style.context('default'):
+        _draw_figures(report, path, store)
+
+
+def _draw_figures(report, path, store):
     from matplotlib.figure import Figure
-    fig = Figure(figsize=(13, 9.5), layout='constrained')
-    axes = fig.subplots(2, 3).ravel()
+    fig = Figure(figsize=(17, 9.5), layout='constrained')
+    axes = fig.subplots(2, 4).ravel()
     points = [p for p in report.get('points', []) if p.get('ions')]
     ax = axes[0]
     conv = report.get('convergence', [])
@@ -560,6 +655,63 @@ def write_figures(report, path):
         ax.plot([f['min_r'] for f in front], [f['merit'] * 1e12 for f in front], 'o-')
     ax.axvline(report.get('target', 40), color='k', linewidth=.8, linestyle='--')
     ax.set(title='Pareto front', xlabel='lowest R of the range', ylabel='Σ S (pA)')
+    ladders = any(any(t[1] > 0 for t in ion['table']) for p in points[:8] for ion in p['ions'])
+    for ax, empty in zip(axes[:6], (not conv, not ladders, not finite_caps, not amp, not val, not front)):
+        if empty:  # e.g. a check map stopped before its first ladder line
+            ax.text(.5, .5, 'nothing measured yet', transform=ax.transAxes, ha='center', va='center',
+                    color='0.4')
+    _draw_stopping(axes[6], report.get('stopping') or {}, stored_lines(store, 'stopping'))
+    _draw_beam_and_spray(axes[7], report.get('references') or [], stored_lines(store))
     fig.suptitle(f"Q2 map {report.get('name', '')}: {len(report.get('points', []))} points, "
                  f"{report.get('lines', 0)} lines", fontsize=12)
     fig.savefig(path, dpi=110)
+
+
+def _draw_stopping(ax, summary, lines):
+    """Each stopping curve over its own maximum; x_stop from the Q1_DC curves, solid; Q1_DC + shift dashed."""
+    drawn = 0
+    for request, x, y, _, _ in lines:
+        ok = np.isfinite(x) & np.isfinite(y)
+        if ok.sum() < 3 or not np.nanmax(y[ok]) > 0:
+            continue
+        variant = str(request.get('variant', ''))
+        ax.plot(x[ok], y[ok] / np.nanmax(y[ok]), '--' if variant.startswith('shift') else '-',
+                linewidth=1.2, label=variant)
+        drawn += 1
+    x_stop = summary.get('x_stop')
+    if x_stop:
+        ax.axvline(x_stop, color='k', linewidth=.8, linestyle=':')
+        ax.set_title(f"Stopping cut: x_stop {x_stop:.2f} V\nQ1_DC +{summary.get('expected_shift_v', 0):g} V "
+                     f"moves it {summary.get('shift_v', 0):.2f} V"
+                     + (' (thermalized)' if summary.get('thermalized') else ' (not thermalized)'), fontsize=10)
+    else:
+        ax.set_title('Stopping cut')
+    if drawn:
+        ax.legend(fontsize='x-small')
+    else:
+        ax.text(.5, .5, 'no stopping line', transform=ax.transAxes, ha='center', va='center')
+    ax.set(xlabel='x (V)', ylabel='signal / its maximum')
+
+
+def _draw_beam_and_spray(ax, references, lines):
+    """The reference peak and the ESI current, both relative to the first reference: one scale, no second axis.
+    2026-11-04 lab: the spray current went 42 -> 48 -> 36 nA while the peaks held within 2 %."""
+    refs = [r for r in references if r.get('height') and r.get('started')]
+    if not refs:
+        ax.text(.5, .5, 'no reference line', transform=ax.transAxes, ha='center', va='center')
+        ax.set(title='Beam and spray')
+        return
+    start, first = float(refs[0]['started']), float(refs[0]['height'])
+    hours = [(float(r['started']) - start) / 3600 for r in refs]
+    ax.plot(hours, [float(r['height']) / first for r in refs], 'o-', label='reference peak (beam)')
+    spray = [(started, float(np.nanmean(values))) for _, _, _, values, started in lines
+             if len(values) and np.isfinite(values).any() and started]
+    reference_spray = [value for started, value in spray if abs(started - start) < 1.]
+    if spray and (reference_spray or spray[0][1]):
+        base = reference_spray[0] if reference_spray else spray[0][1]
+        ax.plot([(started - start) / 3600 for started, _ in spray], [value / base for _, value in spray],
+                '.', label='ESI current (each line)')
+    ax.axhline(1., color='k', linewidth=.6)
+    ax.set(title='Beam and spray, relative to the first reference', xlabel='hours since the first reference',
+           ylabel='relative to the first reference')
+    ax.legend(fontsize='x-small')

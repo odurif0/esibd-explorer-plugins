@@ -108,6 +108,28 @@ def test_the_plot_axis_and_the_file_use_the_scan_settings(mscan_rig, tmp_path):
     assert all(c.writes for c in two)
 
 
+def test_a_line_that_does_not_sweep_a_has_no_mz(mscan_rig, tmp_path):
+    # x, entry stub and frequency lines keep A fixed: their axis is not A, so it carries no m/z.
+    s = mscan_rig.scan
+    with_frequency(mscan_rig)
+    s.mz_r0_mm = 5.
+    add_offset(mscan_rig, factor=.2, fixed=10.)
+    add_offset(mscan_rig, factor=.2, fixed=10., pair=2)
+    s.offset_minimum, s.offset_resolution = .5, 0.
+    s._plan = s._preflight()
+    s._plan['detectors'] = [mscan_rig.detector]
+    path = tmp_path / 'frequency.h5'
+    s._line = dict(kind='frequency', axis=[400e3, 450e3, 500e3], amplitude_v=100.)
+    s.saveData(path)
+    with h5py.File(path) as f:
+        assert 'mz' not in f['MScan/Validation']
+        assert json.loads(f['MScan/Validation'].attrs['map_line'])['kind'] == 'frequency'
+    s._line = None
+    s.saveData(path)  # The amplitude line (no map line) still gets it.
+    with h5py.File(path) as f:
+        assert 'mz' in f['MScan/Validation']
+
+
 @pytest.mark.parametrize(('frequency', 'amplitudes'), [
     (500e3, [62.0, 92.0, 151.9, 212.0]), (450.45e3, [50.2, 74.6, 123.3, 170.6]), (400e3, [None, 58.7, 96.8, 135.0]),
 ])

@@ -85,8 +85,8 @@ selects the "measurement channels"; the current range is kept). The plugin selec
 and verifies it at each connection and after a config load, never during the OFF
 discharge check (which reads both connectors and then restores this choice), and not
 when resuming after an Explorer crash. The ADC is not switched back and forth during
-operation: readings right after a switch are the least reliable (see the
-2026-10-05 observations in SOFTWARE_TEST_PLAN).
+operation: readings right after a switch are the least reliable (observed on
+2026-10-05).
 
 `ADC readback` shows the voltage of that connector (negative on `NEG`) only from a
 new conversion (data-ready flag set before the read) on the verified selection:
@@ -150,9 +150,16 @@ Reloading an INI configuration preserves channel names, module addresses and
 output targets; the current channels remain read-only.
 
 The vendor API reports one current per HV module, not separate currents for
-the positive and negative connectors. Voltage, current, and temperature use
-separate plot axes and their own units in HDF recordings. A missing or invalid
-reading is recorded as `NaN`, never as the previous measurement.
+the positive and negative connectors. The live display has one tab per quantity,
+each plot at full height: `Current` (selected first), `Voltage` and `Temperature`.
+A current is plotted only while its HV output's `Output On` is checked; a tab
+without any channel ON is not shown, and the tab you select is kept when tabs
+appear or disappear. Explorer's stack and group buttons do not apply and are
+hidden. The currents are drawn in nA (`Current (nA)`); the channels, the HDF files and
+the other plugins (MScan, Transmission) keep amperes. All channels are still recorded,
+with their own units, in the HDF files.
+A missing or invalid reading is recorded as `NaN`, never as the previous
+measurement.
 
 These channels reuse the existing diagnostic reads; they send no output
 commands and do not impose a current limit.
@@ -230,24 +237,38 @@ After a CGC receive/protocol error (`-7` through `-14`, or `-100`), the next ser
 I/O operation first uses the manufacturer's `Purge` recovery routine. The failed
 command is not retried, except within the OFF discharge check: a measurement step
 (ADC selection, ready flags or ADC read, never an output command) that gets a
-receive error (-10/-11/-12) is purged and repeated once. On 2026-10-26 a single -10
-to an ADC selection left an OFF unconfirmed. The periodic readback only reads: a receive error
+receive error (no reply -10/-11/-12, or a reply to another command -13/-14) is purged and
+repeated once. On 2026-10-26 a single -10 to an ADC selection, and on 2026-11-11 a single -13
+to the ready flags, left an OFF unconfirmed. The periodic readback only reads: a receive error
 there purges the port and reads the whole poll once more, then logs `ESI reply lost, port
 resynchronized and read again` as a warning (2026-11-03: seven lost replies on the heater limit
 reads, each reported as an error with HV possibly energized and recovered at the next poll). A
-second failure still reports the lost readback. Successful readback resets the consecutive-error count;
+second failure still reports the lost readback. The heater configuration (hardware limits, voltage,
+current and power limits, target temperature) changes only by a command: the 1 s poll reads it
+every 30 s and right after any heater write, config load or resync, while every heater command
+still reads it live (2026-11-11: all 18 lost replies of the day hit these reads, 5 of the 33
+calls of each poll). Successful readback resets the consecutive-error count;
 persistent errors close communication. Output requests are logged with their
 module, ON/OFF state and target so future failures can be correlated with HT clicks.
+One acquisition loop polls the ESI: a loop replaced by a newer one stops, and two starts at the
+same moment cannot both run (2026-11-11: after an OFF/ON, the ON thread and Explorer's recording
+start each started a loop; two polls per second gave "Could not acquire lock to acquire data" at
+every lost reply, five times more lost replies and 50 MB of worker log per hour).
 
 For an established connection, global OFF displays `Stopping: checking HV` while it
 disables the HV outputs, the heater and the global enable. Once they are verified
 OFF (about 3 s, with the first settled reading), the button returns to OFF and the badge shows
 `OFF: HV discharging`: the discharge check continues in the background, without
-blocking the operator. The port stays open while the driver checks both ADC
+blocking the operator. Switch the controller itself off only after `ESI HV discharge verified`
+(the console says so at OFF): a controller switched off during the check leaves its discharge
+unmeasured (`Disconnected: discharge unverified`, below). The port stays open while the driver checks both ADC
 polarities on both HV modules. All four absolute voltages must be **at most 10 V for
 three consecutive fresh measurement rounds** before the port closes; the console then
 reports `ESI HV discharge verified after N s`. The check has a 120-second deadline; a
-blocked DLL is handled by the transport watchdog. ON is refused until the check ends.
+blocked DLL is handled by the transport watchdog. ON is not executed before the check ends:
+an ON clicked during the check waits for its verdict, reconnects after a verified discharge
+(outputs forced OFF, as at any ON), and is dropped with a warning otherwise; OFF cancels it
+(2026-11-11: ON was clicked and refused six times during checks).
 Explorer closing waits for its verdict (at most about 2 min) instead of interrupting it.
 **Close communication** clicked during the check returns at once: the check closes the port
 itself (2026-10-26: waiting for it there froze Explorer for 33 s). The general **Close
@@ -285,6 +306,17 @@ shutdown actually verifies discharge. It has its own warning icon and red summar
 the current `STATE_ON` badge stays green and does not certify the previous shutdown.
 Closing a COM handle or killing the worker
 does not disable physical outputs or certify discharge.
+
+A controller that vanishes during the discharge check (`-100 Device not connected`: switched
+off or its cable unplugged) **after** its HV, heater and global enable were read back OFF is
+not an unconfirmed shutdown: nothing is generated any more, only the discharge below 10 V was
+not measured. The console names the elapsed time and the last readings, the worker is released
+at once (on 2026-11-11 a retry OFF on the vanished port hung 7 s on Purge), and the amber state
+`Disconnected: discharge unverified` stays until the next ON, which forces the outputs OFF
+again and reads the HV live. If the controller vanishes before the outputs are read back OFF,
+or the check fails while it still answers, the shutdown stays unconfirmed as above. An ON
+whose Open never completes (controller switched off) only releases its port: no OFF sequence
+runs on it and the state stays what it was before.
 
 The cards show both voltage readings and the current while checking. Current
 readings must be valid, but there is **no current threshold** until its accuracy
@@ -480,5 +512,4 @@ ESI-Controller.exe 16 -xs ESI-current-before.cfg -t
 To copy this plugin to another machine, keep the whole `esi/` directory
 together, including `vendor/` and `native/`. The old private Python distribution
 is not needed or shipped. Python notebook drivers remain explicit reference tools,
-not a fallback for Explorer. See [RUST_MIGRATION.md](../RUST_MIGRATION.md) for the
-separate mock, host, Wine and physical-hardware validation gates.
+not a fallback for Explorer.

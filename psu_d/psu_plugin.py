@@ -22,6 +22,7 @@ from esibd.core import (
     Channel,
     DeviceController,
     Parameter,
+    getTestMode,
     parameterDict,
 )
 from esibd.plugins import Device, Plugin
@@ -4521,6 +4522,27 @@ class PSUChannel(Channel):
         return color
 
 
+def _wait_for_poll(controller: Any, seconds: float) -> None:
+    """Sleep until the next poll, or until a verified write asks for one at once (``_poll_now``).
+
+    2026-11-04: after each MScan write, the point waited for the next 1 s poll to see a fresh readback:
+    about 0.5 s of the 0.9 s spent per point outside the measurement.
+    """
+    wake = controller.__dict__.setdefault("_poll_now", Event())
+    deadline = time.monotonic() + max(0.0, seconds)
+    while controller.acquiring and not wake.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, 0.05))
+    wake.clear()
+
+
+def _request_poll(controller: Any) -> None:
+    """A verified write: its readback is published by a poll now, not at the end of the interval."""
+    controller.__dict__.setdefault("_poll_now", Event()).set()
+
+
 class PSUController(DeviceController):
     """PSU hardware controller used by the ESIBD Explorer plugin."""
 
@@ -5342,6 +5364,15 @@ class PSUController(DeviceController):
             return False, "device disable is not confirmed"
         return True, ""
 
+    def runAcquisition(self) -> None:
+        """Explorer's loop, woken at once when a manual write ends (its readback is then fresh)."""
+        while self.acquiring:
+            with self.lock.acquire_timeout(1, timeoutMessage="Could not acquire lock to acquire data") as acquired:
+                if acquired:
+                    self.fakeNumbers() if getTestMode() else self.readNumbers()
+                    self.signalComm.updateValuesSignal.emit()
+            _wait_for_poll(self, self.getDevice().interval / 1000)  # The lock is released before waiting.
+
     def readNumbers(self, *, already_acquired: bool = False) -> None:
         if self.device is None or not getattr(self, "initialized", False):
             self.initializeValues(reset=True)
@@ -5873,6 +5904,7 @@ class PSUController(DeviceController):
                     self._manual_apply_worker_running = False
             if pending is None:
                 self._sync_status_to_gui(sync_manual_panel=True)
+                _request_poll(self)
                 return
             manual_state, cancel = pending
             self.applyManualState(manual_state, cancel=cancel)

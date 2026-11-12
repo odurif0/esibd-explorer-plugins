@@ -1,0 +1,27 @@
+# First step on the instrument: the stopping cut and the P1 ladder up to the R_target region.
+# Revised from its first run on 2026-11-04 (maps/2026-11-04_11-27-59_q2-check-1h), whose values
+# (best_scan_range, spray window, time per point) are now the engine's defaults.
+# Every key left out takes the value of q2_map.toml.
+
+[map]
+name = "q2-check-2h"
+max_lines = 40
+
+[map.design]
+amplitude = [[500, 26]]
+frequency = []
+
+[map.ladder]
+repeats = 0
+max_lines = 6        # k = 0.200, then 0.2056, 0.2081, 0.2093, 0.2099, 0.2103 (yesterday R ≈ 30–55 at 0.21)
+
+[map.stopping]
+repeats = 1
+x_from_v = 30        # 2026-11-04: x50 = 34.8–37.4 V, widths 0.6–1.1 V
+x_to_v = 42
+
+[map.stages]
+search = false
+validation = false
+local = false
+best = false

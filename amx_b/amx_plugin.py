@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, current_thread
 from typing import Any, cast
 
 import numpy as np
@@ -5246,17 +5246,33 @@ class AMXController(DeviceController):
                     device.recording = False
         self.acquiring = False
 
+    def startAcquisition(self) -> None:
+        """Explorer's start, one caller at a time.
+
+        Explorer checks for a running loop, then starts one, without a lock. On 2026-11-11 the ESI's ON
+        thread and Explorer's recording start ran it at once and two loops polled the device (lock
+        timeouts, five times more lost replies). This device also restarts its loop from a worker thread.
+        """
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            super().startAcquisition()
+
+    def _superseded_loop(self) -> bool:
+        """A newer acquisition loop runs: this one ends, so the device is polled by one loop only."""
+        owner = getattr(self, "acquisitionThread", None)
+        return isinstance(owner, Thread) and owner is not current_thread() and owner.is_alive()
+
     def _restart_acquisition_after_transition(self) -> None:
         """Restart acquisition after a transition without joining the old thread."""
-        self.acquiring = True
-        old_thread = getattr(self, "acquisitionThread", None)
-        if old_thread is None or not old_thread.is_alive():
-            self.acquisitionThread = Thread(
-                target=self.runAcquisition,
-                name=f"{self.controllerParent.name} acquisitionThread",
-            )
-            self.acquisitionThread.daemon = True
-            self.acquisitionThread.start()
+        with self.__dict__.setdefault("_acquisition_start_lock", Lock()):
+            self.acquiring = True
+            old_thread = getattr(self, "acquisitionThread", None)
+            if old_thread is None or not old_thread.is_alive():
+                self.acquisitionThread = Thread(
+                    target=self.runAcquisition,
+                    name=f"{self.controllerParent.name} acquisitionThread",
+                )
+                self.acquisitionThread.daemon = True
+                self.acquisitionThread.start()
 
     def runAcquisition(self) -> None:
         """Poll AMX housekeeping and push readbacks to the GUI from the acquisition thread.
@@ -5267,7 +5283,7 @@ class AMXController(DeviceController):
         without that, every poll silently aborted on the held lock and left the duty
         monitors and the status badge frozen at their startup snapshot.
         """
-        while self.acquiring:
+        while self.acquiring and not self._superseded_loop():
             started = time.monotonic()
             try:
                 with self._controller_lock_section(

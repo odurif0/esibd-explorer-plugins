@@ -28,6 +28,14 @@ const ACTIVE_BITS: u64 = CTRL_ACTIVE | MOD_ACTIVE | DEV_ACTIVE;
 const VOLTAGE_READY: u64 = 0x10;
 const CURRENT_READY: u64 = 0x40;
 const HEAT_READY: u64 = 1;
+/// CGC receive errors: no reply (-10, -11, -12) or a reply that does not match the command
+/// (-13 wrong command, -14 wrong argument). A purge resynchronizes the port; only reads repeat.
+const RECEIVE_ERRORS: [i64; 5] = [-10, -11, -12, -13, -14];
+/// How long the 1 s poll reuses the heater configuration (limits, target temperature). Only a
+/// command changes it, and every heater write, purge or (re)connection discards it; the front
+/// panel shows up within this time. 2026-11-11 lab: all 18 lost replies of the day hit these
+/// four reads, 5 of the 33 calls of every poll.
+const HEAT_CONFIGURATION_REFRESH: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 // After an ADC polarity selection, conversions are discarded until both limits pass, as for the
 // electrospray readback. 2026-10-22 lab: the first conversion after each selection often read
@@ -93,6 +101,7 @@ pub struct Controller {
     discharge_settle: Duration,
     discharge_settle_conversions: u64,
     discharge_deadline: Option<Instant>,
+    heat_configuration_cache: Option<(Instant, Value)>,
     error_codes: Value,
 }
 
@@ -184,6 +193,7 @@ impl Controller {
             discharge_settle: DISCHARGE_SETTLE,
             discharge_settle_conversions: DISCHARGE_SETTLE_CONVERSIONS,
             discharge_deadline: None,
+            heat_configuration_cache: None,
             error_codes: serde_json::from_str(crate::ERROR_CATALOG)
                 .map_err(|error| Error::runtime(format!("Invalid ESI error catalog: {error}")))?,
         })
@@ -290,6 +300,13 @@ impl Controller {
         ctx: &Context,
         cancellable: bool,
     ) -> Result<Vec<Value>> {
+        if symbol.starts_with("COM_ESI_CTRL_SetHeatCtrl")
+            || symbol == "COM_ESI_CTRL_LoadCurrentConfig"
+            || symbol == "COM_ESI_CTRL_SetCurrentConfig"
+            || symbol == "COM_ESI_CTRL_Purge"
+        {
+            self.heat_configuration_cache = None; // heater writes, a loaded config, a resync: read live
+        }
         let reply = self.native(symbol, args, ctx, cancellable)?;
         self.check_status(reply.status, symbol)?;
         if reply.values.len() != count {
@@ -336,8 +353,9 @@ impl Controller {
 
     /// A measurement-only step of the discharge check (ADC selection, ready flags, ADC reads): after
     /// one CGC receive error, purge the port and do this step once more. 2026-10-26 lab: a single -10
-    /// (no reply within 1.5 s) to SetHVsupplyMeasRanges left an OFF unconfirmed. Output commands are
-    /// never repeated this way.
+    /// (no reply within 1.5 s) to SetHVsupplyMeasRanges left an OFF unconfirmed; 2026-11-11 lab: a
+    /// single -13 (a reply to another command) to GetModuleDataReadyFlags did the same. Output
+    /// commands are never repeated this way.
     fn measurement<T>(
         &mut self,
         ctx: &Context,
@@ -345,7 +363,7 @@ impl Controller {
     ) -> Result<T> {
         match step(self) {
             Err(error)
-                if [-10, -11, -12].contains(&self.last_status) && !self.transport_poisoned =>
+                if RECEIVE_ERRORS.contains(&self.last_status) && !self.transport_poisoned =>
             {
                 eprintln!(
                     "ESI discharge check: {error}; purging and repeating this measurement once"
@@ -563,6 +581,7 @@ impl Controller {
             ));
         }
         self.measurement_requests.clear();
+        self.heat_configuration_cache = None;
         self.opening = true;
         self.open_failed = false;
         self.failed_open_released = false;
@@ -704,11 +723,24 @@ impl Controller {
             ctx,
             cancellable,
         )?;
-        Ok(json!({
+        let configuration = json!({
             "hardware_limits": {"max_voltage_v": float(maxima[0]), "max_current_a": float(maxima[1]), "max_power_w": float(maxima[2]), "max_temperature_c": float(maxima[3])},
             "voltage_limit_v": float(number(&voltage)?), "current_limit_a": float(number(&current)?),
             "power_limit_w": float(number(&power)?), "target_temperature_c": float(number(&target)?),
-        }))
+        });
+        self.heat_configuration_cache = Some((Instant::now(), configuration.clone()));
+        Ok(configuration)
+    }
+
+    /// The heater configuration of the 1 s poll: read live at most every HEAT_CONFIGURATION_REFRESH,
+    /// and after any heater write, purge or connection. Commands always read it live.
+    fn polled_heat_configuration(&mut self, ctx: &Context) -> Result<Value> {
+        if let Some((read_at, configuration)) = &self.heat_configuration_cache
+            && read_at.elapsed() < HEAT_CONFIGURATION_REFRESH
+        {
+            return Ok(configuration.clone());
+        }
+        self.heat_configuration(ctx, true)
     }
 
     fn heat_maxima(&mut self, ctx: &Context, cancellable: bool) -> Result<[f64; 4]> {
@@ -1211,7 +1243,7 @@ impl Controller {
     fn diagnostics_with_recovery(&mut self, ctx: &Context) -> Result<Value> {
         match self.diagnostics(ctx) {
             Err(error)
-                if [-10, -11, -12].contains(&self.last_status)
+                if RECEIVE_ERRORS.contains(&self.last_status)
                     && !self.transport_poisoned
                     && !ctx.is_cancelled() =>
             {
@@ -1305,7 +1337,7 @@ impl Controller {
             ctx,
             true,
         )?;
-        let configuration = self.heat_configuration(ctx, true)?;
+        let configuration = self.polled_heat_configuration(ctx)?;
         let heat_command = self.read(
             "COM_ESI_CTRL_GetModuleActivationState",
             &[json!(0), json!(false)],

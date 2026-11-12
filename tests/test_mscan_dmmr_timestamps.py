@@ -31,7 +31,7 @@ def test_a_repeated_stamp_in_the_history_no_longer_blocks_start(mscan_continuous
     assert v['status'] == 'completed', v['error']
 
 
-def test_a_repeated_stamp_during_a_scan_is_skipped_with_its_value(mscan_rig):
+def test_a_repeated_stamp_during_a_scan_is_skipped_with_its_value(mscan_rig, mscan_virtual_clock):
     s, r = mscan_rig.scan, mscan_rig
     pause, ticks = s._pause, [0]
     def repeat_one_stamp():
@@ -45,6 +45,19 @@ def test_a_repeated_stamp_during_a_scan_is_skipped_with_its_value(mscan_rig):
     assert s._validation['status'] == 'completed', s._validation['error']
     assert s.outputChannels[0].recordingData == pytest.approx([10., 20., 30.])  # 1e6 was skipped
     assert 1e6 not in s._module_values(0., 1e12)
+
+
+def test_each_skipped_record_is_kept_once_with_its_delay_for_the_scan_file(mscan_rig):
+    """Open since 2026-11-03: two records within the clock resolution (0 s), or a clock stepped back (< 0 s)."""
+    s, r = mscan_rig.scan, mscan_rig
+    t = r.detector_device.time.data
+    last = t[-1]
+    t.extend([last, last - .5, last + .01])  # Repeated, earlier, then later again.
+    r.detector.values.data.extend([1., 2., 3.])
+    s._dmmr_skipped = {}
+    for _ in range(3):  # Every poll sees them again; each is noted once.
+        s._dmmr_history([r.detector])
+    assert sorted(s._dmmr_skipped.items()) == [(last - .5, pytest.approx(-.5)), (last, 0.)]
 
 
 def test_the_engine_receives_increasing_times_only(mscan_rig):

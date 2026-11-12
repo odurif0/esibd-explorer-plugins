@@ -187,12 +187,18 @@ def test_off_returns_to_off_once_outputs_are_verified_and_on_waits(control, esi_
             seen.append(control.parent.onAction.state)
 
     monkeypatch.setattr(c, "_on_discharge_progress", progress)
+    reconnect = []
+    control.parent.setOn = reconnect.append
     assert c.shutdownCommunication()
     assert seen == [(control.module._ESI_STOPPING, False), False]
     assert control.parent._session_closed, "a refused ON is not recorded for a crash resume"
-    assert "ESI outputs OFF; the HV discharge check continues in the background." in control.messages
-    assert any("ON is possible once it ends" in message for message in control.messages)
-    assert control.messages[-1].startswith("ESI HV discharge verified after ")
+    assert any(message.startswith("ESI outputs OFF; the HV discharge check continues in the background. "
+                                  "Switch the controller off only after") for message in control.messages)
+    # 2026-11-11 lab: ON was refused six times; it now follows a verified discharge.
+    assert any("ON follows once it verifies the discharge" in message for message in control.messages)
+    assert any(message.startswith("ESI HV discharge verified after ") for message in control.messages)
+    assert control.messages[-1] == "ESI ON, queued behind the discharge check: reconnecting."
+    assert reconnect == [True]
     assert control.statuses[-1] == ("Disconnected", False)
     assert esi_discharge_rig.calls.count(("close",)) == 1
     assert not c._discharge_outputs_off
@@ -291,3 +297,35 @@ def test_general_close_uses_the_off_path_and_never_waits_on_the_gui_thread(contr
     device.pluginManager = SimpleNamespace(closing=state == "closing")
     device.closeCommunication()
     assert calls == ([("setOn", False)] if state == "ST_ON" else ["controller", "base"])
+
+
+@pytest.mark.parametrize("then", ["off", "unverified"])
+def test_a_queued_on_is_cancelled_by_off_or_dropped_without_a_verified_discharge(control, esi_discharge_rig,
+                                                                                monkeypatch, then):
+    c = control.controller
+    reconnect = []
+    control.parent.setOn = reconnect.append
+    original = c._on_discharge_progress
+    report = {"consecutive": 0, "limit_v": 10.0,
+              "modules": {1: {"positive_v": 2.849, "negative_v": -2.712, "measured_a": 0.}}}
+
+    def progress(report):
+        original(report)
+        if not getattr(c, "_on_after_check", False):
+            control.parent.onAction.state = True  # ON during the check: queued
+            c.toggleOn()
+            if then == "off":
+                control.parent.onAction.state = False  # then OFF: the queued ON is cancelled
+                monkeypatch.setattr(c, "shutdownCommunication", lambda: False)
+                c.toggleOn()
+
+    monkeypatch.setattr(c, "_on_discharge_progress", progress)
+    if then == "unverified":
+        def disconnect(timeout_s, on_discharge):
+            on_discharge(report)
+            raise RuntimeError("ESI discharge unconfirmed: fresh ADC voltages did not remain below the limit")
+        monkeypatch.setattr(esi_discharge_rig.driver, "disconnect", disconnect)
+    c._shutdown_communication_unlocked()
+    assert reconnect == []
+    expected = "is cancelled" if then == "off" else "is dropped: the discharge was not verified"
+    assert any(expected in message for message in control.messages), control.messages

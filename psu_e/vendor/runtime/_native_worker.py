@@ -36,8 +36,10 @@ ROUTINE_READ_PREFIXES = ("get_", "read_", "poll_", "collect_", "is_", "list_", "
 DISCRETE_OUTPUT_TOKENS = ("State", "Enable")
 # Positions of a discrete output that change on every read, left out of change detection.
 # 2026-10-22: ESI GetCompleteState also returns the modules' conversion-ready flags (index 7,
-# 223 <-> 255): every 1 s poll counted as a change, 43 MB of log per hour.
-LOG_VOLATILE_OUTPUTS = {"COM_ESI_CTRL_GetCompleteState": frozenset({7})}
+# 223 <-> 255): every 1 s poll counted as a change, 43 MB of log per hour. 2026-11-11: its
+# DataFlags (index 0, 15 <-> 13 with HV on) did the same: 50 MB per hour. Both are data-ready
+# flags, not states; DeviceState to State (indexes 1-6) are still logged when they change.
+LOG_VOLATILE_OUTPUTS = {"COM_ESI_CTRL_GetCompleteState": frozenset({0, 7})}
 LIFECYCLE_ATTRIBUTES = frozenset({"connected", "_dll_port_claimed", "_open_failed", "_opening_in_progress",
                                 "_failed_open_released", "_failed_open_cleanup_outcome",
                                 "_transport_poisoned", "_transport_error"})
