@@ -164,6 +164,21 @@ fn check_lists_what_to_change_before_start() {
     )
     .unwrap_err();
     assert!(err.message.contains("cannot start"));
+    for (range, ok) in [
+        (json!([]), true),
+        (json!([30, 60]), true),
+        (json!([60, 30]), false),
+        (json!([30]), false),
+    ] {
+        let checked = call(
+            &mut c,
+            "map_check",
+            &[plan_with(json!({"spray_range_na": range})), instrument()],
+        )
+        .unwrap();
+        let text = checked["problems"].to_string();
+        assert_eq!(!text.contains("spray_range_na"), ok, "{range}: {text}");
+    }
     let unknown = call(
         &mut c,
         "map_check",

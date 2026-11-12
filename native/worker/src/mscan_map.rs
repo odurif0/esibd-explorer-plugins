@@ -595,7 +595,7 @@ fn default_follow() -> BTreeMap<String, f64> {
 }
 
 defaults!(MapConfig {
-    name: String = "q2-map".to_owned(),
+    name: String = "q2-full".to_owned(),
     mix: Vec<f64> = default_mix(),
     // 2026-11-04: 322 sits unresolved on the low-A background at k = 0.200 and 2722 never rose
     // above the noise (nor on 2026-11-03); an ion the beam lacks makes every point infeasible.
@@ -611,6 +611,9 @@ defaults!(MapConfig {
     reference_every: usize = 5,
     // 2026-11-04: the ESI current went 42 → 48 → 36 nA while the M03 peaks stayed within 2 %.
     spray_window_percent: f64 = 40.0,
+    // A fixed ESI current range in nA, [low, high], instead of the window around the reference
+    // (user, 2026-11-12); empty: the window. Checked by MScan before each line and over each line.
+    spray_range_na: Vec<f64> = Vec::new(),
     seed: u64 = 1,
     detector: String = "M03".to_owned(),
     point_s: f64 = 0.8,
@@ -4152,6 +4155,17 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
     }
     if !(cfg.point_overhead_s >= 0.0 && cfg.point_overhead_s.is_finite()) {
         problems.push("point_overhead_s must be zero or positive.".to_owned());
+    }
+    if !(cfg.spray_window_percent > 0.0 && cfg.spray_window_percent.is_finite()) {
+        problems.push("spray_window_percent must be positive.".to_owned());
+    }
+    match cfg.spray_range_na.as_slice() {
+        [] => {}
+        [lo, hi] if lo.is_finite() && hi.is_finite() && *lo >= 0.0 && hi > lo => {}
+        _ => problems.push(
+            "spray_range_na must be empty (window around the reference) or [low, high] in nA, 0 <= low < high."
+                .to_owned(),
+        ),
     }
     if !(cfg.r_target > 1.0 && cfg.r_max >= cfg.r_target) {
         problems.push("r_target must exceed 1 and r_max must be at least r_target.".to_owned());

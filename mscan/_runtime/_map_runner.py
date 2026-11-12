@@ -162,6 +162,9 @@ class MapRunner:
         self.notice = ''  # Said to the operator at Start or Resume (a changed Ilim).
         self.start_values = {}
         self.spray_reference = None
+        self.spray_source = ''
+        self._session_start = 0  # First journal record of this run (Start or Resume).
+        self._said_window = None
         self._failures = []
         self._operator_settings = None
 
@@ -187,7 +190,13 @@ class MapRunner:
         """Start a new map from a plan file, or resume the map of folder ``resume``."""
         if self.running:
             raise RuntimeError('A map is already running.')
+        # One runner serves every map of the session: each Start or Resume begins from its own state.
+        # 2026-11-12 lab: a map stopped on its spray window; then every Start map, whatever its plan,
+        # compared the spray with that map's reference (and kept its start values to restore at the end).
         self.notice = ''
+        self.start_values, self._operator_settings = {}, None
+        self.spray_reference, self.spray_source, self._said_window = None, '', None
+        self._failures = []
         if resume is not None:
             self.folder = Path(resume)
             self.journal = json.loads((self.folder / JOURNAL).read_text(encoding='utf-8'))
@@ -390,8 +399,6 @@ class MapRunner:
             values['__frequency_khz__'] = self.scan._map_frequency_hz() / 1e3
             self._operator_settings = self.scan._map_settings_snapshot()
             return values
-        if self.start_values:
-            return
         saved = self.folder / START_VALUES
         if saved.is_file():
             # Resume after a crash: the values before the first line, not those a line left behind.
@@ -401,6 +408,9 @@ class MapRunner:
             self.start_values = self.scan._gui(capture, cancel=False)
             atomic_json(saved, dict(channels=self.start_values, settings=self._operator_settings))
         self.spray_reference = self.scan._gui(self.scan._map_spray_now, cancel=False)
+        records = (self.journal or {}).get('records') or []
+        self._session_start, self._said_window = len(records), None
+        self._spray_at = 'Resume' if records else 'Start'
 
     def _restore_start_values(self):
         if not self.start_values:
@@ -473,37 +483,73 @@ class MapRunner:
     # ------------------------------------------------------------------ spray
 
     def _spray_basis(self):
-        """The ESI current of the last reference line that found its peak; before one, its value at Start.
+        """The ESI current of this run's last reference line that found its peak; before one, the ESI
+        current when the map started or resumed (``spray_source`` says which).
 
         2026-11-04 lab: the ESI current went 42 -> 48 -> 36 nA while the M03 peaks held within 2 %. The
         reference lines verify the beam; the window then guards against a sudden change from there, not
         against the slow drift of a spray that still delivers the same beam.
+        2026-11-12 lab: a Resume compared the spray with a reference line of the earlier run and waited
+        for a current the ESI no longer gave. Starting or resuming a map accepts the spray it finds.
         """
-        for record in reversed((self.journal or {}).get('records') or []):
+        records = (self.journal or {}).get('records') or []
+        for record in reversed(records[self._session_start:]):
             request, analysis = record.get('request') or {}, record.get('analysis') or {}
             spray = analysis.get('spray_mean')
             if (request.get('role') == 'reference' and record.get('outcome') == 'done' and spray
                     and any(peak.get('found') for peak in analysis.get('peaks') or [])):
+                self.spray_source = f'reference line {request.get("id", "?")}'
                 return abs(float(spray))
+        self.spray_source = f'ESI current at {getattr(self, "_spray_at", "Start")}'
         return self.spray_reference
 
     def _spray_window(self):
+        fixed = self._spray_range()
+        if fixed is not None:
+            return fixed  # User 2026-11-12: a range chosen in the plan, whatever the spray at Start.
         basis = self._spray_basis()
         if basis is None or not math.isfinite(basis) or basis == 0:
             return None
-        percent = float(self.journal['plan']['map'].get('spray_window_percent', 20.))
+        percent = self._spray_percent()
         return abs(basis) * (1 - percent / 100), abs(basis) * (1 + percent / 100)
+
+    def _spray_range(self):
+        """The plan's fixed ESI current range (A), or None for the window around the reference."""
+        span = self.journal['plan']['map'].get('spray_range_na') or []
+        return (float(span[0]) * 1e-9, float(span[1]) * 1e-9) if len(span) == 2 else None
+
+    def _window_text(self, window):
+        if self._spray_range() is not None:
+            return f'{window[0] * 1e9:.1f}–{window[1] * 1e9:.1f} nA (fixed range of the plan)'
+        return (f'{window[0] * 1e9:.1f}–{window[1] * 1e9:.1f} nA (±{self._spray_percent():g} % of '
+                f'{abs(self._spray_basis()) * 1e9:.1f} nA, {self.spray_source})')
+
+    def _spray_percent(self):
+        return float(self.journal['plan']['map'].get('spray_window_percent', 20.))
+
+    def _say_window(self, window):
+        """Tell the operator the spray window whenever it changes (map.log and the console)."""
+        if window is None or window == self._said_window:
+            return
+        self._said_window = window
+        text = f'Map: spray window {self._window_text(window)}.'
+        self._log(text)
+        with contextlib.suppress(Exception):
+            self.scan._gui(lambda: self.scan.print(text), cancel=False)
 
     def _wait_for_spray(self):
         window = self._spray_window()
         if window is None:
             return
+        self._say_window(window)
         deadline = self.monotonic() + self.SPRAY_WAIT_S
         while True:
             now = self.scan._gui(self.scan._map_spray_now, cancel=False)
             if now is not None and math.isfinite(now) and window[0] <= abs(now) <= window[1]:
                 return
-            self._set_status('paused', f'Spray current {now} A outside {window[0]:.3g}–{window[1]:.3g} A; waiting')
+            reading = 'unavailable' if now is None or not math.isfinite(now) else f'{abs(now) * 1e9:.1f} nA'
+            self._set_status('paused', f'Spray current {reading} outside {self._window_text(window)}; waiting '
+                             f'(up to {self.SPRAY_WAIT_S / 60:.0f} min, or Stop)')
             if self.monotonic() > deadline:
                 raise SafeStop(f'Spray current outside its window for {self.SPRAY_WAIT_S / 60:.0f} min')
             if self.cancel.wait(5.):
@@ -517,7 +563,8 @@ class MapRunner:
             return
         mean = float(np.mean(values))
         if not window[0] <= mean <= window[1]:
-            raise LineFailed(f'spray current {mean:.3g} A left its window during the line')
+            raise LineFailed(f'spray current {mean * 1e9:.1f} nA left its window {self._window_text(window)} '
+                             'during the line')
 
     # ------------------------------------------------------------------ files
 

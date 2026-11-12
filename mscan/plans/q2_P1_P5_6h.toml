@@ -1,8 +1,8 @@
 # Second step on the instrument: the stopping cut and the full ladders of P1 and P5 (same RF cycles,
-# different f and E). Every key left out takes the value of q2_map.toml.
+# different f and E). Every key left out takes the value of q2_full.toml.
 
 [map]
-name = "q2-check-6h"
+name = "q2-P1-P5-6h"
 max_lines = 80
 
 [map.design]
