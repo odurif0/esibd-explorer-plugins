@@ -425,6 +425,28 @@ def _invoke_gui_callback(callback: Any) -> None:
         )
 
 
+def _start_on_next_gui_turn(start: Any) -> bool:
+    """On the Qt GUI thread, run ``start`` on the next event-loop turn and return True; else False.
+
+    MScan writes CH0 then CH1 in one GUI call. Each write started its own apply, so every scan point
+    made two applies one after the other (2026-11-12 lab: 0.27 s per point). Started on the next
+    turn, the apply worker finds both edits merged into one state.
+    """
+    try:
+        from PyQt6.QtCore import QThread, QTimer
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        return False
+    app = QApplication.instance()
+    try:
+        if app is None or QThread.currentThread() != app.thread():
+            return False
+        QTimer.singleShot(0, start)
+    except Exception:
+        return False
+    return True
+
+
 def _disable_spinbox_wheel(widget: Any) -> None:
     """Prevent accidental mouse-wheel edits on hardware-facing spinboxes."""
     install_filter = getattr(widget, "installEventFilter", None)
@@ -5651,7 +5673,7 @@ class PSUController(DeviceController):
         if self.main_state == _PSU_SHUTDOWN_UNCONFIRMED_STATE:
             return  # A status poll cannot confirm that the port has closed.
         if snapshot.get("read_recovery"):
-            self.print(f"PSU reply lost, port resynchronized and read again: {snapshot['read_recovery']}",
+            self.print(f"PSU reply lost, port resynchronized and the request repeated: {snapshot['read_recovery']}",
                        flag=PRINT.WARNING)
         self.hardware_main_state = str(
             snapshot.get("main_state", {}).get("name", "Unknown")
@@ -5903,16 +5925,26 @@ class PSUController(DeviceController):
             if self._manual_apply_worker_running:
                 return
             self._manual_apply_worker_running = True
-            try:
-                Thread(
-                    target=self._manual_state_apply_worker,
-                    name=f"{self.controllerParent.name} applyManualStateThread",
-                    daemon=True,
-                ).start()
-            except Exception:
+            if _start_on_next_gui_turn(self._start_manual_apply_worker):
+                return  # Busy from now on; edits made before the next turn join this apply.
+            self._start_manual_apply_worker(locked=True)
+
+    def _start_manual_apply_worker(self, locked: bool = False) -> None:
+        try:
+            Thread(
+                target=self._manual_state_apply_worker,
+                name=f"{self.controllerParent.name} applyManualStateThread",
+                daemon=True,
+            ).start()
+        except Exception:
+            if locked:
                 self._manual_apply_worker_running = False
                 self._manual_apply_pending_state = None
-                raise
+            else:
+                with self._manual_apply_state_lock:
+                    self._manual_apply_worker_running = False
+                    self._manual_apply_pending_state = None
+            raise
 
     def _discard_pending_manual_state_apply(self) -> None:
         with self._manual_apply_state_lock:

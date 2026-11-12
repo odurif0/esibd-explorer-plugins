@@ -1526,7 +1526,12 @@ impl Controller {
             );
         }
         let recovery = Self::recovery_context(timeout, ctx);
-        match Io::new(&recovery, timeout).and_then(|io| self.recover_outputs(&io)) {
+        // After a lost reply the port is out of step: without a purge each OFF command reads the
+        // late reply of the previous one (-13) even when it executed (2026-11-12 lab).
+        match Io::new(&recovery, timeout).and_then(|io| {
+            let _ = self.resynchronize_after_lost_reply(&io);
+            self.recover_outputs(&io)
+        }) {
             Ok(()) => error,
             Err(recovery) => Error::new(error.kind, format!("{}; {recovery}", error.message)),
         }
@@ -2062,10 +2067,12 @@ impl Backend for Controller {
                     })
                     .transpose()?
                     .unwrap_or(true);
-                let result = if method == "apply_manual_state" {
-                    let state = ManualState::parse(a.required("manual_state")?)?;
-                    self.apply_manual(&state, monitoring, &profile, &io)
+                let state = if method == "apply_manual_state" {
+                    Some(ManualState::parse(a.required("manual_state")?)?)
                 } else {
+                    None
+                };
+                let ramp = if state.is_none() {
                     let ch = channel(a.required("channel")?)?;
                     let target = number(a.required("target_v")?, "ramp target")?;
                     if !target.is_finite() || target < 0.0 {
@@ -2073,8 +2080,35 @@ impl Backend for Controller {
                             "PSU ramp target must be finite and non-negative.",
                         ));
                     }
-                    self.standalone_ramp(ch, target, monitoring, &profile, &io)
+                    Some((ch, target))
+                } else {
+                    None
                 };
+                let run = |c: &mut Self| match (&state, ramp) {
+                    (Some(state), _) => c.apply_manual(state, monitoring, &profile, &io),
+                    (None, Some((ch, target))) => {
+                        c.standalone_ramp(ch, target, monitoring, &profile, &io)
+                    }
+                    (None, None) => Err(Error::argument("PSU apply without a state or target.")),
+                };
+                self.receive_fault = None;
+                let mut result = run(self);
+                // A reply lost during the apply (2026-11-12 lab, PSU_A: one SetPSUOutputVoltage of
+                // 1097 unanswered for 3 s, then every command read the late reply of the previous
+                // one; the safety OFF ended a 2 h map). Both operations read the hardware state
+                // before writing what differs and verify it after, so once the port is in step
+                // again they are run once more: a write that did execute is not sent twice.
+                if result.is_err()
+                    && !ctx.is_cancelled()
+                    && let Ok(Some(lost)) = self.resynchronize_after_lost_reply(&io)
+                {
+                    result = run(self);
+                    if result.is_ok() {
+                        self.pending_recovery = Some(format!(
+                            "{lost} during {method}; the state was read back and the request completed"
+                        ));
+                    }
+                }
                 result.map_err(|error| self.after_manual_failure(error, timeout, ctx))?;
                 Ok(Value::Null)
             }

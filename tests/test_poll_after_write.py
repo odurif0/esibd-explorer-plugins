@@ -90,3 +90,23 @@ def test_without_a_write_the_poll_keeps_its_interval():
     thread.join(2)
     gaps = [b - a for a, b in zip(polls, polls[1:])]
     assert 2 <= len(gaps) <= 4 and min(gaps) > .25, gaps
+
+
+def test_the_two_rails_written_in_one_gui_call_make_one_apply(monkeypatch):
+    """MScan writes CH0 then CH1 in one GUI call: one apply carries both (2026-11-12 lab: two per point)."""
+    module, _, c = psu.make_psu()
+    turns = []
+    monkeypatch.setattr(module, '_start_on_next_gui_turn', lambda start: turns.append(start) or True)
+    applied = []
+    c.applyManualState = lambda state, cancel=None: applied.append(state)
+    c._sync_status_to_gui = lambda **kw: None
+    c._queue_manual_state_apply({'setpoints_only': True, 'voltage_values': {0: 80.5}})
+    assert c._manual_apply_worker_running, 'busy at once: MScan must not see a stale readback as fresh'
+    c._queue_manual_state_apply({'setpoints_only': True, 'voltage_values': {1: 80.5}})
+    assert len(turns) == 1 and not applied
+    turns[0]()
+    deadline = time.monotonic() + 2
+    while c._manual_apply_worker_running and time.monotonic() < deadline:
+        time.sleep(.005)
+    assert [state['voltage_values'] for state in applied] == [{0: 80.5, 1: 80.5}]
+    assert not c._manual_apply_worker_running

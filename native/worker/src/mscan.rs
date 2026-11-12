@@ -58,6 +58,14 @@ const STEPPED: &str = "Step by step";
 const CONTINUOUS: &str = "Continuous";
 const PAGE_LIMIT: usize = 4096;
 const POLL_S: f64 = 0.05;
+/// Before a stepped point is measured, its rails must be within a quarter of the amplitude grid
+/// spacing around it of their target (at least this much and 0.05 % of the target, at most the
+/// panel tolerance). With the 1 V panel tolerance and 0.2–0.9 V steps, 15 % of the 2026-11-12 map
+/// points started while the PSU output was still 0.1–0.5 V short of its target. The panel
+/// tolerance stays the limit during the window.
+const RAIL_SETTLE_FLOOR_V: f64 = 0.1;
+const RAIL_SETTLE_STEP_FRACTION: f64 = 0.25;
+const RAIL_SETTLE_RELATIVE: f64 = 5e-4;
 
 fn missing_number() -> f64 {
     f64::NAN
@@ -811,6 +819,8 @@ struct RailState {
     confirmed: Option<f64>,
     expected: f64,
     value: f64,
+    /// How close the readback must come to `expected` before a stepped point is measured.
+    settle_tolerance: f64,
 }
 
 #[derive(Clone)]
@@ -823,6 +833,9 @@ struct Point {
     finite_samples: usize,
     start: f64,
     end: f64,
+    /// Wall times of the write of this point's targets (start and end of the GUI command).
+    command_start: f64,
+    command_end: f64,
     volts: Vec<f64>,
     currents: Vec<f64>,
     offsets: Vec<(f64, f64)>,
@@ -839,6 +852,8 @@ impl Point {
             finite_samples: 0,
             start: f64::NAN,
             end: f64::NAN,
+            command_start: f64::NAN,
+            command_end: f64::NAN,
             volts: vec![f64::NAN; rails],
             currents: vec![f64::NAN; rails],
             offsets: vec![(f64::NAN, f64::NAN); offsets],
@@ -848,6 +863,7 @@ impl Point {
         json!({"index": index, "status": self.status, "mean": float(self.mean), "samples": self.samples,
             "signal": float(self.signal), "signal_sigma": float(self.signal_sigma),
             "finite_samples": self.finite_samples, "window_start": float(self.start), "window_end": float(self.end),
+            "command_start": float(self.command_start), "command_end": float(self.command_end),
             "rail_v": floats(&self.volts), "rail_i": floats(&self.currents),
             "offsets": self.offsets.iter().map(|(a, b)| vec![float(*a), float(*b)]).collect::<Vec<_>>()})
     }
@@ -1073,6 +1089,7 @@ impl Run {
                 confirmed: Some(initial),
                 expected: initial,
                 value: r.value,
+                settle_tolerance: settings.voltage_tolerance,
             });
         }
         let extra = usize::from(settings.axis == AXIS_EXTRA);
@@ -1203,7 +1220,9 @@ impl Run {
         })
     }
 
-    fn observe(&mut self, obs: &Observation) -> Result<bool> {
+    /// Validates `obs`; returns (ready, settled): every source within the panel tolerance, and the
+    /// rails also within their settling tolerance (required before a stepped point is measured).
+    fn observe(&mut self, obs: &Observation) -> Result<(bool, bool)> {
         obs.clock()?;
         if ![
             obs.wall + self.settings.duration()?,
@@ -1289,6 +1308,7 @@ impl Run {
             return Err(Error::runtime("Scan source count changed."));
         }
         let mut ready = amx_ready;
+        let mut settled = true;
         let (low, high) = self.amplitude_range;
         for ((r, frozen), state) in obs
             .rails
@@ -1357,6 +1377,7 @@ impl Run {
                 && r.monitor.is_finite()
                 && r.monitor >= 0.0
                 && (r.monitor - state.expected).abs() <= self.settings.voltage_tolerance;
+            settled &= (r.monitor - state.expected).abs() <= state.settle_tolerance;
             state.value = r.value;
         }
         for ((o, frozen), &expected) in obs
@@ -1385,7 +1406,7 @@ impl Run {
         {
             return Err(Error::runtime("System clock changed during acquisition."));
         }
-        Ok(ready)
+        Ok((ready, ready && settled))
     }
 
     fn issue(
@@ -1527,13 +1548,30 @@ impl Run {
             return Err(Error::argument("Nonfinite acknowledged offset target."));
         }
         let command = self.command.take().unwrap();
+        let panel = self.settings.voltage_tolerance;
+        let stepped = !command.restore && self.settings.mode != CONTINUOUS;
+        let spacing = if stepped {
+            self.amplitude_spacing()
+        } else {
+            0.0
+        };
         for (j, r) in self.rails.iter_mut().enumerate() {
             if ack.revisions[j] != r.revision {
                 r.confirmed = None;
             }
             r.revision = ack.revisions[j];
             r.value = ack.values[j];
-            r.expected = command.targets[j];
+            let target = command.targets[j];
+            r.settle_tolerance = if stepped {
+                panel.min(
+                    RAIL_SETTLE_FLOOR_V
+                        .max(RAIL_SETTLE_STEP_FRACTION * spacing)
+                        .max(RAIL_SETTLE_RELATIVE * target.abs()),
+                )
+            } else {
+                panel
+            };
+            r.expected = target;
         }
         self.offset_expected = ack.offset_values;
         if let Some(f) = command.frequency_hz {
@@ -1544,7 +1582,8 @@ impl Run {
             }
             self.frequency_expected = f;
         }
-        if !command.restore && self.settings.mode == CONTINUOUS {
+        if !command.restore {
+            // Stepped points keep them too: with the window times they split the time of a point.
             self.raw.command_start[self.index] = ack.start_wall;
             self.raw.command_end[self.index] = ack.end_wall;
         }
@@ -1571,6 +1610,26 @@ impl Run {
         }
         self.since = None;
         Ok(())
+    }
+
+    /// The amplitude spacing between this point and its nearest neighbour on the line's grid
+    /// (0 on a line that keeps the amplitude).
+    fn amplitude_spacing(&self) -> f64 {
+        let at = |i: usize| self.settings.amplitude_at(self.steps[i]);
+        let here = at(self.index);
+        let mut spacing = f64::INFINITY;
+        for j in [self.index.checked_sub(1), Some(self.index + 1)]
+            .into_iter()
+            .flatten()
+        {
+            if j < self.steps.len() {
+                let d = (at(j) - here).abs();
+                if d > 0.0 && d.is_finite() {
+                    spacing = spacing.min(d);
+                }
+            }
+        }
+        if spacing.is_finite() { spacing } else { 0.0 }
     }
 
     fn history(&self, d: &Detector, baseline: Option<f64>) -> Result<()> {
@@ -1646,6 +1705,8 @@ impl Run {
             finite_samples: valid,
             start: window.start,
             end: window.end,
+            command_start: self.raw.command_start[window.index],
+            command_end: self.raw.command_end[window.index],
             volts: window.volts,
             currents: window.currents,
             offsets: window.offsets,
@@ -1701,18 +1762,23 @@ impl Run {
 
     /// The sources not ready in `obs`, for an error message (2026-11-02 lab: a scan stopped at
     /// 250 V on "PSU voltage / offset settling timed out" and nothing said which source).
-    fn waiting_for(&self, obs: &Observation) -> String {
+    fn waiting_for(&self, obs: &Observation, settling: bool) -> String {
         let tolerance = self.settings.voltage_tolerance;
         let mut waiting = Vec::new();
         for (r, state) in obs.rails.iter().zip(&self.rails) {
+            let rail_tolerance = if settling {
+                state.settle_tolerance
+            } else {
+                tolerance
+            };
             if r.busy {
                 waiting.push(format!("{} busy", r.name));
             } else if !r.monitor.is_finite() || r.monitor < 0.0 {
                 waiting.push(format!("{} no voltage readback", r.name));
-            } else if (r.monitor - state.expected).abs() > tolerance {
+            } else if (r.monitor - state.expected).abs() > rail_tolerance {
                 waiting.push(format!(
-                    "{} at {:.3} V for {} V",
-                    r.name, r.monitor, state.expected
+                    "{} at {:.3} V for {} V (± {:.3} V)",
+                    r.name, r.monitor, state.expected, rail_tolerance
                 ));
             } else if !r.current_readback.is_finite() || r.current_readback < 0.0 {
                 waiting.push(format!("{} no current readback", r.name));
@@ -1794,7 +1860,7 @@ impl Run {
                 "Unexpected or duplicate command acknowledgement.",
             ));
         }
-        let ready = self.observe(obs)?;
+        let (ready, settled) = self.observe(obs)?;
         // Acknowledgement completes the command callback, not the next scan
         // poll. Like the reference, defer pending-window finalization until
         // that poll validates the common wall/monotonic acquisition clock.
@@ -1804,6 +1870,11 @@ impl Run {
         let duration = self.settings.duration()?;
         match self.phase {
             Phase::Settling | Phase::Restoring => {
+                let ready = if self.phase == Phase::Settling {
+                    settled
+                } else {
+                    ready
+                };
                 self.since = if ready {
                     self.since.or(Some(obs.mono))
                 } else {
@@ -1832,7 +1903,7 @@ impl Run {
                 } else if obs.mono >= self.deadline {
                     return Err(Error::runtime(format!(
                         "PSU voltage / offset settling timed out; no detector value assigned to this point.{}",
-                        self.waiting_for(obs)
+                        self.waiting_for(obs, self.phase == Phase::Settling)
                     )));
                 }
             }
@@ -1840,7 +1911,7 @@ impl Run {
                 if !ready {
                     return Err(Error::runtime(format!(
                         "PSU / offset readback became invalid or left tolerance during acquisition.{}",
-                        self.waiting_for(obs)
+                        self.waiting_for(obs, false)
                     )));
                 }
                 if obs.mono >= self.deadline {
@@ -1878,14 +1949,14 @@ impl Run {
                 if self.ready_seen && !ready {
                     return Err(Error::runtime(format!(
                         "PSU / offset readback became invalid or left tolerance after reaching the continuous target.{}",
-                        self.waiting_for(obs)
+                        self.waiting_for(obs, false)
                     )));
                 }
                 self.ready_seen |= ready && obs.mono <= self.deadline;
                 if !ready && obs.mono - self.begin_mono >= self.settings.settle_timeout {
                     return Err(Error::runtime(format!(
                         "PSU voltage settling timed out during continuous acquisition.{}",
-                        self.waiting_for(obs)
+                        self.waiting_for(obs, false)
                     )));
                 }
                 let watermark = self.capture(obs)?;
@@ -2061,6 +2132,8 @@ impl Run {
             "rail_i": points.iter().map(|p| floats(&p.currents)).collect::<Vec<_>>(),
             "window_start": points.iter().map(|p| float(p.start)).collect::<Vec<_>>(),
             "window_end": points.iter().map(|p| float(p.end)).collect::<Vec<_>>(),
+            "command_start": points.iter().map(|p| float(p.command_start)).collect::<Vec<_>>(),
+            "command_end": points.iter().map(|p| float(p.command_end)).collect::<Vec<_>>(),
                         "samples": points.iter().map(|p| vec![p.samples]).collect::<Vec<_>>(),
             "signal": points.iter().map(|p| float(p.signal)).collect::<Vec<_>>(),
             "signal_sigma": points.iter().map(|p| float(p.signal_sigma)).collect::<Vec<_>>(),

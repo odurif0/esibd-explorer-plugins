@@ -360,6 +360,56 @@ fn stepped_restores_distinct_initials_only_after_closed_valid_windows() {
 }
 
 #[test]
+fn a_stepped_point_waits_for_its_rails_within_a_quarter_of_the_grid_spacing() {
+    // 2026-11-12 lab: with the 1 V panel tolerance and 0.2–0.9 V steps, 15 % of the map points
+    // started while the PSU output was still 0.1–0.5 V short of its target.
+    let mut r = Rig::new("Step by step");
+    r.settings["start"] = json!(10.0);
+    r.settings["stop"] = json!(10.8);
+    r.settings["step"] = json!(0.4);
+    r.settings["settle_timeout"] = json!(5.0);
+    r.start();
+    r.step().unwrap(); // First command (10 V) written and acknowledged.
+    r.obs["rails"][0]["monitor"] = json!(9.7); // Within 1 V, not within 0.1 V (spacing 0.4 V).
+    for _ in 0..40 {
+        r.step().unwrap();
+        assert_eq!(r.status["state"], "settling", "{}", r.status);
+    }
+    r.obs["rails"][0]["monitor"] = json!(9.95);
+    r.until("acquiring");
+    // During the window the panel tolerance applies: a 0.3 V deviation is not a fault.
+    r.obs["rails"][0]["monitor"] = json!(9.7);
+    r.step().unwrap();
+    r.obs["rails"][0]["monitor"] = json!(10.0);
+    let result = r.run();
+    assert_eq!(result["validation"]["status"], "completed");
+    let starts = result["validation"]["command_start"].as_array().unwrap();
+    let ends = result["validation"]["command_end"].as_array().unwrap();
+    let windows = result["validation"]["window_start"].as_array().unwrap();
+    for i in 0..3 {
+        let (s, e, w) = (
+            starts[i].as_f64().unwrap(),
+            ends[i].as_f64().unwrap(),
+            windows[i].as_f64().unwrap(),
+        );
+        assert!(s <= e && e <= w, "point {i}: command {s}–{e}, window {w}");
+    }
+}
+
+#[test]
+fn a_settling_timeout_names_the_settling_tolerance() {
+    let mut r = Rig::new("Step by step");
+    r.settings["start"] = json!(10.0);
+    r.settings["stop"] = json!(10.8);
+    r.settings["step"] = json!(0.4);
+    r.start();
+    r.step().unwrap();
+    r.obs["rails"][0]["monitor"] = json!(9.7);
+    r.tick(0.2);
+    r.fault("PSU_A_CH0 at 9.700 V for 10 V (± 0.100 V)");
+}
+
+#[test]
 fn quantized_echo_is_acknowledged_once_not_an_external_request() {
     let mut r = Rig::new("Step by step");
     r.quantize = true;

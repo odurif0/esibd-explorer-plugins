@@ -980,6 +980,100 @@ fn a_persistent_fault_gets_one_recovery_and_a_write_is_never_repeated() {
     assert_eq!(h.calls_named("SetPSUOutputVoltage").len(), 1);
 }
 
+fn ramped_output() -> (Controller, Arc<Mutex<Hardware>>) {
+    let (c, h) = connected();
+    {
+        let mut h = h.lock().unwrap();
+        h.outputs = [true, false];
+        h.enabled = true;
+        h.voltages = [100.0, 0.0];
+        h.currents = [0.3, 0.0];
+        h.calls.clear();
+    }
+    (c, h)
+}
+
+#[test]
+fn a_reply_lost_during_an_apply_is_read_back_and_completed_without_switching_off() {
+    // 2026-11-12 lab, PSU_A at 17:49:54: one SetPSUOutputVoltage of 1097 unanswered for 3 s; the
+    // safety OFF that followed ended a 2 h map although the PSU itself was fine.
+    let (mut c, h) = ramped_output();
+    h.lock().unwrap().script("SetPSUOutputVoltage", failed(-10));
+    let state = json!({"setpoints_only":true,"voltage_values":{"$map":[[0,101.0]]}});
+    call(&mut c, "apply_manual_state", &[state], fast_profile()).unwrap();
+    {
+        let h = h.lock().unwrap();
+        assert_eq!(h.voltages, [101.0, 0.0]);
+        assert_eq!(h.outputs, [true, false]);
+        assert!(h.enabled);
+        assert_eq!(h.calls_named("Purge").len(), 1, "{:?}", h.names());
+        assert!(
+            !h.names()
+                .iter()
+                .any(|n| ["SetPSUEnable", "SetDeviceEnable"].contains(n)),
+            "no safety OFF: {:?}",
+            h.names()
+        );
+        // The setpoint is read back after the purge, before any new write.
+        let purge = h.names().iter().position(|n| *n == "Purge").unwrap();
+        let write = purge
+            + h.names()[purge..]
+                .iter()
+                .position(|n| *n == "SetPSUOutputVoltage")
+                .unwrap();
+        assert!(
+            h.names()[purge..write].contains(&"GetPSUSetOutputVoltage"),
+            "{:?}",
+            h.names()
+        );
+    }
+    let s = call(&mut c, "collect_housekeeping", &[], json!({})).unwrap();
+    let said = s["read_recovery"].as_str().unwrap();
+    assert!(
+        said.contains("SetPSUOutputVoltage failed with vendor status -10")
+            && said.contains("apply_manual_state"),
+        "{s}"
+    );
+}
+
+#[test]
+fn a_reply_lost_twice_in_an_apply_resynchronizes_before_the_safety_off() {
+    let (mut c, h) = ramped_output();
+    {
+        let mut h = h.lock().unwrap();
+        h.script("SetPSUOutputVoltage", failed(-10));
+        h.script("SetPSUOutputVoltage", failed(-10));
+    }
+    let state = json!({"setpoints_only":true,"voltage_values":{"$map":[[0,101.0]]}});
+    assert!(call(&mut c, "apply_manual_state", &[state], fast_profile()).is_err());
+    let h = h.lock().unwrap();
+    assert_eq!(h.calls_named("Purge").len(), 2, "{:?}", h.names());
+    let last_purge = h.names().iter().rposition(|n| *n == "Purge").unwrap();
+    let off = h.names().iter().position(|n| *n == "SetPSUEnable").unwrap();
+    assert!(
+        last_purge < off,
+        "the port is in step before the OFF: {:?}",
+        h.names()
+    );
+    assert_eq!(h.outputs, [false, false]);
+    assert!(!h.enabled);
+}
+
+#[test]
+fn a_readback_mismatch_in_an_apply_is_not_retried() {
+    let (mut c, h) = ramped_output();
+    h.lock()
+        .unwrap()
+        .ignore
+        .insert("SetPSUOutputVoltage".into());
+    let state = json!({"setpoints_only":true,"voltage_values":{"$map":[[0,150.0]]}});
+    assert!(call(&mut c, "apply_manual_state", &[state], fast_profile()).is_err());
+    let h = h.lock().unwrap();
+    assert!(h.calls_named("Purge").is_empty(), "{:?}", h.names());
+    assert_eq!(h.calls_named("SetPSUOutputVoltage").len(), 1);
+    assert_eq!(h.outputs, [false, false]);
+}
+
 #[test]
 fn a_compatibility_status_is_an_answer_not_a_lost_reply() {
     // Some firmware answers -13 to these reads, and the worker has a documented fallback.

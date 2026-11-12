@@ -61,14 +61,14 @@ INSTRUMENT = dict(q1_dc_v=36.0, ap_q1_q2_v=34.0, x_v=10.0, ilim_a=0.5, psu_max_v
                   clock_hz=100e6, f_hz=500e3, frequency_writable=True, free_disk_bytes=1e12)
 
 
-@pytest.mark.parametrize('name', ['q2_full.toml', 'q2_P1_2h.toml', 'q2_P1_P5_6h.toml'])
+@pytest.mark.parametrize('name', ['q2_full.toml', 'q2_P1_2h.toml', 'q2_cycles_6h.toml'])
 def test_plan_templates_are_valid_and_ready_for_a_nominal_instrument(engine, name):
     plan = RUNNER.load_plan(PLANS / name)
     check = engine('map_check', plan, INSTRUMENT)
     assert check['problems'] == [], check['problems']
     assert check['estimate']['outcome'] in ('done', 'stop')
     hours = check['estimate']['total_s'] / 3600
-    expected = {'q2_full.toml': (35, 75), 'q2_P1_2h.toml': (1.5, 2.7), 'q2_P1_P5_6h.toml': (4.5, 7.5)}[name]
+    expected = {'q2_full.toml': (35, 75), 'q2_P1_2h.toml': (1.5, 2.7), 'q2_cycles_6h.toml': (4.5, 7.5)}[name]
     assert expected[0] < hours < expected[1], f'{name}: {hours:.1f} h simulated'
 
 
@@ -356,7 +356,7 @@ def test_a_map_stopped_by_its_spray_window_leaves_no_window_to_the_next_one(engi
     scan._start_map_line = original
     scan.channels['Q1_DC'].value = 38.  # Set by the operator before the next map.
     done = len(scan.lines_run)
-    second = runner.start(PLANS / 'q2_P1_P5_6h.toml')  # Another plan; the spray is steady at 10 nA.
+    second = runner.start(PLANS / 'q2_full.toml')  # Another plan; the spray is steady at 10 nA.
     deadline = time.monotonic() + 120
     while len(scan.lines_run) < done + 2 and runner.running and time.monotonic() < deadline:
         time.sleep(.02)
@@ -366,6 +366,35 @@ def test_a_map_stopped_by_its_spray_window_leaves_no_window_to_the_next_one(engi
     assert len(scan.lines_run) >= done + 2 and 'Spray' not in status['message'], status
     assert runner.spray_reference == 10e-9 and runner._failures == []
     assert scan.channels['Q1_DC'].value == 38.  # This map's start value, not the 36 V of the first map.
+
+
+def test_a_line_that_cannot_start_stops_the_map_at_once_without_counting_it(engine, tmp_path):
+    """2026-11-12 lab: PSU_A went OFF after a lost reply; the map then failed two more lines in 4 s on
+    "Cannot start: PSU_A_CH0: no valid PSU voltage readback" and stopped on "3 failed lines". A refused
+    start is tried again for a while, then stops the map with what to fix; it is not a failed line."""
+    scan = FakeMScan()
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    runner.START_RETRY_S, runner.START_RETRY_EVERY_S = .4, .05
+    original = scan._start_map_line
+    attempts = []
+
+    def psu_off_after_two_lines():
+        if len(scan.lines_run) < 2:
+            return original()
+        attempts.append(time.monotonic())
+        scan.scan_status = 'Cannot start: PSU_A_CH0: no valid PSU voltage readback.'
+        return False
+    scan._start_map_line = psu_off_after_two_lines
+    folder = runner.start(PLANS / 'q2_P1_2h.toml')
+    runner.thread.join(120)
+    status = json.loads((folder / RUNNER.STATUS).read_text())
+    assert status['state'] == 'stopped', status
+    assert 'the next line cannot start: PSU_A_CH0: no valid PSU voltage readback. Fix it' in status['message']
+    assert 'Resume' in status['message']
+    records = json.loads((folder / RUNNER.JOURNAL).read_text())['records']
+    assert len(records) == 2 and all(r['outcome'] == 'done' for r in records)
+    assert len(attempts) >= 3, 'tried again before stopping'
+    assert scan.channels['Q1_DC'].value == 36., 'start values restored'
 
 
 def test_a_fixed_spray_range_of_the_plan_replaces_the_window():
@@ -447,7 +476,7 @@ def test_resume_plans_with_the_ilim_the_operator_set_on_the_psu_since_start(engi
 def test_unreachable_point_closes_and_the_map_goes_on(engine, tmp_path):
     scan = FakeMScan(unreachable_points={'P1'})
     runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
-    folder = run_map(runner, PLANS / 'q2_P1_P5_6h.toml')
+    folder = run_map(runner, PLANS / 'q2_cycles_6h.toml')
     journal = json.loads((folder / RUNNER.JOURNAL).read_text())
     p1 = [r for r in journal['records'] if r['request']['point'] == 'P1']
     assert [r['outcome'] for r in p1] == ['unreachable'], 'P1 closes after its first line'

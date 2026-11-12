@@ -145,6 +145,8 @@ class MapRunner:
     SPRAY_WAIT_S = 1800.
     FAILURES_PER_HOUR = 3
     LINE_MARGIN_S = 180.
+    START_RETRY_S = 30.  # A refused line start is tried again for this long (a source briefly busy).
+    START_RETRY_EVERY_S = 5.
     STALL_S = 300.  # A point settles within its 30 s timeout or fails: 5 min without one is a hang.
     # Between two points, beyond settle_s: readback confirmation (2026-11-04: 1.0 s median, 2.6 s at most).
     POINT_OVERHEAD_S = 2.
@@ -342,10 +344,22 @@ class MapRunner:
     def _run_scan(self, request) -> dict:
         """Start the line like the Start button, wait for its file, read its arrays."""
         started = self.scan._gui(self.scan._start_map_line, cancel=False)
-        if not started:
+        refused_until = self.monotonic() + self.START_RETRY_S
+        while not started:
             message = self.scan._gui(lambda: str(getattr(self.scan, 'scan_status', '') or 'MScan did not start'),
                                      cancel=False)
-            raise (LineUnreachable if self._unreachable(message) else LineFailed)(message)
+            if self._unreachable(message):
+                raise LineUnreachable(message)
+            # A source that refuses the start (PSU OFF after a fault, no readback, DMMR stopped) does not
+            # recover by itself. Once a PSU went OFF the map burnt its three failures in 4 s
+            # (2026-11-12 lab): stop now, without counting the line, and say what to fix.
+            if self.monotonic() >= refused_until:
+                cause = message.removeprefix('Cannot start:').strip().rstrip('.')
+                raise SafeStop(f'the next line cannot start: {cause}. Fix it, then Map… → '
+                               'Resume the map: this line was not counted.')
+            if self.cancel.wait(self.START_RETRY_EVERY_S):
+                raise SafeStop('Stopped by the operator.')
+            started = self.scan._gui(self.scan._start_map_line, cancel=False)
         # A line stops only when it hangs (no new point), or past the time of every point of its axis.
         # A line slower than its estimate is not a fault (2026-11-04: three good P1 lines were stopped
         # because a point took 2.1 s, not the 1.1 s of the estimate).
