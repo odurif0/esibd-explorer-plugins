@@ -26,7 +26,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.12.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.13.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -89,6 +89,9 @@ Windows from sleeping on idle; disable sleep in the power plan of the lab PC as 
 are written to `<Explorer data path>/logs/<device>/`.
 
 A numeric field is applied with Enter, Tab or a click outside it.
+
+Live plots show the last 30 min. The mouse wheel over the time axis zooms it, as over a y axis;
+the plot then stops following the clock until you click **Scale x automatically** in its title bar.
 
 ### After an Explorer crash
 

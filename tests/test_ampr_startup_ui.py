@@ -6,6 +6,8 @@ construction, saved parameter restoration, colour updates, or Qt actions.
 """
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 
 import pytest
 from support.qt import run_probe
@@ -70,3 +72,6 @@ def test_colour_state_requires_initialized_controls(folder, state, active):
         assert channel._monitor_feedback_state() == "default"
 
 
+if __name__ == "__main__":  # run_probe executes this file; without it the probe never ran (42418c9)
+    from support.ampr_ui import probe
+    raise SystemExit(probe(sys.argv[1], bool(int(sys.argv[2])), Path(sys.argv[3])))

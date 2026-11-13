@@ -1276,12 +1276,47 @@ def _offer_thirty_minutes(display) -> None:
         setting.loading = False
 
 
+def _zoom_time_axis_with_wheel(display) -> None:
+    """The wheel over the time axis zooms it, as it does over a y axis (user, 2026-11-13).
+
+    Explorer keeps the time axis following the clock with the mouse disabled on x, so the wheel did
+    nothing there. Its first turn now does what Explorer's "Scale x manually" button does, then
+    zooms; the same button ("Scale x automatically") brings the following back.
+    """
+    for widget in getattr(display, "livePlotWidgets", []) or []:
+        get_axis = getattr(widget, "getAxis", None)
+        if not callable(get_axis):
+            continue  # Stacked layout: the extra ViewBoxes share the first plot's time axis.
+        for side in ("bottom", "top"):
+            try:
+                axis = get_axis(side)
+            except KeyError:
+                continue
+            if axis is None or getattr(axis, "_zooms_time", False):
+                continue
+            wheel = axis.wheelEvent
+
+            def zoom(event, axis=axis, wheel=wheel) -> None:
+                view = axis.linkedView()
+                if (view is not None and not view.mouseEnabled()[0]
+                        and not view.sceneBoundingRect().contains(event.scenePos())):
+                    display.updateMouseEnabled(x=True)
+                wheel(event)
+
+            axis.wheelEvent = zoom
+            axis._zooms_time = True
+
+
 class _LiveDisplay(LiveDisplay):
-    """Explorer's live plot, showing the last 30 min by default."""
+    """Explorer's live plot: the last 30 min by default, the wheel zooms the time axis."""
 
     def initGUI(self) -> None:
         super().initGUI()
         _offer_thirty_minutes(self)
+
+    def initFig(self) -> None:
+        super().initFig()
+        _zoom_time_axis_with_wheel(self)
 
 
 class PSUDevice(Device):

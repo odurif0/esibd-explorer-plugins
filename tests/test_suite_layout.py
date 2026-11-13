@@ -44,3 +44,21 @@ def test_support_fixtures_are_registered_plugins():
         if any(isinstance(node, ast.FunctionDef) and any("fixture" in ast.unparse(d) for d in node.decorator_list)
                for node in ast.parse(path.read_text(encoding="utf-8")).body))
     assert with_fixtures == sorted(conftest.pytest_plugins)
+
+
+def test_a_module_that_runs_itself_as_a_probe_has_an_entry_point():
+    # 2026-11-13: since 42418c9 two probe modules ran themselves without a `__main__` block, so the
+    # subprocess did nothing, exited 0, and the setpoint-entry and AMPR-startup probes always passed.
+    def runs_itself(tree):
+        return any(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "run_probe"
+                   and node.args and getattr(node.args[0], "id", None) == "__file__" for node in ast.walk(tree))
+
+    def entry_point(tree):
+        return any(isinstance(node, ast.If) and any(
+            isinstance(test, ast.Compare) and getattr(test.left, "id", None) == "__name__"
+            and getattr(test.comparators[0], "value", None) == "__main__" for test in ast.walk(node.test))
+            for node in tree.body)
+
+    trees = {path.name: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(TESTS.glob("test_*.py"))}
+    offenders = [name for name, tree in trees.items() if runs_itself(tree) and not entry_point(tree)]
+    assert offenders == [], offenders

@@ -5,6 +5,8 @@ requests, while panel construction, refresh and signal wiring are production cod
 """
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 
 import pytest
 from support.qt import run_probe
@@ -16,3 +18,6 @@ def test_setpoint_entry_waits_for_validation(folder, surface, tmp_path):
     run_probe(__file__, folder, surface, tmp_path, timeout=30)
 
 
+if __name__ == "__main__":  # run_probe executes this file; without it the probe never ran (42418c9)
+    from support.setpoint_ui import probe
+    raise SystemExit(probe(sys.argv[1], sys.argv[2], Path(sys.argv[3])))
