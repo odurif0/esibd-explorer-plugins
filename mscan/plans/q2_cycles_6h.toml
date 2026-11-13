@@ -11,14 +11,18 @@
 # At each point: a k ladder (0.200, 0.2056, 0.2081, 0.2093), the verification line at the computed
 # (k*, δ*) and two entry-stub cuts. The heights at k = 0.200 compare the transmission of the three
 # points; a reference line on 922 every two lines follows the beam (+80 % in 36 min on 11/12).
+#
+# 2026-11-13 run (maps/2026-11-13_14-54-33): P1 and P2 done; P3 stopped because the AMX makes
+# 300.300 kHz (whole 10 ns periods), not 300 kHz. From v0.5.14 the map uses 300.300 kHz; P3 is in
+# q2_frequency_15h.toml, with the other frequencies.
 
 [map]
 name = "q2-cycles-6h"
 max_lines = 45
 reference_every = 2             # the beam drifted 37 → 66 pA in 36 min on 2026-11-12
-spray_range_na = [30, 300]      # ESI current (nA). 2026-11-12, 1100 V: 60–180 nA. Below 30 nA the beam
-                                # was weak (24 pA at 14 nA). Set it to the spray of the day before Start.
-point_overhead_s = 1.4          # 2026-11-12: 2.5 s per point (the map then times its own lines)
+spray_range_na = [3, 300]       # ESI current (nA): the spray is on. 2026-11-13, 1000 V: 27–30 nA with a
+                                # steady beam (922: 43–50 pA in 5 h); 11/12, 1100 V: 60–180 nA.
+point_overhead_s = 2.5          # 2026-11-13: 3.6 s per point (the map then times its own lines)
 
 [map.design]
 amplitude = [[500, 12], [500, 5], [300, 9.4]]   # (f kHz, E eV); the first one is also the instrument check

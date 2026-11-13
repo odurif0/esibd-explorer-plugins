@@ -5912,6 +5912,9 @@ class PSUController(DeviceController):
     def applyValueFromThread(self, channel: PSUChannel) -> None:
         # Capture widget-backed values on Qt, then send an immutable command to
         # the same worker as the panel. A voltage edit cannot toggle a gate.
+        # A scan marks its writes while it makes them (Explorer applies them at once).
+        scan_driven = bool(getattr(channel, "scan_driven", False))
+
         def request() -> None:
             parent = self.controllerParent
             if (parent.loading or getattr(parent, "_channelValueSyncing", False)
@@ -5924,9 +5927,10 @@ class PSUController(DeviceController):
             ch, target = channel.channel_number(), float(channel.value)
             if ch not in _PSU_CHANNEL_IDS or not np.isfinite(target) or target < 0:
                 return
-            self.applyManualStateFromThread({
-                "setpoints_only": True, "voltage_values": {ch: target},
-            })
+            state: dict[str, Any] = {"setpoints_only": True, "voltage_values": {ch: target}}
+            if scan_driven:
+                state["scan_driven"] = True
+            self.applyManualStateFromThread(state)
 
         self._queue_native_gui(request)
 
@@ -5955,6 +5959,8 @@ class PSUController(DeviceController):
                 previous = self._copy_manual_state(pending[0])
                 for key in ("voltage_values", "current_limit_values"):
                     previous.setdefault(key, {}).update(state.get(key, {}))
+                if not (previous.get("scan_driven") and state.get("scan_driven")):
+                    previous.pop("scan_driven", None)  # An operator edit in the batch is logged.
                 state = previous
             self._manual_apply_pending_state = (state, self._output_cancel)
             if self._manual_apply_worker_running:
@@ -6149,6 +6155,11 @@ class PSUController(DeviceController):
         self, manual_state: dict[str, Any], *, cancel: Event | None = None
     ) -> None:
         cancel = self._output_cancel if cancel is None else cancel
+        # Scan writes are not logged: one per point (2026-11-13 lab: 5 156 lines in one map).
+        # The mark is the plugin's own: the worker gets the operator's state as it is.
+        scan_driven = bool(manual_state.get("scan_driven"))
+        if "scan_driven" in manual_state:
+            manual_state = {key: value for key, value in manual_state.items() if key != "scan_driven"}
         device = self.device
         if cancel.is_set():
             return
@@ -6179,7 +6190,8 @@ class PSUController(DeviceController):
                     return
                 self._update_state()
                 self._set_loaded_config_text("Manual (unsaved)")
-            self.print("Applied PSU manual values.")
+            if not scan_driven:
+                self.print("Applied PSU manual values.")
         except TimeoutError:
             return
         except Exception as exc:  # noqa: BLE001

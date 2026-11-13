@@ -401,10 +401,11 @@ scan, started and saved like one from Start, with all of its checks; the decisio
 MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
 
 - **Map plan**: the plan of the next map (TOML). Templates in `plans/`, named by content:
-  `q2_P1_2h.toml` (stopping cut and the P1 ladder, about 2.5 h), `q2_cycles_6h.toml` (R against
+  `q2_P1_2h.toml` (stopping cut and the P1 ladder, about 3.5 h), `q2_cycles_6h.toml` (R against
   the number of RF cycles: ladders at 500 kHz with E 12 and 5 eV and at 300 kHz with 9.4 eV, about
-  6 h) and `q2_full.toml` (the full map, about 45–55 h, Ilim at least 330 mA; it lists every key with
-  its default). Change a copy, kept outside the plugin folder. Until 2026-11-12 they were
+  8 h), `q2_frequency_15h.toml` (one night: R against f at a fixed number of cycles, 300, 400, 500
+  and 550 kHz, about 13.5 h) and `q2_full.toml` (the full map, Ilim at least 330 mA; it lists every key with its default).
+  The durations are those Check announces, at 3.6 s per point (2026-11-13). Change a copy, kept outside the plugin folder. Until 2026-11-12 they were
   q2_check_2h, q2_check_6h and q2_map; q2_cycles_6h replaced q2_P1_P5_6h after the 2026-11-12 map.
 - **Map…** (the only map button): a dialog to start a **new map** with a plan (Choose… to pick
   another) or to **resume** a map that did not complete (the newest is proposed; Choose… for
@@ -435,7 +436,9 @@ human:
   up to 20 % wider. A band with two maxima separated by a dip below 75 % of its height is flagged
   `split` (m/z 922 at k 0.2094 on 2026-11-12).
 - **Settings a line does not sweep** are set first and confirmed: the AMX frequency (through the
-  AMX HD plugin, which keeps the duty cycle), `Q1_DC`, the entry stub (x + 0.42·(Ap − x)) and
+  AMX HD plugin, which keeps the duty cycle; every line asks for a whole number of 10 ns periods,
+  so a plan's 300 kHz runs at 300.300 kHz and Check says so: on 2026-11-13 the map waited for
+  300.000 kHz and stopped), `Q1_DC`, the entry stub (x + 0.42·(Ap − x)) and
   `Stub_Exit_Q2` (x − 15 V). MScan's own settings (k, δ, x, timing, file name, notes) are set for
   each line and return to the operator's values at the end.
 - **New line axes** of the MScan worker: x (stopping cut), the entry stub and the AMX frequency
@@ -463,7 +466,8 @@ human:
   `point_s + settle_s + 2 s` each) is measured again. A line slower than its estimate is not a
   fault (2026-11-04: three good lines were stopped at twice an estimate that counted 1.1 s per
   point). The same line failing
-  three times, or three failed lines within one hour, stop the map. A line a limit forbids (PSU headroom,
+  three times, or three failed lines within one hour, stop the map; Resume gives that line three new
+  attempts (2026-11-13: both Resumes stopped at once on the line that had failed three times). A line a limit forbids (PSU headroom,
   Ilim, AMPR limits) closes that setting and the map goes on. Before each line the spray must be in
   its window; the map waits up to 30 min for it.
 - **Safe stop** (Stop, a fault, the end): the AMX frequency, `Q1_DC`, the stubs and MScan's settings
@@ -480,6 +484,8 @@ human:
   the ESI current, so a map stopped before its ladders still shows what it measured.
 - **Resume** continues from the last finished line of the journal, after a safe stop, an Explorer
   crash or a power cut; a line cut in the middle is measured again.
+- **Explorer's log** keeps the map's lines and warnings; the AMPR and PSU plugins no longer log the
+  scan's own setpoint writes, one per point (2026-11-13: 15 300 of the 15 761 lines of the day).
 
 ## Files and upgrades
 

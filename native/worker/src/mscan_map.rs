@@ -619,8 +619,9 @@ defaults!(MapConfig {
     point_s: f64 = 0.8,
     settle_s: f64 = 0.3,
     // Command and readback confirmation of each point, until the map has timed its own points
-    // (2026-11-04: a line took 2.02 s per point + 15.5 s; 2026-11-12: 2.5 s per point).
-    point_overhead_s: f64 = 1.4,
+    // (2026-11-04: a line took 2.02 s per point + 15.5 s; 2026-11-12: 2.5 s per point; 2026-11-13,
+    // rails settled within 0.1 V and read back every second: 3.6 s per point).
+    point_overhead_s: f64 = 2.5,
     q2_length_m: f64 = 0.15,
     max_failures: usize = 3,
     max_lines: usize = 600,
@@ -882,6 +883,10 @@ pub struct Journal {
     pub instrument: Instrument,
     pub started: f64,
     pub records: Vec<Record>,
+    /// First record of the present run (Start or Resume): a line that failed its budget before
+    /// a Resume gets a new one (2026-11-13 lab: two Resumes stopped at once on the line that had
+    /// failed three times, whatever the operator had changed).
+    pub session_start: usize,
 }
 
 pub const JOURNAL_VERSION: u32 = 1;
@@ -1019,6 +1024,23 @@ pub fn amplitude_grid(lo: f64, hi: f64, r_max: f64, coarse: usize) -> Vec<f64> {
     grid.push(round_to(hi, 1e-4));
     grid.dedup_by(|a, b| (*a - *b).abs() < 5e-5);
     grid
+}
+
+/// The frequency the AMX makes for `f_hz`: a whole number of clock ticks per period, the nearest
+/// one inside [lo, hi]. 2026-11-13 lab: 300 kHz is 333.3 ticks of 10 ns; the AMX made 300.300 kHz,
+/// the map waited for 300.000 kHz and stopped. Every line asks for a frequency the AMX can make.
+pub fn on_clock(f_hz: f64, clock_hz: f64, lo_hz: f64, hi_hz: f64) -> f64 {
+    if !(f_hz > 0.0 && f_hz.is_finite() && clock_hz > 0.0 && clock_hz.is_finite()) {
+        return f_hz;
+    }
+    let mut period = (clock_hz / f_hz).round().max(1.0);
+    if hi_hz > 0.0 && clock_hz / period > hi_hz * (1.0 + 1e-12) {
+        period = (clock_hz / hi_hz).ceil().max(1.0);
+    }
+    if lo_hz > 0.0 && clock_hz / period < lo_hz * (1.0 - 1e-12) {
+        period = (clock_hz / lo_hz).floor().max(1.0);
+    }
+    clock_hz / period
 }
 
 /// Frequencies of whole oscillator periods between lo and hi, increasing.
@@ -1485,6 +1507,8 @@ struct View<'a> {
     cfg: &'a MapConfig,
     inst: &'a Instrument,
     records: &'a [Record],
+    /// First record of this run (Start or Resume).
+    session_start: usize,
     x_stop: f64,
     /// R_target, or the highest R reached when no setting reaches it (Section 4).
     target: f64,
@@ -1506,6 +1530,7 @@ impl<'a> View<'a> {
             cfg: &journal.plan.map,
             inst: &journal.instrument,
             records: &journal.records,
+            session_start: journal.session_start.min(journal.records.len()),
             x_stop: journal.instrument.q1_dc_v,
             target: journal.plan.map.r_target,
         };
@@ -1513,6 +1538,11 @@ impl<'a> View<'a> {
             view.x_stop = s.x_stop;
         }
         view
+    }
+
+    /// The frequency the AMX makes for `f_hz` (whole clock ticks per period).
+    fn on_clock(&self, f_hz: f64) -> f64 {
+        on_clock(f_hz, self.inst.clock_hz, 0.0, 0.0)
     }
 
     fn done(&self) -> impl Iterator<Item = (usize, &'a Record)> {
@@ -1734,6 +1764,7 @@ impl<'a> View<'a> {
         delta: f64,
         stub: Option<f64>,
     ) -> Request {
+        let f_hz = self.on_clock(f_hz);
         let x = self.x_for(energy);
         let extent = self.amplitude_extent(f_hz, k, delta);
         let axis = amplitude_grid(extent[0], extent[1], self.cfg.r_max, self.cfg.coarse);
@@ -1745,7 +1776,7 @@ impl<'a> View<'a> {
         let points = axis.len() / self.cfg.coarse.max(1) + 30 * ions.len() + 10;
         let mut r = self.base_request(stage, role, point, variant);
         r.kind = KIND_AMPLITUDE.to_owned();
-        r.f_hz = round_to(f_hz, 1.0);
+        r.f_hz = f_hz;
         r.k = round_to(k, 1e-5);
         r.delta_v = round_to(delta, 0.01);
         r.energy_ev = energy;
@@ -1793,7 +1824,7 @@ impl<'a> View<'a> {
         let x = self.x_for(energy);
         let mut r = self.base_request(stage, role, point, variant);
         r.kind = KIND_FREQUENCY.to_owned();
-        r.f_hz = round_to(hi, 1.0);
+        r.f_hz = on_clock(hi, self.inst.clock_hz, lo, hi);
         r.k = round_to(k, 1e-5);
         r.delta_v = round_to(delta, 0.01);
         r.energy_ev = energy;
@@ -1810,7 +1841,7 @@ impl<'a> View<'a> {
 
     fn reference_line(&self) -> Request {
         let cfg = &self.cfg.reference;
-        let f = cfg.f_khz * 1e3;
+        let f = self.on_clock(cfg.f_khz * 1e3);
         let x = self.x_for(cfg.energy_ev);
         let a = self
             .cfg
@@ -2076,7 +2107,7 @@ impl View<'_> {
             .map(|(i, p)| PointSpec {
                 id: format!("P{}", i + 1),
                 stage: "B",
-                mode: Mode::Amplitude(p[0] * 1e3),
+                mode: Mode::Amplitude(self.on_clock(p[0] * 1e3)),
                 energy: p[1],
             })
             .collect();
@@ -2567,7 +2598,7 @@ impl View<'_> {
         let axis = linear_grid(x + cfg.cut_from_x_v, top, cfg.cut_step_v);
         let mut r = self.base_request(spec.stage, ROLE_STUB, &spec.id, variant);
         r.kind = KIND_EXTRA.to_owned();
-        r.f_hz = f;
+        r.f_hz = self.on_clock(f);
         r.k = round_to(k, 1e-5);
         r.delta_v = round_to(delta, 0.01);
         r.energy_ev = spec.energy;
@@ -2583,7 +2614,7 @@ impl View<'_> {
 
     fn stopping_lines(&self) -> Vec<Request> {
         let cfg = &self.cfg.stopping;
-        let f = cfg.f_khz * 1e3;
+        let f = self.on_clock(cfg.f_khz * 1e3);
         let axis = linear_grid(cfg.x_from_v, cfg.x_to_v, cfg.x_step_v);
         let mut lines = Vec::new();
         for (shift_name, q1) in [
@@ -3199,9 +3230,8 @@ impl<'a> Engine<'a> {
                 {
                     continue;
                 }
-                // Whole kHz inside the domain: rounding never steps past its edge.
-                let f = round_to(10f64.powf(lf), 1e3)
-                    .clamp((f_lo / 1e3).ceil() * 1e3, (f_hi / 1e3).floor() * 1e3);
+                // A frequency the AMX makes, inside the domain: rounding never steps past its edge.
+                let f = on_clock(10f64.powf(lf), self.view.inst.clock_hz, f_lo, f_hi);
                 let e = round_to(10f64.powf(le), 0.1);
                 if !self.view.reachable(f, self.view.amplitude_top(f)) {
                     continue;
@@ -3249,7 +3279,7 @@ impl<'a> Engine<'a> {
             (center.f_hz, center.energy_ev / step),
         ];
         for (f, e) in candidates {
-            let (f, e) = (round_to(f, 1e3), round_to(e, 0.1));
+            let (f, e) = (self.view.on_clock(f), round_to(e, 0.1));
             if f < domain.0 || f > domain.1 || e < e_lo || e > e_hi {
                 continue;
             }
@@ -3704,7 +3734,8 @@ impl<'a> Engine<'a> {
         }
         if let Some(last) = records.last() {
             let key = last.request.key();
-            let failures = records
+            // Failures before a Resume do not count: the operator resumed to try again.
+            let failures = records[self.view.session_start..]
                 .iter()
                 .rev()
                 .take_while(|r| r.request.key() == key && r.outcome == FAILED)
@@ -4234,11 +4265,20 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
     let mut worst: f64 = 0.0;
     for (i, p) in cfg.design.amplitude.iter().enumerate() {
         let id = format!("P{}", i + 1);
-        let (f, e) = (p[0] * 1e3, p[1]);
+        let (f, e) = (view.on_clock(p[0] * 1e3), p[1]);
         if p[0] < f_lo || p[0] > f_hi || e < e_lo || e > e_hi {
             problems.push(format!(
                 "{id} ({} kHz, {e} eV) lies outside the bounds.",
                 p[0]
+            ));
+        }
+        if (f - p[0] * 1e3).abs() > 1e-9 * f {
+            warnings.push(format!(
+                "{id}: the AMX makes {:.3} kHz, not {} kHz (whole {:.0} ns periods); the map uses {:.3} kHz.",
+                f / 1e3,
+                p[0],
+                1e9 / inst.clock_hz,
+                f / 1e3
             ));
         }
         let ions = view.ions_in_line(f, cfg.ladder.first_k, 0.0);
@@ -4252,7 +4292,7 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
         let current = view.current_at(f, view.amplitude_top(f));
         worst = worst.max(current);
         let x = view.x_for(e);
-        table.push(json!({"point": id, "mode": "amplitude", "f_khz": p[0], "energy_ev": e, "x_v": x,
+        table.push(json!({"point": id, "mode": "amplitude", "f_khz": f / 1e3, "energy_ev": e, "x_v": x,
             "stub_v": view.stub_for(x), "ions": ions.iter().map(|i| i.0.round()).collect::<Vec<_>>(),
             "cycles": ions.iter().map(|i| cycles(f, i.0, e, cfg.q2_length_m).round()).collect::<Vec<_>>(),
             "current_ma": current * 1e3}));
@@ -4366,6 +4406,7 @@ fn new_journal(plan: Plan, inst: Instrument, started: f64) -> Journal {
         instrument: inst,
         started,
         records: Vec::new(),
+        session_start: 0,
     }
 }
 

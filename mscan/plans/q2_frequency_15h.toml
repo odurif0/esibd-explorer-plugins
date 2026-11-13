@@ -1,0 +1,48 @@
+# Does the resolution depend on the RF frequency, or only on the number of RF cycles? One night.
+# Every key left out takes the value of q2_full.toml.
+#
+# 2026-11-13 (500 kHz): R reaches a cap R_cap ≈ n²/28, where n ∝ f·L·√(m/E) is the number of RF
+# cycles an ion spends in Q2. For 922 the cap is 40 at 26 eV (n 32), 85 at 12 eV (n 47) and 170 at
+# 5 eV (n 73). At a given R the transmission was the same at 12 and 5 eV (0.70 of k 0.200 at R 40).
+# If f matters only through n, a heavier mix (lower f, since m/z ∝ A/f²) is planned from n alone.
+#
+# Two families of points, each at three frequencies with the same n (f/√E constant), the same day:
+# - n as 500 kHz at 26 eV (922: n 32, cap 40; R 11/18/24/30 on the ladder):
+#   300 kHz at 9.4 eV, 400 kHz at 16.6 eV, 500 kHz at 26 eV.
+# - n as 500 kHz at 12 eV (922: n 47, cap 85; R 13/23/36/50):
+#   400 kHz at 7.7 eV, 500 kHz at 12 eV (P1, the instrument check, as on 11/13), 550 kHz at 14.5 eV.
+# The AMX makes whole 10 ns periods: 300 kHz runs at 300.300 kHz and 550 kHz at 549.451 kHz (Check
+# says so); E is set for those frequencies.
+# Each point: the k ladder (0.200, 0.2056, 0.2081, 0.2094), the verification line when R 40 is
+# within reach, and two entry-stub cuts from x − 20 V. A 922 reference line every 3 lines (500 kHz,
+# 26 eV, k 0.200) compares the heights across the night. Check announces about 13.5 h (57 lines);
+# count 14–15 h. Ilim 300 mA is enough: about 220 mA at 550 kHz.
+
+[map]
+name = "q2-frequency-15h"
+max_lines = 80
+reference_every = 3             # 2026-11-13: the beam drifted +16 % in 5 h
+spray_range_na = [3, 300]       # ESI current (nA): the spray is on (2026-11-13: 27–30 nA at 1000 V)
+seed = 3                        # order: P1, then 300 kHz first, 400 kHz, 500 kHz 26 eV, 550 kHz
+
+[map.design]
+amplitude = [[500, 12], [300, 9.4], [400, 16.6], [500, 26], [400, 7.7], [550, 14.5]]   # (f kHz, E eV)
+frequency = []
+
+[map.ladder]
+repeats = 0
+max_lines = 4                   # k = 0.200, 0.2056, 0.2081, 0.2093 (closing near 0.2106)
+
+[map.stopping]
+repeats = 1                     # 922 and 2122 at Q1_DC and Q1_DC + 2 V: x_stop of the day
+x_from_v = 30                   # 2026-11-04, 11-12, 11-13: x50 922 35.5 V, 2122 34.9 V
+x_to_v = 42
+
+[map.stub]
+cut_from_x_v = -20              # 2026-11-13, 5 eV: 2122 was still rising at x − 10 V, the lowest cut
+
+[map.stages]
+search = false
+validation = false
+local = false
+best = false

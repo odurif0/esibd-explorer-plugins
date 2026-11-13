@@ -26,7 +26,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.13.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.14.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.

@@ -1933,7 +1933,10 @@ class AMPRChannel(Channel):
     def valueChanged(self) -> None:
         super().valueChanged()
         self._sync_monitor_feedback()
-        self._log_channel_event(f"Voltage setpoint changed to {float(self.value):.3f} V.")
+        # A scan writes at every point and records the values in its own file (2026-11-13 lab: 10 178
+        # such lines in one map buried the 30 warnings of the day). The operator's changes are logged.
+        if not getattr(self, "scan_driven", False):
+            self._log_channel_event(f"Voltage setpoint changed to {float(self.value):.3f} V.")
 
     def equationChanged(self) -> None:
         super().equationChanged()
