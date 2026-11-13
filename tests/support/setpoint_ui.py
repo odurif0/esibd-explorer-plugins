@@ -66,6 +66,7 @@ def probe(folder, surface, output, *, actions=False):
     device.tree.hide()
     device._schedule_delayed_refresh = lambda *_: None
     refresh = lambda: None
+    global_update = lambda: None  # Explorer's DeviceManager.globalUpdate, after any input value change
     get_committed = None
     set_programmatic = None
 
@@ -142,6 +143,10 @@ def probe(folder, surface, output, *, actions=False):
         spin = parameter.spin
         layout.addWidget(spin)
         get_committed = lambda: channel.value
+        if family == "esi":
+            channel.lastAppliedValue = channel.value  # Explorer's Channel: the value already applied
+            device.controller.applyHeatTemperatureFromThread = lambda value: None
+            global_update = lambda: channel.applyValue(apply=False)
         set_programmatic = lambda value: setattr(channel, "value", value)
     elif surface == "frequency_setting":
         pass
@@ -160,6 +165,16 @@ def probe(folder, surface, output, *, actions=False):
                         calls.append(value)
                     else:
                         getattr(self.channel, "enabledChanged", lambda: None)()
+        if not actions:
+            # Real ESI channels: Explorer applies them (apply=False) on any input value change.
+            real = []
+            for stand_in in device.channels:
+                channel = module.ESIChannel.__new__(module.ESIChannel)
+                channel.__dict__.update(vars(stand_in))
+                channel.channelParent = device
+                real.append(channel)
+            device.channels = real
+            global_update = lambda: [channel.applyValue(apply=False) for channel in device.channels]
         for channel in device.channels:
             channel.VALUE, channel.ENABLED = "Value", "Enabled"
             params = {"Value": ValueParameter(channel, "value"), "Enabled": ValueParameter(channel, "enabled")}
@@ -228,7 +243,9 @@ def probe(folder, surface, output, *, actions=False):
         assert get_committed() == old, ("partial draft leaked to other commands", get_committed(), old)
         for _ in range(3):
             refresh()
+            global_update()  # 2026-11-12 lab: ESI sent 120 V while 1200 V was being typed
             app.processEvents()
+        assert calls == [], (folder, surface, action, "sent by a global update", calls)
         assert prefix in spin.lineEdit().text(), ("poll overwrote draft", spin.text())
         assert get_committed() == old
         QTest.keyClicks(spin, "5.5")

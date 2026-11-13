@@ -17,7 +17,7 @@ from support.qt import run_probe
 ROOT = Path(__file__).resolve().parents[1]
 STABILITY_CASES = ("heat_stable", "heat_stabilizing", "heat_stale", "heat_expired", "heat_reset")
 HEAT_CASES = (*STABILITY_CASES, "heat_controls", "heat_failed_edit", "heat_active", "heat_blocked", "heat_invalid_sensor", "heat_unknown", "heat_poll_error", "heat_off", "heat_stuck_off", "heat_quantized")
-CASES = ("widgets", "status_warning", "panel", "groups", "horizontal", "vertical", "stacked", "output_off", "constant", "manual", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
+CASES = ("widgets", "status_warning", "panel", "groups", "horizontal", "vertical", "stacked", "output_off", "constant", "manual", "time_wheel", "log", "recording", "off", "stopping", "unconfirmed", *HEAT_CASES)
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -623,6 +623,10 @@ def probe(case, output):
             current.values = ns["DynamicNp"](initialData=np.full(1000, 2.5e-9))
         if case == "log":
             current.logY = True
+        if case == "time_wheel":
+            live.autoScaleAction.state = False  # Explorer's default: the time axis follows the clock
+            replots = []  # Explorer replots a time range the user changed (PlotItem.parentPlot)
+            device.signalComm = SimpleNamespace(plotSignal=SimpleNamespace(emit=replots.append))
     live.initFig()
     axes = {device.name: (0, None, 1, device.time.get())}
     live.getTimeAxes = lambda: axes
@@ -692,6 +696,34 @@ def probe(case, output):
         assert live.livePlotWidgets[0].viewRange()[1] == before
     elif case == "log":
         assert device.channels[3].plotCurve.opts["logMode"][1]
+    elif case == "time_wheel":
+        # User, 2026-11-13: the wheel over the time axis zooms it, as over the y axis.
+        plot = live.livePlotWidgets[0]
+        view = plot.getViewBox()
+
+        def wheel(axis):
+            pos = QtCore.QPointF(plot.mapFromScene(plot.getAxis(axis).sceneBoundingRect().center()))
+            event = QtGui.QWheelEvent(pos, QtCore.QPointF(plot.viewport().mapToGlobal(pos.toPoint())),
+                                      QtCore.QPoint(), QtCore.QPoint(0, 120), QtCore.Qt.MouseButton.NoButton,
+                                      QtCore.Qt.KeyboardModifier.NoModifier, QtCore.Qt.ScrollPhase.NoScrollPhase, False)
+            QtWidgets.QApplication.sendEvent(plot.viewport(), event)
+            app.processEvents()
+            return view.viewRange()
+
+        assert not view.mouseEnabled()[0]
+        (x0, x1), (y0, y1) = view.viewRange()
+        x_range, (z0, z1) = wheel("left")  # y zoom, the time axis keeps following
+        assert x_range == [x0, x1] and z1 - z0 < y1 - y0, (x_range, (x0, x1), (z0, z1), (y0, y1))
+        assert not view.mouseEnabled()[0] and live.autoScaleAction.state is False and not replots
+        (w0, w1), y_range = wheel("bottom")
+        assert view.mouseEnabled()[0] and live.autoScaleAction.state is True  # "Scale x automatically" shown
+        assert w1 - w0 < .9 * (x1 - x0) and y_range == [z0, z1], ((w0, w1), (x0, x1))
+        assert replots
+        (v0, v1), _ = wheel("bottom")
+        assert v1 - v0 < .9 * (w1 - w0)
+        live.plot(apply=True)  # new data: the zoomed window stays
+        app.processEvents()
+        assert view.viewRange()[0] == [v0, v1]
     window.grab().save(str(output / f"esi-current-{case}.png"))
     return 0
 

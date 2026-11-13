@@ -105,7 +105,8 @@ the vendor target API.
 
 Apply a typed voltage with Enter, Tab, or a click outside the field. A button
 that uses the target also reads the current field text; OFF stops without
-first applying a new target. Acquisition refreshes leave edits untouched.
+first applying a new target. Acquisition refreshes and value changes in other devices
+(AMPR, PSU, MScan…) leave edits untouched.
 The heater's numeric target uses the same rule. In the `Set` field, ↑/↓ change
 the target by 10 V, Ctrl+↑/↓ or Page Up/Down by 100 V; with the output ON, each
 step is applied at once through the software ramp.
