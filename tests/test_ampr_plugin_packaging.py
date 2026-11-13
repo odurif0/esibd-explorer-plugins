@@ -530,6 +530,15 @@ def test_channel_events_are_logged_for_user_changes():
             None,
         ),
     ]
+    # A scan's write, one per point, is not logged (2026-11-13 lab: 10 178 lines in one map).
+    logs.clear()
+    channel.scan_driven = True
+    module.AMPRChannel.valueChanged(channel)
+    assert logs == []
+    channel.scan_driven = False
+    module.AMPRChannel.valueChanged(channel)
+    assert [message for message, _ in logs] == [
+        "AMPR channel AMPR_M02_CH3 (module 2 CH3): Voltage setpoint changed to 123.400 V."]
 
 
 def test_channel_off_immediately_clears_monitor():

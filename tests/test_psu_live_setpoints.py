@@ -229,6 +229,52 @@ def test_queued_field_edits_preserve_each_other_and_cancel_on_off(psu_live_rig):
     assert device.calls == [] and controller._manual_apply_pending_state is None
 
 
+def test_scan_writes_are_applied_without_a_log_line(psu_live_rig, monkeypatch):
+    """2026-11-13 lab: MScan's rail writes, one per point, made 5 156 "Applied PSU manual values." lines.
+    The scan's writes are applied as before, silently; an operator edit in the same batch is logged."""
+    module, controller, device, _, messages = psu_live_rig
+    controller.controllerParent.loading = False
+    queued = []
+    monkeypatch.setattr(controller, "_queue_native_gui", queued.append)
+    sent = []
+    unlocked = controller._apply_manual_state_unlocked
+    monkeypatch.setattr(controller, "_apply_manual_state_unlocked",
+                        lambda device, state, *a: sent.append(dict(state)) or unlocked(device, state, *a))
+
+    class Channel:
+        real = enabled = True
+
+        def __init__(self, number, value):
+            self.number, self.value = number, value
+
+        def channel_number(self):
+            return self.number
+
+    # MScan marks the channel while it writes; the request is built on the next GUI turn.
+    first, second = Channel(0, 80.), Channel(1, 230.)
+    for channel in (first, second):
+        channel.scan_driven = True
+        controller.applyValueFromThread(channel)
+        channel.scan_driven = False
+    controller._manual_apply_worker_running = True
+    for request in queued:
+        request()
+    controller._manual_state_apply_worker()
+    assert device.voltages == {0: 80., 1: 230.}
+    assert "Applied PSU manual values." not in messages
+    assert sent and all("scan_driven" not in state for state in sent), "the worker accepts only its fields"
+    queued.clear()
+    controller.applyValueFromThread(Channel(0, 70.))  # the operator
+    second.value, second.scan_driven = 220., True
+    controller.applyValueFromThread(second)
+    controller._manual_apply_worker_running = True
+    for request in queued:
+        request()
+    controller._manual_state_apply_worker()
+    assert device.voltages == {0: 70., 1: 220.}
+    assert messages.count("Applied PSU manual values.") == 1, messages
+
+
 def test_cancel_during_live_readback_does_not_write(psu_live_rig):
     _, controller, device, state, messages = psu_live_rig
     state["voltage_values"][0] = 80.

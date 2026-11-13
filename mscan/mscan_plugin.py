@@ -106,6 +106,17 @@ def _square_wave_trace(a, q):
 _BANDS = {}
 
 
+@contextlib.contextmanager
+def _scan_write(channel):
+    """Marks a write as the scan's while it is made: the AMPR and PSU plugins do not log it (one per
+    point; 2026-11-13 lab: 15 300 such lines in one map). Explorer applies a value at once."""
+    channel.scan_driven = True
+    try:
+        yield
+    finally:
+        channel.scan_driven = False
+
+
 def square_wave_band(k):
     """Stable q interval on the scan line a = 2kq (k = U/A); None above the apex (k ≈ 0.2153).
 
@@ -2605,7 +2616,8 @@ class MScan(Scan):
             # A line that keeps A (stopping, frequency) rewrote it at every point: two PSU applies
             # per point for nothing (2026-11-12 lab). The readback check stays the same.
             if not abs(float(rail['channel'].value) - target) < self.UNCHANGED_RAIL_V:
-                rail['channel'].value = target
+                with _scan_write(rail['channel']):
+                    rail['channel'].value = target
             revision = rail['channel'].voltage_request_revision
             if revision != rail['request_revision']:
                 rail['confirmed_vset'] = None
@@ -2613,7 +2625,8 @@ class MScan(Scan):
         for o, offset in zip(planned, offsets):
             c = o['channel']
             before = float(c.value)
-            c.value = offset
+            with _scan_write(c):
+                c.value = offset
             # The channel rounds to its display precision: verify what was really requested.
             commanded = float(c.value)
             o['requested'], o['expected'], o['ready'] = offset, commanded, False

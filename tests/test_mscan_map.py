@@ -61,14 +61,15 @@ INSTRUMENT = dict(q1_dc_v=36.0, ap_q1_q2_v=34.0, x_v=10.0, ilim_a=0.5, psu_max_v
                   clock_hz=100e6, f_hz=500e3, frequency_writable=True, free_disk_bytes=1e12)
 
 
-@pytest.mark.parametrize('name', ['q2_full.toml', 'q2_P1_2h.toml', 'q2_cycles_6h.toml'])
+@pytest.mark.parametrize('name', ['q2_full.toml', 'q2_P1_2h.toml', 'q2_cycles_6h.toml', 'q2_frequency_15h.toml'])
 def test_plan_templates_are_valid_and_ready_for_a_nominal_instrument(engine, name):
     plan = RUNNER.load_plan(PLANS / name)
     check = engine('map_check', plan, INSTRUMENT)
     assert check['problems'] == [], check['problems']
     assert check['estimate']['outcome'] in ('done', 'stop')
     hours = check['estimate']['total_s'] / 3600
-    expected = {'q2_full.toml': (35, 75), 'q2_P1_2h.toml': (1.5, 2.7), 'q2_cycles_6h.toml': (4.5, 7.5)}[name]
+    expected = {'q2_full.toml': (35, 110), 'q2_P1_2h.toml': (3, 4.5), 'q2_cycles_6h.toml': (6.5, 9),
+                'q2_frequency_15h.toml': (11, 16)}[name]
     assert expected[0] < hours < expected[1], f'{name}: {hours:.1f} h simulated'
 
 
@@ -142,7 +143,8 @@ class FakeMScan:
         return self.frequency
 
     def _set_map_frequency(self, hz):
-        self.frequency = float(hz)
+        # The AMX HD oscillator: whole periods of its 100 MHz clock (300 kHz gives 300.300 kHz).
+        self.frequency = 100e6 / round(100e6 / float(hz))
 
     def _map_settings_snapshot(self):
         return dict(self.settings)
@@ -482,6 +484,39 @@ def test_unreachable_point_closes_and_the_map_goes_on(engine, tmp_path):
     assert [r['outcome'] for r in p1] == ['unreachable'], 'P1 closes after its first line'
     assert any(r['request']['point'] == 'P2' and r['outcome'] == 'done' for r in journal['records'])
     assert json.loads((folder / RUNNER.STATUS).read_text())['state'] == 'done'
+
+
+def test_a_design_frequency_the_amx_cannot_make_runs_at_the_nearest_one(engine, tmp_path):
+    """2026-11-13 lab: q2_cycles_6h asked for 300 kHz; the AMX makes whole 10 ns periods, 300.300 kHz, and
+    the map stopped on "Settings before the line not reached: AMX at 300.300 kHz for 300.000 kHz"."""
+    scan = FakeMScan()
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    folder = run_map(runner, PLANS / 'q2_cycles_6h.toml')
+    assert json.loads((folder / RUNNER.STATUS).read_text())['state'] == 'done'
+    journal = json.loads((folder / RUNNER.JOURNAL).read_text())
+    p3 = [r for r in journal['records'] if r['request']['point'] == 'P3']
+    assert p3 and all(r['outcome'] == 'done' for r in p3)
+    assert {r['request']['f_hz'] for r in p3} == {100e6 / 333}
+    assert scan.frequency == 500e3, 'back to the frequency at Start'
+
+
+def test_resume_gives_a_line_that_failed_three_times_new_attempts(engine, tmp_path):
+    """2026-11-13 lab: one line failed three times and the map stopped; both Resumes then stopped at once
+    on "line BP3-ladder failed 3 times". A Resume is the operator asking to try again."""
+    scan = FakeMScan(fail_lines={2, 3, 4})
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    folder = run_map(runner, PLANS / 'q2_P1_2h.toml')
+    status = json.loads((folder / RUNNER.STATUS).read_text())
+    assert status['state'] == 'stopped' and 'within one hour' in status['message'], status
+    resumed = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    resumed.start(resume=folder)
+    resumed.thread.join(600)
+    assert json.loads((folder / RUNNER.STATUS).read_text())['state'] == 'done'
+    journal = json.loads((folder / RUNNER.JOURNAL).read_text())
+    assert journal['session_start'] == 4
+    first = journal['records'][1:5]
+    assert [r['outcome'] for r in first] == ['failed', 'failed', 'failed', 'done']
+    assert len({r['request']['label'] for r in first}) == 1, 'the same line, measured after the Resume'
 
 
 def test_failed_lines_within_an_hour_stop_the_map(engine, tmp_path):

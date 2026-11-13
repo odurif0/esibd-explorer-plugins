@@ -72,6 +72,11 @@ def test_rounded_command_is_what_must_be_confirmed(mscan_rig):
     assert v['status'] == 'completed', v
     assert channel.writes == [3.33, 6.67, 10., 5.]
     assert v['offset_target'] == pytest.approx(np.array([[3.33], [6.67], [10.]]))
+    # Every write is marked as the scan's while it is made, so AMPR and PSU do not log it (2026-11-13).
+    assert channel.scan_marks == [True] * 4 and channel.scan_driven is False
+    rails = mscan_rig.psus[0]
+    assert rails.scan_marks and all(rails.scan_marks)
+    assert not any(c.scan_driven for c in rails.channels)
 
 
 @pytest.mark.parametrize('problem', ['unconfirmed', 'monitor'])

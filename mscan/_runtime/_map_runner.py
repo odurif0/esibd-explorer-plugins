@@ -202,6 +202,10 @@ class MapRunner:
         if resume is not None:
             self.folder = Path(resume)
             self.journal = json.loads((self.folder / JOURNAL).read_text(encoding='utf-8'))
+            # A new session: a line that used up its attempts before gets new ones (2026-11-13 lab: two
+            # Resumes stopped at once on "line BP3-ladder failed 3 times").
+            self.journal['session_start'] = len(self.journal.get('records') or ())
+            atomic_json(self.folder / JOURNAL, self.journal)
             self.notice = self._follow_operator_ilim()
         else:
             plan = load_plan(plan_path)

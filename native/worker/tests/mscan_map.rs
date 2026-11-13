@@ -19,7 +19,8 @@ fn instrument() -> Value {
 }
 
 use esibd_native_worker::mscan_map::{
-    APEX, Filter, StepPolicy, Stepper, amplitude_grid, band, frequency_grid, lstsq, sobol2,
+    APEX, Filter, StepPolicy, Stepper, amplitude_grid, band, frequency_grid, lstsq, on_clock,
+    sobol2,
 };
 
 fn plan_with(map: Value) -> Value {
@@ -86,6 +87,12 @@ fn grids_sobol_and_least_squares() {
         freq.iter()
             .all(|f| (100e6 / f - (100e6 / f).round()).abs() < 1e-6)
     );
+    // The nearest whole period, kept inside [lo, hi] when given.
+    assert_eq!(on_clock(300e3, 100e6, 0.0, 0.0), 100e6 / 333.0);
+    assert_eq!(on_clock(500e3, 100e6, 0.0, 0.0), 500e3);
+    assert_eq!(on_clock(640e3, 100e6, 250e3, 640e3), 100e6 / 157.0); // 156 would be 641.0 kHz
+    assert_eq!(on_clock(250e3, 100e6, 250e3, 640e3), 250e3);
+    assert!(on_clock(f64::NAN, 100e6, 0.0, 0.0).is_nan());
     assert_eq!(sobol2(0), (0.0, 0.0));
     assert_eq!(sobol2(1), (0.5, 0.5));
     // Natural order (not Gray code): the first four points are the same set either way.
@@ -229,6 +236,57 @@ fn journal_drives_the_map_and_rejects_stale_results() {
         let expected = if attempt < 3 { "line" } else { "stop" };
         assert_eq!(next["decision"], json!(expected), "{next}");
     }
+    // 2026-11-13 lab: two Resumes stopped at once on the line that had failed three times. A Resume
+    // starts a new session: that line gets three new attempts.
+    let label = j["records"].as_array().unwrap().last().unwrap()["request"]["label"].clone();
+    j["session_start"] = json!(j["records"].as_array().unwrap().len());
+    let resumed = call(&mut c, "map_next", &[j.clone()]).unwrap();
+    assert_eq!(resumed["decision"], json!("line"), "{resumed}");
+    assert_eq!(resumed["request"]["label"], label);
+    for attempt in 1..=3 {
+        let id = j["records"].as_array().unwrap().len() + 1;
+        let failed = json!({"id": id, "outcome": "failed", "error": "AMX frequency not reached"});
+        j = call(&mut c, "map_record", &[j, failed]).unwrap()["journal"].clone();
+        let next = call(&mut c, "map_next", &[j.clone()]).unwrap();
+        let expected = if attempt < 3 { "line" } else { "stop" };
+        assert_eq!(next["decision"], json!(expected), "{next}");
+    }
+    assert_eq!(
+        j["session_start"], json!(3),
+        "map_record keeps the session start"
+    );
+}
+
+#[test]
+fn every_line_asks_for_a_frequency_the_amx_makes() {
+    // 2026-11-13 lab: 300 kHz is 333.3 periods of 10 ns. The AMX made 300.300 kHz, the map waited
+    // for 300.000 kHz and stopped after three attempts.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let plan = plan_with(json!({"design": {"amplitude": [[300, 9.4]], "frequency": []},
+        "reference": {"f_khz": 333}}));
+    let checked = call(&mut c, "map_check", &[plan.clone(), instrument()]).unwrap();
+    let warnings = checked["warnings"].to_string();
+    assert!(
+        warnings.contains("P1: the AMX makes 300.300 kHz, not 300 kHz"),
+        "{warnings}"
+    );
+    assert_eq!(checked["summary"]["points"][0]["f_khz"], json!(1e5 / 333.0));
+    let journal = simulated_journal(&mut c, plan);
+    let records = journal["records"].as_array().unwrap();
+    assert!(records.len() > 5, "{}", records.len());
+    for r in records {
+        let f = r["request"]["f_hz"].as_f64().unwrap();
+        let ticks = 100e6 / f;
+        assert!((ticks - ticks.round()).abs() < 1e-9, "{}: {f} Hz", r["request"]["label"]);
+    }
+    let f_of = |role: &str| {
+        records
+            .iter()
+            .find(|r| r["request"]["role"] == json!(role))
+            .map(|r| r["request"]["f_hz"].as_f64().unwrap())
+    };
+    assert_eq!(f_of("ladder"), Some(100e6 / 333.0));
+    assert_eq!(f_of("reference"), Some(100e6 / 300.0));
 }
 
 #[test]
@@ -520,7 +578,7 @@ fn line_estimates_follow_the_time_the_map_measures() {
     let mut c = Controller::new(&json!({})).unwrap();
     let journal = simulated_journal(&mut c, json!({}));
     let records = journal["records"].as_array().unwrap();
-    // The simulator times a point like the plan's prior (0.8 + 0.3 + 1.4 s): estimates match it.
+    // The simulator times a point like the plan's prior (0.8 + 0.3 + 2.5 s): estimates match it.
     for r in records.iter().filter(|r| r["outcome"] == json!("done")) {
         let (expected, took) = (
             r["request"]["expected_s"].as_f64().unwrap(),
@@ -549,7 +607,7 @@ fn line_estimates_follow_the_time_the_map_measures() {
     let next = call(&mut c, "map_next", &[slow.clone()]).unwrap();
     let request = &next["request"];
     let per_point = seconds / points;
-    assert!((per_point - 3.75).abs() < 0.25, "{per_point}");
+    assert!((per_point - 5.4).abs() < 0.3, "{per_point}");
     if request["kind"] == json!("offset") {
         let n = request["axis"].as_array().unwrap().len() as f64;
         let expected = request["expected_s"].as_f64().unwrap();

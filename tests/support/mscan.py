@@ -80,6 +80,7 @@ class Rail:
     @value.setter
     def value(self, v):
         self.parent.writes.append((self.number, v))
+        self.parent.scan_marks.append(getattr(self, 'scan_driven', False))
         self.voltage_request_revision += 1
         self._value = v
         self.parent.controller._manual_apply_worker_running = True
@@ -100,7 +101,7 @@ def mscan_rig(mscan_module):
         controller=NS(initialized=True, device=object(), initializing=False, transitioning=False, output_rows=rows))
     psus = []
     for name in ('PSU_A', 'PSU_B'):
-        p = NS(name=name, writes=[], controller=NS(initialized=True, device=object(), _output_cancel=Event(),
+        p = NS(name=name, writes=[], scan_marks=[], controller=NS(initialized=True, device=object(), _output_cancel=Event(),
                _manual_apply_worker_running=False), isOn=lambda: True)
         p.channels = [Rail(p, i) for i in (0, 1)]
         p.getChannels = lambda p=p: p.channels
@@ -230,7 +231,7 @@ class OffsetChannel:
         self.real = self.enabled = self.active = True
         self.min, self.max = -100., 100.
         self._value = self.monitor = value
-        self.writes = []
+        self.writes, self.scan_marks = [], []
 
     def getDevice(self):
         return self.device
@@ -249,6 +250,7 @@ class OffsetChannel:
     def value(self, value):
         value = round(float(value), 2)
         self.writes.append(value)
+        self.scan_marks.append(getattr(self, 'scan_driven', False))
         if value != self._value:
             self._value = value
             ctrl = self.device.controller
