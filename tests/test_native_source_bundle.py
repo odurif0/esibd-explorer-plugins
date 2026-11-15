@@ -32,6 +32,9 @@ def json_bytes(value):
     return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
 
 
+pytestmark = pytest.mark.slow  # Builds every family's source bundle, one offline: before a release.
+
+
 @pytest.fixture(scope="module")
 def bundles(tmp_path_factory):
     if shutil.which("cargo") is None:

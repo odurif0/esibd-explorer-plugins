@@ -102,6 +102,13 @@ def probe(folder, output):
     # Not monitored, but the loop inputs are still shown.
     assert parent.channelPanelGlobalDiagnostics["interlock"].text() == (
         "Off (not monitored) · loop: output closed, BNC open")
+    # Each diagnostic has its own row (found 2026-11-14: Flags was drawn over Rails).
+    diagnostics = parent.channelPanelGlobalDiagnostics
+    grid = diagnostics["flags"].parentWidget().layout()
+    rows = [grid.getItemPosition(grid.indexOf(diagnostics[name]))[0] for name in (
+        "temperature_monitor_ch0", "dropout_monitor_ch0", "range_monitor_ch0", "rails_monitor_ch0",
+        "flags", "interlock", "psu_enabled")]
+    assert rows == sorted(set(rows)), rows
     # Ticking the link sends CH0's setpoints to CH1, nothing else.
     hw.calls.clear()
     QTest.mouseClick(link, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(8, link.height() // 2))

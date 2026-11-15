@@ -3364,7 +3364,7 @@ class AMXDevice(Device):
             value=2.0,
             minimum=0.001,
             maximum=10000.0,
-            toolTip="Oscillator frequency in kilohertz. Loading a config replaces this value with its saved frequency.",
+            toolTip="Oscillator frequency in kilohertz. Load now replaces this value with the config's saved frequency; ON brings back the last one set.",
             parameterType=PARAMETERTYPE.FLOAT,
             attr="frequency_khz",
             event=self.frequencyChanged,
@@ -4771,8 +4771,8 @@ class AMXController(DeviceController):
         no-op for backward compatibility with tests that call it directly.
         """
 
-    def _sync_loaded_config_to_gui(self, snapshot: dict[str, Any]) -> None:
-        """The loaded hardware config, not the previous GUI, owns the timing."""
+    def _sync_loaded_config_to_gui(self, snapshot: dict[str, Any], restored: "dict[str, Any] | None" = None) -> None:
+        """The loaded hardware config owns the timing; ``restored`` is the operator's last timing just written back."""
         device = self.device
         period = _coerce_int(snapshot.get("oscillator", {}).get("period"), -1)
         widths = {
@@ -4786,7 +4786,18 @@ class AMXController(DeviceController):
         frequency_khz = clock_hz / (period + _safe_device_attr(device, "OSC_OFFSET", 2)) / 1000.0
         width_offset = _safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2)
         self._pending_config_snapshot = snapshot
-        self._delay_anchors.clear()  # The config's delays are the new origin.
+        period_ticks = period + _coerce_int(_safe_device_attr(device, "OSC_OFFSET", 2), 2)
+        if restored is None:
+            self._delay_anchors.clear()  # The config's delays are the new origin.
+            if frequency_khz is not None:
+                self._remember_timing(frequency_khz, {
+                    str(ch.pulser_number()): {
+                        "width_us": ((widths[ch.pulser_number()] + width_offset) / clock_hz * 1e6
+                                     if widths[ch.pulser_number()] else 0.0),
+                        "enabled": widths[ch.pulser_number()] > 0, "width_origin": None}
+                    for ch in channels})
+        else:
+            frequency_khz = restored["frequency_khz"]  # As the operator typed it.
 
         def adopt() -> None:
             if self.device is not device or getattr(self, "_pending_config_snapshot", None) is not snapshot:
@@ -4805,14 +4816,18 @@ class AMXController(DeviceController):
                 _set_config_parameter(parent, "frequency_khz", setting, frequency_khz)
                 _set_config_spinbox(getattr(parent, "frequencyWidget", None), frequency_khz)
                 parent._timing_basis_khz = frequency_khz  # The adopted widths belong to it.
-                parent._timing_edited = False
+                parent._timing_edited = restored is not None
                 for channel in channels:
                     ticks = widths[channel.pulser_number()]
                     width_us = (ticks + width_offset) / clock_hz * 1e6 if ticks else 0.0
+                    enabled = ticks > 0
+                    entry = (restored or {}).get("pulsers", {}).get(channel.pulser_number())
+                    if entry is not None:  # The operator's own values, also the width of a stopped pulser.
+                        width_us, enabled = entry["width_us"], entry["enabled"]
                     getter = getattr(channel, "getParameterByName", None)
                     for attr, name, value in (
                         ("value", getattr(channel, "VALUE", "Value"), width_us),
-                        ("enabled", getattr(channel, "ENABLED", "Enabled"), ticks > 0),
+                        ("enabled", getattr(channel, "ENABLED", "Enabled"), enabled),
                         ("active", getattr(channel, "ACTIVE", "Active"), True),
                     ):
                         parameter = getter(name) if callable(getter) else None
@@ -4820,7 +4835,9 @@ class AMXController(DeviceController):
                     # Keep the equation text, but require an explicit return to
                     # equation mode instead of immediately undoing the config.
                     channel.lastAppliedValue = channel.value
-                    channel._duty_anchor = None
+                    origin = entry["width_origin"] if entry is not None else None
+                    channel._duty_anchor = None if origin is None else (
+                        *origin, round(width_us * clock_hz / 1e6), period_ticks)
                     for name in ("activeChanged", "_update_duty_label", "_sync_enabled_toggle_widget"):
                         refresh = getattr(channel, name, None)
                         if callable(refresh):
@@ -4837,6 +4854,166 @@ class AMXController(DeviceController):
             self._sync_status_to_gui()
 
         _invoke_gui_callback(adopt)
+
+    # ---- last timing: what the operator last set on a config comes back at the next ON
+    def _timing_memory_file(self) -> "Path | None":
+        try:
+            folder = self.controllerParent.pluginManager.Settings.configPath
+            name = self.controllerParent.name
+        except AttributeError:
+            return None
+        return Path(folder) / f"{name}_last_timing.json" if folder else None
+
+    def _load_timing_memory(self, config_index: int) -> "dict[str, Any] | None":
+        """The timing last applied on this config through this plugin and port, else None."""
+        path = self._timing_memory_file()
+        if path is None or config_index < 0 or not path.is_file():
+            return None
+        try:
+            import json
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (not isinstance(data, dict) or data.get("com") != str(getattr(self.controllerParent, "com", ""))
+                or _coerce_int(data.get("config"), -1) != config_index or not isinstance(data.get("pulsers"), dict)):
+            return None  # Another AMX on this plugin, or another config: nothing to bring back.
+        frequency = _coerce_float(data.get("frequency_khz"), np.nan)
+        if not np.isfinite(frequency) or frequency <= 0:
+            return None
+        pulsers: dict[int, dict[str, Any]] = {}
+        for key, entry in data["pulsers"].items():
+            pulser = _coerce_int(key, -1)
+            width = _coerce_float(entry.get("width_us"), np.nan) if isinstance(entry, dict) else np.nan
+            if pulser < 0 or not np.isfinite(width) or width < 0:
+                return None
+            origin = entry.get("width_origin")
+            if not (isinstance(origin, list) and len(origin) == 2
+                    and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in origin)):
+                origin = None
+            pulsers[pulser] = dict(width_us=width, enabled=bool(entry.get("enabled")), width_origin=origin)
+        return dict(frequency_khz=frequency, pulsers=pulsers, time=_coerce_float(data.get("time"), 0.0))
+
+    def _remember_timing(self, frequency_khz: float, pulsers: "dict[str, dict[str, Any]]") -> None:
+        """Record the timing now applied on the loaded config. Never raises."""
+        path = self._timing_memory_file()
+        config = _coerce_int(getattr(self, "_loaded_config_index", -1), -1)
+        if path is None or config < 0:
+            return
+        record = {"com": str(getattr(self.controllerParent, "com", "")), "config": config,
+                  "frequency_khz": float(frequency_khz), "pulsers": pulsers}
+        if record == getattr(self, "_timing_memory_written", None):
+            return
+        try:
+            import json
+            import os
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text(json.dumps({**record, "time": time.time()}), encoding="utf-8")
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError):
+            return
+        self._timing_memory_written = record
+
+    def _remember_gui_timing(self) -> None:
+        """After a frequency or width was written: the operator's timing, with the origin of each width."""
+        parent = self.controllerParent
+        frequency = _coerce_float(getattr(parent, "frequency_khz", np.nan), np.nan)
+        if not np.isfinite(frequency) or frequency <= 0:
+            return
+        clock_hz, osc_offset, _, _ = parent._timing_constants()
+        period = _period_ticks(frequency, clock_hz=clock_hz, oscillator_offset=osc_offset)
+        pulsers = {}
+        for channel in parent.getChannels():
+            if not channel.real:
+                continue
+            width = max(_coerce_float(getattr(channel, "value", 0.0), 0.0), 0.0)
+            anchor = getattr(channel, "_duty_anchor", None)
+            valid = anchor is not None and tuple(anchor[2:]) == (round(width * clock_hz / 1e6), period)
+            pulsers[str(channel.pulser_number())] = {
+                "width_us": width, "enabled": bool(channel.enabled),
+                "width_origin": [int(anchor[0]), int(anchor[1])] if valid else None}
+        self._remember_timing(frequency, pulsers)
+
+    def _read_timing_snapshot(self, device: Any) -> dict[str, Any]:
+        snapshot = self._device_call(device, "collect_housekeeping", timeout_s=self._startup_snapshot_timeout_s())
+        refresh = getattr(self, "_refresh_hd_routing", None)
+        if callable(refresh):
+            self.hd_routing = None
+            refresh(device, snapshot)
+        self._apply_snapshot(snapshot)
+        return snapshot
+
+    def _restore_last_timing(
+        self, device: Any, snapshot: dict[str, Any], config_index: int, timeout_s: float,
+    ) -> "tuple[dict[str, Any], dict[str, Any] | None]":
+        """ON: after the config is loaded, write back the frequency and widths last applied on it.
+
+        User, 2026-11-14: a frequency or width set by hand was lost at every start, the config's own
+        came back. Called with the controller lock held. Load now does not call it: it returns to
+        the config as saved. A restore that fails reloads the config.
+        """
+        memory = self._load_timing_memory(config_index)
+        block = getattr(self, "timing_block_reason", None)
+        if memory is None or (callable(block) and block()):
+            return snapshot, None
+        clock_hz = _coerce_float(_safe_device_attr(device, "CLOCK", 100e6), 100e6)
+        osc_offset = _coerce_int(_safe_device_attr(device, "OSC_OFFSET", 2), 2)
+        width_offset = _coerce_int(_safe_device_attr(device, "PULSER_WIDTH_OFFSET", 2), 2)
+        frequency_khz = memory["frequency_khz"]
+        period = _expected_oscillator_period(frequency_khz, clock_hz=clock_hz, oscillator_offset=osc_offset)
+
+        def registers(reading: dict[str, Any]) -> "tuple[int, dict[int, int]]":
+            return (_coerce_int(reading.get("oscillator", {}).get("period"), -1),
+                    {_coerce_int(p.get("pulser"), -1): _coerce_int(p.get("width_ticks"), -1)
+                     for p in reading.get("pulsers", [])})
+
+        loaded_period, loaded = registers(snapshot)
+        real = {ch.pulser_number() for ch in self.controllerParent.getChannels() if ch.real}
+        if period is None or set(memory["pulsers"]) != real or not real <= set(loaded):
+            return snapshot, None  # Recorded for another channel layout.
+        targets = {pulser: _expected_width_register(entry["enabled"], entry["width_us"],
+                                                    clock_hz=clock_hz, width_offset=width_offset)
+                   for pulser, entry in memory["pulsers"].items()}
+        if loaded_period == period and all(loaded[pulser] == ticks for pulser, ticks in targets.items()):
+            return snapshot, None  # The config holds it already.
+        self._delay_anchors.clear()  # The delays of the config just loaded are the origin.
+        try:
+            shorter, delays = self._delays_kept_in_new_period(device, frequency_khz, timeout_s)
+
+            def write_frequency() -> None:
+                self._device_call(device, "set_frequency_khz", frequency_khz, timeout_s=timeout_s)
+
+            def write_widths() -> None:
+                for pulser, ticks in sorted(targets.items()):
+                    self._device_call(device, "set_pulser_width_ticks", pulser, ticks, timeout_s=timeout_s)
+
+            def write_delays() -> None:
+                for pulser, delay in delays:
+                    self._device_call(device, "set_pulser_delay_ticks", pulser, delay, timeout_s=timeout_s)
+
+            # Delay + width stay inside the period at every step, as in applyGlobalSettings.
+            for write in ((write_delays, write_widths, write_frequency) if shorter
+                          else (write_frequency, write_widths, write_delays)):
+                write()
+            restored = self._read_timing_snapshot(device)
+            read_period, read = registers(restored)
+            if read_period != period or any(read.get(pulser) != ticks for pulser, ticks in targets.items()):
+                raise RuntimeError("the registers do not hold it after the write")
+        except Exception as exc:  # noqa: BLE001
+            if self._retire_failed_native_worker() or self._native_cancel_event.is_set():
+                raise
+            self.print(f"Last AMX timing not restored on config {config_index}: {self._format_exception(exc)}. "
+                       "The config is loaded again as saved.", flag=PRINT.WARNING)
+            self._delay_anchors.clear()
+            self._device_call(device, "load_config", config_index, timeout_s=timeout_s)
+            self._wait_for_startup_ready_snapshot(config_index=config_index, settle_timeout_s=timeout_s)
+            return self._read_timing_snapshot(device), None
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(memory["time"])) if memory["time"] else "earlier"
+        widths = ", ".join(f"P{pulser} {entry['width_us']:g} µs" if entry["enabled"] else f"P{pulser} off"
+                           for pulser, entry in sorted(memory["pulsers"].items()))
+        self.print(f"Last timing set on config {config_index} ({when}) restored: oscillator {frequency_khz:g} kHz "
+                   f"(the config holds {clock_hz / (loaded_period + osc_offset) / 1000:g} kHz); {widths}. "
+                   "Load now returns to the config as saved.")
+        return restored, memory
 
     def _startup_snapshot_timeout_s(self) -> float:
         return float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
@@ -4944,6 +5121,7 @@ class AMXController(DeviceController):
         config_index: int,
         timeout_s: float,
         load_config_first: bool,
+        restore_timing: bool = False,
     ) -> dict[str, Any]:
         device = self.device
         if device is None:
@@ -4966,7 +5144,10 @@ class AMXController(DeviceController):
                 config_index=config_index,
                 settle_timeout_s=timeout_s,
             )
-            self._sync_loaded_config_to_gui(snapshot)
+            restored = None
+            if restore_timing and load_config_first:
+                snapshot, restored = self._restore_last_timing(device, snapshot, config_index, timeout_s)
+            self._sync_loaded_config_to_gui(snapshot, restored=restored)
             return snapshot
         except Exception:
             with contextlib.suppress(Exception):
@@ -5003,8 +5184,9 @@ class AMXController(DeviceController):
         success_message: str | None = None,
         restart_acquisition: bool = False,
         lock_timeout_s: float | None = None,
+        restore_timing: bool = False,
     ) -> None:
-        """Load the selected config, preserve its timing, and enable AMX."""
+        """Load the selected config and enable AMX; ON (``restore_timing``) then brings back the last timing set on it."""
         if lock_timeout_s is None:
             lock_timeout_s = (
                 float(getattr(self.controllerParent, "poll_timeout_s", 5.0))
@@ -5016,6 +5198,7 @@ class AMXController(DeviceController):
                 config_index=config_index,
                 timeout_s=timeout_s,
                 load_config_first=True,
+                restore_timing=restore_timing,
             )
         if restart_acquisition:
             self._restart_acquisition_after_transition()
@@ -5169,6 +5352,7 @@ class AMXController(DeviceController):
                     write_frequency, write_widths, write_delays)
                 for step in steps:
                     step()
+                self._remember_gui_timing()
         except TimeoutError:
             self._retire_failed_native_worker()
             return
@@ -5538,6 +5722,7 @@ class AMXController(DeviceController):
                         or not self.controllerParent.isOn()):
                     return
                 self._apply_channel_timing(channel, timeout_s)
+                self._remember_gui_timing()
         except TimeoutError:
             self._retire_failed_native_worker()
             return
@@ -5611,6 +5796,7 @@ class AMXController(DeviceController):
                     config_index=config_index,
                     timeout_s=timeout_s,
                     lock_message="Could not acquire lock to start the AMX.",
+                    restore_timing=True,
                     success_message="AMX timing enabled.",
                     restart_acquisition=True,
                 )

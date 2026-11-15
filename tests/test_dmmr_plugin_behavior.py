@@ -1189,6 +1189,18 @@ def test_init_failure_guidance_explains_poisoned_port_recovery():
     assert controller._poisoned_com == 10
 
 
+def test_init_failure_guidance_after_a_stopped_worker_does_not_ask_for_a_restart():
+    """Found 2026-11-14: the worker that held the port had been stopped and reaped, which frees the
+    port, and the guidance still asked to restart Explorer (which stops every other device)."""
+    module = load_plugin()
+    controller = module.DMMRController(types.SimpleNamespace(com=10))
+    controller._native_worker_retired_unconfirmed = True  # Set by _retire_native_worker; device is None.
+    guidance = controller._init_failure_guidance(RuntimeError(
+        "dmmr native worker transport is unusable: worker exited unexpectedly; exit=1; stderr=(empty)."))
+    assert "does not need a restart" in guidance and "RESTART" not in guidance
+    assert controller._poisoned_com is None
+
+
 def test_init_failure_guidance_silent_without_prior_poisoning():
     module = load_plugin()
     controller = module.DMMRController(types.SimpleNamespace(com=10))

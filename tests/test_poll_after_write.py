@@ -7,26 +7,11 @@ showed the same gap whether the AMPR was written or not: after each write, MScan
 """
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 from types import SimpleNamespace
 
-from support import ampr, psu
-
-
-class _TimeoutLock:
-    def __init__(self):
-        self._lock = threading.Lock()
-
-    @contextlib.contextmanager
-    def acquire_timeout(self, timeout, timeoutMessage=''):
-        acquired = self._lock.acquire(timeout=timeout)
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                self._lock.release()
+from support import ampr, explorer, psu
 
 
 def _second_poll_after(loop_owner, polls, request):
@@ -49,7 +34,7 @@ def _second_poll_after(loop_owner, polls, request):
 def test_a_finished_psu_write_is_read_back_at_once():
     _, _, c = psu.make_psu()
     polls = []
-    c.lock, c.acquiring = _TimeoutLock(), True
+    c.lock, c.acquiring = explorer.TimeoutLock(), True
     c.getDevice = lambda: SimpleNamespace(interval=10_000)  # 10 s: only the request can explain a poll.
     c.readNumbers = lambda **kw: polls.append(time.monotonic())
     c.signalComm = SimpleNamespace(updateValuesSignal=SimpleNamespace(emit=lambda: None))
@@ -79,7 +64,7 @@ def test_a_finished_ampr_write_refreshes_the_monitors_at_once(monkeypatch):
 def test_without_a_write_the_poll_keeps_its_interval():
     _, _, c = psu.make_psu()
     polls = []
-    c.lock, c.acquiring = _TimeoutLock(), True
+    c.lock, c.acquiring = explorer.TimeoutLock(), True
     c.getDevice = lambda: SimpleNamespace(interval=300)
     c.readNumbers = lambda **kw: polls.append(time.monotonic())
     c.signalComm = SimpleNamespace(updateValuesSignal=SimpleNamespace(emit=lambda: None))
@@ -110,3 +95,68 @@ def test_the_two_rails_written_in_one_gui_call_make_one_apply(monkeypatch):
         time.sleep(.005)
     assert [state['voltage_values'] for state in applied] == [{0: 80.5, 1: 80.5}]
     assert not c._manual_apply_worker_running
+
+
+def _housekeeping_psu():
+    """A PSU controller on Explorer's lock, with a device that answers housekeeping reads."""
+    _, parent, c = psu.make_psu()
+    reads, messages = [], []
+    c.print = parent.print = lambda text, **kw: messages.append(text)
+    parent.poll_timeout_s = 5.
+    c.device = SimpleNamespace(connected=True, _transport_poisoned=False,
+                               collect_housekeeping=lambda timeout_s: reads.append(time.monotonic()) or psu.snapshot())
+    c.main_state, c.lock = "ST_ON", explorer.TimeoutLock()
+    c.signalComm = SimpleNamespace(updateValuesSignal=SimpleNamespace(emit=lambda: None))
+    return parent, c, reads, messages
+
+
+def test_a_recording_psu_is_read_by_the_loop_that_holds_the_lock():
+    """Found 2026-11-14: the acquisition loop holds Explorer's lock, which is not reentrant, and the
+    read took it again. With PSU recording ON every poll waited 1 s, failed with "Could not acquire
+    lock to read PSU housekeeping" and invalidated the readbacks."""
+    _, c, reads, messages = _housekeeping_psu()
+    c.getDevice = lambda: SimpleNamespace(interval=100)
+    c.acquiring = True
+    thread = threading.Thread(target=c.runAcquisition, daemon=True)
+    thread.start()
+    time.sleep(.7)
+    c.acquiring = False
+    thread.join(3)
+    assert len(reads) >= 3, (reads, messages)
+    assert not [text for text in messages if "Could not acquire lock" in text]
+    assert c._hv_readback is not None and c._hv_readback["values"] == {0: 123., 1: 234.}
+
+
+def test_a_psu_that_is_not_recording_is_read_at_once_after_a_write():
+    """2026-11-13 lab, PSU not recording: nothing was woken after a write and each MScan point waited
+    for the next 1 s tick of the device's refresh timer."""
+    parent, c, reads, _ = _housekeeping_psu()
+    c._manual_apply_pending_state, c._manual_apply_worker_running = None, True
+    c._sync_status_to_gui = lambda **kw: None
+    c._manual_state_apply_worker()  # The apply worker ends: nothing more is queued.
+    deadline = time.monotonic() + 2
+    while not reads and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert len(reads) == 1
+
+
+def test_the_refresh_timer_leaves_a_recording_psu_to_its_loop_and_follows_the_interval():
+    parent, c, reads, _ = _housekeeping_psu()
+    intervals = []
+    parent._refreshTimer = SimpleNamespace(interval=lambda: 1000, setInterval=intervals.append)
+    parent.interval = 250
+    stop = threading.Event()
+    c.acquisitionThread = threading.Thread(target=stop.wait, daemon=True)
+    c.acquisitionThread.start()
+    c.acquiring = True
+    parent._refresh_tick()
+    time.sleep(.2)
+    stop.set()
+    c.acquisitionThread.join(2)
+    assert not reads, "one reader: the acquisition loop"
+    assert intervals == [250], "the Interval setting reaches the timer without an Explorer restart"
+    parent._refresh_tick()  # The loop has ended (recording OFF): the timer reads again.
+    deadline = time.monotonic() + 2
+    while not reads and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert len(reads) == 1

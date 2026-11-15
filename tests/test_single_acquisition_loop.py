@@ -12,7 +12,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from support import ampr, amx, dmmr
+from support import ampr, amx, dmmr, explorer
 
 CONTROLLERS = {
     'ampr_a': (lambda: ampr.load_plugin(module_name='ampr_single_loop_test'), 'AMPRController'),
@@ -29,17 +29,6 @@ def _controller(folder):
     c.__dict__.update(initialized=True, acquiring=False, acquisitionThread=None, _native_session_token=object(),
                       controllerParent=SimpleNamespace(name=folder), print=lambda *a, **k: None)
     return cls, c
-
-
-def _explorer_start_acquisition(self):
-    """Explorer 1.0.2 DeviceController.startAcquisition, with the gap that let two callers both start."""
-    if self.acquisitionThread and self.acquisitionThread.is_alive():
-        self.acquiring = False
-        self.acquisitionThread.join(timeout=5)
-    time.sleep(.05)
-    self.acquisitionThread = threading.Thread(target=self.runAcquisition, daemon=True)
-    self.acquiring = True
-    self.acquisitionThread.start()
 
 
 def _waiting_thread():
@@ -83,7 +72,7 @@ def test_a_superseded_loop_ends_without_polling(folder):
 def test_concurrent_starts_poll_the_device_once(folder, monkeypatch):
     cls, c = _controller(folder)
     base = next(k for k in cls.__mro__[1:] if 'startAcquisition' in vars(k))
-    monkeypatch.setattr(base, 'startAcquisition', _explorer_start_acquisition)
+    monkeypatch.setattr(base, 'startAcquisition', explorer.start_acquisition)
     polls = []
 
     def loop():  # The loop body of each plugin is tested above; its exit condition is the real one.

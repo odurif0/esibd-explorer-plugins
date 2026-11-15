@@ -774,6 +774,7 @@ def run(scenario, target, app_holder=None):
         parent.makeCoreIcon = lambda *a, **kw: QIcon()
         parent.print = lambda message, flag=core.PRINT.MESSAGE: log(message=message, flag=flag)
         parent._schedule_delayed_refresh = lambda *a: None
+        parent._refresh_tick = lambda: None  # No refresh timer in this rig: sample() publishes the readbacks.
         parent.tree = QTreeWidget()
         sources_layout.addWidget(QLabel(name))
         sources_layout.addWidget(parent.tree)

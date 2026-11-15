@@ -43,6 +43,10 @@ _ESI_ADC_SETTLE_S = 1.0
 _ESI_ADC_SETTLE_CONVERSIONS = 2
 _ESI_ADC_STALE_MIN_S = 3.0
 _ESI_MAX_TEMPERATURE = 175.0
+# The HEAT-CTRL-2410 holds its power limit in steps of 2^30 pW (1.07 mW) and rounds a request to the
+# nearest one, above as often as below. 2026-11-14 lab: SetHeatCtrlPowerLimit(18 W) returned
+# 18.000207937536 W, (24 W) 24.000277250048 W; the hardware maximum is 179.999931891712 W = 167 638 steps.
+_ESI_HEAT_POWER_STEP_W = 2 ** 30 * 1e-12
 _ESI_HEAT_MODULE = 0
 _ESI_HV_CHANNELS = ((1, 1), (2, 2))
 _ESI_HV_MODULES = (1, 2)
@@ -3135,8 +3139,12 @@ class ESIController(DeviceController):
             applied = device.configure_heat_limits(power_w=value, timeout_s=timeout, cancel_event=cancel)
             permission()
             actual = float(applied['power_w'])
-            if not (np.isfinite(actual) and 0 < actual <= min(value, maximum)):
-                raise ValueError(f"Applied power {actual:g} W does not respect the requested ceiling {value:g} W.")
+            # The limit the device holds is the step nearest to the request: up to one step above it is
+            # the request, not a discrepancy. 2026-11-14 lab: 18 W, held as 18.0002 W, was refused and
+            # the heater forced OFF, as for every limit the device rounds up (half of them).
+            if not (np.isfinite(actual) and 0 < actual <= min(value + _ESI_HEAT_POWER_STEP_W, maximum)):
+                raise ValueError(f"Applied power {actual:.6g} W does not respect the requested ceiling {value:g} W "
+                                 f"(the device holds limits in steps of {_ESI_HEAT_POWER_STEP_W * 1e3:.2f} mW).")
             after = device.get_heat_configuration(timeout_s=timeout)
             permission()
             actual_max = float(after['hardware_limits']['max_power_w'])

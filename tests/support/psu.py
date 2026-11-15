@@ -46,6 +46,7 @@ def make_psu(folder="psu_a"):
         channel_number=lambda ch=ch: ch, getDevice=lambda: parent,
     ) for ch in (0, 1)]
     parent.getChannels = lambda: parent.channels
+    parent.refreshPanelSignal = SimpleNamespace(emit=lambda: None)  # No QObject behind this stand-in.
     controller = parent.controller = module.PSUController(parent)
     controller.device = SimpleNamespace(connected=True, _transport_poisoned=False)
     controller.initialized = True

@@ -5,6 +5,7 @@ carried their own copy of the Explorer stand-ins, and fixtures with the same nam
 came from different modules through `noqa` imports.
 """
 import ast
+import functools
 from pathlib import Path
 import re
 
@@ -13,8 +14,13 @@ import conftest
 TESTS = Path(__file__).resolve().parent
 
 
+@functools.cache
+def _tree(path):
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
 def _imported_modules(path):
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in ast.walk(_tree(path)):
         if isinstance(node, ast.Import):
             yield from (alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
@@ -42,7 +48,7 @@ def test_support_fixtures_are_registered_plugins():
     with_fixtures = sorted(
         f"support.{path.stem}" for path in (TESTS / "support").glob("*.py")
         if any(isinstance(node, ast.FunctionDef) and any("fixture" in ast.unparse(d) for d in node.decorator_list)
-               for node in ast.parse(path.read_text(encoding="utf-8")).body))
+               for node in _tree(path).body))
     assert with_fixtures == sorted(conftest.pytest_plugins)
 
 
@@ -59,6 +65,6 @@ def test_a_module_that_runs_itself_as_a_probe_has_an_entry_point():
             and getattr(test.comparators[0], "value", None) == "__main__" for test in ast.walk(node.test))
             for node in tree.body)
 
-    trees = {path.name: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(TESTS.glob("test_*.py"))}
+    trees = {path.name: _tree(path) for path in sorted(TESTS.glob("test_*.py"))}
     offenders = [name for name, tree in trees.items() if runs_itself(tree) and not entry_point(tree)]
     assert offenders == [], offenders

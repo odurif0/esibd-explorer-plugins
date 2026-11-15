@@ -6,6 +6,8 @@ import importlib.util
 import shutil
 from pathlib import Path
 
+import pytest
+
 from conftest import PLUGIN_SPECS
 from support.parity import PARITY_FAMILIES, assert_family_parity, group_by_family, plugin_source, runtime_root
 
@@ -40,6 +42,7 @@ def test_repository_has_no_sibling_drift() -> None:
     assert _tool().sync(check=True) == []
 
 
+@pytest.mark.slow  # Copies the plugin trees.
 def test_sync_propagates_canonical_edits_and_keeps_device_names(tmp_path: Path) -> None:
     tool = _tool()
     _copy_families(tmp_path)

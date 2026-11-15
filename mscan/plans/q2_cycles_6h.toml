@@ -13,8 +13,9 @@
 # points; a reference line on 922 every two lines follows the beam (+80 % in 36 min on 11/12).
 #
 # 2026-11-13 run (maps/2026-11-13_14-54-33): P1 and P2 done; P3 stopped because the AMX makes
-# 300.300 kHz (whole 10 ns periods), not 300 kHz. From v0.5.14 the map uses 300.300 kHz; P3 is in
-# q2_frequency_15h.toml, with the other frequencies.
+# 300.300 kHz (whole 10 ns periods), not 300 kHz. From v0.5.15 the map uses 299.401 kHz (an even
+# number of periods, for a 50 % duty cycle); P3 is in q2_cycles_frequency_15h.toml, with the other
+# frequencies.
 
 [map]
 name = "q2-cycles-6h"

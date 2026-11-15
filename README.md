@@ -26,7 +26,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.14.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.15.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -116,10 +116,19 @@ Tests run locally (no CI):
 
 ```bash
 python3 -m venv .venv-explorer && .venv-explorer/bin/pip install -r requirements-dev.txt
-.venv-explorer/bin/python -m pytest -q                    # canonical plugin copies
-.venv-explorer/bin/python -m pytest -q -m "not slow"      # without the real Explorer/Qt probes
-.venv-explorer/bin/python -m pytest -q --all-siblings     # release validation
+.venv-explorer/bin/python -m pytest -q -m "not slow"      # after a change, before v0.X.Y: a few minutes
+.venv-explorer/bin/python -m pytest -q tests/test_mscan_map.py   # or only the files of the change
+.venv-explorer/bin/python -m pytest -q                    # before v0.X only: 20 to 50 minutes
+.venv-explorer/bin/python -m pytest -q --all-siblings     # the same on every sibling copy
 ```
+
+A v0.X.Y release is validated by the tests that are not `slow`; the whole suite runs before a
+v0.X release only.
+
+The tests marked `slow` start the real Explorer and Qt in a subprocess, run in real time, or build
+archives. A real-Qt probe that fails an assertion or does not end is run a second time (a busy
+machine makes these probes late); a crash is not. The session ends with the list of the probes
+that needed their second run, and says when the machine was busy.
 
 `ampr_b`, `amx_b` and `psu_b`–`psu_e` are copies of `ampr_a`, `amx_a` and `psu_a`: edit the
 canonical plugin, then run `python3 tools/sync_family_siblings.py`.

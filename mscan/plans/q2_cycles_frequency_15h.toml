@@ -1,0 +1,70 @@
+# Does the resolution depend on the RF frequency, or only on the number of RF cycles? One night:
+# three numbers of cycles, each at three frequencies, the points that answer first, and a spray
+# window that stops the map when the spray changes.
+# Every key left out takes the value of q2_full.toml.
+#
+# 2026-11-13 (500 kHz): R reaches a cap R_cap ≈ n²/28, where n ∝ f·L·√(m/E) is the number of RF
+# cycles an ion spends in Q2: for 922, 40 at 26 eV (n 32), 85 at 12 eV (n 47), 170 at 5 eV (n 73).
+# 2026-11-14 night (q2_frequency_15h): the spray was steady from 23:23 to 01:50 (24–26 nA, the 922
+# reference 38–43 pA), then fell to 20 nA with the beam at −40 %, jumped to 60–110 nA with no beam
+# and died. Kept from it: the stopping cut, the ladder at 500 kHz 12 eV (R 12.6/23.8/35.4/48.5 for
+# 922, as predicted) and one line at 300.300 kHz (R 12.0 at k 0.200, as predicted at n 32).
+#
+# Three numbers of cycles, each at three frequencies (f/√E constant within a family); with the
+# 500 kHz ladders already measured at 12 eV (11/13 and last night) and 5 eV (11/13), the table is full:
+#     n 32 (cap 40):   299.401 kHz 9.3 eV    400 kHz 16.6 eV    500 kHz 26 eV
+#     n 47 (cap 85):   400 kHz 7.7 eV        500 kHz 12 eV *    549.451 kHz 14.5 eV
+#     n 73 (cap 170):  400 kHz 3.2 eV        500 kHz 5 eV *     549.451 kHz 6.0 eV      (* measured)
+# The points run in the order written in [map.design] (seed 467), the most useful first:
+#   1. 299.401 kHz  9.3 eV   n 32   lowest f; one line only last night
+#   2. 549.451 kHz 14.5 eV   n 47   highest f the PSU current allows at Ilim 300 mA
+#   3. 400 kHz     16.6 eV   n 32
+#   4. 400 kHz      7.7 eV   n 47
+#   5. 500 kHz     26 eV     n 32   the 500 kHz ladder of this family (11/12: stopped at its line 10)
+#   6. 549.451 kHz  6.0 eV   n 73   on 11/13 the heavy ions fell near the closing at 500 kHz 5 eV:
+#   7. 400 kHz      3.2 eV   n 73   the same n above and below 5 eV tells an effect of E from one of n
+# After points 1 and 2 (about 4 h) the n 32 and n 47 families have their extreme frequencies.
+# Expected if R depends on n only, for 922 on the ladder: n 32: 11/18/24/30, n 47: 13/23/36/50.
+# The band centres at four frequencies also check the m/z scale (c 0.978, r0 2.625 mm) away from 500 kHz.
+#
+# Frequencies: the AMX makes whole 10 ns periods, and only an even number of them has a 50 % duty
+# cycle. 300 kHz would be 333 periods (300.300 kHz, 166 at Vpos for one rod pair, 167 for the other):
+# the plan asks for 334 periods, 299.401 kHz. 550 kHz runs as 549.451 kHz (182 periods).
+# Spray: no fixed range. The window is ±20 % around the ESI current at Start, then around the
+# current of the last reference line that found its peak (one every 3 lines). A line whose mean
+# current leaves it is measured again; three failed lines in an hour, or 30 min outside the window,
+# stop the map with every setting restored. Map… → Resume continues from the last good line.
+# Each point: the k ladder (0.200, 0.2056, 0.2081, 0.2094), the verification line when R 40 is
+# within reach, two entry-stub cuts from x − 20 V. Check announces 15 h (63 lines); each point took
+# 2.1 h last night. Ilim 300 mA is enough (about 220 mA at 550 kHz).
+# It replaces q2_frequency_15h.toml (500 kHz 12 eV first, 300.300 kHz, a fixed spray range of 3–300 nA).
+
+[map]
+name = "q2-cycles-frequency-15h"
+max_lines = 90
+reference_every = 3
+spray_window_percent = 20       # 2026-11-14 night: −20 % of spray came with −40 % of beam
+spray_range_na = []             # no fixed range: the window follows the reference lines
+seed = 467                      # the points run in the order written below
+
+[map.design]
+amplitude = [[299.401, 9.3], [550, 14.5], [400, 16.6], [400, 7.7], [500, 26], [550, 6.0], [400, 3.2]]   # (f kHz, E eV)
+frequency = []
+
+[map.ladder]
+repeats = 0
+max_lines = 4                   # k = 0.200, 0.2056, 0.2081, 0.2094 (closing near 0.2106)
+
+[map.stopping]
+repeats = 1                     # 922 and 2122 at Q1_DC and Q1_DC + 2 V: x_stop of the day
+x_from_v = 30                   # 2026-11-04 to 11-14: x50 922 35.5 V, 2122 34.9 V
+x_to_v = 42
+
+[map.stub]
+cut_from_x_v = -20              # 2026-11-13, 5 eV: 2122 was still rising at x − 10 V, the lowest cut
+
+[map.stages]
+search = false
+validation = false
+local = false
+best = false

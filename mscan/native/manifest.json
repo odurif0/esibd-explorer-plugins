@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "ad29a1e84a45ee2ba4408f6b54f97e88ae6fddca239cde424146cec7b14570f2",
-    "size_bytes": 11395760,
-    "source_data_sha256": "49bf869ec55376ee571022989b02acbb2560773a657030e5a1dcca3fa3d4fbe8",
+    "sha256": "636db96c7193aa796630d3b6857feab2ee497527acf15eddf8e911e3d063d4e2",
+    "size_bytes": 11396026,
+    "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
     "vendored": true
   },
-  "source_data_sha256": "49bf869ec55376ee571022989b02acbb2560773a657030e5a1dcca3fa3d4fbe8",
+  "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
   "targets": {
     "linux-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -18,9 +18,9 @@
         "mscan"
       ],
       "file": "esibd-mscan-worker",
-      "sha256": "0e4f9183b843b32099f9407c078058cdf81154b19393b47c19d568b6382abbc2",
-      "size_bytes": 1295896,
-      "source_data_sha256": "49bf869ec55376ee571022989b02acbb2560773a657030e5a1dcca3fa3d4fbe8",
+      "sha256": "f77baad85fdd535614649bffc1fa2396a1ec123b1053e993f7efa621e2ed8685",
+      "size_bytes": 1296048,
+      "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
       "target": "x86_64-unknown-linux-gnu"
     },
     "windows-x86_64": {
@@ -30,9 +30,9 @@
         "mscan"
       ],
       "file": "esibd-mscan-worker.exe",
-      "sha256": "683209876fbd0cb32215e00f64bbf1be45dc737f4c1a1d2374949d84283f9c1f",
-      "size_bytes": 1244672,
-      "source_data_sha256": "49bf869ec55376ee571022989b02acbb2560773a657030e5a1dcca3fa3d4fbe8",
+      "sha256": "5f0500bce9437a77dc4dc130c5cedf7c8f06dd0199d366b0072108335d02e40e",
+      "size_bytes": 1245184,
+      "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
       "target": "x86_64-pc-windows-gnu"
     }
   },

@@ -3502,6 +3502,14 @@ class DMMRController(DeviceController):
                     + detail + ' The old connection is retained; no new opening is allowed until it is released.')
         if getattr(self, '_last_open_cleanup_confirmed', False):
             return 'The failed connection attempt was released. Power the DMMR on, then retry the connection.'
+        if (device is None and getattr(self, '_native_worker_retired_unconfirmed', False)
+                and _transport_failure_is_fatal(exc)):
+            # The worker that held the port has been stopped and reaped: the port is free, as for the
+            # other devices (2026-10-28 lab: AMX_B reopened its port in the same Explorer session).
+            # The fallback below asked for an Explorer restart, which stops every other device.
+            return ('The native worker that held the COM port was stopped, which released the port: '
+                    'Explorer does not need a restart. Check that the DMMR is powered and connected, '
+                    'then retry ON.')
         current_com = _coerce_int(getattr(self.controllerParent, "com", None), -1)
         guidance = _dmmr_poisoned_port_guidance(
             exc,
@@ -4407,10 +4415,10 @@ class DMMRController(DeviceController):
         self._queue_native_gui(_update_gui)
 
     def _restore_on_ui_state(self) -> None:
+        """Restore toolbar ON/OFF widgets back to ON after a failed shutdown."""
         if self._retire_native_worker() or (self.device is None and getattr(self, "_native_worker_retired_unconfirmed", False)):
             self._restore_off_ui_state()
             return
-        """Restore toolbar ON/OFF widgets back to ON after a failed shutdown."""
         def _update_gui() -> None:
             sync_on_state = getattr(self.controllerParent, "_set_on_ui_state", None)
             if callable(sync_on_state):

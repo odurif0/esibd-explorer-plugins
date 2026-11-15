@@ -212,7 +212,10 @@ _HOSTS = explorer_host.hosts()
 
 def pytest_report_header(config):
     described = ", ".join(f"{where} {version or 'absent'}" for where, version in _HOSTS)
-    return f"ESIBD Explorer hosts: {described} (plugins target {explorer_host.TARGET_VERSION})"
+    header = [f"ESIBD Explorer hosts: {described} (plugins target {explorer_host.TARGET_VERSION})"]
+    if _busy():
+        header.append(f"The machine is busy ({_busy()}): the real-time probes may need their second run.")
+    return header
 
 
 def pytest_sessionstart(session):
@@ -222,13 +225,28 @@ def pytest_sessionstart(session):
                     + "; ".join(wrong), returncode=4)
 
 
+def _busy() -> str:
+    """The machine's load when it exceeds its cores: the real-time probes are then late."""
+    load, cores = (os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0), os.cpu_count() or 1
+    return f"load {load:.0f} on {cores} cores" if load > cores else ""
+
+
 def pytest_terminal_summary(terminalreporter):
+    if qt.SECOND_RUN:
+        terminalreporter.write_line(
+            f"{len(qt.SECOND_RUN)} real-Qt probe(s) failed their first run and passed the second"
+            + (f" ({_busy()})" if _busy() else "") + ":", yellow=True)
+        for test, why in qt.SECOND_RUN:
+            terminalreporter.write_line(f"  {test}: {why}", yellow=True)
+    elif _busy() and terminalreporter.stats.get("failed"):
+        terminalreporter.write_line(f"The machine is busy ({_busy()}): real-time tests may fail for that reason "
+                                    "alone. Run the failed ones again.", yellow=True)
     wrong = explorer_host.mismatches(_HOSTS)
     if wrong and _USES_HOST:
         terminalreporter.write_line(
             f"WARNING: real-Explorer tests ran against {'; '.join(wrong)}, not the targeted "
             f"{explorer_host.TARGET_VERSION}: they do not validate the release host "
-            "(see README, Running Tests).", yellow=True)
+            "(see README, Development).", yellow=True)
 
 
 _HOST_MARKERS = ('distribution("esibd-explorer")', "distribution('esibd-explorer')",

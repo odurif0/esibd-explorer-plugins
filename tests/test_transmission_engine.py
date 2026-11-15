@@ -711,6 +711,7 @@ def test_a_sweep_or_target_beyond_the_device_limits_is_refused_before_any_move(r
     assert result["status"] == "configuration error" and "± 600 V" in result["reason"] and beamline.commands == []
 
 
+@pytest.mark.slow
 def test_mass_mode_tracks_the_selected_peak_and_raises_it_at_the_end_of_the_beamline(rt, bl):
     engine, simulator = rt
     text = bl.build(simulator.BEAMLINE, selected=["funnel", "q1", "q2"], mode="mass", filter_key="q2",

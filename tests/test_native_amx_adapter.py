@@ -472,6 +472,7 @@ def test_queued_on_callback_cannot_reactivate_after_native_retirement(case, monk
     assert_lost(case)
 
 
+@pytest.mark.slow
 def test_real_native_process_crash_does_not_retain_on_and_leaves_other_worker_alive(case, worker_binary, tmp_path):
     from support.native import NativeDevice, proxy
 

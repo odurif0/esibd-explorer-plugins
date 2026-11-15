@@ -61,6 +61,50 @@ def test_power_edit_only_sets_power_and_independently_verifies(control):
     assert control.calls == [('read',)]
 
 
+# SetHeatCtrlPowerLimit as the HEAT-CTRL-2410 answered on 2026-11-14 (worker log of the lab).
+LAB_POWER_LIMITS = {2.: 2.000379518976, 7.: 6.9997229506559995, 18.: 18.000207937536, 24.: 24.000277250048}
+
+
+def _device_steps(control, monkeypatch, answers=LAB_POWER_LIMITS):
+    def held(**kwargs):
+        control.calls.append(('power', kwargs['power_w']))
+        control.config['power_limit_w'] = answers[kwargs['power_w']]
+        return {'power_w': control.config['power_limit_w']}
+    monkeypatch.setattr(control.controller.device, 'configure_heat_limits', held)
+
+
+@pytest.mark.parametrize('requested', sorted(LAB_POWER_LIMITS))
+def test_a_power_limit_the_device_rounds_to_its_step_is_accepted(control, monkeypatch, requested):
+    """2026-11-14 lab: the device holds its limit in steps of 1.07 mW and rounds to the nearest. 18 W came
+    back as 18.0002 W: "Applied power 18.0002 W does not respect the requested ceiling 18 W", and the
+    heater was forced OFF. Half of the limits round up: 2, 3, 5, 6, 8, 11, 14, 18, 21 and 24 W all failed."""
+    _device_steps(control, monkeypatch)
+    c = control.controller
+    c._apply_heat_power(requested, c._output_cancel)
+    assert c.heat_power_error == '' and c.heat_power_limit_w == LAB_POWER_LIMITS[requested]
+    assert ('enable', False) not in control.calls, 'the heater stays as it was'
+
+
+def test_the_heater_starts_with_a_power_limit_the_device_rounded_up(control, monkeypatch):
+    """2026-11-14 lab, 16:25: "ESI rejected temperature 90 for HEAT: Applied power 18.0002 W does not
+    respect the requested ceiling 18 W.. The affected output was forced OFF"."""
+    _device_steps(control, monkeypatch)
+    c = control.controller
+    control.parent.heat_power_limit_w, control.heat.value = 18., 90.
+    control.parent.print = c.print
+    c._apply_value_unlocked(control.heat, c._output_cancel)
+    assert control.calls[-2:] == [('temperature', 90.), ('enable', True)]
+    assert c.heat_temperature_error == '' and c.heat_power_error == ''
+
+
+def test_a_power_limit_more_than_one_step_above_the_request_is_refused(control, monkeypatch):
+    _device_steps(control, monkeypatch, {18.: 18.0022})  # Two steps above: not the request.
+    c = control.controller
+    c._apply_heat_power(18., c._output_cancel)
+    assert 'unconfirmed' in c.heat_power_error and '18.0022' in c.heat_power_error
+    assert ('enable', True) not in control.calls and ('enable', False) in control.calls
+
+
 def test_temperature_edit_never_enables(control):
     c = control.controller
     c._apply_heat_temperature(80., c._output_cancel)

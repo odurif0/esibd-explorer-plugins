@@ -173,8 +173,10 @@ Both inputs are bounded by fresh device maxima and disabled while those maxima
 are unavailable. Controller maxima are not certified capillary or seal ratings.
 Editing either field never enables heating. Live power changes leave voltage,
 current and PID settings unchanged; the applied ceiling is independently read back
-and shown as `Applied power limit`. Invalid temperature readback blocks a positive
-power edit. A newer field edit replaces older queued edits; OFF cancels queued
+and shown as `Applied power limit`. The controller holds this limit in steps of 1.07 mW
+and rounds a request to the nearest one: 18 W is held as 18.0002 W, which is the request
+(until v0.5.14 the plugin refused every limit rounded up and forced the heater OFF).
+Invalid temperature readback blocks a positive power edit. A newer field edit replaces older queued edits; OFF cancels queued
 changes. A native write already in progress cannot be undone by cancellation.
 
 `ESI_HEAT` controls target temperature in degrees Celsius. ON writes and reads

@@ -61,7 +61,8 @@ INSTRUMENT = dict(q1_dc_v=36.0, ap_q1_q2_v=34.0, x_v=10.0, ilim_a=0.5, psu_max_v
                   clock_hz=100e6, f_hz=500e3, frequency_writable=True, free_disk_bytes=1e12)
 
 
-@pytest.mark.parametrize('name', ['q2_full.toml', 'q2_P1_2h.toml', 'q2_cycles_6h.toml', 'q2_frequency_15h.toml'])
+@pytest.mark.parametrize('name', [pytest.param('q2_full.toml', marks=pytest.mark.slow),  # 40 points: 50 s
+                                  'q2_P1_2h.toml', 'q2_cycles_6h.toml', 'q2_cycles_frequency_15h.toml'])
 def test_plan_templates_are_valid_and_ready_for_a_nominal_instrument(engine, name):
     plan = RUNNER.load_plan(PLANS / name)
     check = engine('map_check', plan, INSTRUMENT)
@@ -69,8 +70,20 @@ def test_plan_templates_are_valid_and_ready_for_a_nominal_instrument(engine, nam
     assert check['estimate']['outcome'] in ('done', 'stop')
     hours = check['estimate']['total_s'] / 3600
     expected = {'q2_full.toml': (35, 110), 'q2_P1_2h.toml': (3, 4.5), 'q2_cycles_6h.toml': (6.5, 9),
-                'q2_frequency_15h.toml': (11, 16)}[name]
+                'q2_cycles_frequency_15h.toml': (13, 18)}[name]
     assert expected[0] < hours < expected[1], f'{name}: {hours:.1f} h simulated'
+
+
+def test_the_frequency_plan_runs_its_points_in_the_order_written(engine):
+    """2026-11-14 night: the spray held 2.5 h of a 15 h plan. The plan now starts with the two extreme
+    frequencies, so the points must run in the order of [map.design] (the engine shuffles all but the first)."""
+    plan = RUNNER.load_plan(PLANS / 'q2_cycles_frequency_15h.toml')
+    lines = engine('map_simulate', plan, INSTRUMENT, dict(hypothesis='H1'))['lines']
+    order = list(dict.fromkeys(line['point'] for line in lines if line['role'] == 'ladder'))
+    assert order == [f'P{i}' for i in range(1, 8)], order
+    periods = {round(100e6 / (line['f_khz'] * 1e3), 6) for line in lines}
+    assert all(period % 2 == 0 for period in periods), f'even periods only (50 % duty cycle): {sorted(periods)}'
+    assert plan['map']['spray_range_na'] == [] and plan['map']['spray_window_percent'] == 20
 
 
 def test_full_plan_template_lists_every_key_with_the_engine_default(engine):
@@ -143,8 +156,11 @@ class FakeMScan:
         return self.frequency
 
     def _set_map_frequency(self, hz):
-        # The AMX HD oscillator: whole periods of its 100 MHz clock (300 kHz gives 300.300 kHz).
-        self.frequency = 100e6 / round(100e6 / float(hz))
+        # The AMX HD oscillator: whole periods of its 100 MHz clock (300 kHz gives 300.300 kHz), and a
+        # pulse of whole periods too, the nearest to half (166 of 333).
+        period = round(100e6 / float(hz))
+        self.frequency = 100e6 / period
+        self.duties = getattr(self, 'duties', set()) | {round(100 * period / 200) / period}
 
     def _map_settings_snapshot(self):
         return dict(self.settings)
@@ -488,7 +504,8 @@ def test_unreachable_point_closes_and_the_map_goes_on(engine, tmp_path):
 
 def test_a_design_frequency_the_amx_cannot_make_runs_at_the_nearest_one(engine, tmp_path):
     """2026-11-13 lab: q2_cycles_6h asked for 300 kHz; the AMX makes whole 10 ns periods, 300.300 kHz, and
-    the map stopped on "Settings before the line not reached: AMX at 300.300 kHz for 300.000 kHz"."""
+    the map stopped on "Settings before the line not reached: AMX at 300.300 kHz for 300.000 kHz".
+    2026-11-14: 300.300 kHz is 333 periods, 166 of them at Vpos: the map asks for an even number, 334."""
     scan = FakeMScan()
     runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
     folder = run_map(runner, PLANS / 'q2_cycles_6h.toml')
@@ -496,7 +513,8 @@ def test_a_design_frequency_the_amx_cannot_make_runs_at_the_nearest_one(engine, 
     journal = json.loads((folder / RUNNER.JOURNAL).read_text())
     p3 = [r for r in journal['records'] if r['request']['point'] == 'P3']
     assert p3 and all(r['outcome'] == 'done' for r in p3)
-    assert {r['request']['f_hz'] for r in p3} == {100e6 / 333}
+    assert {r['request']['f_hz'] for r in p3} == {100e6 / 334}
+    assert scan.duties == {.5}, 'every frequency of the map has a 50 % duty cycle'
     assert scan.frequency == 500e3, 'back to the frequency at Start'
 
 

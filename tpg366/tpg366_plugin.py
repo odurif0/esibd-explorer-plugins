@@ -12,9 +12,9 @@ import re
 import sys
 from threading import Event, Lock, Thread
 import time
+from typing import Any
 
 import numpy as np
-import serial
 from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea
