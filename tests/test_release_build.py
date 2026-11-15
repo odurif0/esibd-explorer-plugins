@@ -16,6 +16,8 @@ import pytest
 from conftest import PLUGIN_SPECS
 from support.release import assert_archive_native_assets, validate_member_names
 
+pytestmark = pytest.mark.slow  # Each test builds archives in a temporary checkout: before a release.
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

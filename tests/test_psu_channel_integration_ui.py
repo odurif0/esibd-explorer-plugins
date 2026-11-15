@@ -61,6 +61,7 @@ def probe(folder, output, configuration="bootstrap"):
     parent.startup_timeout_s, parent.poll_timeout_s = 1., .1
     parent.interlock_monitoring = True
     parent._schedule_delayed_refresh = lambda *a: None
+    parent._refresh_tick = lambda: None  # No refresh timer in this rig: the probe publishes the readbacks.
     manager = ns["DeviceManager"]()
     plugin_manager = SimpleNamespace(
         Device=ns["Device"], ChannelManager=ns["Device"], DeviceManager=manager,

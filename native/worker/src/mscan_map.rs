@@ -1026,30 +1026,36 @@ pub fn amplitude_grid(lo: f64, hi: f64, r_max: f64, coarse: usize) -> Vec<f64> {
     grid
 }
 
-/// The frequency the AMX makes for `f_hz`: a whole number of clock ticks per period, the nearest
-/// one inside [lo, hi]. 2026-11-13 lab: 300 kHz is 333.3 ticks of 10 ns; the AMX made 300.300 kHz,
-/// the map waited for 300.000 kHz and stopped. Every line asks for a frequency the AMX can make.
+/// The frequency the AMX makes for `f_hz` with a 50 % duty cycle: an even number of clock ticks
+/// per period, the nearest one inside [lo, hi].
+/// 2026-11-13 lab: 300 kHz is 333.3 ticks of 10 ns; the AMX made 300.300 kHz, the map waited for
+/// 300.000 kHz and stopped. Every line asks for a frequency the AMX can make.
+/// 2026-11-14: an odd period has no half. At 333 ticks the AMX holds one rod pair 166 ticks at
+/// Vpos and the other 167: their means are -A/333 and +A/333, a DC between the pairs that shifts
+/// k by 0.003 if it reaches the rods (the ladder's last steps are 0.0013 apart). 300 kHz is
+/// 334 ticks, 299.401 kHz.
 pub fn on_clock(f_hz: f64, clock_hz: f64, lo_hz: f64, hi_hz: f64) -> f64 {
     if !(f_hz > 0.0 && f_hz.is_finite() && clock_hz > 0.0 && clock_hz.is_finite()) {
         return f_hz;
     }
-    let mut period = (clock_hz / f_hz).round().max(1.0);
-    if hi_hz > 0.0 && clock_hz / period > hi_hz * (1.0 + 1e-12) {
-        period = (clock_hz / hi_hz).ceil().max(1.0);
+    let mut half = (clock_hz / f_hz / 2.0).round().max(1.0);
+    if hi_hz > 0.0 && clock_hz / (2.0 * half) > hi_hz * (1.0 + 1e-12) {
+        half = (clock_hz / hi_hz / 2.0).ceil().max(1.0);
     }
-    if lo_hz > 0.0 && clock_hz / period < lo_hz * (1.0 - 1e-12) {
-        period = (clock_hz / lo_hz).floor().max(1.0);
+    if lo_hz > 0.0 && clock_hz / (2.0 * half) < lo_hz * (1.0 - 1e-12) {
+        half = (clock_hz / lo_hz / 2.0).floor().max(1.0);
     }
-    clock_hz / period
+    clock_hz / (2.0 * half)
 }
 
-/// Frequencies of whole oscillator periods between lo and hi, increasing.
+/// Frequencies of even oscillator periods (50 % duty cycle, see `on_clock`) between lo and hi,
+/// increasing.
 pub fn frequency_grid(lo_hz: f64, hi_hz: f64, clock_hz: f64) -> Vec<f64> {
-    let longest = (clock_hz / lo_hz).floor() as i64;
-    let shortest = (clock_hz / hi_hz).ceil() as i64;
-    (shortest..=longest)
+    let longest = (clock_hz / lo_hz / 2.0).floor() as i64;
+    let shortest = (clock_hz / hi_hz / 2.0).ceil() as i64;
+    (shortest.max(1)..=longest)
         .rev()
-        .map(|p| clock_hz / p as f64)
+        .map(|half| clock_hz / (2 * half) as f64)
         .collect()
 }
 
@@ -1540,7 +1546,7 @@ impl<'a> View<'a> {
         view
     }
 
-    /// The frequency the AMX makes for `f_hz` (whole clock ticks per period).
+    /// The frequency the AMX makes for `f_hz` (an even number of clock ticks per period).
     fn on_clock(&self, f_hz: f64) -> f64 {
         on_clock(f_hz, self.inst.clock_hz, 0.0, 0.0)
     }
@@ -3617,9 +3623,10 @@ impl<'a> Engine<'a> {
                     p.solution.k,
                     0.0,
                 )?;
-                // One period tick must keep two points per peak width at R_max.
+                // One step of the axis (two ticks: even periods) must keep two points per peak
+                // width at R_max.
                 let top = r.axis.last().copied().unwrap_or(0.0);
-                (2.0 * top / clock <= 1.0 / (2.0 * self.cfg().r_max)).then_some(r)
+                (4.0 * top / clock <= 1.0 / (2.0 * self.cfg().r_max)).then_some(r)
             })
     }
 
@@ -4272,9 +4279,11 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
                 p[0]
             ));
         }
-        if (f - p[0] * 1e3).abs() > 1e-9 * f {
+        if (f - p[0] * 1e3).abs() >= 0.5 {
+            // Hz: what the message would show
             warnings.push(format!(
-                "{id}: the AMX makes {:.3} kHz, not {} kHz (whole {:.0} ns periods); the map uses {:.3} kHz.",
+                "{id}: the AMX makes {:.3} kHz, not {} kHz (periods of an even number of {:.0} ns, \
+                 for a 50 % duty cycle); the map uses {:.3} kHz.",
                 f / 1e3,
                 p[0],
                 1e9 / inst.clock_hz,
@@ -4304,11 +4313,12 @@ fn check(plan: &Plan, inst: &Instrument) -> (Vec<String>, Vec<String>, Value) {
             Some((lo, hi, ions)) => {
                 let current = view.current_at(hi, a);
                 worst = worst.max(current);
-                if 2.0 * hi / inst.clock_hz > 1.0 / (2.0 * cfg.r_max) {
+                if 4.0 * hi / inst.clock_hz > 1.0 / (2.0 * cfg.r_max) {
                     warnings.push(format!(
-                        "{id}: one oscillator tick is {:.1} % in m/z at {:.0} kHz, coarser than R_max = {} \
+                        "{id}: one frequency step (two oscillator ticks, for a 50 % duty cycle) is {:.1} % \
+                         in m/z at {:.0} kHz, coarser than R_max = {} \
                          needs: its ladders inform the laws, no best frequency scan from it.",
-                        200.0 * hi / inst.clock_hz,
+                        400.0 * hi / inst.clock_hz,
                         hi / 1e3,
                         cfg.r_max
                     ));

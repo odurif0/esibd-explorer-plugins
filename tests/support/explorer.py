@@ -8,11 +8,13 @@ Real-Qt tests run the installed Explorer in a subprocess instead (support.qt.run
 """
 from __future__ import annotations
 
+import contextlib
 from enum import Enum
 import importlib.util
 from pathlib import Path
 import sys
 import threading
+import time
 import types
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -358,6 +360,39 @@ CORE = ("PARAMETERTYPE", "PLUGINTYPE", "PRINT", "INOUT", "INFO", "infoDict", "pl
         "parameterDict", "Channel", "MetaChannel", "DeviceController", "ToolButton", "LabviewDoubleSpinBox",
         "TreeWidget", "getTestMode")
 PLUGINS = ("Device", "Plugin", "LiveDisplay", "Scan", "SettingsManager")
+
+
+class TimeoutLock:
+    """Explorer's TimeoutLock over a real lock: ``acquire_timeout`` yields whether it was obtained."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self):
+        self._lock.release()
+
+    @contextlib.contextmanager
+    def acquire_timeout(self, timeout, timeoutMessage='', already_acquired=False):
+        acquired = already_acquired or self._lock.acquire(timeout=timeout)
+        try:
+            yield acquired
+        finally:
+            if acquired and not already_acquired:
+                self._lock.release()
+
+
+def start_acquisition(self):
+    """Explorer 1.0.2 DeviceController.startAcquisition, with the gap that let two callers both start."""
+    if self.acquisitionThread and self.acquisitionThread.is_alive():
+        self.acquiring = False
+        self.acquisitionThread.join(timeout=5)
+    time.sleep(.05)
+    self.acquisitionThread = threading.Thread(target=self.runAcquisition, daemon=True)
+    self.acquiring = True
+    self.acquisitionThread.start()
 
 
 def getTestMode():

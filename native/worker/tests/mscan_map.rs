@@ -83,15 +83,21 @@ fn grids_sobol_and_least_squares() {
     assert!(grid.windows(2).all(|w| w[1] > w[0]));
     let freq = frequency_grid(330e3, 1e6, 100e6);
     assert!(freq.windows(2).all(|w| w[1] > w[0]));
+    // Even periods only: an odd one has no 50 % duty cycle.
     assert!(
         freq.iter()
-            .all(|f| (100e6 / f - (100e6 / f).round()).abs() < 1e-6)
+            .all(|f| (100e6 / f / 2.0 - (100e6 / f / 2.0).round()).abs() < 1e-6)
     );
-    // The nearest whole period, kept inside [lo, hi] when given.
-    assert_eq!(on_clock(300e3, 100e6, 0.0, 0.0), 100e6 / 333.0);
+    assert_eq!((freq[0], *freq.last().unwrap()), (100e6 / 302.0, 1e6));
+    assert_eq!(freq.len(), 102);
+    // The nearest even period, kept inside [lo, hi] when given.
+    assert_eq!(on_clock(300e3, 100e6, 0.0, 0.0), 100e6 / 334.0);
+    assert_eq!(on_clock(100e6 / 333.0, 100e6, 0.0, 0.0), 100e6 / 334.0); // 2026-11-13: 166 of 333 ticks at Vpos
     assert_eq!(on_clock(500e3, 100e6, 0.0, 0.0), 500e3);
-    assert_eq!(on_clock(640e3, 100e6, 250e3, 640e3), 100e6 / 157.0); // 156 would be 641.0 kHz
+    assert_eq!(on_clock(550e3, 100e6, 0.0, 0.0), 100e6 / 182.0);
+    assert_eq!(on_clock(640e3, 100e6, 250e3, 640e3), 100e6 / 158.0); // 156 would be 641.0 kHz
     assert_eq!(on_clock(250e3, 100e6, 250e3, 640e3), 250e3);
+    assert_eq!(on_clock(251e3, 100e6, 250e3, 640e3), 100e6 / 398.0);
     assert!(on_clock(f64::NAN, 100e6, 0.0, 0.0).is_nan());
     assert_eq!(sobol2(0), (0.0, 0.0));
     assert_eq!(sobol2(1), (0.5, 0.5));
@@ -252,7 +258,8 @@ fn journal_drives_the_map_and_rejects_stale_results() {
         assert_eq!(next["decision"], json!(expected), "{next}");
     }
     assert_eq!(
-        j["session_start"], json!(3),
+        j["session_start"],
+        json!(3),
         "map_record keeps the session start"
     );
 }
@@ -261,23 +268,46 @@ fn journal_drives_the_map_and_rejects_stale_results() {
 fn every_line_asks_for_a_frequency_the_amx_makes() {
     // 2026-11-13 lab: 300 kHz is 333.3 periods of 10 ns. The AMX made 300.300 kHz, the map waited
     // for 300.000 kHz and stopped after three attempts.
+    // 2026-11-14: at 333 ticks the duty cycle is 166/333, a DC of A/333 between the rod pairs. The
+    // map asks for even periods: 334 ticks, 299.401 kHz.
     let mut c = Controller::new(&json!({})).unwrap();
-    let plan = plan_with(json!({"design": {"amplitude": [[300, 9.4]], "frequency": []},
-        "reference": {"f_khz": 333}}));
+    let plan = plan_with(
+        json!({"design": {"amplitude": [[300, 9.4]], "frequency": []},
+        "reference": {"f_khz": 333}}),
+    );
     let checked = call(&mut c, "map_check", &[plan.clone(), instrument()]).unwrap();
     let warnings = checked["warnings"].to_string();
     assert!(
-        warnings.contains("P1: the AMX makes 300.300 kHz, not 300 kHz"),
+        warnings.contains("P1: the AMX makes 299.401 kHz, not 300 kHz"),
         "{warnings}"
     );
-    assert_eq!(checked["summary"]["points"][0]["f_khz"], json!(1e5 / 333.0));
+    assert_eq!(
+        checked["summary"]["points"][0]["f_khz"],
+        json!(100e6 / 334.0 / 1e3)
+    );
+    // A plan that names the frequency the AMX makes is not told so.
+    let named = plan_with(json!({"design": {"amplitude": [[299.401, 9.3]], "frequency": []}}));
+    let checked = call(&mut c, "map_check", &[named, instrument()]).unwrap();
+    assert!(
+        !checked["warnings"].to_string().contains("the AMX makes"),
+        "{}",
+        checked["warnings"]
+    );
+    assert_eq!(
+        checked["summary"]["points"][0]["f_khz"],
+        json!(100e6 / 334.0 / 1e3)
+    );
     let journal = simulated_journal(&mut c, plan);
     let records = journal["records"].as_array().unwrap();
     assert!(records.len() > 5, "{}", records.len());
     for r in records {
         let f = r["request"]["f_hz"].as_f64().unwrap();
-        let ticks = 100e6 / f;
-        assert!((ticks - ticks.round()).abs() < 1e-9, "{}: {f} Hz", r["request"]["label"]);
+        let half = 100e6 / f / 2.0;
+        assert!(
+            (half - half.round()).abs() < 1e-9,
+            "{}: {f} Hz",
+            r["request"]["label"]
+        );
     }
     let f_of = |role: &str| {
         records
@@ -285,7 +315,7 @@ fn every_line_asks_for_a_frequency_the_amx_makes() {
             .find(|r| r["request"]["role"] == json!(role))
             .map(|r| r["request"]["f_hz"].as_f64().unwrap())
     };
-    assert_eq!(f_of("ladder"), Some(100e6 / 333.0));
+    assert_eq!(f_of("ladder"), Some(100e6 / 334.0));
     assert_eq!(f_of("reference"), Some(100e6 / 300.0));
 }
 

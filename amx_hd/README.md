@@ -88,6 +88,11 @@ frequency, widths and enable requests from the hardware readback. Previous
 setpoints and unfinished edits are replaced, not sent back to the device.
 Channels return to manual mode; equation text is retained for explicit reuse.
 
+ON then brings back the frequency, widths and enable requests last applied on that
+configuration (kept in `<name>_last_timing.json` of Explorer's configuration folder), and
+says so in the log: a timing set by hand is not lost at the next start. `Load now` returns to
+the configuration as saved. Nothing is brought back on another configuration or COM port.
+
 Runtime timing notes:
 
 - HD timer delay/width share the same register offsets as the normal AMX
@@ -169,7 +174,7 @@ runs: the period is a whole number of 10 ns ticks (9 kHz gives 11111 ticks,
 9.00009 kHz). With an odd number of ticks an exact 50 % is impossible, and the
 line says so. It turns amber, `(not applied)`, when the period register
 differs. After a frequency, width or enable edit, `Loaded config` adds
-`timing edited since load`; the next load replaces those edits.
+`timing edited since load`; `Load now` replaces those edits, the next ON brings them back.
 
 **Advanced** shows every timer with a `Registers` column (`REGISTERS APPLIED`
 when the width and oscillator-0 registers match the request), the sketch and

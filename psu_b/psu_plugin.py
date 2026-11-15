@@ -1402,15 +1402,23 @@ class PSUDevice(Device):
         self._ensure_channel_panel()
         self._update_channel_column_visibility()
         self._sync_acquisition_controls()
+        self._start_refresh_timer()
+
+    def _start_refresh_timer(self) -> None:
+        """(Re)start the readback timer (GUI thread): at Explorer's start and at every connection.
+
+        It was started once, at Explorer's start, and stopped by Close communication and by a lost
+        communication: a PSU reconnected afterwards was never read again (found 2026-11-14).
+        """
+        timer = getattr(self, "_refreshTimer", None)
         try:
-            from PyQt6.QtCore import QTimer
-        except ImportError:
-            return
-        try:
-            self._refreshTimer = QTimer(self)
-            self._refreshTimer.timeout.connect(self._refresh_tick)
-            self._refreshTimer.start(self.interval)
-            self.refreshPanelSignal.connect(self._apply_panel_refresh)
+            if timer is None:
+                from PyQt6.QtCore import QTimer
+                timer = QTimer(self)
+                timer.timeout.connect(self._refresh_tick)
+                self.refreshPanelSignal.connect(self._apply_panel_refresh)
+                self._refreshTimer = timer
+            timer.start(max(1, int(self.interval)))
         except Exception:
             # QTimer/signal connections need a QObject parent; skip the
             # standalone refresh timer when no valid Qt parent is available
@@ -1429,8 +1437,15 @@ class PSUDevice(Device):
 
     def _refresh_tick(self) -> None:
         controller = getattr(self, "controller", None)
+        timer = getattr(self, "_refreshTimer", None)
+        interval = max(1, int(getattr(self, "interval", 1000) or 1000))
+        if callable(getattr(timer, "setInterval", None)) and timer.interval() != interval:
+            timer.setInterval(interval)  # The Interval setting applies at once, not at the next Explorer start.
         if controller is None or not getattr(controller, "initialized", False):
             return
+        loop = getattr(controller, "acquisitionThread", None)
+        if getattr(controller, "acquiring", False) and loop is not None and loop.is_alive():
+            return  # Recording: Explorer's acquisition loop reads the PSU. One reader, never two.
         if bool(getattr(controller, "_manual_apply_active", False)) or bool(
             getattr(controller, "_manual_apply_worker_running", False)
         ):
@@ -2720,7 +2735,7 @@ class PSUDevice(Device):
                 diag_widgets[key] = value_label
             col_offset += 1
 
-        flags_row = col_offset + 1
+        flags_row = 5  # Below Tadc, Dropout, Range and Rails (it shared the Rails row).
         flags_name = QLabel("Flags")
         flags_name.setStyleSheet(_PSU_PANEL_METRIC_NAME_STYLE)
         flags_value = QLabel("n/a")
@@ -3002,14 +3017,9 @@ class PSUDevice(Device):
 
     def _schedule_delayed_refresh(self, delay_s: float) -> None:
         def _do_refresh() -> None:
-            controller = getattr(self, "controller", None)
-            if (
-                controller is not None
-                and getattr(controller, "initialized", False)
-                and not bool(getattr(controller, "_manual_apply_active", False))
-                and not bool(getattr(controller, "_manual_apply_worker_running", False))
-            ):
-                controller.readNumbers()
+            # The read runs in the background, as every poll: this one read the PSU on the GUI thread
+            # (about fifteen serial exchanges, and up to 1 s for the lock) after each panel edit.
+            self._refresh_tick()
             self._update_status_widgets()
             self._update_channel_panel()
             self._sync_manual_panel_from_controller()
@@ -4627,8 +4637,17 @@ def _wait_for_poll(controller: Any, seconds: float) -> None:
 
 
 def _request_poll(controller: Any) -> None:
-    """A verified write: its readback is published by a poll now, not at the end of the interval."""
+    """A verified write: its readback is published by a poll now, not at the end of the interval.
+
+    While recording, Explorer's acquisition loop is woken. Otherwise the device's refresh timer reads:
+    it is asked for a tick now (2026-11-13 lab, PSU not recording: nothing was woken, each MScan
+    point waited for the next 1 s tick).
+    """
     controller.__dict__.setdefault("_poll_now", Event()).set()
+    tick = getattr(getattr(controller, "controllerParent", None), "_refresh_tick", None)
+    queue = getattr(controller, "_queue_native_gui", None)
+    if callable(tick) and callable(queue):
+        queue(tick)
 
 
 class PSUController(DeviceController):
@@ -5145,6 +5164,9 @@ class PSUController(DeviceController):
         self._native_worker_retired_unconfirmed = False
         self.super_init_complete_called = True
         self._set_loaded_config_text("Connected")
+        start_timer = getattr(self.controllerParent, "_start_refresh_timer", None)
+        if callable(start_timer):
+            start_timer()  # Stopped by Close communication or a lost communication.
         self._sync_status_to_gui()
         if self.resume_session:
             # Connecting sends no output command: the readbacks already mirror the PSU as it runs.
@@ -5457,7 +5479,9 @@ class PSUController(DeviceController):
         while self.acquiring:
             with self.lock.acquire_timeout(1, timeoutMessage="Could not acquire lock to acquire data") as acquired:
                 if acquired:
-                    self.fakeNumbers() if getTestMode() else self.readNumbers()
+                    # The lock is held and is not reentrant: without already_acquired every poll waited
+                    # 1 s for it, failed and invalidated the readbacks (PSU recording ON, found 2026-11-14).
+                    self.fakeNumbers() if getTestMode() else self.readNumbers(already_acquired=True)
                     self.signalComm.updateValuesSignal.emit()
             _wait_for_poll(self, self.getDevice().interval / 1000)  # The lock is released before waiting.
 

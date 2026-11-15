@@ -1,6 +1,5 @@
 """Native facade selection and legacy Python-worker fault references."""
 
-import contextlib
 import hashlib
 import importlib.util
 import json
@@ -12,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import explorer
 from support.esi import load_plugin as _load_plugin
 from support.esi_process import FAKE_CONTROLLER, WORKER
 
@@ -706,34 +706,9 @@ def test_reconnection_supersedes_a_cut_discharge_check():
     assert not c.discharge_unverified and any("superseded" in m for m in messages)
 
 
-def _explorer_start_acquisition(self):
-    """Explorer 1.0.2 DeviceController.startAcquisition, with the gap that let two callers both start."""
-    if self.acquisitionThread and self.acquisitionThread.is_alive():
-        self.acquiring = False
-        self.acquisitionThread.join(timeout=5)
-    time.sleep(.05)
-    self.acquisitionThread = threading.Thread(target=self.runAcquisition, daemon=True)
-    self.acquiring = True
-    self.acquisitionThread.start()
-
-
-class _TimeoutLock:
-    def __init__(self):
-        self._lock = threading.Lock()
-
-    @contextlib.contextmanager
-    def acquire_timeout(self, timeout, timeoutMessage=""):
-        acquired = self._lock.acquire(timeout=timeout)
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                self._lock.release()
-
-
 def _polling_controller(module):
     c = module.ESIController(SimpleNamespace())
-    c.initialized, c.acquisitionThread, c.lock = True, None, _TimeoutLock()
+    c.initialized, c.acquisitionThread, c.lock = True, None, explorer.TimeoutLock()
     c.getDevice = lambda: SimpleNamespace(interval=10)
     polls = []
     c.readNumbers = lambda: polls.append((threading.current_thread(), time.monotonic()))
@@ -745,7 +720,7 @@ def test_concurrent_acquisition_starts_poll_the_esi_once(monkeypatch):
     two polls per second, lock timeouts at every lost reply and 50 MB of worker log per hour."""
     module = _load_plugin()
     base = next(c for c in module.ESIController.__mro__[1:] if "startAcquisition" in vars(c))
-    monkeypatch.setattr(base, "startAcquisition", _explorer_start_acquisition)
+    monkeypatch.setattr(base, "startAcquisition", explorer.start_acquisition)
     c, polls = _polling_controller(module)
     c.startAcquisition()  # the loop of the previous connection
     time.sleep(.05)
