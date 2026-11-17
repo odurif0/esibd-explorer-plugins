@@ -58,6 +58,11 @@ _DMMR_COMMUNICATION_LOST_STATE = "Communication lost"
 _DMMR_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
 _DMMR_ATTENTION_STATE_TOKENS = ("error", "unconfirmed", "lost", "pending")
 _DMMR_TRANSPORT_FAILURE_THRESHOLD = 3
+# After reading stopped on lost replies with the DMMR confirmed OFF and closed, it reconnects by itself
+# once, after this delay, then not again within the hour (2026-11-16 02:00: the DMMR stopped and an
+# overnight map stopped with it; switched ON again the next morning, it read normally).
+_DMMR_AUTO_RECONNECT_DELAY_S = 30.0
+_DMMR_AUTO_RECONNECT_EVERY_S = 3600.0
 _DMMR_POWER_ON_ICON = "switch-medium_on.png"
 _DMMR_POWER_OFF_ICON = "switch-medium_off.png"
 _DMMR_NEUTRAL_WIDGET_STYLE = (
@@ -802,6 +807,19 @@ def _session_restart_recording(device: Any, deadline: float) -> None:
         return
     QTimer.singleShot(1000, lambda: _session_restart_recording(device, deadline))
 # ---- end crash resume ----
+
+
+def _auto_reconnect(device: Any, controller: Any, generation: object, recording: bool) -> None:
+    """Switch the DMMR ON again after a read stop, unless the operator has acted meanwhile."""
+    if getattr(controller, "_auto_reconnect_generation", None) != generation:
+        return
+    controller._auto_reconnect_generation = None
+    if device.isOn() or getattr(controller, "initialized", False):
+        return
+    device.print(f"{device.name} reconnecting by itself after the read stop.", flag=PRINT.WARNING)
+    device.setOn(True)
+    if recording:
+        _session_restart_recording(device, time.monotonic() + 120.0)
 
 
 def providePlugins() -> "list[type[Plugin]]":
@@ -3782,7 +3800,7 @@ class DMMRController(DeviceController):
         self.print(f'DMMR reading stopped: {reason}', flag=PRINT.ERROR)
         self.acquiring = False
         self.initializeValues(reset=True)
-        stopped = False
+        stopped = reconnect = False
         try:
             with self._controller_lock_section('Could not acquire DMMR stop lock.',
                                                already_acquired=already_acquired):
@@ -3793,7 +3811,7 @@ class DMMRController(DeviceController):
                     stopped = True
                 elif device is not None and not getattr(device, '_transport_poisoned', False):
                     if self._disable_acquisition(already_acquired=True):
-                        stopped = device.disconnect() is True
+                        stopped = reconnect = device.disconnect() is True
         except Exception as stop_exc:
             self.print(f'DMMR stop not confirmed: {stop_exc}', flag=PRINT.WARNING)
         if stopped:
@@ -3801,12 +3819,39 @@ class DMMRController(DeviceController):
             self.initialized = False
             self.main_state = 'Disconnected'
             self._restore_off_ui_state()
+            if reconnect:
+                self._schedule_auto_reconnect()
         else:
             self.initialized = True
             self.main_state = _DMMR_SHUTDOWN_UNCONFIRMED_STATE
             self._restore_on_ui_state()
         self.device_state_summary = self.voltage_state_summary = self.temperature_state_summary = 'Unknown'
         self._sync_status_to_gui()
+
+    def _schedule_auto_reconnect(self) -> None:
+        """Reconnect once, after a delay, when reading stopped with the DMMR confirmed OFF and closed."""
+        parent = self.controllerParent
+        if not callable(getattr(parent, "setOn", None)):
+            return
+        now = time.monotonic()
+        last = getattr(self, "_auto_reconnect_at", None)
+        if last is not None and now - last < _DMMR_AUTO_RECONNECT_EVERY_S:
+            self.print("DMMR not reconnected by itself: it already was "
+                       f"{(now - last) / 60:.0f} min ago. Switch it ON by hand.", flag=PRINT.WARNING)
+            return
+        self._auto_reconnect_at = now
+        generation = self._auto_reconnect_generation = object()
+        recording = bool(getattr(parent, "recording", False))
+        delay_ms = int(_DMMR_AUTO_RECONNECT_DELAY_S * 1000)
+        self.print(f"DMMR reconnecting by itself in {_DMMR_AUTO_RECONNECT_DELAY_S:.0f} s.", flag=PRINT.WARNING)
+
+        def later() -> None:
+            try:
+                from PyQt6.QtCore import QTimer
+            except ImportError:
+                return
+            QTimer.singleShot(delay_ms, lambda: _auto_reconnect(parent, self, generation, recording))
+        _invoke_gui_callback(later)
 
     def fakeNumbers(self) -> None:
         self.initializeValues(reset=True)
@@ -3849,6 +3894,7 @@ class DMMRController(DeviceController):
             self.print(f"DMMR startup diagnostics unavailable: {exc}", flag=PRINT.WARNING)
 
     def toggleOn(self) -> None:
+        self._auto_reconnect_generation = None  # The operator's ON or OFF replaces a pending reconnection.
         base_toggle_on = getattr(super(), "toggleOn", None)
         if callable(base_toggle_on):
             base_toggle_on()

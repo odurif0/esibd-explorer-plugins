@@ -415,6 +415,77 @@ def test_a_line_that_cannot_start_stops_the_map_at_once_without_counting_it(engi
     assert scan.channels['Q1_DC'].value == 36., 'start values restored'
 
 
+class _BeamLostMScan(FakeMScan):
+    """2026-11-15 lab: the beam fell to a tenth from 18:55 to 21:44 with the spray current in range."""
+
+    def __init__(self, lost_after, low_references):
+        super().__init__()
+        self.lost_after, self.low_references = lost_after, low_references
+        self.dimmed = set()
+
+    def _start_map_line(self):
+        started = super()._start_map_line()
+        request = self.line
+        if len(self.lines_run) > self.lost_after and self.low_references > 0:
+            self.result['signal'] = [.1 * y for y in self.result['signal']]
+            self.dimmed.add(request['id'])
+            self.low_references -= request['role'] == 'reference'
+        return started
+
+
+def test_a_map_waits_for_a_lost_beam_and_measures_its_lines_again(engine, tmp_path):
+    plan = tmp_path / 'beam.toml'
+    plan.write_text((PLANS / 'q2_P1_2h.toml').read_text() + '\n[map.reference]\nbeam_wait_s = 0\n'
+                    'beam_max_wait_s = 3600\n')
+    scan = _BeamLostMScan(lost_after=6, low_references=2)
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    folder = run_map(runner, plan)
+    status = json.loads((folder / RUNNER.STATUS).read_text())
+    assert status['state'] == 'done', status
+    log = (folder / RUNNER.LOG).read_text()
+    assert 'Map: beam lost: the 922 ' in log and ' fell to ' in log, log
+    records = json.loads((folder / RUNNER.JOURNAL).read_text())['records']
+    waits = [r for r in records if r['request']['role'] == 'wait']
+    assert waits and all(r['request']['point'] == 'BEAM' for r in waits)
+    # Each measurement line measured without beam is measured again once the beam is back.
+    def same(a, b):
+        return (a['request']['role'] == b['request']['role'] and a['request']['variant'] == b['request']['variant']
+                and abs(a['request']['k'] - b['request']['k']) < 1e-6 and a['request']['f_hz'] == b['request']['f_hz'])
+    dark = [r for r in records if r['request']['id'] in scan.dimmed
+            and r['request']['role'] not in ('reference', 'probe')]
+    for lost in dark:
+        assert any(same(r, lost) and r['request']['id'] not in scan.dimmed and r['outcome'] == 'done'
+                   for r in records), lost['request']
+    assert dark, 'a measurement line ran while the beam was lost'
+    probes = [r for r in records if r['request']['role'] == 'probe']
+    assert probes and all(r['analysis']['level'] > 0 for r in probes), 'a probe before the long lines'
+
+
+class ScanStopped(Exception):
+    """The name MScan's _gui raises when a Qt response comes too late after a scan stopped."""
+
+
+def test_a_late_qt_response_fails_one_line_and_the_map_goes_on(engine, tmp_path):
+    """2026-11-16 21:00: Explorer's hourly history save held the Qt thread while a line started; MScan's
+    5 s wait expired and the map stopped on a traceback after 30 lines."""
+    scan = FakeMScan()
+    original, late = scan._start_map_line, []
+
+    def start():
+        if len(scan.lines_run) == 3 and not late:
+            late.append(True)
+            raise ScanStopped('Scan stopped.')
+        return original()
+    scan._start_map_line = start
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    folder = run_map(runner, PLANS / 'q2_P1_2h.toml')
+    status = json.loads((folder / RUNNER.STATUS).read_text())
+    assert status['state'] == 'done', status
+    records = json.loads((folder / RUNNER.JOURNAL).read_text())['records']
+    failed = [r for r in records if r['outcome'] == 'failed']
+    assert len(failed) == 1 and failed[0]['error'] == 'ScanStopped: Scan stopped.'
+
+
 def test_a_fixed_spray_range_of_the_plan_replaces_the_window():
     """User 2026-11-12: a fixed ESI current range in nA, as in Transmission, whatever the spray at Start."""
     scan, said = FakeMScan(), []
@@ -532,9 +603,12 @@ def test_resume_gives_a_line_that_failed_three_times_new_attempts(engine, tmp_pa
     assert json.loads((folder / RUNNER.STATUS).read_text())['state'] == 'done'
     journal = json.loads((folder / RUNNER.JOURNAL).read_text())
     assert journal['session_start'] == 4
-    first = journal['records'][1:5]
-    assert [r['outcome'] for r in first] == ['failed', 'failed', 'failed', 'done']
-    assert len({r['request']['label'] for r in first}) == 1, 'the same line, measured after the Resume'
+    records = journal['records']
+    failed, resumed_reference, again = records[1:4], records[4], records[5]
+    assert [r['outcome'] for r in failed] == ['failed'] * 3
+    assert resumed_reference['request']['role'] == 'reference', 'a Resume checks the beam first'
+    assert again['outcome'] == 'done' and again['request']['label'] == failed[0]['request']['label'], \
+        'the same line, measured after the Resume'
 
 
 def test_failed_lines_within_an_hour_stop_the_map(engine, tmp_path):
@@ -849,6 +923,43 @@ def test_a_line_without_new_points_is_stopped_as_hung(monkeypatch):
     runner.STALL_S = .05
     data = runner._run_scan(dict(expected_s=1e3, axis=list(range(40))))
     assert scan.stops >= 1 and data['error'].startswith('no new point for')
+
+
+class _SprayLineScan(_LineScan):
+    """A line during which the emitter runs dry after ``dry_after`` polls."""
+
+    def __init__(self, points, dry_after):
+        super().__init__(points, every=1)
+        self.dry_after = dry_after
+
+    def _map_spray_now(self):
+        return 60e-9 if self.polls < self.dry_after else 0.
+
+
+def test_a_line_stops_once_the_spray_has_stayed_outside_its_range(monkeypatch):
+    """2026-11-16 lab: the emitter ran dry at 11:18 in a 36 min line, which went on until the operator
+    stopped it: the spray of a line was judged only on its mean, at the end."""
+    scan = _SprayLineScan(points=10 ** 6, dry_after=50)
+    runner = _guard_runner(scan, monkeypatch, spray_range_na=[20, 150])
+    runner.SPRAY_OUT_S, runner.SPRAY_CHECK_EVERY_S = 0.02, 0.
+    clock = iter(np.arange(0, 1e6, .001))
+    runner.monotonic = lambda: float(next(clock))
+    data = runner._run_scan(dict(expected_s=1e6, axis=list(range(10 ** 6))))
+    assert scan.stops >= 1
+    assert data['error'].startswith('spray current 0.0 nA outside its window 20.0–150.0 nA'), data['error']
+    assert 50 <= scan.polls < 200, 'stopped soon after the spray went out'
+
+
+def test_a_short_spray_dip_does_not_stop_a_line(monkeypatch):
+    scan = _SprayLineScan(points=300, dry_after=10 ** 9)
+    spray = scan._map_spray_now
+    scan._map_spray_now = lambda: 0. if 100 <= scan.polls < 110 else spray()
+    runner = _guard_runner(scan, monkeypatch, spray_range_na=[20, 150])
+    runner.SPRAY_OUT_S, runner.SPRAY_CHECK_EVERY_S = 0.05, 0.
+    clock = iter(np.arange(0, 1e6, .001))
+    runner.monotonic = lambda: float(next(clock))
+    data = runner._run_scan(dict(expected_s=1e6, axis=list(range(300))))
+    assert data['status'] == 'completed' and scan.stops == 0
 
 
 def test_a_line_longer_than_every_point_of_its_axis_is_stopped(monkeypatch):

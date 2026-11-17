@@ -645,8 +645,10 @@ def test_native_command_dispatch_still_expires_without_late_write(mscan_module, 
     from threading import Event
 
     queued, writes = [], []
-    scan = NS(_cancel=Event(), _bridge=NS(thread=lambda: object(), request=NS(emit=queued.append)))
-    clock = iter([0., 6.])
+    timeout = mscan_module.MScan.GUI_TIMEOUT_S
+    scan = NS(_cancel=Event(), _bridge=NS(thread=lambda: object(), request=NS(emit=queued.append)),
+              GUI_TIMEOUT_S=timeout)
+    clock = iter([0., timeout + 1.])
     monkeypatch.setattr(mscan_module, 'time', NS(monotonic=lambda: next(clock)))
     with pytest.raises(mscan_module.ScanError, match='Qt response timed out'):
         mscan_module.MScan._gui(scan, lambda: writes.append(70.))
@@ -654,6 +656,26 @@ def test_native_command_dispatch_still_expires_without_late_write(mscan_module, 
     mscan_module._GuiBridge.execute(scan._bridge, queued[0])
     assert queued[0].done.is_set() and isinstance(queued[0].error, mscan_module.ScanStopped)
     assert not writes
+
+
+def test_a_qt_thread_busy_for_an_hourly_save_does_not_expire(mscan_module, monkeypatch):
+    """2026-11-16 19:00 and 21:00: Explorer's hourly history save held the Qt thread longer than the
+    former 5 s wait; a line aborted, then a map stopped."""
+    from threading import Event
+
+    queued = []
+    scan = NS(_cancel=Event(), _bridge=NS(thread=lambda: object(), request=NS(emit=queued.append)),
+              GUI_TIMEOUT_S=mscan_module.MScan.GUI_TIMEOUT_S)
+    ticks = iter([0., 6., 6.])
+
+    def monotonic():
+        value = next(ticks)
+        if value == 6. and queued and not queued[0].done.is_set():
+            mscan_module._GuiBridge.execute(scan._bridge, queued[0])  # Qt answers after 6 s
+        return value
+    monkeypatch.setattr(mscan_module, 'time', NS(monotonic=monotonic))
+    assert mscan_module.MScan._gui(scan, lambda: 42) == 42
+    assert mscan_module.MScan.GUI_TIMEOUT_S >= 20
 
 
 @pytest.mark.parametrize(('scenario', 'scale'), [

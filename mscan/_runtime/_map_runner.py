@@ -145,9 +145,17 @@ class MapRunner:
     SPRAY_WAIT_S = 1800.
     FAILURES_PER_HOUR = 3
     LINE_MARGIN_S = 180.
-    START_RETRY_S = 30.  # A refused line start is tried again for this long (a source briefly busy).
+    # A refused line start is tried again for this long: a source briefly busy, or the DMMR restarting
+    # by itself after a lost reply (2026-11-16 lab: the DMMR stopped at 02:00:06 and the map stopped
+    # 30 s later, with the spray still on).
+    START_RETRY_S = 600.
     START_RETRY_EVERY_S = 5.
     STALL_S = 300.  # A point settles within its 30 s timeout or fails: 5 min without one is a hang.
+    # A line stops as soon as the ESI current has stayed outside its window this long, instead of being
+    # judged on its mean at the end (2026-11-16 lab: the emitter ran dry at 11:18 in a 36 min line,
+    # which went on until the operator stopped it).
+    SPRAY_OUT_S = 60.
+    SPRAY_CHECK_EVERY_S = 5.
     # Between two points, beyond settle_s: readback confirmation (2026-11-04: 1.0 s median, 2.6 s at most).
     POINT_OVERHEAD_S = 2.
 
@@ -289,6 +297,8 @@ class MapRunner:
             self._set_status('running', f'Line {request["id"]}: {request["stage"]} {request["role"]} '
                              f'{request["point"]} {request["variant"]}'.strip(), progress=progress, request=request)
             if kind == 'wait':
+                if request.get('point') == 'BEAM':
+                    self._say_beam(request)
                 result = self._wait(request)
             else:
                 result = self._line(request)
@@ -333,12 +343,29 @@ class MapRunner:
             result.update(outcome='unreachable', error=str(exc))
         except LineFailed as exc:
             result.update(outcome='failed', error=str(exc))
+        except Exception as exc:
+            # A Qt response that came too late (2026-11-16 21:00: Explorer's hourly history save held the
+            # Qt thread while a line started, and the map stopped on a traceback) fails this line only.
+            if self.cancel.is_set() or type(exc).__name__ not in ('ScanError', 'ScanStopped'):
+                raise
+            result.update(outcome='failed', error=f'{type(exc).__name__}: {exc}')
         finally:
-            self.scan._gui(self.scan._end_map_line, cancel=False)
+            self._end_line()
         result['duration_s'] = self.clock() - started
         for key in ('axis', 'signal', 'sigma', 'spray'):
             result[key] = finite(result.get(key) or [])
         return result
+
+    def _end_line(self):
+        """Release the line in MScan; a Qt thread still busy is asked again (three times)."""
+        for attempt in range(3):
+            try:
+                self.scan._gui(self.scan._end_map_line, cancel=False)
+                return
+            except Exception as exc:
+                if type(exc).__name__ not in ('ScanError', 'ScanStopped') or attempt == 2:
+                    raise
+                time.sleep(1.)
 
     @staticmethod
     def _unreachable(error) -> bool:
@@ -371,16 +398,28 @@ class MapRunner:
         begin = self.monotonic()
         progress, progressed = self._points_done(), begin
         reason, stop_requested = '', None
+        window, spray_checked, spray_out = self._spray_window(), begin, None
         while not self.scan._gui(lambda: bool(self.scan.finished), cancel=False):
             now = self.monotonic()
             done = self._points_done()
             if done != progress:
                 progress, progressed = done, now
+            if window is not None and now - spray_checked >= self.SPRAY_CHECK_EVERY_S:
+                spray_checked = now
+                spray = self.scan._gui(self.scan._map_spray_now, cancel=False)
+                inside = spray is not None and math.isfinite(spray) and window[0] <= abs(spray) <= window[1]
+                spray_out = None if inside else (spray_out if spray_out is not None else (now, spray))
             if not reason and not self.cancel.is_set():
                 if progress is not None and now - progressed > self.STALL_S:
                     reason = f'no new point for {self.STALL_S / 60:.0f} min'
                 elif now - begin > limit:
                     reason = f'line longer than {limit / 60:.0f} min, the time of every point of its axis'
+                elif spray_out is not None and now - spray_out[0] >= self.SPRAY_OUT_S:
+                    value = spray_out[1]
+                    reading = ('unavailable' if value is None or not math.isfinite(value)
+                               else f'{abs(value) * 1e9:.1f} nA')
+                    reason = (f'spray current {reading} outside its window {self._window_text(window)} for '
+                              f'{self.SPRAY_OUT_S:.0f} s during the line')
             if self.cancel.is_set() or reason:
                 stop_requested = now if stop_requested is None else stop_requested
                 self.scan._gui(self.scan._stop_map_line, cancel=False)
@@ -544,6 +583,13 @@ class MapRunner:
 
     def _spray_percent(self):
         return float(self.journal['plan']['map'].get('spray_window_percent', 20.))
+
+    def _say_beam(self, request):
+        """The engine waits for the beam: tell the operator (map.log and the console)."""
+        text = f'Map: {request.get("variant", "beam lost")}.'
+        self._log(text)
+        with contextlib.suppress(Exception):
+            self.scan._gui(lambda: self.scan.print(text), cancel=False)
 
     def _say_window(self, window):
         """Tell the operator the spray window whenever it changes (map.log and the console)."""

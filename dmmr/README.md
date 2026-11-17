@@ -150,11 +150,18 @@ An unavailable capture is explicitly reported, not silently omitted.
 
 Returned receive errors (`−10` to `−13`) are logged before recovery. The driver
 checks the controller, acquisition mode and ranges, with a serial purge if needed,
-and one more purge if a reply is lost during that check (2026-10-30: `-13` then `-10`
-stopped the reading for 56 min). The failed reading is missing data, never a reused value.
+and up to three more purges, 2, 5 and 12 s apart, while a reply is lost during that check. A check
+read that got no reply at all (`−10`) is asked again, up to twice, before a purge: a range read went
+unanswered in 3 of 56 reads on 2026-11-15/16, always at start or in a recovery
+(2026-10-30: `-13` then `-10` stopped the reading for 56 min; 2026-11-16 02:00: two passes 1.7 s
+apart failed and stopped an overnight map). The failed reading is missing data, never a reused value.
 A second error before valid replies from all modules, or a fourth incident
 within 60 seconds, stops acquisition. A blocked DLL is never retried or closed
 concurrently. This checks new replies, not fresh ADC conversions.
+
+When reading stops with the DMMR confirmed OFF and its port closed, it switches ON again by itself
+30 s later, and restarts recording if it was recording; pressing ON or OFF meanwhile cancels that.
+It does so once per hour: a second stop within the hour waits for the operator.
 
 Keep `<Explorer data path>/logs/dmmr/dmmr_protocol_com*.jsonl*` with the Explorer
 log and native worker logs. The protocol log records clear-on-read port

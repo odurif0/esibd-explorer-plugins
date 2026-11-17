@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "c7a071b2086b0617ddb4ae54b42776b74ed086178c65eb3065992db57fbb8b25",
-    "size_bytes": 391545,
-    "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
+    "sha256": "d8649ccbfeb0dc46f01faa604ba1eb69863c49403fc5d1af27ce7f2bec3e3d81",
+    "size_bytes": 395830,
+    "source_data_sha256": "550cbbc65f274da5f5133c60e7942c4874e9550172306588342406d08b36d2e2",
     "vendored": false
   },
-  "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
+  "source_data_sha256": "550cbbc65f274da5f5133c60e7942c4874e9550172306588342406d08b36d2e2",
   "targets": {
     "windows-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-ampr-worker.exe",
       "sha256": "bebe45f7ffc408e93b796da321c4442bc5dafea6e199dc2ddd5f0642245628fd",
       "size_bytes": 803328,
-      "source_data_sha256": "f3dc3be3d38f21cd3c8ebf009a83ad78ef6f4ebab5ac23f9c7ae05cc1a2fab52",
+      "source_data_sha256": "550cbbc65f274da5f5133c60e7942c4874e9550172306588342406d08b36d2e2",
       "target": "x86_64-pc-windows-gnu"
     }
   },

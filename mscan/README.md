@@ -431,6 +431,9 @@ human:
   point a ladder in k up to the closing, two repeats, a verification line at the computed (k*, δ*)
   and a cut along the entry stub; then the outer search in (f, E), an out-of-sample check, a local
   check and the best scan, repeated. A reference window on 922 every five lines corrects the drift.
+  The first design point runs first, the others in an order drawn from `seed`; `ordered = true` in
+  `[map.design]` keeps the order written (2026-11-16: a seed that kept 5 points in order put the most
+  useful of 4 last).
 - **Peaks.** R = m/Δm is read at the outer half-height edges of each band. The bands are
   flat-topped with ripples on their high-A side that reproduce from day to day (2026-11-04 and
   11-12); a ripple below half height no longer cuts the band short. A Gaussian fit made these bands
@@ -459,10 +462,32 @@ human:
   peak. `spray_range_na = [30, 60]` in the plan sets a fixed range in nA instead. The window in use
   is said in the console and `map.log` whenever it changes. Each Start or Resume takes its own
   reference (2026-11-12: after a map stopped on its window, the next maps kept that window).
+- **Beam.** The spray current does not show the beam (2026-11-15: the 922 reference fell from 54 to
+  3.5 pA from 18:55 to 21:44 while the current stayed at 33–65 nA, and 12 lines measured nothing).
+  A reference line whose ion falls below `beam_min_fraction` (0.5) of the best good reference of
+  the last `beam_window_s` (2 h; judged against the last one, a beam fading 40 % per reference passed)
+  means the beam is lost: the lines measured since the last good check are measured again, and the
+  map waits, measuring the reference again every `beam_wait_s` (5 min), until the beam comes back,
+  for at most `beam_max_wait_s` (3 h). The console and `map.log` say so. Each Start or Resume
+  begins with a reference, and a Resume judges it against the good references before it: a
+  Resume without beam waits instead of taking a low peak as the new normal. After a deliberate
+  change (another emitter giving less beam), start a new map or lower `beam_min_fraction`.
+- **Ion probe.** Before each line of 5 min or more that does not follow a reference, a probe of
+  about 1 min (`probe_points` = 9 points across the top of the last good 922 reference peak, on the
+  same detector) checks that ions arrive; below `beam_min_fraction` of that reference the beam is
+  lost, as above (2026-11-16: the beam faded during a 36 min line and was gone for the next two with
+  the ESI current in range). `probe = false` in `[map.reference]` turns it off.
+- **Unconfirmed lines.** After a Resume, the lines measured since the last good reference or probe
+  before the stop are measured again: nothing tells whether the beam was there (2026-11-16: two
+  lines without ions stayed counted when the references after them failed on the spray).
 - **A line that cannot start** (a PSU switched OFF after a fault, no readback, DMMR stopped) is
-  tried again for 30 s. The map then stops and says what to fix; that line is not counted, so
-  Map… → Resume continues with it (2026-11-12: after PSU_A went OFF, the map spent its three
-  failures in 4 s).
+  tried again for 10 min, long enough for the DMMR to restart by itself after a lost reply (it
+  stopped a map at 02:00 on 2026-11-16). The map then stops and says what to fix; that line is not
+  counted, so Map… → Resume continues with it (2026-11-12: after PSU_A went OFF, the map spent
+  its three failures in 4 s).
+- **Spray during a line.** A line whose ESI current stays outside its window for 60 s is stopped at
+  once and measured again (2026-11-16: the emitter ran dry at 11:18 in a 36 min line, which went on
+  until the operator stopped it).
 - **Faults.** A failed line (spray outside its window over the line, a worker or detector fault,
   no new point for 5 min, or a line longer than all the points of its axis would take at
   `point_s + settle_s + 2 s` each) is measured again. A line slower than its estimate is not a

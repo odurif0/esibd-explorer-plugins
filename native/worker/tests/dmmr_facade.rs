@@ -673,7 +673,7 @@ fn framing_failure_allows_one_purge_restores_baud_drains_fifo_and_restarts_only_
 }
 
 #[test]
-fn a_reply_lost_while_verifying_gets_one_more_resynchronization_then_stops() {
+fn a_reply_lost_while_verifying_gets_more_resynchronizations_then_stops() {
     let flush = || {
         step(
             "GetCurent",
@@ -688,13 +688,16 @@ fn a_reply_lost_while_verifying_gets_one_more_resynchronization_then_stops() {
             step("SetAutomaticCurent", 0, vec![]),
         ]
     };
+    // A range read unanswered three times in a row: the pass fails.
     let lost = |steps: &mut Vec<_>| {
         steps.extend(verify(false, &[]));
-        steps.push(step(
-            "GetModuleMeasRange",
-            -10,
-            vec![json!(0), json!(false)],
-        ));
+        for _ in 0..3 {
+            steps.push(step(
+                "GetModuleMeasRange",
+                -10,
+                vec![json!(0), json!(false)],
+            ));
+        }
     };
     // 2026-10-30 lab: -13 on GetState, then -10 on a range while verifying.
     let mut steps = connect_steps();
@@ -711,17 +714,66 @@ fn a_reply_lost_while_verifying_gets_one_more_resynchronization_then_stops() {
     assert_eq!(incident["verified"], json!(true));
     completed(&script);
 
-    // Bounded: a third lost reply stops the reading.
+    // 2026-11-16 lab: -13 on GetState, then -10 on a range in two passes; the third pass finds the
+    // DMMR answering again.
     let mut steps = connect_steps();
     steps.push(step("GetState", -13, vec![json!(0)]));
+    for _ in 0..2 {
+        steps.extend(resync());
+        lost(&mut steps);
+    }
     steps.extend(resync());
-    lost(&mut steps);
-    steps.extend(resync());
-    lost(&mut steps);
+    steps.extend(verify(false, &[(0, 2, false)]));
+    steps.push(flush());
+    let (mut c, script) = controller(steps);
+    call(&mut c, "connect", vec![]).unwrap();
+    configure(&mut c, json!({"0":[2,false]}), false);
+    let incident = call(&mut c, "recover_read", vec![json!(-13), json!("get_state")]).unwrap();
+    assert_eq!(incident["verified"], json!(true));
+    assert_eq!(incident["passes"], json!(3));
+    completed(&script);
+
+    // Bounded: a reply lost in each of the four passes stops the reading.
+    let mut steps = connect_steps();
+    steps.push(step("GetState", -13, vec![json!(0)]));
+    for _ in 0..4 {
+        steps.extend(resync());
+        lost(&mut steps);
+    }
     let (mut c, script) = controller(steps);
     call(&mut c, "connect", vec![]).unwrap();
     configure(&mut c, json!({"0":[2,false]}), false);
     assert!(call(&mut c, "recover_read", vec![json!(-13), json!("get_state")]).is_err());
+    completed(&script);
+}
+
+#[test]
+fn an_unanswered_range_read_is_asked_again_without_a_purge() {
+    // 2026-11-15/16 lab: GetModuleMeasRange went unanswered (-10, nothing received) in 3 of 56 reads;
+    // with 8 modules a whole pass failed about one time in three.
+    let mut steps = connect_steps();
+    steps.push(step("GetState", 0, vec![json!(0)]));
+    steps.push(step("GetEnable", 0, vec![json!(true)]));
+    steps.push(step("GetAutomaticCurent", 0, vec![json!(false)]));
+    steps.push(exact(
+        "GetModuleMeasRange",
+        json!([0, 0, false]),
+        -10,
+        vec![json!(0), json!(false)],
+    ));
+    steps.push(exact(
+        "GetModuleMeasRange",
+        json!([0, 0, false]),
+        0,
+        vec![json!(2), json!(false)],
+    ));
+    let (mut c, script) = controller(steps);
+    call(&mut c, "connect", vec![]).unwrap();
+    configure(&mut c, json!({"0":[2,false]}), false);
+    let incident = call(&mut c, "recover_read", vec![json!(-11), json!("current")]).unwrap();
+    assert_eq!(incident["verified"], json!(true));
+    assert_eq!(incident["unanswered_reads"], json!(1));
+    assert_eq!(incident["purge_attempted"], json!(false));
     completed(&script);
 }
 
@@ -737,6 +789,9 @@ fn bad_state_range_gate_and_baud_readback_never_trigger_reenable_or_reconnect() 
             ]),
             "range" => steps.extend(verify(false, &[(0, 3, false)])),
             _ => steps.extend([
+                // Unanswered three times: then the purge, whose baud readback is wrong.
+                step("GetState", -10, vec![json!(0)]),
+                step("GetState", -10, vec![json!(0)]),
                 step("GetState", -10, vec![json!(0)]),
                 step("Purge", 0, vec![]),
                 step("SetBaudRate", 0, vec![json!(9600)]),
