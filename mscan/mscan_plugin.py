@@ -456,6 +456,9 @@ class MScan(Scan):
     VALIDATION = 'Validation'
     PAIRS = {'CH0-CH1': (0, 1), 'CH2-CH3': (2, 3)}
     POLL_S = .05
+    # Explorer's hourly history save blocks the Qt thread for several seconds (2026-11-16: 'Stored data in
+    # dmmr.h5' at 19:00:20 and 21:00:25, then a 5 s wait expired: a line aborted, then a map stopped).
+    GUI_TIMEOUT_S = 30.
     PICOAMPERE = 1e12  # Plot unit; files keep amperes.
     # Panel layout (user request 2026-11-03: the flat list was not intuitive). Status first, next to
     # Start; then what to choose, in the order a scan is prepared; live readings last. None: top level.
@@ -2709,7 +2712,7 @@ class MScan(Scan):
             self._bridge.execute(call)
         else:
             self._bridge.request.emit(call)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + self.GUI_TIMEOUT_S
         while not call.done.wait(.02):
             if (cancel and self._cancel.is_set()) or time.monotonic() > deadline:
                 call.expired.set()  # a delayed Qt callback must not write later

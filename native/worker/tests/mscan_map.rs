@@ -731,3 +731,320 @@ fn a_band_with_two_maxima_is_flagged_split() {
     let r = p["r"].as_f64().unwrap();
     assert!((26.0..33.0).contains(&r), "R {r}: {p}");
 }
+
+fn beam_plan(extra: Value) -> Value {
+    let mut map = json!({
+        "reference_every": 3,
+        "design": {"amplitude": [[500, 12], [500, 5]], "frequency": []},
+        "ladder": {"repeats": 0, "max_lines": 4},
+        "stopping": {"repeats": 1},
+        "stages": {"search": false, "validation": false, "local": false, "best": false},
+    });
+    if let (Some(m), Some(e)) = (map.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            m.insert(k.clone(), v.clone());
+        }
+    }
+    plan_with(map)
+}
+
+fn simulate_with(c: &mut Controller, plan: Value, options: Value) -> Value {
+    let mut opts = json!({"hypothesis": "H1", "journal": true, "max_lines": 200, "drift": 0.0});
+    for (k, v) in options.as_object().unwrap() {
+        opts[k] = v.clone();
+    }
+    call(c, "map_simulate", &[plan, instrument(), opts]).unwrap()
+}
+
+#[test]
+fn lines_measured_while_the_beam_is_lost_are_measured_again() {
+    // 2026-11-15 lab: the beam was lost from 18:55 to 21:44 while the spray current stayed in
+    // range; the 922 reference fell from 54 to 3.5 pA and 12 lines measured nothing.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let clean = simulate_with(&mut c, beam_plan(json!({})), json!({}));
+    let start = 1.8e9;
+    let (off_from, off_to) = (6000.0, 13000.0);
+    let out = simulate_with(
+        &mut c,
+        beam_plan(json!({})),
+        json!({"beam_off": [[off_from, off_to]]}),
+    );
+    assert_eq!(out["outcome"], json!("done"), "{}", out["reason"]);
+    let records = out["journal"]["records"].as_array().unwrap();
+    let waits: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["request"]["role"] == json!("wait"))
+        .collect();
+    assert!(!waits.is_empty());
+    let text = waits[0]["request"]["variant"].as_str().unwrap();
+    assert!(
+        text.starts_with("beam lost: the 922 reference fell to"),
+        "{text}"
+    );
+    // Every ladder rung has a line measured with the beam, and the map measures the same rungs as
+    // without the loss.
+    let rungs = |records: &[Value], valid_only: bool| {
+        let mut set: Vec<(String, String)> = records
+            .iter()
+            .filter(|r| r["request"]["role"] == json!("ladder") && r["outcome"] == json!("done"))
+            .filter(|r| {
+                let t = r["started"].as_f64().unwrap() - start;
+                let end = t + r["duration_s"].as_f64().unwrap();
+                !valid_only || end <= off_from || t >= off_to
+            })
+            .map(|r| {
+                (
+                    r["request"]["point"].as_str().unwrap().to_owned(),
+                    format!("{:.5}", r["request"]["k"].as_f64().unwrap()),
+                )
+            })
+            .collect();
+        set.sort();
+        set.dedup();
+        set
+    };
+    let clean_rungs = rungs(clean["journal"]["records"].as_array().unwrap(), false);
+    assert_eq!(rungs(records, true), clean_rungs);
+    let lost = records
+        .iter()
+        .filter(|r| {
+            let t = r["started"].as_f64().unwrap() - start;
+            r["request"]["role"] == json!("ladder") && t > off_from && t < off_to
+        })
+        .count();
+    assert_eq!(
+        lost, 0,
+        "no ladder line is started while the beam is known to be lost"
+    );
+    assert!(records.len() > clean["journal"]["records"].as_array().unwrap().len());
+}
+
+#[test]
+fn a_beam_that_does_not_come_back_stops_the_map() {
+    let mut c = Controller::new(&json!({})).unwrap();
+    let out = simulate_with(
+        &mut c,
+        beam_plan(json!({"reference": {"beam_max_wait_s": 3600}})),
+        json!({"beam_off": [[6000, 1e9]]}),
+    );
+    assert_eq!(out["outcome"], json!("stop"));
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.starts_with("beam lost for 6"), "{reason}");
+    assert!(reason.contains("Map… → Resume"), "{reason}");
+}
+
+#[test]
+fn a_resume_checks_the_beam_against_the_reference_before_it() {
+    // A Resume without beam must not make a low 922 peak the new normal (2026-11-15: 54 → 3.5 pA,
+    // still a found peak).
+    let mut c = Controller::new(&json!({})).unwrap();
+    let out = simulate_with(
+        &mut c,
+        beam_plan(json!({"reference": {"beam_max_wait_s": 1800}})),
+        json!({"beam_off": [[6000, 1e9]]}),
+    );
+    assert_eq!(out["outcome"], json!("stop"));
+    let mut j = out["journal"].clone();
+    let records = j["records"].as_array().unwrap().clone();
+    let references: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["request"]["role"] == json!("reference") && r["outcome"] == json!("done"))
+        .collect();
+    let height = |r: &Value| {
+        r["analysis"]["peaks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| (p["mz"].as_f64().unwrap() - 922.01).abs() < 0.5)
+            .map_or(0.0, |p| p["height"].as_f64().unwrap())
+    };
+    let good = references.first().unwrap();
+    let low = references.last().unwrap();
+    assert!(height(low) > 0.0 && height(low) < 0.5 * height(good));
+    let resume = |j: &mut Value, reference: &Value| {
+        let records = j["records"].as_array_mut().unwrap();
+        let mut r = reference.clone();
+        let last = records.last().unwrap();
+        r["request"]["id"] = json!(records.len() + 1);
+        r["started"] = json!(last["started"].as_f64().unwrap() + 7200.0);
+        records.push(r);
+    };
+    j["session_start"] = json!(records.len());
+    let first = call(&mut c, "map_next", &[j.clone()]).unwrap();
+    assert_eq!(
+        first["request"]["role"],
+        json!("reference"),
+        "a Resume starts with a reference: {first}"
+    );
+    let mut without_beam = j.clone();
+    resume(&mut without_beam, low);
+    let next = call(&mut c, "map_next", &[without_beam]).unwrap();
+    assert_eq!(next["decision"], json!("wait"), "{next}");
+    let mut with_beam = j;
+    resume(&mut with_beam, good);
+    let next = call(&mut c, "map_next", &[with_beam]).unwrap();
+    assert_eq!(next["decision"], json!("line"), "{next}");
+    assert_ne!(next["request"]["role"], json!("reference"));
+}
+
+fn sequence(records: &[Value], start: f64) -> Vec<(u64, String, f64, String, bool)> {
+    records
+        .iter()
+        .map(|r| {
+            (
+                r["request"]["id"].as_u64().unwrap(),
+                r["request"]["role"].as_str().unwrap().to_owned(),
+                ((r["started"].as_f64().unwrap() - start) / 60.0).round(),
+                r["outcome"].as_str().unwrap().to_owned(),
+                r["analysis"]["level"].as_f64().unwrap_or(0.0) > 0.0,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_probe_before_each_long_line_finds_a_lost_beam_at_once() {
+    // 2026-11-16 lab: the beam faded during a 36 min ladder line and was gone for the next two
+    // (44 min) while the ESI current stayed in range; a reference every three lines saw it too late.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let start = 1.8e9;
+    let (off_from, off_to) = (5000.0, 9000.0);
+    let out = simulate_with(
+        &mut c,
+        beam_plan(json!({"reference_every": 5})),
+        json!({"beam_off": [[off_from, off_to]]}),
+    );
+    assert_eq!(out["outcome"], json!("done"), "{}", out["reason"]);
+    let records = out["journal"]["records"].as_array().unwrap();
+    let seq = sequence(records, start);
+    // Every ladder line is preceded by a reference or a probe.
+    for (i, r) in records.iter().enumerate() {
+        if r["request"]["role"] == json!("ladder") && r["outcome"] == json!("done") {
+            let before = records[..i]
+                .iter()
+                .rev()
+                .find(|p| p["outcome"] == json!("done") && p["request"]["role"] != json!("wait"))
+                .unwrap();
+            let role = before["request"]["role"].as_str().unwrap();
+            assert!(role == "probe" || role == "reference", "{seq:?}");
+        }
+    }
+    // The first probe in the dark is followed by a wait, not by a ladder line.
+    let dark_probe = records
+        .iter()
+        .position(|r| {
+            let t = r["started"].as_f64().unwrap() - start;
+            r["request"]["role"] == json!("probe") && t > off_from && t < off_to
+        })
+        .expect("a probe while the beam is off");
+    assert_eq!(
+        records[dark_probe + 1]["request"]["role"],
+        json!("wait"),
+        "{seq:?}"
+    );
+    // No ladder line started in the dark.
+    assert!(!records.iter().any(|r| {
+        let t = r["started"].as_f64().unwrap() - start;
+        r["request"]["role"] == json!("ladder") && t > off_from + 60.0 && t < off_to
+    }));
+    // A probe is short: about a minute.
+    let probe = records
+        .iter()
+        .find(|r| r["request"]["role"] == json!("probe"))
+        .unwrap();
+    assert!(probe["duration_s"].as_f64().unwrap() < 120.0, "{probe}");
+}
+
+#[test]
+fn a_resume_measures_again_the_lines_no_reference_confirmed() {
+    // 2026-11-16 lab: after two ladder lines without beam, the three references failed on the spray
+    // and the map stopped with those lines counted as done.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let out = simulate_with(
+        &mut c,
+        beam_plan(json!({"reference": {"probe": false}, "max_lines": 8})),
+        json!({}),
+    );
+    let mut j = out["journal"].clone();
+    let records = j["records"].as_array().unwrap().clone();
+    let last_reference = records
+        .iter()
+        .rposition(|r| r["request"]["role"] == json!("reference"))
+        .unwrap();
+    let unconfirmed: Vec<&Value> = records[last_reference + 1..]
+        .iter()
+        .filter(|r| r["outcome"] == json!("done"))
+        .collect();
+    assert!(!unconfirmed.is_empty(), "{:?}", sequence(&records, 1.8e9));
+    j["plan"]["map"]["max_lines"] = json!(600);
+    j["session_start"] = json!(records.len());
+    let next = call(&mut c, "map_next", &[j.clone()]).unwrap();
+    assert_eq!(next["request"]["role"], json!("reference"));
+    assert_eq!(
+        next["progress"]["lines_without_beam"],
+        json!(unconfirmed.len()),
+        "{next}"
+    );
+}
+
+#[test]
+fn an_ordered_design_measures_its_points_in_the_order_written() {
+    // 2026-11-16 lab: seed 52 kept the order of five points but ran four as P1, P3, P4, P2.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let design = json!([[550, 14.5], [550, 6.0], [400, 16.6], [400, 7.7]]);
+    let first_points = |ordered: bool, c: &mut Controller| {
+        let plan = plan_with(json!({"seed": 52, "max_lines": 400,
+            "design": {"amplitude": design, "frequency": [], "ordered": ordered},
+            "ladder": {"repeats": 0, "max_lines": 2}, "stopping": {"repeats": 1},
+            "stages": {"search": false, "validation": false, "local": false, "best": false}}));
+        let out = call(
+            c,
+            "map_simulate",
+            &[
+                plan,
+                instrument(),
+                json!({"hypothesis": "H1", "journal": true, "max_lines": 400}),
+            ],
+        )
+        .unwrap();
+        let mut order: Vec<String> = Vec::new();
+        for r in out["journal"]["records"].as_array().unwrap() {
+            let point = r["request"]["point"].as_str().unwrap().to_owned();
+            if r["request"]["role"] == json!("ladder") && !order.contains(&point) {
+                order.push(point);
+            }
+        }
+        order
+    };
+    assert_eq!(first_points(true, &mut c), ["P1", "P2", "P3", "P4"]);
+    assert_ne!(first_points(false, &mut c), ["P1", "P2", "P3", "P4"]);
+}
+
+#[test]
+fn a_beam_fading_step_by_step_is_lost_against_the_best_recent_reference() {
+    // 2026-11-16: the 15:55 reference (26.5 pA) passed at 61 % of the one before (43.3 pA) and became
+    // the measure of the next probes. Judged against the last good reference, a beam losing 40 % per
+    // reference is never lost.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let fade = json!({"beam_scale": [[4000, 1e9, 0.6], [6000, 1e9, 0.6], [8000, 1e9, 0.6]]});
+    let lost = |window: f64, c: &mut Controller| {
+        let out = simulate_with(
+            c,
+            beam_plan(json!({"reference": {"beam_window_s": window, "beam_max_wait_s": 1200}})),
+            fade.clone(),
+        );
+        out["journal"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["request"]["role"] == json!("wait"))
+    };
+    assert!(
+        !lost(0.0, &mut c),
+        "judged against the last reference only, the fade passes"
+    );
+    assert!(
+        lost(7200.0, &mut c),
+        "judged against the best of the last 2 h, it is lost"
+    );
+}

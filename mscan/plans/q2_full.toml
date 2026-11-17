@@ -40,6 +40,8 @@ stub_below_q1_v = 1
 amplitude = [[500, 26], [500, 12], [500, 5], [300, 26], [300, 9.4], [300, 4.3],
              [550, 26], [550, 8]]                         # (f kHz, E eV)
 frequency = [[110, 26], [110, 8]]                          # (A V, E eV): frequency lines
+ordered = false                 # true: the points in the order written; false: P1, then an order drawn
+                                # from the seed (11/16: seed 52 put the most useful of 4 points last)
 
 [map.ladder]
 first_k = 0.200
@@ -80,6 +82,19 @@ k = 0.200
 energy_ev = 26
 ion = 922.01
 window = 0.10
+beam_min_fraction = 0.5         # a reference below half the last good one: beam lost (2026-11-15: 54 -> 3.5 pA
+                                # with the spray current in range); the lines since that good reference
+                                # are measured again, and the map waits for the beam
+beam_window_s = 7200            # ... of the best good reference of the last 2 h (11/16: 26.5 pA passed at
+                                # 61 % of the reference before and became the measure of the probes)
+beam_wait_s = 300               # reference again every 5 min while the beam is lost
+beam_max_wait_s = 10800         # then the map stops (2026-11-15: back after 2 h 50 min)
+probe = true                    # before each measurement line of 5 min or more (and not right after a
+                                # reference): a short line across the top of the last good 922 peak;
+                                # ions below beam_min_fraction of it = beam lost (2026-11-16: no ion for
+                                # 44 min with the spray in range)
+probe_points = 9
+probe_min_line_s = 300
 
 [map.outer]
 max_ladders = 6

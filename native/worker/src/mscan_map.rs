@@ -503,6 +503,10 @@ defaults!(Design {
     amplitude: Vec<[f64; 2]> = vec![[500.0, 26.0], [500.0, 12.0], [500.0, 5.0], [300.0, 26.0],
         [300.0, 9.4], [300.0, 4.3], [550.0, 26.0], [550.0, 8.0]],
     frequency: Vec<[f64; 2]> = vec![[110.0, 26.0], [110.0, 8.0]],
+    // true: the points in the order written; false: P1 first, then the others in an order drawn
+    // from the seed (2026-11-16: a seed chosen to keep the order of 5 points reordered 4, and the
+    // most useful point came last).
+    ordered: bool = false,
 });
 
 defaults!(Ladder {
@@ -539,6 +543,25 @@ defaults!(Reference {
     energy_ev: f64 = 26.0,
     ion: f64 = 922.01,
     window: f64 = 0.10,
+    // Beam guard. A reference line whose ion falls below this fraction of the last good reference
+    // means the beam is lost: the lines measured since that good reference are measured again, and
+    // the map waits, measuring the reference again every beam_wait_s, for at most beam_max_wait_s.
+    // 2026-11-15 lab: the beam was lost from 18:55 to 21:44 while the spray current stayed in its
+    // range (33–65 nA); the 922 reference fell from 54 pA to 3.5 pA and 12 lines measured nothing.
+    beam_min_fraction: f64 = 0.5,
+    // ... of the best good reference of the last beam_window_s, not of the last one: judged against
+    // the last one, a beam fading by 40 % per reference would never be lost (2026-11-16: the 15:55
+    // reference, 26.5 pA, passed at 61 % of 43.3 pA and became the measure of the next probes).
+    beam_window_s: f64 = 7200.0,
+    beam_wait_s: f64 = 300.0,
+    beam_max_wait_s: f64 = 10800.0,
+    // Ion check before a measurement line longer than probe_min_line_s: a short line of probe_points
+    // across the top of the last good reference peak, on the same detector. Its highest point above
+    // that reference's baseline must reach beam_min_fraction of its height. 2026-11-16 lab: the beam
+    // faded during a 36 min line and was gone for the next two (44 min) with the spray in range.
+    probe: bool = true,
+    probe_points: usize = 9,
+    probe_min_line_s: f64 = 300.0,
 });
 
 defaults!(Outer {
@@ -802,6 +825,8 @@ pub struct Analysis {
     pub noise: f64,
     pub spray_mean: f64,
     pub spray_rel_std: f64,
+    /// Highest finite point of the line (A): what a probe line is judged on.
+    pub level: f64,
 }
 
 fn finite_or_zero(v: &mut f64) {
@@ -1491,6 +1516,7 @@ const ROLE_VALIDATION: &str = "validation";
 const ROLE_LOCAL: &str = "local";
 const ROLE_BEST: &str = "best";
 const ROLE_WAIT: &str = "wait";
+const ROLE_PROBE: &str = "probe";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -1513,11 +1539,139 @@ struct View<'a> {
     cfg: &'a MapConfig,
     inst: &'a Instrument,
     records: &'a [Record],
+    /// Lines measured while the beam was lost (between the last good reference and a reference
+    /// that lost the beam, or after it): measured again, never used.
+    invalid: Vec<bool>,
+    /// The beam is lost now: the last reference lost it.
+    beam_lost: Option<BeamLoss>,
     /// First record of this run (Start or Resume).
     session_start: usize,
     x_stop: f64,
     /// R_target, or the highest R reached when no setting reaches it (Section 4).
     target: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct BeamLoss {
+    /// The reference or probe line that lost the beam, its start, the height of its ion and that of
+    /// the last good reference (A), and how many lines are to measure again.
+    line: u64,
+    role: String,
+    since: f64,
+    height: f64,
+    good: f64,
+    lines_lost: usize,
+}
+
+/// The beam guard over a journal: which lines were measured without beam, and whether the beam is
+/// lost now. A reference is good when its ion is found at least `beam_min_fraction` of the last
+/// good reference, before a Resume or after it (the first found reference of a map is good).
+fn beam_check(
+    cfg: &MapConfig,
+    records: &[Record],
+    session_start: usize,
+) -> (Vec<bool>, Option<BeamLoss>) {
+    let mut invalid = vec![false; records.len()];
+    // The good references: (start, height of their ion, baseline), in s and A.
+    let mut goods: Vec<(f64, f64, f64)> = Vec::new();
+    let window = cfg.reference.beam_window_s.max(0.0);
+    // The height a check must reach a fraction of (the best good reference of the window before it)
+    // and the baseline of the last good reference.
+    let measure = |goods: &[(f64, f64, f64)], at: f64| -> Option<(f64, f64)> {
+        let (_, _, baseline) = *goods.last()?;
+        let best = goods
+            .iter()
+            .filter(|(t, _, _)| *t >= at - window)
+            .map(|(_, h, _)| *h)
+            .fold(0.0, f64::max);
+        let best = if best > 0.0 { best } else { goods.last()?.1 };
+        Some((best, baseline))
+    };
+    let mut pending: Vec<usize> = Vec::new();
+    let mut lost: Option<BeamLoss> = None;
+    let mut lines_lost = 0usize;
+    let fraction = cfg.reference.beam_min_fraction;
+    for (i, r) in records.iter().enumerate() {
+        if i == session_start && i > 0 {
+            // Resume: the run starts with a reference judged against the last good reference
+            // before it (a Resume without beam must not make a low peak the new normal). The lines
+            // no good reference or probe confirmed before the stop are measured again: nothing
+            // tells whether the beam was there (2026-11-16: two ladder lines without beam were left
+            // as done when the references after them failed on the spray). A beam lost before the
+            // Resume is not counted as waited.
+            for &j in &pending {
+                invalid[j] = true;
+            }
+            pending.clear();
+            lost = None;
+            lines_lost = 0;
+        }
+        if r.outcome != DONE || r.request.role == ROLE_WAIT {
+            continue;
+        }
+        let role = r.request.role.as_str();
+        if role != ROLE_REFERENCE && role != ROLE_PROBE {
+            if lost.is_some() {
+                invalid[i] = true;
+                lines_lost += 1;
+            } else {
+                pending.push(i);
+            }
+            continue;
+        }
+        let good = measure(&goods, r.started);
+        let (height, ok) = if role == ROLE_REFERENCE {
+            let peak = r.analysis.peak(cfg.reference.ion);
+            let height = peak.map_or(0.0, |p| p.height);
+            let ok = height > 0.0 && good.is_none_or(|(g, _)| height >= fraction * g);
+            if ok {
+                goods.push((r.started, height, peak.map_or(0.0, |p| p.baseline)));
+            }
+            (height, ok)
+        } else {
+            // A probe before any good reference has nothing to be judged against.
+            match good {
+                None => (0.0, true),
+                Some((g, baseline)) => {
+                    let height = r.analysis.level - baseline;
+                    (height, height >= fraction * g)
+                }
+            }
+        };
+        if ok {
+            pending.clear();
+            lost = None;
+            lines_lost = 0;
+            continue;
+        }
+        invalid[i] = true;
+        for &j in &pending {
+            invalid[j] = true;
+        }
+        lines_lost += pending.len();
+        pending.clear();
+        let loss = lost.take().unwrap_or(BeamLoss {
+            line: r.request.id,
+            role: role.to_owned(),
+            since: r.started,
+            good: good.map_or(0.0, |(g, _)| g),
+            ..BeamLoss::default()
+        });
+        lost = Some(BeamLoss {
+            height: height.max(0.0),
+            lines_lost,
+            ..loss
+        });
+    }
+    if session_start >= records.len() && session_start > 0 {
+        // Resumed, nothing measured yet: the next line is a reference; the unconfirmed lines are
+        // measured again.
+        for &j in &pending {
+            invalid[j] = true;
+        }
+        lost = None;
+    }
+    (invalid, lost)
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1532,11 +1686,15 @@ struct StoppingSummary {
 
 impl<'a> View<'a> {
     fn new(journal: &'a Journal) -> Self {
+        let session_start = journal.session_start.min(journal.records.len());
+        let (invalid, beam_lost) = beam_check(&journal.plan.map, &journal.records, session_start);
         let mut view = Self {
             cfg: &journal.plan.map,
             inst: &journal.instrument,
             records: &journal.records,
-            session_start: journal.session_start.min(journal.records.len()),
+            invalid,
+            beam_lost,
+            session_start,
             x_stop: journal.instrument.q1_dc_v,
             target: journal.plan.map.r_target,
         };
@@ -1555,14 +1713,14 @@ impl<'a> View<'a> {
         self.records
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.outcome == DONE)
+            .filter(|(i, r)| r.outcome == DONE && !self.invalid[*i] && r.request.role != ROLE_PROBE)
     }
 
     fn of(&self, point: &str) -> Vec<(usize, &'a Record)> {
         self.records
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.request.point == point && r.outcome != FAILED)
+            .filter(|(i, r)| r.request.point == point && r.outcome != FAILED && !self.invalid[*i])
             .collect()
     }
 
@@ -1875,6 +2033,42 @@ impl<'a> View<'a> {
         r.label = "reference".to_owned();
         r
     }
+
+    /// The last good reference (not lost with the beam) and its ion's peak.
+    fn last_good_reference(&self) -> Option<(&'a Record, &'a Peak)> {
+        let ion = self.cfg.reference.ion;
+        self.done()
+            .filter(|(_, r)| r.request.role == ROLE_REFERENCE)
+            .filter_map(|(_, r)| r.analysis.peak(ion).map(|p| (r, p)))
+            .filter(|(_, p)| p.height > 0.0 && p.fwhm > 0.0)
+            .last()
+    }
+
+    /// A short line across the top of the last good reference peak: the ions are there or not.
+    fn probe_line(&self) -> Option<Request> {
+        let (reference, peak) = self.last_good_reference()?;
+        let n = self.cfg.reference.probe_points.max(3);
+        let half = 0.5 * peak.fwhm;
+        let axis: Vec<f64> = (0..n)
+            .map(|i| {
+                round_to(
+                    peak.center - half + 2.0 * half * i as f64 / (n - 1) as f64,
+                    0.01,
+                )
+            })
+            .collect();
+        let mut r = reference.request.clone();
+        r.role = ROLE_PROBE.to_owned();
+        r.point = "PROBE".to_owned();
+        r.variant = String::new();
+        r.id = 0;
+        r.expected_s = self.line_time(n);
+        r.axis = axis;
+        r.adaptive = false;
+        r.coarse = 1;
+        r.label = "probe".to_owned();
+        Some(r)
+    }
 }
 
 // ---------------------------------------------------------------- points: ladders and their solution
@@ -2137,7 +2331,11 @@ impl View<'_> {
         let first = amplitude.remove(0);
         let mut rest = amplitude;
         rest.extend(frequency);
-        let order = Rng::new(self.cfg.seed).permutation(rest.len());
+        let order = if self.cfg.design.ordered {
+            (0..rest.len()).collect()
+        } else {
+            Rng::new(self.cfg.seed).permutation(rest.len())
+        };
         let mut points = vec![first];
         points.extend(order.into_iter().map(|i| rest[i].clone()));
         points
@@ -3695,9 +3893,14 @@ impl<'a> Engine<'a> {
     }
 
     fn reference_due(&self) -> bool {
+        // Each run (Start or Resume) begins with a reference: the beam is checked before a line.
         let mut since = 0usize;
         let mut any = false;
-        for r in self.view.records.iter().filter(|r| r.outcome == DONE) {
+        for (_, r) in self
+            .view
+            .done()
+            .filter(|(i, _)| *i >= self.view.session_start)
+        {
             match r.request.role.as_str() {
                 ROLE_REFERENCE => {
                     any = true;
@@ -3734,9 +3937,101 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// The beam is lost: wait, then measure the reference again, until it comes back or for at most
+    /// beam_max_wait_s.
+    fn beam_decision(&self, loss: &BeamLoss) -> Decision {
+        let cfg = &self.cfg().reference;
+        let waited = self.view.now() - loss.since;
+        let text = format!(
+            "the {:.0} {} fell to {:.1} pA at line {} ({:.0} % of {:.1} pA)",
+            cfg.ion,
+            loss.role,
+            loss.height * 1e12,
+            loss.line,
+            if loss.good > 0.0 {
+                100.0 * loss.height / loss.good
+            } else {
+                0.0
+            },
+            loss.good * 1e12
+        );
+        if waited >= cfg.beam_max_wait_s {
+            return Decision::Stop(format!(
+                "beam lost for {:.0} min: {text}. Check the spray, then Map… → Resume: the lines \
+                 measured without beam are measured again",
+                waited / 60.0
+            ));
+        }
+        if self
+            .view
+            .records
+            .last()
+            .is_some_and(|r| r.request.role == ROLE_WAIT)
+        {
+            return Decision::Line(self.view.reference_line());
+        }
+        let mut w = self.view.base_request(
+            "R",
+            ROLE_WAIT,
+            "BEAM",
+            &format!(
+                "beam lost: {text}; {} line(s) to measure again; reference again in {:.0} min",
+                loss.lines_lost,
+                cfg.beam_wait_s / 60.0
+            ),
+        );
+        w.kind = KIND_WAIT.to_owned();
+        w.seconds = cfg.beam_wait_s.max(0.0).round();
+        w.expected_s = w.seconds;
+        w.label = "wait".to_owned();
+        Decision::Wait(w)
+    }
+
+    /// The next line, with an ion probe before a long measurement line when the last line of this
+    /// run was not a reference or a probe (2026-11-16: no ion for 44 min with the spray in range).
     fn decide(&self) -> Decision {
+        let decision = self.decide_line();
+        let Decision::Line(request) = &decision else {
+            return decision;
+        };
+        let cfg = &self.cfg().reference;
+        if !cfg.probe
+            || matches!(
+                request.role.as_str(),
+                ROLE_REFERENCE | ROLE_PROBE | ROLE_WAIT
+            )
+            || request.expected_s < cfg.probe_min_line_s
+        {
+            return decision;
+        }
         let records = self.view.records;
-        if records.len() >= self.cfg().max_lines {
+        let checked = records[self.view.session_start..]
+            .iter()
+            .rev()
+            .find(|r| r.outcome == DONE && r.request.role != ROLE_WAIT)
+            .is_some_and(|r| matches!(r.request.role.as_str(), ROLE_REFERENCE | ROLE_PROBE));
+        if checked {
+            return decision;
+        }
+        match self.view.probe_line() {
+            Some(probe) => Decision::Line(probe),
+            None => decision,
+        }
+    }
+
+    fn decide_line(&self) -> Decision {
+        let records = self.view.records;
+        // The budget counts measured lines: neither the waits nor the lines lost with the beam.
+        let measured = records
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| {
+                r.request.role != ROLE_WAIT
+                    && r.request.role != ROLE_PROBE
+                    && !self.view.invalid[*i]
+            })
+            .count();
+        if measured >= self.cfg().max_lines {
             return Decision::Stop(format!("line budget of {} reached", self.cfg().max_lines));
         }
         if let Some(last) = records.last() {
@@ -3756,7 +4051,7 @@ impl<'a> Engine<'a> {
             if last.outcome == UNREACHABLE
                 && matches!(
                     last.request.role.as_str(),
-                    ROLE_REFERENCE | ROLE_STOPPING | ROLE_BEST
+                    ROLE_REFERENCE | ROLE_PROBE | ROLE_STOPPING | ROLE_BEST
                 )
             {
                 return Decision::Stop(format!(
@@ -3764,6 +4059,9 @@ impl<'a> Engine<'a> {
                     last.request.role, last.error
                 ));
             }
+        }
+        if let Some(loss) = &self.view.beam_lost {
+            return self.beam_decision(loss);
         }
         if self.reference_due() {
             return Decision::Line(self.view.reference_line());
@@ -3895,6 +4193,8 @@ impl<'a> Engine<'a> {
             "remaining_s_estimate": left as f64 * typical,
             "x_stop": self.view.x_stop,
             "c": self.laws.c,
+            "beam_lost": self.view.beam_lost,
+            "lines_without_beam": self.view.invalid.iter().filter(|i| **i).count(),
         })
     }
 }
@@ -3914,6 +4214,11 @@ pub struct SimOptions {
     pub max_lines: usize,
     pub start: f64,
     pub journal: bool,
+    /// [from, to] in s after the start: the beam is lost (10 % of the signal reaches the detector,
+    /// as on 2026-11-15: 922 at 3.5 pA for 54 pA).
+    pub beam_off: Vec<[f64; 2]>,
+    /// [from, to, factor]: the signal is multiplied by factor between from and to (s after the start).
+    pub beam_scale: Vec<[f64; 3]>,
 }
 
 impl Default for SimOptions {
@@ -3927,6 +4232,8 @@ impl Default for SimOptions {
             max_lines: 1200,
             start: 1.8e9,
             journal: false,
+            beam_off: Vec::new(),
+            beam_scale: Vec::new(),
         }
     }
 }
@@ -4059,7 +4366,19 @@ impl Q2Sim {
             }
             _ => {}
         }
-        y * self.drift() + baseline
+        let t = self.clock - self.opts.start;
+        let beam = if self.opts.beam_off.iter().any(|w| (w[0]..w[1]).contains(&t)) {
+            0.1
+        } else {
+            1.0
+        } * self
+            .opts
+            .beam_scale
+            .iter()
+            .filter(|w| (w[0]..w[1]).contains(&t))
+            .map(|w| w[2])
+            .product::<f64>();
+        y * self.drift() * beam + baseline
     }
 
     fn run(&mut self, req: &Request) -> LineResult {
@@ -4472,11 +4791,17 @@ fn record(journal: &mut Journal, result: &LineResult) -> Result<Analysis> {
             "Line arrays do not match the requested axis.",
         ));
     }
-    let analysis = if result.outcome == DONE && request.kind != KIND_WAIT {
+    let mut analysis = if result.outcome == DONE && request.kind != KIND_WAIT {
         analyse(&journal.plan.map, &request, result)
     } else {
         Analysis::default()
     };
+    analysis.level = result
+        .signal
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(0.0, f64::max);
     let started = if result.started.is_finite() {
         result.started
     } else {

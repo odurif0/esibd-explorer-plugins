@@ -290,3 +290,87 @@ def test_explicit_off_finished_during_recovery_is_not_relabelled_unconfirmed(dmm
     assert not rig.controller.initialized and rig.controller.device is None
     assert rig.ui_states[-1] is False
     assert rig.device.calls == []
+
+
+def _stop_on_lost_replies(rig, monkeypatch, *, when=1000.):
+    """Persistent receive errors stop the reading with the DMMR confirmed OFF and closed."""
+    scheduled = []
+    monkeypatch.setattr(rig.module, '_invoke_gui_callback', lambda callback: scheduled.append(callback))
+    monkeypatch.setattr(rig.module.time, 'monotonic', lambda: when)
+    rig.device.get_module_current = lambda *a, **kw: (-13, 666., 0)
+    rig.controller.readNumbers()
+    rig.controller.readNumbers()
+    assert ('disconnect',) in rig.device.calls and not rig.controller.initialized
+    return scheduled
+
+
+def _with_explorer_device(rig, recording=True):
+    switched, state = [], {'on': True}
+    parent = rig.controller.controllerParent
+    parent.name, parent.recording = 'DMMR', recording
+    parent.isOn = lambda: state['on']
+    shown = parent._set_on_ui_state
+
+    def show(on):
+        shown(on)
+        state['on'] = on
+    parent._set_on_ui_state = show
+
+    def set_on(on):
+        switched.append(on)
+        state['on'] = on
+    parent.setOn = set_on
+    parent.print = lambda message, flag=None: rig.logs.append(message)
+    return switched, state
+
+
+def test_a_read_stop_reconnects_the_dmmr_once_by_itself(dmmr_acquisition_rig, monkeypatch):
+    """2026-11-16 02:00: lost replies stopped the DMMR and an overnight map; ON again, it read normally."""
+    rig = dmmr_acquisition_rig
+    switched, _ = _with_explorer_device(rig)
+    start_plugin(rig)
+    restarted = []
+    monkeypatch.setattr(rig.module, '_session_restart_recording', lambda device, deadline: restarted.append(device))
+    scheduled = _stop_on_lost_replies(rig, monkeypatch)
+    assert any('reconnecting by itself in 30 s' in text for text in rig.logs), rig.logs
+    timers = []
+    import PyQt6.QtCore as qtcore
+    monkeypatch.setattr(qtcore.QTimer, 'singleShot', lambda ms, callback: timers.append((ms, callback)))
+    for callback in scheduled:
+        callback()
+    assert [ms for ms, _ in timers] == [30000]
+    timers[0][1]()
+    assert switched == [True]
+    assert restarted == [rig.controller.controllerParent]
+    timers[0][1]()  # A timer fires once: a second call changes nothing.
+    assert switched == [True]
+
+
+def test_a_second_read_stop_within_the_hour_waits_for_the_operator(dmmr_acquisition_rig, monkeypatch):
+    rig = dmmr_acquisition_rig
+    _with_explorer_device(rig)
+    start_plugin(rig)
+    rig.controller._auto_reconnect_at = 1000. - 1800.
+    scheduled = _stop_on_lost_replies(rig, monkeypatch)
+    timers = []
+    import PyQt6.QtCore as qtcore
+    monkeypatch.setattr(qtcore.QTimer, 'singleShot', lambda ms, callback: timers.append((ms, callback)))
+    for callback in scheduled:
+        callback()
+    assert timers == []
+    assert any('already was 30 min ago. Switch it ON by hand.' in text for text in rig.logs), rig.logs
+
+
+def test_the_operator_cancels_a_pending_reconnection(dmmr_acquisition_rig, monkeypatch):
+    rig = dmmr_acquisition_rig
+    switched, _ = _with_explorer_device(rig, recording=False)
+    start_plugin(rig)
+    scheduled = _stop_on_lost_replies(rig, monkeypatch)
+    timers = []
+    import PyQt6.QtCore as qtcore
+    monkeypatch.setattr(qtcore.QTimer, 'singleShot', lambda ms, callback: timers.append((ms, callback)))
+    for callback in scheduled:
+        callback()
+    rig.controller.toggleOn()  # The operator's ON/OFF button.
+    timers[0][1]()
+    assert switched == []

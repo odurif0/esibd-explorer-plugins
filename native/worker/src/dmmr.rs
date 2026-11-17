@@ -69,6 +69,14 @@ pub const GUI_ATTRIBUTES: &[&str] = &[
     "baudrate",
 ];
 pub const PYTHON_OBJECT_API_GAPS: &[&str] = &["new_read_recovery", "new_command_recovery"];
+/// Pauses (s) before each resynchronization of a read recovery whose verification lost a reply:
+/// about 20 s of patience before the DMMR stops, within the 45 s budget the plugin gives
+/// recover_read (8 × the 5 s poll timeout + 5 s).
+const RECOVERY_PAUSES_S: [f64; 4] = [0.0, 2.0, 5.0, 12.0];
+#[cfg(not(feature = "test-backend"))]
+const RECOVERY_PAUSE_SCALE: f64 = 1.0;
+#[cfg(feature = "test-backend")]
+const RECOVERY_PAUSE_SCALE: f64 = 0.001;
 const DEBUG_SHA256: &str = "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3";
 const MAIN_STATE: &[(u64, &str)] = &[
     (0, "ST_ON"),
@@ -1069,6 +1077,36 @@ impl Controller {
         recovery_ensure(reply.status, export)?;
         Ok(reply.values)
     }
+    /// A verification read that got no reply at all (-10, nothing received, so nothing stale to purge)
+    /// is asked again, up to twice. 2026-11-15/16 lab: GetModuleMeasRange went unanswered in 3 of 56
+    /// reads, all at startup or in a recovery; with 8 modules a pass failed about one time in three,
+    /// and two such passes stopped the DMMR at 02:00.
+    fn verify_read(
+        &mut self,
+        export: &str,
+        inputs: Vec<Value>,
+        seeds: Vec<Value>,
+        incident: &mut Value,
+        ctx: &Context,
+    ) -> Result<Vec<Value>> {
+        for attempt in 0..3 {
+            self.active(ctx)?;
+            let reply = self.read(export, inputs.clone(), seeds.clone(), ctx)?;
+            self.active(ctx)?;
+            incident["operations"]
+                .as_array_mut()
+                .ok_or_else(|| Error::runtime("Missing recovery operation journal"))?
+                .push(json!({"action": export, "arguments": inputs, "status": reply.status}));
+            if reply.status == -10 && attempt < 2 {
+                let asked = incident["unanswered_reads"].as_u64().unwrap_or(0);
+                incident["unanswered_reads"] = json!(asked + 1);
+                continue;
+            }
+            recovery_ensure(reply.status, export)?;
+            return Ok(reply.values);
+        }
+        unreachable!("the last attempt returns")
+    }
     fn recovery_write(
         &mut self,
         export: &str,
@@ -1105,17 +1143,17 @@ impl Controller {
         incident: &mut Value,
         ctx: &Context,
     ) -> Result<Value> {
-        let state = self.recovery_read("GetState", vec![], vec![json!(0)], incident, ctx)?;
+        let state = self.verify_read("GetState", vec![], vec![json!(0)], incident, ctx)?;
         if state[0] != json!(0) {
             return Err(Error::runtime("Controller is not ST_ON"));
         }
-        let enabled = self.recovery_read("GetEnable", vec![], vec![json!(false)], incident, ctx)?;
+        let enabled = self.verify_read("GetEnable", vec![], vec![json!(false)], incident, ctx)?;
         if enabled[0] != json!(true) {
             return Err(Error::runtime(
                 "Measurement enable not confirmed; no automatic re-enable",
             ));
         }
-        let mode = self.recovery_read(
+        let mode = self.verify_read(
             "GetAutomaticCurent",
             vec![],
             vec![json!(false)],
@@ -1128,7 +1166,7 @@ impl Controller {
             ));
         }
         for (&address, &(range, auto)) in ranges {
-            let values = self.recovery_read(
+            let values = self.verify_read(
                 "GetModuleMeasRange",
                 vec![json!(address)],
                 vec![json!(0), json!(false)],
@@ -1173,9 +1211,18 @@ impl Controller {
             match self.verify_running(recovery.automatic, &recovery.ranges, &mut incident, ctx) {
                 Ok(_) => (),
                 Err(error) if error.kind == "ReceiveError" => {
-                    // One more pass: a reply lost here is as transient as the one that led here
-                    // (2026-10-30 lab: -13, then -10 on the seventh range, and 56 min without DMMR).
-                    for retry in [true, false] {
+                    // More passes, further apart: a reply lost here is as transient as the one that
+                    // led here (2026-10-30 lab: -13, then -10 on the seventh range, and 56 min
+                    // without DMMR; 2026-11-16 02:00: -13, then -10 on a range in two passes 1.7 s
+                    // apart, which stopped the DMMR and an overnight map).
+                    let passes = RECOVERY_PAUSES_S.len();
+                    for (pass, pause) in RECOVERY_PAUSES_S.iter().enumerate() {
+                        let retry = pass + 1 < passes;
+                        if *pause > 0.0 {
+                            ctx.sleep(Duration::from_secs_f64(pause * RECOVERY_PAUSE_SCALE))?;
+                            self.active(ctx)?;
+                        }
+                        incident["passes"] = json!(pass + 1);
                         self.resynchronize(&mut incident, ctx)?;
                         self.recovery_write(
                             "SetAutomaticCurent",
