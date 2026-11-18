@@ -150,3 +150,41 @@ def test_successful_start_still_acquires_normally(dmmr_toggle_rig):
     assert dmmr_toggle_rig.controller.acquiring is True
     assert dmmr_toggle_rig.device.enabled is True
     assert "DMMR acquisition enabled." in dmmr_toggle_rig.logs
+
+
+@pytest.mark.parametrize("state", ["ST_OFF", "UNKNOWN_STATE_0x0002", "ST_ERR_MODULE"])
+def test_a_valid_reply_with_a_non_running_state_cannot_start_acquisition(dmmr_toggle_rig, state):
+    rig = dmmr_toggle_rig
+    rig.device.fail_start = None
+    rig.device.get_state = lambda **kw: (0, "0x0001", state)
+    start(rig)
+    assert not rig.controller.acquiring and rig.parent.on is False
+    assert not rig.device.enabled and not rig.device.automatic
+    assert any(state in message for message in rig.logs)
+    assert "DMMR acquisition enabled." not in rig.logs
+
+
+def test_an_invalid_saved_range_choice_is_refused_before_any_range_command(dmmr_toggle_rig):
+    rig = dmmr_toggle_rig
+    rig.device.fail_start = None
+    channel = rig.parent.getChannels()[0]
+    rig.parent.getChannels = lambda: [channel]
+    channel._requested_range_mode = "5"
+    start(rig)
+    assert not rig.controller.acquiring
+    assert any("Invalid range mode" in message for message in rig.logs)
+    assert not any(call[0] == "range" for call in rig.device.calls)
+    assert not rig.device.enabled
+
+
+def test_a_worker_range_readback_that_differs_from_the_request_refuses_on(dmmr_toggle_rig):
+    rig = dmmr_toggle_rig
+    rig.device.fail_start = None
+    channel = rig.parent.getChannels()[0]
+    rig.parent.getChannels = lambda: [channel]
+    channel._requested_range_mode = "3"
+    rig.device.configure_module_ranges = lambda modes, **kw: {
+        address: (2, True) if mode == "Auto" else (1, False) for address, mode in modes.items()}  # 1, not 3
+    start(rig)
+    assert not rig.controller.acquiring and not rig.device.enabled
+    assert any("Range not confirmed for module 5" in message for message in rig.logs)

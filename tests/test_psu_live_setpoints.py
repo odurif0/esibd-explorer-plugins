@@ -1,208 +1,28 @@
-"""Live PSU setpoints must not restart the gates or rewrite the other rail."""
+"""Live PSU setpoint edits: what the plugin sends to its worker, and when.
+
+The edit itself (ramp from the hardware setpoint, the other rail and the gates left alone, every
+readback verified) runs in the PSU worker and is tested there: native/worker/tests/psu_controller.rs
+(a_live_voltage_edit_steps_only_its_channel_without_gate_commands and the tests after it)."""
 from copy import deepcopy
-from threading import Event, Lock, Thread
+from threading import Event, Thread
 
 import pytest
 
 
 
-@pytest.mark.parametrize("channel,start,target", [
-    (0, 100., 80.), (1, 100., 80.), (0, 100., 120.),
-    (0, 380., 80.), (0, 80., 380.), (0, 100., 0.), (0, 0., 100.),
-    (0, 100., 100.), (0, 100., 100.001),
-])
-@pytest.mark.parametrize("partial", [False, True])
-def test_voltage_edit_only_steps_modified_channel_without_gate_commands(psu_live_rig, channel, start, target, partial):
-    module, controller, device, state, messages = psu_live_rig
-    device.voltages[channel] = start
-    state["voltage_values"][channel] = target
-    if partial:
-        state = {"setpoints_only": True, "voltage_values": {channel: target}}
-    other_voltage = device.voltages[1 - channel]
-    controller.applyManualState(state)
-    writes = device.calls
-    assert all(call[0] == "voltage" and call[1] == channel for call in writes), writes
-    if start == target:
-        assert writes == []
-    else:
-        values = [start] + [call[2] for call in writes]
-        assert values[-1] == target
-        assert all(min(start, target) <= v <= max(start, target) for v in values)
-        assert values == sorted(values, reverse=target < start)
-        assert all(abs(b - a) <= module._PSU_VOLTAGE_RAMP_STEP_V for a, b in zip(values, values[1:]))
-    assert device.voltages == {channel: target, 1 - channel: other_voltage}
-    assert device.outputs == (True, True) and device.enabled
-    assert controller.errorCount == 0, messages
-
-
-def test_voltage_edit_through_real_driver_and_ctypes(psu_dll_case):
-    import ctypes
-
-    controller, driver, calls, _status = psu_dll_case
-    controller.lock = Lock()
-    controller.errorCount = 0
-    controller.controllerParent.name = "PSU"
-    controller.controllerParent.interlock_monitoring = True
-    controller._update_state = lambda: None
-    controller._sync_status_to_gui = lambda **kw: None
-    messages = []
-    controller.print = lambda msg, **kw: messages.append(msg)
-    voltages, currents = {0: 100., 1: 240.}, {0: .01, 1: .02}
-    ptr = ctypes.POINTER
-    read_pair = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint16, ptr(driver.WIN_BOOL), ptr(driver.WIN_BOOL))
-    read_limits = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint16, ctypes.c_uint,
-                                  ptr(ctypes.c_double), ptr(ctypes.c_double))
-
-    @read_pair
-    def get_range(port, ch0, ch1):
-        ch0[0] = ch1[0] = False
-        return 0
-
-    @read_pair
-    def get_interlocks(port, output, bnc):
-        output[0] = bnc[0] = True
-        return 0
-
-    @read_limits
-    def get_voltage(port, channel, value, limit):
-        value[0], limit[0] = voltages[channel], 1000.
-        return 0
-
-    @read_limits
-    def get_current(port, channel, value, limit):
-        value[0], limit[0] = currents[channel], 1.
-        return 0
-
-    @ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_uint16, ctypes.c_uint, ctypes.c_double)
-    def set_voltage(port, channel, value):
-        calls.append(("SetPSUOutputVoltage", channel, value))
-        voltages[channel] = value
-        return 0
-
-    driver.psu_dll.COM_HVPSU2D_GetPSUFullRange = get_range
-    driver.psu_dll.COM_HVPSU2D_GetInterlockEnable = get_interlocks
-    driver.psu_dll.COM_HVPSU2D_GetPSUSetOutputVoltage = get_voltage
-    driver.psu_dll.COM_HVPSU2D_GetPSUSetOutputCurrent = get_current
-    driver.psu_dll.COM_HVPSU2D_SetPSUOutputVoltage = set_voltage
-    # No other DLL setters are provided: an enable/current/range command is an error.
-    controller.applyManualState(dict(
-        output_enabled={0: True, 1: True}, full_range_enabled={0: False, 1: False},
-        voltage_values={0: 80., 1: 240.}, current_limit_values=currents,
-    ))
-    assert controller.errorCount == 0, messages
-    assert [call for call in calls if isinstance(call, tuple)] == [("SetPSUOutputVoltage", 0, 80.)]
-    assert voltages == {0: 80., 1: 240.}
-
-
-@pytest.mark.parametrize("partial", [False, True])
-def test_current_limit_edit_also_keeps_voltage_and_gates(psu_live_rig, partial):
-    _, controller, device, state, messages = psu_live_rig
-    state["current_limit_values"][0] = .015
-    if partial:
-        state = {"setpoints_only": True, "current_limit_values": {0: .015}}
-    controller.applyManualState(state)
-    assert device.calls == [("current", 0, .015)]
-    assert device.voltages == {0: 100., 1: 240.}
-    assert device.outputs == (True, True) and device.enabled
-    assert controller.errorCount == 0, messages
-
-
-def test_disabled_channel_stays_disabled_during_edit(psu_live_rig):
-    _, controller, device, state, messages = psu_live_rig
-    device.outputs = (False, True)
-    state["output_enabled"][0] = False
-    state["voltage_values"][0] = 80.
-    controller.applyManualState(state)
-    assert device.calls == [("voltage", 0, 80.)]
-    assert device.outputs == (False, True) and device.enabled
-    assert controller.errorCount == 0, messages
-
-
-@pytest.mark.parametrize("fault", ["voltage_nan", "voltage_negative", "voltage_missing", "current_nan",
-                                   "limit_missing", "limit_low", "current_limit_missing", "interlocks"])
-def test_unverified_live_state_cannot_start_a_voltage_ramp(psu_live_rig, fault):
-    _, controller, device, state, messages = psu_live_rig
-    state["voltage_values"][0] = 380.
-    if fault == "voltage_nan":
-        device.voltages[0] = float("nan")
-    elif fault == "voltage_negative":
-        device.voltages[0] = -100.
-    elif fault == "voltage_missing":
-        device.get_channel_voltage_limits = None
-    elif fault == "current_nan":
-        device.currents[0] = float("nan")
-    elif fault == "current_limit_missing":
-        device.get_channel_current_limits = lambda ch, **kw: (device.currents[ch], None)
-    elif fault == "interlocks":
-        device.interlocks = (False, True)
-    else:
-        device.get_channel_voltage_limits = lambda ch, **kw: (device.voltages[ch],
-                                                        None if fault == "limit_missing" else 200.)
-    controller.applyManualState(state)
-    assert not any(call[0] == "voltage" for call in device.calls)
-    assert device.outputs == (False, False) and not device.enabled
-    assert controller.errorCount == 1
-    assert any("Failed to apply" in msg for msg in messages)
-
-
-@pytest.mark.parametrize("fault", ["ignored_voltage", "lost_ack", "gate_off", "range_changed", "current_ignored"])
-def test_failed_live_write_disables_without_retrying_a_cold_start(psu_live_rig, fault):
+def test_a_refused_live_edit_switches_the_outputs_off_without_retrying(psu_live_rig):
+    """The worker refuses an edit it cannot verify (native/worker/tests/psu_controller.rs:
+    a_failed_live_write_is_not_retried_as_a_cold_start). The plugin then switches the outputs OFF
+    under the same lock and never sends the state again as a cold start."""
     _, controller, device, state, messages = psu_live_rig
     state["voltage_values"][0] = 80.
-    setter = device.set_channel_voltage
-
-    def write(ch, value, **kw):
-        if fault != "ignored_voltage":
-            setter(ch, value, **kw)
-        if fault == "lost_ack":
-            raise RuntimeError("ACK lost after applied write")
-        if fault == "gate_off":
-            device.outputs = (False, True)
-        if fault == "range_changed":
-            device.ranges = (True, False)
-
-    device.set_channel_voltage = write
-    if fault == "current_ignored":
-        state["current_limit_values"][0] = .001
-        device.set_channel_current = lambda *a, **kw: None
+    device.apply_failure = RuntimeError("CH0 voltage setpoint readback 100 V does not match requested 80 V.")
     controller.applyManualState(state)
+    assert len(device.requests) == 1
     assert device.outputs == (False, False) and not device.enabled
-    assert not any(call in [("outputs", True, True), ("global", True)] for call in device.calls)
-    assert not any(call[0] == "voltage" and call[2] == 0 for call in device.calls)
-    if fault == "current_ignored":
-        assert not any(call[0] == "voltage" for call in device.calls)
     assert controller.errorCount == 1, messages
+    assert any("Failed to apply PSU manual values" in msg and "does not match" in msg for msg in messages)
     assert "Applied PSU manual values." not in messages
-
-
-def test_range_change_still_disables_before_relay_even_with_stale_cache(psu_live_rig):
-    _, controller, device, state, messages = psu_live_rig
-    state["full_range_enabled"][0] = True
-    controller.full_range_by_channel = {0: True, 1: False}  # misleading cache
-    switch = device.set_output_full_range
-    observations = []
-
-    def switch_range(*enabled, **kw):
-        observations.append((device.outputs, device.get_channel_measured_voltage(0),
-                             device.get_channel_measured_voltage(1)))
-        switch(*enabled, **kw)
-
-    device.set_output_full_range = switch_range
-    controller.applyManualState(state)
-    assert device.calls[0] == ("outputs", False, False)
-    assert observations == [((False, False), 0., 0.)]
-    assert device.ranges == (True, False)
-    assert device.outputs == (True, True)
-    assert controller.errorCount == 0, messages
-
-
-def test_range_change_refused_if_disable_is_not_confirmed(psu_live_rig):
-    _, controller, device, state, messages = psu_live_rig
-    state["full_range_enabled"][0] = True
-    device.set_output_enabled = lambda *a, **kw: None
-    controller.applyManualState(state)
-    assert not any(call[0] in ("voltage", "current", "range") for call in device.calls)
-    assert any("not confirmed disabled before reconfiguration" in msg for msg in messages)
 
 
 def test_queued_field_edits_preserve_each_other_and_cancel_on_off(psu_live_rig):
@@ -216,6 +36,9 @@ def test_queued_field_edits_preserve_each_other_and_cancel_on_off(psu_live_rig):
         controller.applyManualStateFromThread({"setpoints_only": True, key: {channel: target}})
     assert device.calls == []
     controller._manual_state_apply_worker()
+    # One operation for the worker, the last value of each field kept.
+    assert device.requests == [{"setpoints_only": True, "voltage_values": {0: 70., 1: 230.},
+                                "current_limit_values": {1: .015}}], device.requests
     assert device.calls == [("current", 1, .015), ("voltage", 0, 70.), ("voltage", 1, 230.)]
     assert device.voltages == {0: 70., 1: 230.}
     assert device.currents == {0: .01, 1: .015}

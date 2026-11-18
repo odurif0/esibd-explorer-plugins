@@ -1465,7 +1465,7 @@ def run(scenario, target, app_holder=None):
         scan._refresh_interface()
         assert scan.settingsMgr.settings[scan.MODULES].value.splitlines()[0] == 'M3 DMMR_M03, M5 DMMR_M05'
         detector_device.recording = False
-        assert not scan.initScan() and 'recording' in scan.scan_status
+        assert not scan.initScan() and 'recording' in scan.scan_status, scan.scan_status
         detector_device.recording = True
         amx.psu_ch23 = 'PSU_A'
         scan._refresh_interface()

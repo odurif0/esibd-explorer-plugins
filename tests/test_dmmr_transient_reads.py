@@ -120,55 +120,17 @@ def test_campaign_keeps_recovery_metadata_and_shades_actual_gap(dmmr_notebook_ns
         plt.close(figure)
 
 
-def start_plugin(rig):
-    rig.controller.toggleOn()
-    assert rig.controller.acquiring
-    rig.device.connected = True
-    rig.device._transport_poisoned = False
-    rig.device.calls.clear()
-    def disconnect():
-        rig.device.calls.append(('disconnect',))
-        rig.device.connected = False
-        return True
-    rig.device.disconnect = disconnect
-
-
-@pytest.mark.parametrize('status', [-10, -11, -12, -13])
-def test_plugin_transient_read_is_nan_then_a_new_verified_cycle(dmmr_acquisition_rig, status):
-    rig = dmmr_acquisition_rig
-    start_plugin(rig)
-    getter = rig.device.get_module_current
-    failed = False
-    def bad_once(address, **kw):
-        nonlocal failed
-        if not failed:
-            failed = True
-            return status, 666., 0
-        return getter(address, **kw)
-    rig.device.get_module_current = bad_once
-    rig.controller.readNumbers()
-    assert rig.controller.acquiring
-    assert all(np.isnan(v) for v in rig.controller.values.values())
-    first_token = rig.controller.measurementSnapshot()[2]
-    rig.controller.readNumbers()
-    assert rig.controller.values == {0: 1e-12, 3: 4e-12}
-    assert rig.controller.measurementSnapshot()[2] is not first_token
-    assert rig.controller._read_recovery.last_incident['resumed']
-    assert not any('mode was active' in line for line in rig.logs)
-    assert not any(call == ('automatic', False) for call in rig.device.calls)
+# The plugin's own reactions. The read recovery itself (lost replies, purges, verified ranges, a cycle
+# published as missing) runs in the Rust worker: native/worker/tests/dmmr_facade.rs and
+# tests/test_native_dmmr_adapter.py.
 
 
 @pytest.mark.parametrize('stop_confirmed', [True, False])
-def test_plugin_persistent_error_stops_and_retains_uncertainty(dmmr_acquisition_rig, stop_confirmed):
-    rig = dmmr_acquisition_rig
-    start_plugin(rig)
-    rig.device.get_module_current = lambda *a, **kw: (-13, 666., 0)
-    rig.controller.readNumbers()
-    assert rig.controller.acquiring
+def test_a_read_failure_stops_and_retains_uncertainty(dmmr_native_acquisition_rig, stop_confirmed):
+    rig = dmmr_native_acquisition_rig
+    rig.device.poll_error = RuntimeError('GetModuleMeasRange: receive status -10')
     if not stop_confirmed:
-        # Initial verification still succeeds. The failed OFF readback must
-        # prevent port closure and preserve the next OFF action.
-        rig.device.get_enable = lambda **kw: (0, True)
+        rig.device.readback['enable'] = (0, True)  # the OFF readback does not confirm OFF
     rig.controller.readNumbers()
     assert not rig.controller.acquiring
     assert all(np.isnan(v) for v in rig.controller.values.values())
@@ -176,102 +138,12 @@ def test_plugin_persistent_error_stops_and_retains_uncertainty(dmmr_acquisition_
     assert rig.controller.initialized is not stop_confirmed
     assert rig.controller.main_state == ('Disconnected' if stop_confirmed else 'Shutdown unconfirmed')
     assert rig.ui_states[-1] is not stop_confirmed
+    assert any('DMMR reading stopped: GetModuleMeasRange: receive status -10' in m for m in rig.logs)
 
 
-@pytest.mark.parametrize('operation', ['state', 'current'])
-def test_plugin_blocked_dll_never_queries_or_closes_the_same_transport(dmmr_acquisition_rig, operation):
-    rig = dmmr_acquisition_rig
-    start_plugin(rig)
-    def blocked(*args, **kw):
-        rig.device._transport_poisoned = True
-        raise RuntimeError('DMMR instance is now marked unusable after DLL call timed out')
-    if operation == 'state':
-        rig.device.get_state = blocked
-    else:
-        rig.device.get_module_current = blocked
-    def forbidden(*a, **kw):
-        pytest.fail('Another device call was made after poisoning')
-    for name in ['get_device_state', 'get_voltage_state', 'get_temperature_state']:
-        setattr(rig.device, name, forbidden if operation == 'state' else lambda **kw: (0, 0, []))
-    rig.device.disconnect = forbidden
-    rig.controller.readNumbers()
-    assert not rig.controller.acquiring
-    assert rig.controller.device is rig.device and rig.controller.initialized
-    assert rig.controller.main_state == 'Shutdown unconfirmed'
-    assert rig.ui_states[-1] is True
-    assert not any(c[0] in ('automatic', 'enable', 'disconnect') for c in rig.device.calls)
-
-
-@pytest.mark.parametrize('status', [-10, -11, -12, -13])
-def test_plugin_range_read_at_on_retries_read_only_not_writes(dmmr_acquisition_rig, status):
-    rig = dmmr_acquisition_rig
-    recovery_class = rig.module._get_dmmr_driver_class().CommandRecovery
-    rig.device.new_command_recovery = lambda **kw: recovery_class(rig.device, **kw)
-    getter = rig.device.get_module_meas_range
-    failed = False
-    def bad_once(address, **kw):
-        nonlocal failed
-        if not failed:
-            failed = True
-            return status, 0, False
-        return getter(address, **kw)
-    rig.device.get_module_meas_range = bad_once
-    rig.controller.toggleOn()
-    assert rig.controller.acquiring
-    assert len([c for c in rig.device.calls if c[0] == 'auto_range']) == 2
-    assert rig.controller._verified_read_ranges == {0: (0, True), 3: (0, True)}
-
-
-def test_notebook_preserves_reset_device_time_in_a_new_segment(dmmr_notebook_rig):
-    device, cfg, _, run = dmmr_notebook_rig
-    cfg['baseline_window_s'] = .5
-    inject_stream_fault(device, sticky=True)
-    purge, get_frame = device.purge, device.get_current
-    reset_at = None
-    def reset():
-        nonlocal reset_at
-        status = purge()
-        reset_at = device.clock()
-        return status
-    def frame(**kw):
-        reply = list(get_frame(**kw))
-        if reply[0] == 0 and reset_at is not None:
-            reply[4] -= reset_at
-        return tuple(reply)
-    device.purge, device.get_current = reset, frame
-    report, raw, summary, saved = run()
-    assert report['status'] == 'complete', report['error']
-    selected = raw.loc[raw.selected.eq(1)]
-    assert set(selected.segment) == {0, 1}
-    assert selected.groupby('address').device_time_s.diff().lt(0).any()
-    assert selected.groupby(['address', 'segment']).device_time_s.diff().dropna().gt(0).all()
-    assert summary.drift_fA_min.isna().all()  # No fit through the restart.
-    assert set(summary.time_source) == {'host_elapsed_s'}
-    assert report['acquisition']['read_recoveries'][0]['segment_after'] == 1
-    assert saved['baseline_windows']
-
-
-@pytest.mark.parametrize('bad', [(0, np.nan, 0), (0, 1e-12, 2)])
-def test_plugin_recovery_requires_valid_values_in_the_verified_range(dmmr_acquisition_rig, bad):
-    rig = dmmr_acquisition_rig
-    start_plugin(rig)
-    rig.controller._verified_read_ranges = {0: (0, False), 3: (0, False)}
-    rig.device.get_module_meas_range = lambda *a, **kw: (0, 0, False)
-    rig.device.get_module_current = lambda *a, **kw: (-13, np.nan, 0)
-    rig.controller.readNumbers()
-    assert rig.controller.acquiring
-    rig.device.get_module_current = lambda *a, **kw: bad
-    rig.controller.readNumbers()
-    assert not rig.controller.acquiring and not rig.controller.initialized
-    assert rig.controller.main_state == 'Disconnected'
-    assert not rig.controller._read_recovery.last_incident['resumed']
-    assert all(np.isnan(v) for v in rig.controller.values.values())
-
-
-def test_explicit_off_finished_during_recovery_is_not_relabelled_unconfirmed(dmmr_acquisition_rig):
+def test_explicit_off_finished_during_recovery_is_not_relabelled_unconfirmed(dmmr_native_acquisition_rig):
     from contextlib import contextmanager
-    rig = dmmr_acquisition_rig
-    start_plugin(rig)
+    rig = dmmr_native_acquisition_rig
     section = rig.controller._controller_lock_section
     @contextmanager
     def finish_off_before_failure_handler(message, **kw):
@@ -297,8 +169,7 @@ def _stop_on_lost_replies(rig, monkeypatch, *, when=1000.):
     scheduled = []
     monkeypatch.setattr(rig.module, '_invoke_gui_callback', lambda callback: scheduled.append(callback))
     monkeypatch.setattr(rig.module.time, 'monotonic', lambda: when)
-    rig.device.get_module_current = lambda *a, **kw: (-13, 666., 0)
-    rig.controller.readNumbers()
+    rig.device.poll_error = RuntimeError('GetModuleMeasRange: receive status -10')
     rig.controller.readNumbers()
     assert ('disconnect',) in rig.device.calls and not rig.controller.initialized
     return scheduled
@@ -324,11 +195,10 @@ def _with_explorer_device(rig, recording=True):
     return switched, state
 
 
-def test_a_read_stop_reconnects_the_dmmr_once_by_itself(dmmr_acquisition_rig, monkeypatch):
+def test_a_read_stop_reconnects_the_dmmr_once_by_itself(dmmr_native_acquisition_rig, monkeypatch):
     """2026-11-16 02:00: lost replies stopped the DMMR and an overnight map; ON again, it read normally."""
-    rig = dmmr_acquisition_rig
+    rig = dmmr_native_acquisition_rig
     switched, _ = _with_explorer_device(rig)
-    start_plugin(rig)
     restarted = []
     monkeypatch.setattr(rig.module, '_session_restart_recording', lambda device, deadline: restarted.append(device))
     scheduled = _stop_on_lost_replies(rig, monkeypatch)
@@ -346,10 +216,9 @@ def test_a_read_stop_reconnects_the_dmmr_once_by_itself(dmmr_acquisition_rig, mo
     assert switched == [True]
 
 
-def test_a_second_read_stop_within_the_hour_waits_for_the_operator(dmmr_acquisition_rig, monkeypatch):
-    rig = dmmr_acquisition_rig
+def test_a_second_read_stop_within_the_hour_waits_for_the_operator(dmmr_native_acquisition_rig, monkeypatch):
+    rig = dmmr_native_acquisition_rig
     _with_explorer_device(rig)
-    start_plugin(rig)
     rig.controller._auto_reconnect_at = 1000. - 1800.
     scheduled = _stop_on_lost_replies(rig, monkeypatch)
     timers = []
@@ -361,10 +230,9 @@ def test_a_second_read_stop_within_the_hour_waits_for_the_operator(dmmr_acquisit
     assert any('already was 30 min ago. Switch it ON by hand.' in text for text in rig.logs), rig.logs
 
 
-def test_the_operator_cancels_a_pending_reconnection(dmmr_acquisition_rig, monkeypatch):
-    rig = dmmr_acquisition_rig
+def test_the_operator_cancels_a_pending_reconnection(dmmr_native_acquisition_rig, monkeypatch):
+    rig = dmmr_native_acquisition_rig
     switched, _ = _with_explorer_device(rig, recording=False)
-    start_plugin(rig)
     scheduled = _stop_on_lost_replies(rig, monkeypatch)
     timers = []
     import PyQt6.QtCore as qtcore

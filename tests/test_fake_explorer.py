@@ -54,7 +54,7 @@ def host_api():
 
 def test_fake_explorer_matches_the_target_host():
     import explorer_host
-    if explorer_host.interpreter_version(explorer_host.qt_python()) != explorer_host.TARGET_VERSION:
+    if not explorer_host.is_target(explorer_host.interpreter_version(explorer_host.qt_python())):
         pytest.skip(f"needs ESIBD Explorer {explorer_host.TARGET_VERSION}")
     result = run_probe(__file__, "--probe", timeout=120)
     host = json.loads(result.stdout.strip().splitlines()[-1])

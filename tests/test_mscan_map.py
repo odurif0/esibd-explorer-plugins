@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -386,6 +387,30 @@ def test_a_map_stopped_by_its_spray_window_leaves_no_window_to_the_next_one(engi
     assert scan.channels['Q1_DC'].value == 38.  # This map's start value, not the 36 V of the first map.
 
 
+def test_the_map_log_follows_the_reference_and_its_sentinel(engine, tmp_path):
+    """2026-11-17: near the closing the instrument resolved 20–30 % less than on the other days, which
+    the reference at k 0.200 barely showed. A sentinel at k 0.2094 follows each reference; map.log and
+    the console give the R and height of both."""
+    plan = tmp_path / 'sentinel.toml'
+    plan.write_text((PLANS / 'q2_P1_2h.toml').read_text() + '\n[map.reference]\nsentinel_k = 0.2094\n')
+    scan = FakeMScan()
+    printed = []
+    scan.print = lambda text, **kw: printed.append(text)
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    folder = runner.start(plan)
+    deadline = time.monotonic() + 120
+    while len(scan.lines_run) < 4 and runner.running and time.monotonic() < deadline:
+        time.sleep(.02)
+    runner.stop()
+    runner.thread.join(300)
+    roles = [line['role'] for line in scan.lines_run]
+    assert roles[:2] == ['reference', 'sentinel'], roles
+    log = (folder / RUNNER.LOG).read_text()
+    assert re.search(r'reference k 0\.20000: 922 at [\d.]+ V, R [\d.]+, [\d.]+ pA', log), log
+    assert re.search(r'sentinel k 0\.20940: 922 at [\d.]+ V, R [\d.]+, [\d.]+ pA', log), log
+    assert any(text.startswith('Map: sentinel k 0.20940') for text in printed), printed
+
+
 def test_a_line_that_cannot_start_stops_the_map_at_once_without_counting_it(engine, tmp_path):
     """2026-11-12 lab: PSU_A went OFF after a lost reply; the map then failed two more lines in 4 s on
     "Cannot start: PSU_A_CH0: no valid PSU voltage readback" and stopped on "3 failed lines". A refused
@@ -412,6 +437,29 @@ def test_a_line_that_cannot_start_stops_the_map_at_once_without_counting_it(engi
     records = json.loads((folder / RUNNER.JOURNAL).read_text())['records']
     assert len(records) == 2 and all(r['outcome'] == 'done' for r in records)
     assert len(attempts) >= 3, 'tried again before stopping'
+    assert scan.channels['Q1_DC'].value == 36., 'start values restored'
+
+
+def test_the_esi_switched_off_stops_the_map_and_restores_its_start_values(engine, tmp_path):
+    """2026-11-17 lab: the operator switched the ESI OFF (current 0) and the map went on."""
+    scan = FakeMScan()
+    runner = RUNNER.MapRunner(scan, engine, data_path=tmp_path)
+    runner.SPRAY_LOST_S, runner.SPRAY_CHECK_EVERY_S = .2, .02
+    original = scan._start_map_line
+
+    def esi_off_after_two_lines():
+        started = original()
+        if len(scan.lines_run) == 2:
+            scan._map_spray_now = lambda: None
+        return started
+    scan._start_map_line = esi_off_after_two_lines
+    folder = runner.start(PLANS / 'q2_P1_2h.toml')
+    runner.thread.join(120)
+    status = json.loads((folder / RUNNER.STATUS).read_text())
+    assert status['state'] == 'stopped', status
+    assert 'spray current unavailable below its window' in status['message'] and 'ESI is OFF' in status['message']
+    records = json.loads((folder / RUNNER.JOURNAL).read_text())['records']
+    assert len(records) == 2 and len(scan.lines_run) == 2
     assert scan.channels['Q1_DC'].value == 36., 'start values restored'
 
 
@@ -941,13 +989,94 @@ def test_a_line_stops_once_the_spray_has_stayed_outside_its_range(monkeypatch):
     stopped it: the spray of a line was judged only on its mean, at the end."""
     scan = _SprayLineScan(points=10 ** 6, dry_after=50)
     runner = _guard_runner(scan, monkeypatch, spray_range_na=[20, 150])
-    runner.SPRAY_OUT_S, runner.SPRAY_CHECK_EVERY_S = 0.02, 0.
+    runner.SPRAY_LOST_S, runner.SPRAY_CHECK_EVERY_S = 0.02, 0.
     clock = iter(np.arange(0, 1e6, .001))
     runner.monotonic = lambda: float(next(clock))
     data = runner._run_scan(dict(expected_s=1e6, axis=list(range(10 ** 6))))
     assert scan.stops >= 1
-    assert data['error'].startswith('spray current 0.0 nA outside its window 20.0–150.0 nA'), data['error']
+    assert data['error'].startswith('spray current 0.0 nA below its window 20.0–150.0 nA (fixed range of the plan) for'), data['error']
+    assert runner._spray_lost == data['error'], 'a spray below its window stops the map'
     assert 50 <= scan.polls < 200, 'stopped soon after the spray went out'
+
+
+def test_a_spray_above_its_window_fails_the_line_only(monkeypatch):
+    """The only spray that came back by itself was above its window (2026-11-15 00:05, 117.6 nA)."""
+    scan = _SprayLineScan(points=10 ** 6, dry_after=10 ** 9)
+    scan._map_spray_now = lambda: 60e-9 if scan.polls < 50 else 400e-9
+    runner = _guard_runner(scan, monkeypatch, spray_range_na=[20, 150])
+    runner.SPRAY_LOST_S, runner.SPRAY_CHECK_EVERY_S = 0.02, 0.
+    clock = iter(np.arange(0, 1e6, .001))
+    runner.monotonic = lambda: float(next(clock))
+    data = runner._run_scan(dict(expected_s=1e6, axis=list(range(10 ** 6))))
+    assert data['error'].startswith('spray current 400.0 nA outside its window'), data['error']
+    assert runner._spray_lost == ''
+
+
+def test_the_esi_switched_off_during_a_line_stops_the_map(monkeypatch):
+    """2026-11-17 lab: the operator switched the ESI OFF during a map, which did not stop."""
+    scan = _SprayLineScan(points=10 ** 6, dry_after=10 ** 9)
+    scan._map_spray_now = lambda: 60e-9 if scan.polls < 50 else None  # OFF: MScan reads no ESI current.
+    scan._configure_map_line = lambda request, config: None
+    runner = _guard_runner(scan, monkeypatch, spray_range_na=[20, 150])
+    runner.SPRAY_LOST_S, runner.SPRAY_CHECK_EVERY_S = 0.02, 0.
+    clock = iter(np.arange(0, 1e6, .001))
+    runner.monotonic = lambda: float(next(clock))
+    for name in ('_wait_for_spray', '_apply_static', '_wait_static', '_end_line'):
+        setattr(runner, name, lambda *args: None)
+    with pytest.raises(RUNNER.SafeStop, match=r'spray current unavailable below its window 20\.0–150\.0 nA \(fixed range of the plan\) for '
+                                              r'0\.02 s during the line: the ESI is OFF or no longer sprays\. .* '
+                                              r'Resume the map: this line was not counted'):
+        runner._line(dict(id=7, expected_s=1e6, axis=list(range(10 ** 6))))
+    assert scan.stops >= 1 and 50 <= scan.polls < 200
+
+
+def _spray_runner(readings, *, first=False):
+    """A runner between two lines; ``readings`` gives the ESI current at each check (the last one stays)."""
+    readings = list(readings)
+    scan = SimpleNamespace(_gui=lambda action, cancel=True: action(), print=lambda *a, **k: None,
+                           _show_map_status=lambda status: None,
+                           _map_spray_now=lambda: readings.pop(0) if len(readings) > 1 else readings[0])
+    runner = RUNNER.MapRunner(scan, None, data_path='.')
+    runner.journal = dict(plan=dict(map=dict(spray_range_na=[20, 150])), records=[] if first else [{}] * 3)
+    runner._session_start = 0
+    runner.SPRAY_LOST_S, runner.SPRAY_CHECK_EVERY_S = .05, .005
+    return runner
+
+
+@pytest.mark.parametrize('reading', [None, 0., 3e-9])
+def test_a_spray_gone_before_a_line_stops_the_map_after_5_s(reading):
+    runner = _spray_runner([reading])
+    started = time.monotonic()
+    with pytest.raises(RUNNER.SafeStop, match=r'below its window 20\.0–150\.0 nA \(fixed range of the plan\) for 0\.05 s before the line: the ESI is OFF'):
+        runner._wait_for_spray()
+    assert time.monotonic() - started < 5., 'not the 30 min wait'
+
+
+def test_a_spray_back_within_5_s_lets_the_line_start():
+    _spray_runner([0., None, 45e-9])._wait_for_spray()
+
+
+def test_a_spray_above_its_window_before_a_line_is_waited_for():
+    runner = _spray_runner([400e-9])
+    runner.SPRAY_WAIT_S = .2
+    with pytest.raises(RUNNER.SafeStop, match='Spray current outside its window for 0 min'):
+        runner._wait_for_spray()
+
+
+def test_the_first_line_after_start_or_resume_waits_for_the_spray():
+    """At Start or Resume the operator has just started the spray: it is waited for, not judged."""
+    runner = _spray_runner([0.], first=True)
+    runner.SPRAY_WAIT_S = .2
+    with pytest.raises(RUNNER.SafeStop, match='Spray current outside its window for 0 min'):
+        runner._wait_for_spray()
+
+
+def test_the_esi_switched_off_while_the_map_waits_for_the_beam_stops_it():
+    runner = _spray_runner([45e-9, None])
+    started = time.monotonic()
+    with pytest.raises(RUNNER.SafeStop, match='unavailable below its window .* while the map waited for the beam'):
+        runner._wait(dict(seconds=300.))
+    assert time.monotonic() - started < 5.
 
 
 def test_a_short_spray_dip_does_not_stop_a_line(monkeypatch):
@@ -955,7 +1084,8 @@ def test_a_short_spray_dip_does_not_stop_a_line(monkeypatch):
     spray = scan._map_spray_now
     scan._map_spray_now = lambda: 0. if 100 <= scan.polls < 110 else spray()
     runner = _guard_runner(scan, monkeypatch, spray_range_na=[20, 150])
-    runner.SPRAY_OUT_S, runner.SPRAY_CHECK_EVERY_S = 0.05, 0.
+    runner.SPRAY_OUT_S = runner.SPRAY_LOST_S = 0.05  # The dip is shorter.
+    runner.SPRAY_CHECK_EVERY_S = 0.
     clock = iter(np.arange(0, 1e6, .001))
     runner.monotonic = lambda: float(next(clock))
     data = runner._run_scan(dict(expected_s=1e6, axis=list(range(300))))

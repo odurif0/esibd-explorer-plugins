@@ -82,18 +82,14 @@ def probe(outcome, output):
     parent._update_status_widgets = refresh_widgets
     controller = module.DMMRController(parent)
     parent.controller = controller
-    if outcome in ('recovered', 'recovered_off', 'persistent'):
-        from support.dmmr import StartupDevice
-        hardware = StartupDevice(module._get_dmmr_driver_class().CommandRecovery)
-        if outcome != 'recovered_off':
-            hardware.faults[('auto_range', 2)] = -12
-            hardware.desync = True
-            hardware.persistent = outcome == 'persistent'
-    else:
-        hardware = FaultingDMMR()
+    # The DMMR's (scripted) native worker. A lost reply recovered inside the worker is an ON that
+    # succeeds ('recovered', 'recovered_off'); one it cannot recover fails ON and its cleanup
+    # ('persistent'). The recovery itself is tested in native/worker/tests/dmmr_facade.rs.
+    hardware = FaultingDMMR()
     controller.device = hardware
-    hardware.fail_start = None if outcome in ("success", "close_failure") else "enable_ack" if outcome == "lost_ack" else "range"
-    hardware.reject_cleanup = outcome in ("unconfirmed", "lost_ack")
+    hardware.fail_start = (None if outcome in ("success", "close_failure", "recovered", "recovered_off")
+                           else "enable_ack" if outcome == "lost_ack" else "range")
+    hardware.reject_cleanup = outcome in ("unconfirmed", "lost_ack", "persistent")
     hardware.disconnect_result = outcome != "close_failure"
     controller.initialized = True
     controller.main_state = "OFF"
@@ -149,10 +145,6 @@ def probe(outcome, output):
     if outcome in ('success', 'close_failure', 'recovered', 'recovered_off'):
         assert controller.acquiring and hardware.enabled
         assert parent.statusBadgeLabel.text() == 'ST_ON'
-        if outcome == 'recovered':
-            assert hardware.events[-1]['verified']
-            assert hardware.calls.count(('auto_range', 2, True)) == 1
-            assert hardware.calls.count(('purge',)) == 1
     else:
         assert not controller.acquiring
         assert np.isnan(channel.monitor), "Failed startup left a stale displayed sample"
@@ -179,10 +171,6 @@ def probe(outcome, output):
     hardware.reject_cleanup = False
     hardware.fail_start = None
     hardware.disconnect_result = True
-    if outcome == 'persistent':
-        hardware.persistent = hardware.sticky = False
-    elif outcome == 'recovered_off':
-        hardware.sticky = True
     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
     settle()
     check(not expected_on)

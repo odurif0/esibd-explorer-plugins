@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections import deque
 import importlib
 import importlib.util
 import logging
@@ -58,6 +59,8 @@ _DMMR_COMMUNICATION_LOST_STATE = "Communication lost"
 _DMMR_SHUTDOWN_UNCONFIRMED_STATE = "Shutdown unconfirmed"
 _DMMR_ATTENTION_STATE_TOKENS = ("error", "unconfirmed", "lost", "pending")
 _DMMR_TRANSPORT_FAILURE_THRESHOLD = 3
+# Readings waiting for Explorer's recorder (Qt thread): more than an hour at 5 readings/s.
+_DMMR_PENDING_SAMPLES = 20000
 # After reading stopped on lost replies with the DMMR confirmed OFF and closed, it reconnects by itself
 # once, after this delay, then not again within the hour (2026-11-16 02:00: the DMMR stopped and an
 # overnight map stopped with it; switched ON again the next morning, it read normally).
@@ -1136,43 +1139,74 @@ class DMMRDevice(Device):
         self.channelType = DMMRChannel
 
     def appendData(self, nan: bool = False, skipPlotting: bool = False) -> None:
-        """Record like Explorer, then keep the new timestamp later than the previous one."""
-        super().appendData(nan, skipPlotting)
-        try:
-            last = self.time.get()[-2:]  # A view: the correction is written into the history.
-            if len(last) == 2 and last[0] - self._STAMP_BUNCH_S < last[1] <= last[0]:
-                last[1] = last[0] + self._STAMP_STEP_S
-        except (AttributeError, TypeError, ValueError, IndexError):
-            pass  # No timestamped history to correct.
+        """Record every DMMR reading once, at the time it was read (DMMRController._publish_sample).
+
+        Explorer's timer still calls this from its Qt thread; it now takes the readings waiting since the
+        last call, none or several, instead of the latest value stamped with the time of the call.
+        """
+        samples = self.controller.takeSamples()
+        if self.plotableChannels or nan:
+            self.updateValues()  # Equations of virtual channels, as Explorer does.
+            if nan:  # Explorer's mark of a gap (recording started or stopped).
+                for channel in self.getChannels():
+                    channel.appendValue(lenT=self.time.size, nan=True)
+                self._add_time(time.time())
+            on = bool(self.isOn())
+            for stamp, values, ranges, token in samples:
+                for channel in self.getChannels():
+                    if getattr(channel, "real", False) and callable(getattr(channel, "module_address", None)):
+                        address = channel.module_address()
+                        valid = bool(channel.enabled) and on
+                        channel.monitor = values.get(address, np.nan) if valid else np.nan
+                        channel.measurement_range = ranges.get(address, np.nan) if valid else np.nan
+                        channel._measurement_token = token
+                    channel.appendValue(lenT=self.time.size)
+                self._add_time(stamp)
+                self._note_reading(stamp)
+        if self.liveDisplayActive():
+            if skipPlotting:
+                self.measureInterval(reset=False)
+            else:
+                self.signalComm.plotSignal.emit(False)  # noqa: FBT003
+        else:
+            self.measureInterval()
+
+    def _add_time(self, stamp: float) -> None:
+        """A stamp equal to or just before the previous one follows it (2026-11-03: one equal stamp blocked
+        every MScan scan). A larger step back is a clock adjustment: kept, for readers to skip."""
+        history = self.time
+        if history.size:
+            last = float(history.get()[-1])
+            if last - self._STAMP_BUNCH_S < stamp <= last:
+                stamp = last + self._STAMP_STEP_S
+        history.add(stamp)
+
+    def _note_reading(self, stamp: float) -> None:
+        """'Interval (measured)' shows the time between DMMR readings, not between Explorer's timer calls."""
+        previous = getattr(self, "_last_reading_stamp", None)
+        self._last_reading_stamp = stamp
+        if previous is not None and stamp > previous:
+            gap_ms = (stamp - previous) * 1000
+            mean = getattr(self, "_reading_interval_ms", None)
+            self._reading_interval_ms = gap_ms if mean is None else 0.9 * mean + 0.1 * gap_ms
+
+    def measureInterval(self, reset: bool = True) -> None:
+        """No lag guard on the DMMR: a late Qt thread delays the display only, never the readings.
+
+        Explorer 1.0.2 counted late timer calls of its Qt thread; past a tolerance it paused DMMR
+        recording (NaN readings), counted DMMR errors and closed the DMMR (2026-10-21, 2026-11-17).
+        """
+        if reset or getattr(self, "lastIntervalTime", None) is None:
+            self.lastIntervalTime = time.time() * 1000
+        self.lagging = 0
+        self.lagging_seconds = 0
+        reading = getattr(self, "_reading_interval_ms", None)
+        if reading is not None:
+            self.interval_measured = int(round(reading))
 
     def bufferLagging(self, wait: "int | None" = None) -> bool:
-        """Name Explorer's display-lag pauses: each one silently counts a DMMR error.
-
-        Explorer 1.0.2 pauses recording when any device's display lags past its
-        tolerance and adds one to this controller's error count per pause, only
-        logging at DEBUG level; at the maximum it closes the DMMR communication
-        although the DMMR link reported nothing (lab log 2026-10-21 16:20-16:24).
-        """
-        paused = bool(super().bufferLagging(wait))
-        if not paused:
-            self._display_lag_reported = False
-        elif not getattr(self, "_display_lag_reported", False):
-            self._display_lag_reported = True
-            manager = getattr(self, "pluginManager", None)
-            devices = getattr(getattr(manager, "DeviceManager", None), "getDevices", lambda: [])()
-            worst = max(devices, key=lambda device: getattr(device, "lagging_seconds", 0) or 0, default=None)
-            settings = getattr(manager, "Settings", None)
-            self.print(
-                f"Explorer display lag: {getattr(worst, 'name', 'a device')} is "
-                f"{getattr(worst, 'lagging_seconds', '?')} s behind (tolerance "
-                f"{getattr(settings, 'maxLagTolerance', '?')} s). Explorer pauses DMMR recording "
-                f"for {wait if wait is not None else getattr(settings, 'lagWaitTime', '?')} s and counts "
-                "each pause as a DMMR error, closing communication after "
-                f"{getattr(getattr(self, 'controller', None), 'maxErrorCount', '?')}; the DMMR link "
-                "itself reported no error. Reduce plotted data or the acquisition rate.",
-                flag=PRINT.WARNING,
-            )
-        return paused
+        """Never pause DMMR recording for a late display: the readings carry their own times."""
+        return False
 
     def initGUI(self) -> None:
         super().initGUI()
@@ -1802,17 +1836,11 @@ class DMMRDevice(Device):
         state = self._display_main_state()
         if state == "ST_ON":
             background = "#2f855a"
-        elif state == "OFF":
+        elif state in ("OFF", "ST_OFF"):
             background = "#4a5568"
-        elif state == "ST_STBY":
-            background = "#b7791f"
         elif state == "Disconnected":
             background = "#718096"
-        elif (
-            state == "ST_OVERLOAD"
-            or state.startswith("ST_ERR")
-            or _state_requires_operator_attention(state)
-        ):
+        elif state.startswith("ST_ERR") or _state_requires_operator_attention(state):
             background = "#c53030"
         else:
             background = "#4a5568"
@@ -3082,6 +3110,14 @@ class DMMRChannel(Channel):
             line_edit.setToolTip(tooltip)
 
 
+def _require_native_backend(device):
+    """The DMMR is driven by its own Rust worker only; there is no Python DLL path in the plugin."""
+    backend = _native_dmmr_backend(device)
+    if backend is None:
+        raise RuntimeError("DMMR communication requires its native worker.")
+    return backend
+
+
 def _native_dmmr_backend(device):
     """Inspect local facade fields without turning detection into an RPC."""
     try:
@@ -3165,6 +3201,9 @@ class DMMRController(DeviceController):
         self._sample_lock = RLock()
         self.meas_ranges: dict[int, float] = {}
         self._sample_token = object()
+        # Every reading, with the time it was read, until Explorer's recorder takes it (Qt thread).
+        self._pending_samples: deque = deque(maxlen=_DMMR_PENDING_SAMPLES)
+        self._samples_dropped = 0
 
     def initializeValues(self, reset: bool = False) -> None:
         with self._sample_lock:
@@ -3183,6 +3222,36 @@ class DMMRController(DeviceController):
         with self._sample_lock:
             return dict(self.values or {}), dict(self.meas_ranges), self._sample_token
 
+    def _publish_sample(self, values, ranges, stamp: float) -> None:
+        """A new reading: the live values, and a row for Explorer's history with the time it was read.
+
+        Explorer 1.0.2 records a device from a timer of its Qt thread, with the time the Qt thread got
+        there: a late Qt thread lost a reading (two between ticks), recorded NaN (none) and shifted the
+        times; it then paused recording and closed the DMMR (2026-11-17: 38 % NaN on M03, closed at
+        13:40, while the DMMR answered 4.9 times a second all along). Each reading is now recorded
+        once, at the time it was read, whenever the Qt thread takes it.
+        """
+        with self._sample_lock:
+            self.values, self.meas_ranges = values, ranges
+            self._sample_token = token = object()
+            if not getattr(self.controllerParent, "recording", False):
+                return  # Explorer is not recording: the live values only.
+            pending = self._pending_samples
+            if len(pending) == pending.maxlen:
+                self._samples_dropped += 1
+            pending.append((float(stamp), dict(values), dict(ranges), token))
+
+    def takeSamples(self) -> list:
+        """The readings not yet recorded, oldest first (Qt thread)."""
+        with self._sample_lock:
+            samples = list(self._pending_samples)
+            self._pending_samples.clear()
+            dropped, self._samples_dropped = self._samples_dropped, 0
+        if dropped:
+            self.print(f"{dropped} DMMR readings were not recorded: Explorer's Qt thread took none for "
+                       f"more than {_DMMR_PENDING_SAMPLES} readings.", flag=PRINT.WARNING)
+        return samples
+
     def _store_current(self, values, ranges, module, current, meas_range) -> None:
         if not np.isfinite(current) or not _valid_measurement_range(meas_range):
             self.errorCount += 1
@@ -3192,20 +3261,12 @@ class DMMRController(DeviceController):
         ranges[module] = int(meas_range)
 
     def _new_command_recovery(self, device, timeout_s: float, phase: str):
-        if _native_dmmr_backend(device) is not None:
-            if phase == "startup":
-                self._native_cancel_event = Event()
-            self._native_call(device, "begin_command_recovery", phase,
-                              timeout_s=timeout_s, cancellable=phase == "startup")
-            return _NativeDMMRCommandRecovery(self, device, timeout_s, phase)
-        factory = getattr(device, 'new_command_recovery', None)
-        if not callable(factory):
-            return None  # An old/incomplete backend fails closed on a receive error.
-        return factory(
-            phase=phase, timeout_s=timeout_s,
-            continue_check=lambda: self.device is device and (
-                phase != 'startup' or self.controllerParent.isOn()),
-        )
+        _require_native_backend(device)
+        if phase == "startup":
+            self._native_cancel_event = Event()
+        self._native_call(device, "begin_command_recovery", phase,
+                          timeout_s=timeout_s, cancellable=phase == "startup")
+        return _NativeDMMRCommandRecovery(self, device, timeout_s, phase)
 
     def _native_call(self, device, name, *args, timeout_s: float, cancellable=False):
         backend = _native_dmmr_backend(device)
@@ -3233,32 +3294,18 @@ class DMMRController(DeviceController):
                 backend.cancel()
 
     def _startup_call(self, device, name, *args, timeout_s: float, recovery=None):
-        if _native_dmmr_backend(device) is not None:
-            if recovery is not None:
-                recovery._active()
-            result = self._native_call(device, name, *args, timeout_s=timeout_s,
-                                       cancellable=True)
-            if recovery is not None:
-                recovery._active()
-            return result
         if recovery is not None:
             recovery._active()
-        elif getattr(device, '_transport_poisoned', False):
-            raise RuntimeError('DLL blocked; startup cancelled.')
-        result = getattr(device, name)(*args, timeout_s=timeout_s)
+        result = self._native_call(device, name, *args, timeout_s=timeout_s, cancellable=True)
         if recovery is not None:
             recovery._active()
-        elif getattr(device, '_transport_poisoned', False):
-            raise RuntimeError('DLL blocked; startup cancelled.')
         return result
 
-    def _recover_startup_command(self, device, recovery, status, action, verify, *, expected=None):
+    def _recover_startup_command(self, device, recovery, status, action, *, expected=None):
         if recovery is None or status not in (-10, -11, -12, -13):
             raise RuntimeError(f'{action} failed: {self._format_status(status, device=device)}')
         self.print(f'DMMR startup receive error in {action}: {status}; checking hardware readbacks.', flag=PRINT.WARNING)
-        result = (recovery.recover(status, action, {"running": True} if expected is None else expected)
-                  if isinstance(recovery, _NativeDMMRCommandRecovery)
-                  else recovery.recover(status, action, verify))
+        result = recovery.recover(status, action, {"running": True} if expected is None else expected)
         self.print(f'Recovered DMMR startup after {action}: {status}; hardware readbacks verified.', flag=PRINT.WARNING)
         return result
 
@@ -3273,90 +3320,33 @@ class DMMRController(DeviceController):
                 f'read range={used_range!r}, auto={auto_readback!r}, status={self._format_status(status, device=device)}')
         return result
 
-    def _verify_startup_ranges(self, device, recovery):
-        state_reply = recovery.verify_running()
-        # Check settings confirmed before the fault too. Auto ranges may move.
-        for address, (value, automatic) in self._verified_read_ranges.items():
-            result = (device.NO_ERR, *recovery._call('get_module_meas_range', address))
-            self._validate_startup_range(device, address, automatic, None if automatic else value, result)
-        return state_reply
-
     def _configure_module_ranges(self, device, modules, timeout_s: float, *, recovery=None) -> None:
-        if _native_dmmr_backend(device) is not None:
-            self._read_recovery = None
-            self._verified_read_ranges = {}
-            requested = {
-                channel.module_address(): getattr(channel, '_requested_range_mode', 'Auto')
-                for channel in self.controllerParent.getChannels() if channel.real
-            }
-            modes = {module: requested.get(module, 'Auto') for module in modules}
-            if any(mode not in _DMMR_RANGE_MODES for mode in modes.values()):
-                raise ValueError(f"Invalid range mode: {modes!r}")
-            if recovery is not None:
-                recovery._active()
-            verified = self._native_call(device, "configure_module_ranges", modes,
-                                         timeout_s=timeout_s, cancellable=True)
-            if not isinstance(verified, dict) or set(verified) != set(modes):
-                raise RuntimeError("Native DMMR did not verify every requested module range.")
-            for address, values in verified.items():
-                if not isinstance(values, (tuple, list)) or len(values) != 2:
-                    raise RuntimeError("Malformed native DMMR range readback.")
-                mode = modes[address]
-                result = self._validate_startup_range(
-                    device, address, mode == 'Auto', None if mode == 'Auto' else int(mode),
-                    (device.NO_ERR, *values),
-                )
-                self._verified_read_ranges[address] = result[1:]
-            self._native_read_recovery_device = device
-            return
-        self._read_recovery = None
+        """Set and read back each module's range in the worker (read first: an unchanged range is not rewritten)."""
+        _require_native_backend(device)
         self._verified_read_ranges = {}
         requested = {
             channel.module_address(): getattr(channel, '_requested_range_mode', 'Auto')
             for channel in self.controllerParent.getChannels() if channel.real
         }
-
-        def recover_range(status, action, address, auto, fixed=None):
-            def verify():
-                self._verify_startup_ranges(device, recovery)
-                result = (device.NO_ERR, *recovery._call('get_module_meas_range', address))
-                return self._validate_startup_range(device, address, auto, fixed, result)
-            return self._recover_startup_command(device, recovery, status, action, verify)
-
-        def readback(module, auto=None, fixed=None):
-            result = self._startup_call(device, 'get_module_meas_range', module,
-                                        timeout_s=timeout_s, recovery=recovery)
-            if result[0] != device.NO_ERR:
-                result = recover_range(result[0], f'get_module_meas_range({module})', module, auto, fixed)
-            return self._validate_startup_range(device, module, auto, fixed, result)
-
-        for module in modules:
-            mode = requested.get(module, 'Auto')
-            if mode not in _DMMR_RANGE_MODES:
-                raise ValueError(f'Invalid range mode for module {module}: {mode!r}')
-            auto = mode == 'Auto'
-            fixed = None if auto else int(mode)
-            # Read the hardware, not a cached setting. Rewriting an unchanged
-            # range needlessly exposes startup to the vendor's malformed ACKs.
-            result = readback(module)
-            if result[2] is not auto:
-                status = self._startup_call(device, 'set_module_auto_range', module, auto,
-                                            timeout_s=timeout_s, recovery=recovery)
-                if status != device.NO_ERR:
-                    result = recover_range(status, f'set_module_auto_range({module}, {auto})', module, auto)
-                else:
-                    result = readback(module, auto)
-            # Auto ranging may have moved since the first read. Use the readback
-            # after manual mode was confirmed, not the old range number.
-            if not auto and result[1] != fixed:
-                status = self._startup_call(device, 'set_module_meas_range', module, fixed,
-                                            timeout_s=timeout_s, recovery=recovery)
-                if status != device.NO_ERR:
-                    result = recover_range(status, f'set_module_meas_range({module}, {mode})', module, auto, fixed)
-                else:
-                    result = readback(module, auto, fixed)
-            _, used_range, auto_readback = self._validate_startup_range(device, module, auto, fixed, result)
-            self._verified_read_ranges[module] = (used_range, auto_readback)
+        modes = {module: requested.get(module, 'Auto') for module in modules}
+        if any(mode not in _DMMR_RANGE_MODES for mode in modes.values()):
+            raise ValueError(f"Invalid range mode: {modes!r}")
+        if recovery is not None:
+            recovery._active()
+        verified = self._native_call(device, "configure_module_ranges", modes,
+                                     timeout_s=timeout_s, cancellable=True)
+        if not isinstance(verified, dict) or set(verified) != set(modes):
+            raise RuntimeError("Native DMMR did not verify every requested module range.")
+        for address, values in verified.items():
+            if not isinstance(values, (tuple, list)) or len(values) != 2:
+                raise RuntimeError("Malformed native DMMR range readback.")
+            mode = modes[address]
+            result = self._validate_startup_range(
+                device, address, mode == 'Auto', None if mode == 'Auto' else int(mode),
+                (device.NO_ERR, *values),
+            )
+            self._verified_read_ranges[address] = result[1:]
+        self._native_read_recovery_device = device
 
     def _measurement_modules(self) -> list[int]:
         configured_modules_getter = getattr(self.controllerParent, "getConfiguredModules", None)
@@ -3404,14 +3394,12 @@ class DMMRController(DeviceController):
         status = self._startup_call(device, 'set_automatic_current', False,
                                     timeout_s=timeout_s, recovery=recovery)
         if status != device.NO_ERR:
-            self._recover_startup_command(device, recovery, status, 'set_automatic_current(False)',
-                                          lambda: recovery.verify_running())
+            self._recover_startup_command(device, recovery, status, 'set_automatic_current(False)')
 
         status, enabled = self._startup_call(device, 'get_automatic_current',
                                              timeout_s=timeout_s, recovery=recovery)
         if status != device.NO_ERR:
-            self._recover_startup_command(device, recovery, status, 'get_automatic_current()',
-                                          lambda: recovery.verify_running())
+            self._recover_startup_command(device, recovery, status, 'get_automatic_current()')
         elif enabled is not False:
             raise RuntimeError('DMMR manual module polling mode not confirmed.')
         return True
@@ -3635,78 +3623,7 @@ class DMMRController(DeviceController):
         if not getattr(self.controllerParent, "isOn", lambda: False)():
             return
 
-        if _native_dmmr_backend(self.device) is not None:
-            self._read_native_numbers(already_acquired=already_acquired)
-            return
-
-        new_values = dict(self.values)
-        new_ranges = dict.fromkeys(new_values, np.nan)
-        poll_modules = self._measurement_modules()
-
-        for module in poll_modules:
-            if not self.acquiring or self.device is None:
-                return
-            status = None
-            measured_current = np.nan
-            try:
-                with self._controller_lock_section(
-                    f"Could not acquire lock to read DMMR module {module}.",
-                    already_acquired=already_acquired,
-                ):
-                    device = self.device
-                    if device is None:
-                        return
-                    status, measured_current, meas_range = device.get_module_current(
-                        module,
-                        timeout_s=float(self.controllerParent.poll_timeout_s),
-                    )
-            except TimeoutError:
-                # No reading this cycle; keep NaN for this module, not a stale
-                # value that the recorder could associate with a new timestamp.
-                continue
-            except Exception as exc:  # noqa: BLE001
-                self.errorCount += 1
-                self.print(
-                    f"Failed to read DMMR module {module}: {exc}",
-                    flag=PRINT.ERROR,
-                )
-                if _transport_failure_is_fatal(exc):
-                    self._handle_transport_loss()
-                    return
-                continue
-
-            if status == getattr(device, "NO_ERR", status):
-                self._store_current(new_values, new_ranges, module, measured_current, meas_range)
-                recovery = getattr(self, '_read_recovery', None)
-                if recovery is not None and np.isfinite(new_values.get(module, np.nan)):
-                    expected = recovery.ranges.get(module)
-                    if recovery.awaiting_samples and expected and not expected[1] and meas_range != expected[0]:
-                        new_values[module] = new_ranges[module] = np.nan
-                    else:
-                        recovery.note_sample(module)
-                continue
-
-            if status in (-10, -11, -12, -13):
-                self._recover_read(status, f'get_module_current({module})', already_acquired=already_acquired)
-                return  # Publish the missing cycle, never reuse or backfill it.
-
-            self.errorCount += 1
-            self.print(
-                f"DMMR rejected current read for module {module}: "
-                f"{self._format_status(status)}",
-                flag=PRINT.ERROR,
-            )
-
-        recovery = getattr(self, '_read_recovery', None)
-        if recovery is not None and recovery.awaiting_samples:
-            self._stop_after_read_failure(
-                f'No new valid reply after recovery for modules {sorted(recovery.awaiting_samples)}.',
-                already_acquired=already_acquired)
-            return
-        with self._sample_lock:
-            self.values = new_values
-            self.meas_ranges = new_ranges
-            self._sample_token = object()
+        self._read_native_numbers(already_acquired=already_acquired)
 
     def _read_native_numbers(self, *, already_acquired=False):
         device = self.device
@@ -3716,10 +3633,12 @@ class DMMRController(DeviceController):
         try:
             with self._controller_lock_section('Could not acquire lock to read DMMR modules.',
                                                already_acquired=already_acquired):
+                poll_started = time.time()
                 result = self._native_call(
                     device, "poll_currents", self._measurement_modules(),
                     timeout_s=float(self.controllerParent.poll_timeout_s), cancellable=True,
                 )
+                stamp = (poll_started + time.time()) / 2
             if not self.acquiring or self.device is not device or not self.controllerParent.isOn():
                 return
             if (not isinstance(result, dict) or type(result.get('token')) is not int
@@ -3741,10 +3660,8 @@ class DMMRController(DeviceController):
             else:
                 self.print('DMMR receive recovery verified; the failed polling cycle is missing.',
                            flag=PRINT.WARNING)
-            with self._sample_lock:
-                self.values, self.meas_ranges = new_values, new_ranges
-                self._sample_token = object()
-                self._native_sample_token = token
+            self._publish_sample(new_values, new_ranges, stamp)
+            self._native_sample_token = token
         except TimeoutError:
             if self.device is not device:
                 return
@@ -3767,30 +3684,19 @@ class DMMRController(DeviceController):
         try:
             with self._controller_lock_section('Could not acquire DMMR recovery lock.',
                                                already_acquired=already_acquired):
-                if _native_dmmr_backend(self.device) is not None:
-                    device = self.device
-                    timeout_s = float(self.controllerParent.poll_timeout_s)
-                    if getattr(self, '_native_read_recovery_device', None) is not device:
-                        self._native_call(device, 'configure_read_recovery',
-                                          getattr(self, '_verified_read_ranges', {}),
-                                          timeout_s=timeout_s, cancellable=True)
-                        self._native_read_recovery_device = device
-                    incident = self._native_call(device, 'recover_read', status, action,
-                                                 timeout_s=timeout_s, cancellable=True)
-                    if not isinstance(incident, dict) or incident.get('verified') is not True:
-                        raise RuntimeError('Native DMMR read recovery was not verified.')
-                    self.print('DMMR communication verified; waiting for new module readings.',
-                               flag=PRINT.WARNING)
-                    return incident
-                if getattr(self, '_read_recovery', None) is None:
-                    self._read_recovery = _get_dmmr_driver_class().ReadRecovery(
-                        self.device, getattr(self, '_verified_read_ranges', {}), automatic=False,
-                        timeout_s=float(self.controllerParent.poll_timeout_s),
-                        continue_check=lambda: self.acquiring and self.controllerParent.isOn())
-                incident = self._read_recovery.recover(status, action)
-                diagnostic = getattr(self.device, 'protocol_diagnostics', lambda: {})()
-                self.print('DMMR communication verified; waiting for new module readings. '
-                           f'Protocol log: {diagnostic.get("file") or "unavailable"}', flag=PRINT.WARNING)
+                device = self.device
+                timeout_s = float(self.controllerParent.poll_timeout_s)
+                if getattr(self, '_native_read_recovery_device', None) is not device:
+                    self._native_call(device, 'configure_read_recovery',
+                                      getattr(self, '_verified_read_ranges', {}),
+                                      timeout_s=timeout_s, cancellable=True)
+                    self._native_read_recovery_device = device
+                incident = self._native_call(device, 'recover_read', status, action,
+                                             timeout_s=timeout_s, cancellable=True)
+                if not isinstance(incident, dict) or incident.get('verified') is not True:
+                    raise RuntimeError('Native DMMR read recovery was not verified.')
+                self.print('DMMR communication verified; waiting for new module readings.',
+                           flag=PRINT.WARNING)
                 return incident
         except Exception as exc:  # No endless retry, nor cleanup beside a blocked DLL.
             self._stop_after_read_failure(str(exc), already_acquired=already_acquired)
@@ -3882,17 +3788,6 @@ class DMMRController(DeviceController):
 
         self._queue_native_gui(update_gui)
 
-    def _report_startup_diagnostics(self, device: Any, *, start: bool) -> None:
-        method = getattr(device, "begin_startup_diagnostics" if start else "end_startup_diagnostics", None)
-        if not callable(method):
-            return
-        try:
-            report = method(timeout_s=float(self.controllerParent.connect_timeout_s))
-            if report:
-                self.print(report)
-        except Exception as exc:  # Diagnostic failures are not acquisition results.
-            self.print(f"DMMR startup diagnostics unavailable: {exc}", flag=PRINT.WARNING)
-
     def toggleOn(self) -> None:
         self._auto_reconnect_generation = None  # The operator's ON or OFF replaces a pending reconnection.
         base_toggle_on = getattr(super(), "toggleOn", None)
@@ -3916,7 +3811,6 @@ class DMMRController(DeviceController):
             self.stopAcquisition()
             self.acquiring = False
 
-        diagnostics_device = None
         try:
             if target_on:
                 measurement_modules = self._measurement_modules()
@@ -3926,22 +3820,14 @@ class DMMRController(DeviceController):
                     device = self.device
                     if device is None:
                         raise RuntimeError("DMMR became unavailable during startup.")
-                    diagnostics_device = device
-                    self._report_startup_diagnostics(device, start=True)
                     timeout_s = float(self.controllerParent.connect_timeout_s)
                     recovery = self._new_command_recovery(device, timeout_s, 'startup')
                     enable_status = self._startup_call(
                         device, 'set_enable', True, timeout_s=timeout_s, recovery=recovery,
                     )
                     if enable_status != device.NO_ERR:
-                        if isinstance(recovery, _NativeDMMRCommandRecovery):
-                            self._recover_startup_command(device, recovery, enable_status,
-                                                          'set_enable(True)', None,
-                                                          expected={'enabled': True})
-                        else:
-                            raise RuntimeError(
-                                f"set_enable(True) failed: {self._format_status(enable_status, device=device)}"
-                            )
+                        self._recover_startup_command(device, recovery, enable_status,
+                                                      'set_enable(True)', expected={'enabled': True})
                     # Stop unsolicited current frames before configuring module
                     # ranges, not only after all those command/reply exchanges.
                     self._disable_automatic_current_for_module_polling(
@@ -3955,12 +3841,8 @@ class DMMRController(DeviceController):
                     raise RuntimeError('Could not confirm the DMMR state after startup.')
                 if self.main_state != 'ST_ON':
                     raise RuntimeError(f'DMMR did not enter ST_ON after startup: {self.main_state}.')
-                self._report_startup_diagnostics(diagnostics_device, start=False)
-                diagnostics_device = None  # Close before starting continuous reads.
                 if getattr(device, "_transport_poisoned", False):
-                    raise RuntimeError("DMMR transport is unusable after startup diagnostics; restart Explorer.")
-                if getattr(device, "_startup_log_path", None) is not None:
-                    raise RuntimeError("Native startup capture could not be closed; acquisition was not started.")
+                    raise RuntimeError("DMMR transport is unusable after startup; restart Explorer.")
                 start_acquisition = getattr(self, "startAcquisition", None)
                 if callable(start_acquisition):
                     start_acquisition()
@@ -4004,9 +3886,6 @@ class DMMRController(DeviceController):
                 flag=PRINT.ERROR,
             )
         finally:
-            if diagnostics_device is not None:
-                # Include the failed command and its OFF/readback cleanup.
-                self._report_startup_diagnostics(diagnostics_device, start=False)
             self._end_transition()
             self._sync_status_to_gui()
 
@@ -4115,12 +3994,8 @@ class DMMRController(DeviceController):
                 if device is None:
                     shutdown_confirmed = self.main_state == "Disconnected"
                 else:
-                    shutdown_result = (
-                        self._native_call(device, 'shutdown',
-                                          timeout_s=float(self.controllerParent.connect_timeout_s))
-                        if _native_dmmr_backend(device) is not None
-                        else device.shutdown(timeout_s=float(self.controllerParent.connect_timeout_s))
-                    )
+                    shutdown_result = self._native_call(
+                        device, 'shutdown', timeout_s=float(self.controllerParent.connect_timeout_s))
                     shutdown_confirmed = shutdown_result is True
         except Exception as exc:  # noqa: BLE001
             self.errorCount += 1
@@ -4173,7 +4048,6 @@ class DMMRController(DeviceController):
                     if status != device.NO_ERR:
                         status, _state_hex, state_name = self._recover_startup_command(
                             device, startup_recovery, status, 'get_state()',
-                            lambda: self._verify_startup_ranges(device, startup_recovery),
                             expected={'running': True, 'ranges': getattr(self, '_verified_read_ranges', {})})
         except TimeoutError:
             # Transient controller-lock contention; skip this refresh and keep
@@ -4375,7 +4249,6 @@ class DMMRController(DeviceController):
         self.device, self.initialized, self.acquiring = None, False, False
         self.main_state = self._forced_close_state = "Disconnected: shutdown unconfirmed"
         self._poisoned_com = None
-        self._read_recovery = None
         self.device_state_summary = self.voltage_state_summary = self.temperature_state_summary = "Unknown"
         self.initializeValues(reset=True)
         self._restore_off_ui_state()
@@ -4479,11 +4352,8 @@ class DMMRController(DeviceController):
         self._queue_native_gui(_update_gui)
 
     def _disable_acquisition(self, *, already_acquired=False) -> bool:
-        """Confirm both OFF gates; one resynchronization for returned receive faults.
-
-        Always attempt both disables unless the DLL is blocked. Only OFF writes
-        may be repeated; never reconnect or re-enable during cleanup.
-        """
+        """Confirm both OFF gates in the worker (one resynchronization for returned receive faults;
+        only OFF writes may be repeated, never a reconnection or a re-enable)."""
         errors: list[str] = []
         try:
             with self._controller_lock_section(
@@ -4494,60 +4364,10 @@ class DMMRController(DeviceController):
                 if device is None:
                     raise RuntimeError('device unavailable')
                 timeout_s = float(self.controllerParent.connect_timeout_s)
-                if _native_dmmr_backend(device) is not None:
-                    result = self._native_call(device, 'disable_acquisition', timeout_s=timeout_s)
-                    if result is not True:
-                        raise RuntimeError('Native DMMR did not confirm both OFF gates.')
-                    return True
-
-                def stop_once():
-                    failures, receive_status, fatal = [], None, False
-                    off_readbacks = 0
-                    for name in ('set_automatic_current', 'set_enable', 'get_automatic_current', 'get_enable'):
-                        if getattr(device, '_transport_poisoned', False):
-                            failures.append('DLL blocked; shutdown cannot be confirmed.')
-                            fatal = True
-                            break
-                        try:
-                            write = name.startswith('set_')
-                            result = getattr(device, name)(*((False,) if write else ()), timeout_s=timeout_s)
-                            status = result if write else result[0]
-                            if status != device.NO_ERR:
-                                failures.append(f'{name} failed: {self._format_status(status, device=device)}')
-                                if status in (-10, -11, -12, -13):
-                                    receive_status = status
-                                else:
-                                    fatal = True
-                            elif not write:
-                                if result[1] is False:
-                                    off_readbacks += 1
-                                else:
-                                    failures.append(f'{name}: OFF not confirmed (readback {result[1]!r})')
-                                    fatal = True
-                        except Exception as exc:  # noqa: BLE001
-                            failures.append(f'{name} failed: {exc}')
-                            fatal = True
-                    if getattr(device, '_transport_poisoned', False):
-                        failures.append('DLL blocked; shutdown cannot be confirmed.')
-                        fatal = True
-                    return failures, None if fatal else receive_status, off_readbacks == 2 and not fatal
-
-                errors, receive_status, off_verified = stop_once()
-                if errors and receive_status is not None:
-                    recovery = self._new_command_recovery(device, timeout_s, 'shutdown')
-                    if recovery is not None:
-                        def verify_off():
-                            if not off_verified:
-                                retry_errors, _, _ = stop_once()
-                                if retry_errors:
-                                    raise RuntimeError('; '.join(retry_errors))
-                            recovery.last_incident['off_flags'] = {'automatic': False, 'enable': False}
-                        # Lost command ACKs do not justify purging when both
-                        # subsequent, successful flag reads already prove OFF.
-                        recovery.recover(receive_status, 'disable acquisition', verify_off,
-                                         purge_first=not off_verified)
-                        errors = []
-                        self.print('Recovered DMMR shutdown; both OFF gates verified.', flag=PRINT.WARNING)
+                result = self._native_call(device, 'disable_acquisition', timeout_s=timeout_s)
+                if result is not True:
+                    raise RuntimeError('Native DMMR did not confirm both OFF gates.')
+                return True
         except Exception as exc:  # noqa: BLE001
             errors.append(str(exc))
         if errors:

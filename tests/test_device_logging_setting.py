@@ -44,7 +44,7 @@ def test_every_device_plugin_drops_the_logging_setting():
 
 def test_explorer_still_names_the_device_setting_logging():
     python = os.environ.get("ESIBD_QT_PYTHON", sys.executable)
-    if explorer_host.interpreter_version(python) != explorer_host.TARGET_VERSION:
+    if not explorer_host.is_target(explorer_host.interpreter_version(python)):
         pytest.skip(f"needs ESIBD Explorer {explorer_host.TARGET_VERSION}")
     probe = ("import inspect, sys, types; sys.modules['pyautogui'] = types.ModuleType('pyautogui');"
              "from esibd.plugins import Device;"

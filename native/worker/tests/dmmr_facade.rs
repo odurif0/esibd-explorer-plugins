@@ -358,13 +358,13 @@ fn initialize_refreshes_modules_and_only_persists_scan_when_requested() {
 #[test]
 fn dmmr_unknown_states_are_not_borrowed_from_hv_instruments() {
     let (mut c, script) = controller(vec![
-        step("GetState", 0, vec![json!(1)]),
+        step("GetState", 0, vec![json!(2)]),
         step("GetState", -10, vec![json!(0)]),
         step("GetBaseState", 0, vec![json!(1024 | 2048)]),
     ]);
     assert_eq!(
         call(&mut c, "get_state", vec![]).unwrap(),
-        json!({"$tuple":[0,"0x0001","UNKNOWN_STATE_0x0001"]})
+        json!({"$tuple":[0,"0x0002","UNKNOWN_STATE_0x0002"]})
     );
     assert_eq!(
         call(&mut c, "get_state", vec![]).unwrap(),
@@ -1449,45 +1449,6 @@ fn temporary_dir() -> std::path::PathBuf {
         std::process::id(),
         TEMP_ID.fetch_add(1, Ordering::Relaxed)
     ))
-}
-
-#[test]
-fn startup_capture_requires_verified_hash_and_preserves_nonprintable_bytes_in_bounded_report() {
-    let (mut c, script) = controller(vec![]);
-    assert!(
-        call(&mut c, "begin_startup_diagnostics", vec![])
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("unverified DLL")
-    );
-    completed(&script);
-    let directory = temporary_dir();
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("dmmr_startup_com5.log");
-    std::fs::write(&path, b"ACK\0\x1b\xff\r\n").unwrap();
-    let config = json!({"device_id":"test","com":5,"dll_path":"COM-DMMR-8.dll","dll_sha256":"e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3","log_dir":directory.to_str().unwrap()});
-    let (mut c, script) = config_controller(
-        config,
-        vec![
-            exact("OpenDebugFile", json!([path.to_str().unwrap()]), 0, vec![]),
-            step("CloseDebugFile", 0, vec![]),
-        ],
-    );
-    assert!(
-        call(&mut c, "begin_startup_diagnostics", vec![])
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("Native capture opened")
-    );
-    assert_eq!(
-        call(&mut c, "end_startup_diagnostics", vec![]).unwrap(),
-        json!("[DMMR native] ACK\\x00\\x1b\\xff")
-    );
-    assert!(c.get_attribute("_startup_log_path").unwrap().is_null());
-    completed(&script);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections import deque
 import hashlib
 import importlib
 import importlib.util
@@ -789,6 +790,10 @@ def _scrollable_panel(panel: Any) -> Any:
     return scroll
 
 
+# Readings waiting for Explorer's recorder (Qt thread): more than an hour at 1 reading/s.
+_ESI_PENDING_SAMPLES = 4000
+
+
 class ESIDevice(Device):
     """Electrospray HV and HEAT-CTRL-2410 controller."""
 
@@ -826,6 +831,52 @@ class ESIDevice(Device):
     LOADED_CONFIG = "Loaded config"
 
     LiveDisplay = _ESILiveDisplay
+
+    def appendData(self, nan: bool = False, skipPlotting: bool = False) -> None:
+        """Record every ESI reading once, at the time it was read (ESIController._publish_sample)."""
+        controller = self.controller
+        samples = controller.takeSamples()
+        if self.plotableChannels or nan:
+            self.updateValues()  # Equations of virtual channels, as Explorer does.
+            if nan:  # Explorer's mark of a gap (recording started or stopped).
+                for channel in self.getChannels():
+                    channel.appendValue(lenT=self.time.size, nan=True)
+                self._add_time(time.time())
+            for stamp, values, currents in samples:
+                controller.assignReadings(values, currents)
+                for channel in self.getChannels():
+                    channel.appendValue(lenT=self.time.size)
+                self._add_time(stamp)
+            if samples:
+                controller.assignReadings(controller.values, controller.currents)  # the latest on screen
+        if self.liveDisplayActive():
+            if skipPlotting:
+                self.measureInterval(reset=False)
+            else:
+                self.signalComm.plotSignal.emit(False)  # noqa: FBT003
+        else:
+            self.measureInterval()
+
+    def _add_time(self, stamp: float) -> None:
+        """A stamp equal to or just before the previous one follows it; a larger step back is a clock
+        adjustment, kept for readers to skip."""
+        history = self.time
+        if history.size:
+            last = float(history.get()[-1])
+            if last - 0.1 < stamp <= last:
+                stamp = last + 1e-6
+        history.add(stamp)
+
+    def measureInterval(self, reset: bool = True) -> None:
+        """No lag guard: a late Qt thread delays the display only, never the readings."""
+        if reset or getattr(self, "lastIntervalTime", None) is None:
+            self.lastIntervalTime = time.time() * 1000
+        self.lagging = 0
+        self.lagging_seconds = 0
+
+    def bufferLagging(self, wait: "int | None" = None) -> bool:
+        """Never pause ESI recording for a late display: the readings carry their own times."""
+        return False
 
     def appendOutputData(self, h5file, useAllHistory: bool | None = None, *, useDefaultFile: bool = False) -> None:
         """Keep Explorer's file schema, but record each channel's physical unit."""
@@ -2360,6 +2411,10 @@ class ESIController(DeviceController):
         self._heat_stability = _get_temperature_stability_class()()
         self.values: dict[int, float] | None = None
         self.currents: dict[int, float] = {}
+        # Every reading, with the time it was read, until Explorer's recorder takes it (Qt thread).
+        self._pending_samples: deque = deque(maxlen=_ESI_PENDING_SAMPLES)
+        self._samples_lock = Lock()
+        self._samples_dropped = 0
         self.targets: dict[int, float] = {}
         self.module_active: dict[int, bool | None] = {}
         self.module_control_active: dict[int, bool | None] = {}
@@ -2418,9 +2473,37 @@ class ESIController(DeviceController):
         while self.acquiring and getattr(self, "acquisitionThread", None) is me:
             with self.lock.acquire_timeout(1, timeoutMessage="Could not acquire lock to acquire data") as acquired:
                 if acquired and getattr(self, "acquisitionThread", None) is me:
+                    started = time.time()
                     self.fakeNumbers() if getTestMode() else self.readNumbers()
+                    self._publish_sample((started + time.time()) / 2)
                     self.signalComm.updateValuesSignal.emit()
             time.sleep(self.getDevice().interval / 1000)  # The lock is released before waiting.
+
+    def _publish_sample(self, stamp: float) -> None:
+        """A row for Explorer's history with the time it was read (acquisition thread).
+
+        Explorer 1.0.2 records from a timer of its Qt thread, with the time the Qt thread got there:
+        a late Qt thread lost readings, recorded gaps and shifted the times, then paused recording
+        (2026-11-17: ESI 11 s behind). Each reading is now recorded once, at the time it was read.
+        """
+        if not getattr(self.controllerParent, "recording", False):
+            return
+        sample = (float(stamp), dict(self.values or {}), dict(self.currents or {}))
+        with self._samples_lock:
+            if len(self._pending_samples) == self._pending_samples.maxlen:
+                self._samples_dropped += 1
+            self._pending_samples.append(sample)
+
+    def takeSamples(self) -> list:
+        """The readings not yet recorded, oldest first (Qt thread)."""
+        with self._samples_lock:
+            samples = list(self._pending_samples)
+            self._pending_samples.clear()
+            dropped, self._samples_dropped = self._samples_dropped, 0
+        if dropped:
+            self.print(f"{dropped} ESI readings were not recorded: Explorer's Qt thread took none for "
+                       f"more than {_ESI_PENDING_SAMPLES} readings.", flag=PRINT.WARNING)
+        return samples
 
     def initializeCommunication(self) -> None:
         if self.initializing:
@@ -3322,12 +3405,16 @@ class ESIController(DeviceController):
             )
 
     def updateValues(self) -> None:
+        self.assignReadings(self.values, self.currents)
+
+    def assignReadings(self, values, currents) -> None:
+        """Show one reading on the channels (the latest, or one being recorded)."""
         get_channels = getattr(self.controllerParent, 'getChannels', None)
         if not callable(get_channels):
             return
         for channel in get_channels():
             current = _is_current_channel(channel)
-            readings = self.currents if current else self.values
+            readings = currents if current else values
             value = (readings.get(channel.module_address(), np.nan)
                      if readings is not None and channel.enabled and channel.real else np.nan)
             channel.monitor = value

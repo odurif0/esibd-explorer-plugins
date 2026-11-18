@@ -47,8 +47,10 @@ class DMMRBase:
     # Controller status values (from COM-DMMR-8.h)
     MAIN_STATE = {
         0: 'ST_ON',                # Modules are on
-        # 1 and 2 are commented out in the DMMR header. Keep them unknown,
-        # with their numeric code, rather than borrowing labels from HV PSUs.
+        # Not named in the DMMR header (commented out there, borrowed from HV PSUs). Observed as the
+        # modules disabled: 1 before SetEnable(True), 0 after (2026-11-15), 1 after an OFF (2026-11-17).
+        1: 'ST_OFF',
+        # 2 stays unknown, with its numeric code.
         0x8000: 'ST_ERROR',        # General error
         0x8001: 'ST_ERR_MODULE',   # DPA-1F-module error
         0x8002: 'ST_ERR_VSUP',     # Supply-voltage error

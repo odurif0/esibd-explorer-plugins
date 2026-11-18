@@ -477,6 +477,13 @@ human:
   same detector) checks that ions arrive; below `beam_min_fraction` of that reference the beam is
   lost, as above (2026-11-16: the beam faded during a 36 min line and was gone for the next two with
   the ESI current in range). `probe = false` in `[map.reference]` turns it off.
+- **Sentinel.** `sentinel_k` in `[map.reference]` (0: none) adds, right after each reference, the same
+  ion at the same setting near the closing (e.g. k 0.2094), on `sentinel_points` (60) over
+  ± `sentinel_window` (6 %) of its band: about 4 min. R there changes by 0.6–0.8 × the relative change
+  of the resolution cap, against 0.28 × at k 0.200, so it follows a drift of the instrument through the
+  night (2026-11-17: 20–30 % less near the closing than on the other days, 6 % on the reference). It does
+  not count in `reference_every`. `map.log` and the console give the R and height of each reference and
+  sentinel. `warmup_s` (0: none) begins each run with references (and sentinels) only, for that long.
 - **Unconfirmed lines.** After a Resume, the lines measured since the last good reference or probe
   before the stop are measured again: nothing tells whether the beam was there (2026-11-16: two
   lines without ions stayed counted when the references after them failed on the spray).
@@ -485,9 +492,14 @@ human:
   stopped a map at 02:00 on 2026-11-16). The map then stops and says what to fix; that line is not
   counted, so Map… → Resume continues with it (2026-11-12: after PSU_A went OFF, the map spent
   its three failures in 4 s).
-- **Spray during a line.** A line whose ESI current stays outside its window for 60 s is stopped at
-  once and measured again (2026-11-16: the emitter ran dry at 11:18 in a 36 min line, which went on
-  until the operator stopped it).
+- **Spray lost.** An ESI current below its window, or none (ESI OFF), for 5 s stops the map, during a
+  line, before one or while it waits for the beam; Map… → Resume measures the interrupted line again.
+  Such a spray never came back by itself (2026-11-12 to 11-16: 1.7 to 15.8 nA, then three failed
+  lines or 30 min of waiting before the stop; 2026-11-17: the ESI was switched OFF and the map went
+  on). The current is read every second, so one missing ESI reading does not stop the map.
+- **Spray above its window.** A line whose ESI current stays above its window for 60 s is stopped at
+  once and measured again; before a line, such a spray is waited for up to 30 min (2026-11-15: a
+  spray at 117.6 nA came back into its window).
 - **Faults.** A failed line (spray outside its window over the line, a worker or detector fault,
   no new point for 5 min, or a line longer than all the points of its axis would take at
   `point_s + settle_s + 2 s` each) is measured again. A line slower than its estimate is not a
@@ -496,7 +508,8 @@ human:
   three times, or three failed lines within one hour, stop the map; Resume gives that line three new
   attempts (2026-11-13: both Resumes stopped at once on the line that had failed three times). A line a limit forbids (PSU headroom,
   Ilim, AMPR limits) closes that setting and the map goes on. Before each line the spray must be in
-  its window; the map waits up to 30 min for it.
+  its window: at Start or Resume the map waits up to 30 min for it (the operator has just started
+  it); later, only a spray above its window is waited for.
 - **Safe stop** (Stop, a fault, the end): the AMX frequency, `Q1_DC`, the stubs and MScan's settings
   return to Start. The PSU rails and the rod pairs stay as the last line left them: restored at the
   end of a completed line, held after a line fault, as for any MScan scan. Ranges, Ilim and the ESI

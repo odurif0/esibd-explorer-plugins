@@ -96,6 +96,7 @@ def probe(folder, output):
 
     def edit(target, action):
         hw.calls.clear()
+        hw.requests.clear()
         spin.setFocus()
         spin.selectAll()
         QTest.keyClicks(spin, str(target))
@@ -120,12 +121,17 @@ def probe(folder, output):
         assert controller.psu_enabled_actual is True and controller.interlock_active is True
         for ch in (0, 1):
             assert parent.channelPanelCards[ch]["voltage_monitor"].text() == module._format_voltage_text(hw.voltages[ch])
+        # One voltage operation; the worker ramps it. (Leaving the Ilim field may send its unchanged
+        # value: the worker reads it back and writes nothing.)
+        assert len([r for r in hw.requests if "voltage_values" in r]) <= 1, hw.requests
         return [call[2] for call in hw.calls]
 
+    # The worker ramps from the hardware setpoint in steps (native/worker/tests/psu_controller.rs:
+    # a_live_voltage_edit_steps_only_its_channel_without_gate_commands); this fake gives the end state.
     assert edit(80, "enter") == [80.]
     window.grab().save(str(output / f"{folder}-100-to-80.png"))
-    assert edit(380, "tab") == [180., 280., 380.]
-    assert edit(80, "click") == [280., 180., 80.]
+    assert edit(380, "tab") == [380.]
+    assert edit(80, "click") == [80.]
     assert edit(80, "enter") == [], "Revalidating an unchanged value must not send commands"
     # Switching editing focus can emit editingFinished again: still no writes.
     hw.calls.clear()

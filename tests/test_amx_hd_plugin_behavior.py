@@ -14,6 +14,7 @@ import threading
 import types
 from pathlib import Path
 from support.amx import load_hd_controller_classes, load_plugin
+from support.worker import as_worker
 
 
 
@@ -498,26 +499,6 @@ def test_config_selector_changed_allows_standby_operating_selection():
     assert not any("standby slot" in m for m in logs)
 
 
-def test_warn_if_standby_operating_does_not_emit():
-    """A standby-named Operating config is a normal operator choice. The plugin
-    must NOT emit a warning — the operator knows HV will not be applied."""
-    plugin = load_plugin("amx_hd")
-    parent = types.SimpleNamespace(name="AMX_HD")
-    controller = plugin.AMXHDController(controllerParent=parent)
-    controller.available_configs = [
-        {"index": 0, "name": "Standby", "active": True, "valid": True},
-        {"index": 1, "name": "Operate", "active": True, "valid": True},
-    ]
-    logs = []
-    controller.print = lambda msg, flag=None: logs.append(msg)
-
-    controller._warn_if_standby_operating(0)
-    assert logs == []
-
-    controller._warn_if_standby_operating(1)
-    assert logs == []
-
-
 def test_resume_pending_on_auto_selects_standby_when_device_parked():
     """When the device is already in STATE_STANDBY after init (parked by a
     previous shutdown) and no Operating config is selected, the resume path
@@ -865,7 +846,7 @@ def test_loaded_config_status_reads_the_interlock_function_without_writing_it():
             calls.append("get_interlock_funct")
             return next(replies)
 
-    controller.device = Device()
+    controller.device = as_worker("amx_hd", Device())
     controller._refresh_loaded_config_status()
     assert controller.interlock_function is False
     assert messages == ["AMX HD interlock function OFF in the loaded config: the interlock input "

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from support import explorer
+from support.worker import as_worker
 
 
 def load_plugin(folder: str = "amx_a", module_name: str | None = None):
@@ -132,7 +133,7 @@ def make_case(folder):
     controller.lock = Lock()
     controller.errorCount = 0
     controller.print = parent.print
-    controller.device = RegisterDevice(count=len(parent.channels))
+    controller.device = as_worker("amx_hd" if hd else "amx", RegisterDevice(count=len(parent.channels)))
     controller.initialized = True
     controller.available_configs = [dict(index=index, name="Stored signal", active=True, valid=True) for index in PRESETS]
     controller._restart_acquisition_after_transition = lambda: None

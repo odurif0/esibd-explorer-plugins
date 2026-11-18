@@ -42,7 +42,7 @@ def test_no_plugin_writes_the_read_only_channel_loading():
 
 def test_explorer_channel_loading_is_read_only_on_the_target_host():
     python = os.environ.get("ESIBD_QT_PYTHON", sys.executable)
-    if explorer_host.interpreter_version(python) != explorer_host.TARGET_VERSION:
+    if not explorer_host.is_target(explorer_host.interpreter_version(python)):
         pytest.skip(f"needs ESIBD Explorer {explorer_host.TARGET_VERSION}")
     probe = ("import sys, types; sys.modules['pyautogui'] = types.ModuleType('pyautogui');"
              "from esibd.core import Channel; from esibd.plugins import Plugin;"

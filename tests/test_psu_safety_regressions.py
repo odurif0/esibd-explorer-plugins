@@ -1,4 +1,9 @@
-"""Fault-injection tests for PSU output sequencing, not just successful writes."""
+"""Fault-injection tests for PSU output sequencing, not just successful writes.
+
+The manual-state sequence (readbacks, interlocks, limits, discharge before a range switch, the
+ramp) runs in the PSU worker and is tested there: native/worker/tests/psu_controller.rs. These
+tests keep what the plugin itself decides: OFF, the interlock setting, the startup and the
+recovery after a failed operation."""
 
 import importlib
 import logging
@@ -86,39 +91,6 @@ def test_old_command_token_stays_cancelled_after_new_on_session(setup):
     assert device.calls == []
 
 
-@pytest.mark.parametrize("fault", ["voltage", "current", "current_nan", "range", "missing"])
-def test_bad_readback_prevents_activation(setup, fault):
-    _module, controller, device, messages = setup
-    if fault == "voltage":
-        device.get_channel_voltage_limits = lambda *a, **k: (999.0, 10000.0)
-    elif fault == "current":
-        device.get_channel_current_limits = lambda *a, **k: (0.02, 1.0)
-    elif fault == "current_nan":
-        device.get_channel_current_limits = lambda *a, **k: (float("nan"), 1.0)
-    elif fault == "range":
-        device.get_output_full_range = lambda **k: (True, True)
-    else:
-        device.get_channel_voltage_limits = None
-    controller.applyManualState(manual())
-    assert ("global", True) not in device.calls
-    assert ("outputs", True, False) not in device.calls
-    assert device.outputs == (False, False)
-    assert any("Failed to apply" in msg for msg in messages)
-
-
-def test_cancel_after_readback_prevents_activation(setup):
-    _module, controller, device, _messages = setup
-
-    def read_range(**kwargs):
-        controller._cancel_output_commands()
-        return device.ranges
-
-    device.get_output_full_range = read_range
-    controller.applyManualState(manual())
-    assert ("global", True) not in device.calls
-    assert device.outputs == (False, False)
-
-
 @pytest.mark.parametrize("enabled", [True, False])
 def test_initialization_applies_both_interlock_states(setup, monkeypatch, enabled):
     module, controller, device, _messages = setup
@@ -130,16 +102,6 @@ def test_initialization_applies_both_interlock_states(setup, monkeypatch, enable
     assert device.interlocks == (enabled, enabled)
     assert ("interlocks", enabled, enabled) in device.calls
     assert hasattr(controller.signalComm.initCompleteSignal, "last_emit")
-
-
-@pytest.mark.parametrize("actual", [(False, False), (True, False), (None, True)])
-def test_unconfirmed_interlock_prevents_activation(setup, actual):
-    _module, controller, device, messages = setup
-    device.get_interlock_enabled = lambda **kw: actual
-    controller.applyManualState(manual())
-    assert ("global", True) not in device.calls
-    assert not device.enabled
-    assert any("interlock" in msg and "not confirmed" in msg for msg in messages)
 
 
 def test_off_is_accepted_during_an_on_transition(setup):
@@ -264,19 +226,6 @@ def test_interlock_stays_enabled_when_outputs_are_not_confirmed_off(setup):
     assert any("not confirmed OFF" in msg for msg in messages)
 
 
-def test_manual_apply_requires_disable_before_reconfiguring_range(setup):
-    _module, controller, device, messages = setup
-    device.enabled = True
-    device.outputs = (True, False)
-    device.set_output_enabled = lambda *a, **kw: None  # ACK, but command ignored.
-    state = manual()
-    state["full_range_enabled"][0] = True
-    controller.applyManualState(state)
-    assert not any(call[0] in {"voltage", "current", "range"} for call in device.calls)
-    assert ("global", True) not in device.calls
-    assert any("not confirmed disabled before reconfiguration" in msg for msg in messages)
-
-
 def test_manual_mode_requires_channel_disable_before_global_enable(setup):
     _module, controller, device, _messages = setup
     device.outputs = (True, False)
@@ -284,40 +233,6 @@ def test_manual_mode_requires_channel_disable_before_global_enable(setup):
     with pytest.raises(RuntimeError, match="not confirmed disabled before manual mode"):
         controller._start_manual_mode(timeout_s=0.1, cancel=controller._output_cancel)
     assert ("global", True) not in device.calls
-
-
-def test_ramp_target_is_checked_against_limit_before_enable(setup):
-    _module, controller, device, messages = setup
-    device.get_channel_voltage_limits = lambda ch, **kw: (device.voltages[ch], 200.0)
-    controller.applyManualState(manual(300))
-    assert not device.enabled
-    assert ("global", True) not in device.calls
-    assert any("verified hardware limit" in msg for msg in messages)
-
-
-def test_off_interrupts_discharge_wait_without_switching_relay(setup):
-    _module, controller, device, _messages = setup
-
-    def measured(channel, **kwargs):
-        controller._cancel_output_commands()
-        return 1000.0
-
-    device.get_channel_measured_voltage = measured
-    state = manual()
-    state["full_range_enabled"][0] = True
-    controller.applyManualState(state)
-    assert not any(call[0] == "range" for call in device.calls)
-    assert ("global", True) not in device.calls
-
-
-def test_missing_discharge_readback_refuses_range_switch(setup):
-    _module, controller, device, _messages = setup
-    device.get_channel_measured_voltage = None
-    state = manual()
-    state["full_range_enabled"][0] = True
-    controller.applyManualState(state)
-    assert not any(call[0] == "range" for call in device.calls)
-    assert not device.enabled
 
 
 @pytest.mark.parametrize("quantity", ["voltage", "current"])

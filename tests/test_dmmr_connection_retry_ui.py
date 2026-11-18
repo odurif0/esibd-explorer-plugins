@@ -100,8 +100,10 @@ def probe(late_status, output, shutdown_action=None):
         driver = factory(**kwargs)
         gates = FaultingDMMR()
         gates.fail_start = None
-        for name in ('set_enable', 'get_enable', 'set_automatic_current', 'get_automatic_current',
-                     'set_module_auto_range', 'get_module_meas_range', 'get_state'):
+        for name in ('set_enable', 'get_enable', 'set_automatic_current', 'get_automatic_current', 'get_state',
+                     # The worker's own calls (their DLL sequences are tested in Rust).
+                     'begin_command_recovery', 'recover_command', 'verify_running',
+                     'configure_module_ranges', 'configure_read_recovery', 'poll_currents'):
             setattr(driver, name, getattr(gates, name))
         for name in ('get_device_state', 'get_voltage_state', 'get_temperature_state'):
             setattr(driver, name, lambda **kwargs: (0, '0x0000', 'OK'))

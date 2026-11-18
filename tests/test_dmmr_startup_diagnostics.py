@@ -1,4 +1,4 @@
-"""Native startup evidence reaches Explorer without extra serial commands."""
+"""The DLL debug capture belongs to the Python facade (notebook evidence), never to the plugin."""
 from __future__ import annotations
 
 import builtins
@@ -246,68 +246,18 @@ def attach_capture(rig):
     rig.device.end_startup_diagnostics = end
 
 
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_failed_start_captures_first_error_and_cleanup_in_explorer_log(rig, cleanup_fails):
+@pytest.mark.parametrize("fails", [False, True])
+def test_on_never_copies_the_dll_debug_file_into_the_explorer_log(rig, fails):
+    """2026-11-17: ~150 '[DMMR native] … not available for automatic notifications' lines at each ON.
+
+    The DLL debug file is the zero-check notebook's evidence; the Rust worker's protocol log records
+    every DLL call of the plugin with its status.
+    """
     attach_capture(rig)
-    rig.device.reject_cleanup = cleanup_fails
+    rig.device.fail_start = None if not fails else rig.device.fail_start
     start(rig)
-    calls = rig.device.calls
-    assert calls[0] == ("capture", "begin")
-    assert calls[-1] == ("capture", "end")
-    assert calls.count(("range", 5, True)) == 1, "No diagnostic retry"
-    assert ("enable", False) in calls
-    assert any("Data read: '5Yx'" in message for message in rig.logs)
-    assert rig.parent.on is cleanup_fails
-
-
-def test_success_closes_trace_before_continuous_acquisition(rig):
-    attach_capture(rig)
-    rig.device.fail_start = None
-    rig.controller.startAcquisition = lambda: rig.device.calls.append(("acquisition", "start"))
-    start(rig)
-    assert rig.device.calls[-2:] == [("capture", "end"), ("acquisition", "start")]
-    assert "DMMR acquisition enabled." in rig.logs
-
-
-@pytest.mark.parametrize("which", ["begin", "end"])
-def test_python_logging_error_does_not_change_startup_outcome(rig, which):
-    attach_capture(rig)
-    rig.device.fail_start = None
-
-    def broken(**kwargs):
-        raise OSError("diagnostic file unavailable")
-
-    setattr(rig.device, f"{which}_startup_diagnostics", broken)
-    start(rig)
-    assert "DMMR acquisition enabled." in rig.logs
-    assert any("diagnostic file unavailable" in message for message in rig.logs)
-
-
-@pytest.mark.parametrize("poisoned", [False, True])
-def test_unclosed_capture_never_turns_into_continuous_logging(rig, poisoned):
-    attach_capture(rig)
-    rig.device.fail_start = None
-    rig.controller.startAcquisition = lambda: pytest.fail("capture still open")
-
-    def unclosed(**kwargs):
-        rig.device.calls.append(('capture', 'end'))
-        rig.device._transport_poisoned = poisoned
-        rig.device._startup_log_path = Path("still-open.log")
-        if poisoned:
-            rig.device.reject_cleanup = True
-        return "native capture not closed"
-
-    rig.device.end_startup_diagnostics = unclosed
-    start(rig)
-    assert "DMMR acquisition enabled." not in rig.logs
-    if poisoned:
-        assert ('enable', False) not in rig.device.calls
-        assert ('automatic', False) not in rig.device.calls[rig.device.calls.index(('capture', 'end')) + 1:]
-        assert rig.controller.device is rig.device and rig.controller.initialized
-    else:
-        assert ('enable', False) in rig.device.calls
-    assert rig.controller.acquiring is False
-    assert rig.parent.on is poisoned
+    assert not any(call[0] == "capture" for call in rig.device.calls)
+    assert not any("[DMMR native]" in message or "[DMMR startup]" in message for message in rig.logs)
 
 
 def test_plain_off_does_not_start_capture(rig):

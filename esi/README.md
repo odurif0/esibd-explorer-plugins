@@ -337,6 +337,14 @@ by default and cannot terminate a blocked DLL owner without restarting their ker
 The cards wrap in narrow panels, with scrollbars when needed. The mouse wheel
 does not edit setpoints.
 
+## Recording
+
+Every reading (voltages, currents, heater temperature) is recorded once, at the time it was read
+(the middle of its poll), whenever Explorer's Qt thread takes it. A late Qt thread delays the
+display only: Explorer's lag guard, which paused recording when the display fell behind
+(2026-11-17: ESI 11 s behind), is off for the ESI. Explorer 1.0.2 recorded the latest reading at each
+call of its timer, with the time of the call.
+
 ## Configuration
 
 The driver supports NVM slots `0..1022`; the plugin's `Operating config` setting

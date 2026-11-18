@@ -59,6 +59,8 @@ A failed port close leaves **Disconnect unconfirmed**; click OFF again to retry.
   differing from the previous reading discards the frame and stops acquisition.
 - Each six-channel packet is recorded once, timestamped on receipt by the PC.
   Curves use Explorer's logarithmic pressure display and standard data export.
+  A late Explorer display delays the curves only: Explorer's lag guard, which
+  paused or closed a device whose display fell behind, is off for the TPG366.
 - Underrange, overrange, sensor errors, switched-off or missing gauges, and
   identification errors appear separately in **Status**, with **NaN** data
   rather than zero or an old pressure. Other valid channels keep updating.

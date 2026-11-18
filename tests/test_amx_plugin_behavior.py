@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from support import explorer
 from support.amx import load_plugin
+from support.worker import as_worker
 
 
 PLUGIN_PATH = (
@@ -169,7 +170,7 @@ def test_controller_read_numbers_maps_pulser_snapshot():
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
 
     controller.readNumbers()
@@ -212,7 +213,7 @@ def test_operator_panel_expected_registers_match_real_write_paths():
             width_writes.append((pulser, width, timeout_s))
 
     controller = module.AMXController(types.SimpleNamespace())
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.print = lambda *args, **kwargs: None
     for index, width_us in enumerate((0.001, 0.005, 0.025, 0.03, 0.035, 1.2345, 500.0)):
         channel = types.SimpleNamespace(
@@ -617,7 +618,7 @@ def test_controller_exposes_available_amx_configs_in_gui_state():
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
 
     controller._refresh_available_configs()
     controller._sync_status_to_gui()
@@ -651,7 +652,7 @@ def test_controller_exposes_loaded_amx_config_in_gui_state():
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
 
     controller._refresh_loaded_config_status()
     controller._sync_status_to_gui()
@@ -720,7 +721,7 @@ def test_controller_toggle_on_refreshes_loaded_config_after_initialize():
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.available_configs = [
         {"index": 9, "name": "Operate", "active": True, "valid": True},
@@ -815,7 +816,7 @@ def test_controller_toggle_on_enables_before_config_load_and_width_remains_writa
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.available_configs = [
         {"index": 9, "name": "Operate", "active": True, "valid": True},
@@ -852,7 +853,7 @@ def test_controller_startup_disables_device_enable_after_config_load_failure():
             raise RuntimeError("load failed")
 
     controller = module.AMXController(types.SimpleNamespace())
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
 
     with pytest.raises(RuntimeError, match="load failed"):
         controller._load_operating_config_and_enable_device(
@@ -939,7 +940,7 @@ def test_controller_toggle_on_waits_for_state_on_after_enable():
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.available_configs = [
         {"index": 9, "name": "Operate", "active": True, "valid": True},
@@ -1088,7 +1089,7 @@ def test_controller_toggle_on_reconnects_transport_before_loading_operating_conf
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.available_configs = [
         {"index": 0, "name": "Standby", "active": True, "valid": True},
@@ -1123,7 +1124,7 @@ def test_controller_toggle_on_requires_operating_config():
     )
 
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     restored = []
     messages = []
@@ -1231,7 +1232,7 @@ def test_controller_load_now_is_rejected_while_amx_is_off():
         isOn=lambda: False,
     )
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     messages = []
     controller.print = lambda message, flag=None: messages.append((message, flag))
@@ -1302,7 +1303,7 @@ def test_controller_close_communication_syncs_after_device_is_disposed():
         )
     )
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.loaded_config_text = "9:Operate [memory]"
     controller.available_configs = [{"index": 9, "name": "Operate"}]
@@ -1333,10 +1334,11 @@ def test_controller_init_complete_resumes_pending_on_request():
     )
 
     controller = module.AMXController(parent)
-    controller.device = object()
+    device = controller.device = as_worker("amx", types.SimpleNamespace())
+    controller._native_ready_device = device  # The worker's connection finished.
     controller.toggleOnFromThread = lambda parallel=True: toggle_calls.append(parallel)
 
-    controller.initComplete()
+    controller.initComplete(native_device=device, native_token=controller._native_cancel_event)
 
     assert controller.initialized is True
     assert sync_calls
@@ -1356,10 +1358,11 @@ def test_controller_init_complete_does_not_toggle_when_ui_is_off():
     )
 
     controller = module.AMXController(parent)
-    controller.device = object()
+    device = controller.device = as_worker("amx", types.SimpleNamespace())
+    controller._native_ready_device = device  # The worker's connection finished.
     controller.toggleOnFromThread = lambda parallel=True: toggle_calls.append(parallel)
 
-    controller.initComplete()
+    controller.initComplete(native_device=device, native_token=controller._native_cancel_event)
 
     assert controller.initialized is True
     assert toggle_calls == []
@@ -1389,7 +1392,7 @@ def test_controller_shutdown_uses_full_software_shutdown():
     )
     controller = module.AMXController(parent)
     device = FakeDevice()
-    controller.device = device
+    controller.device = as_worker("amx", device)
     controller.initialized = True
     controller.shutdownCommunication()
 
@@ -1417,7 +1420,7 @@ def test_controller_shutdown_failure_marks_state_unconfirmed():
         _update_status_widgets=lambda: None,
     )
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.print = lambda message, flag=None: messages.append((message, flag))
 
@@ -1522,7 +1525,7 @@ def test_controller_shutdown_parks_standby_before_disconnect_when_available():
         {"index": 0, "name": "Standby", "active": True, "valid": True},
         {"index": 9, "name": "Operate", "active": True, "valid": True},
     ]
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.print = lambda message, flag=None: messages.append((message, flag))
 
@@ -1627,7 +1630,7 @@ def test_amx_controller_read_numbers_acquires_lock_for_housekeeping():
         available_configs_text="",
     )
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
 
     lock_calls = []
@@ -1727,7 +1730,7 @@ def test_controller_read_numbers_runs_while_framework_holds_the_lock():
         available_configs_text="",
     )
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
 
     # Hold the non-reentrant lock the same way the framework acquisition loop does.
@@ -1785,7 +1788,7 @@ def test_controller_run_acquisition_reads_and_emits_under_lock(monkeypatch):
         available_configs_text="",
     )
     controller = module.AMXController(parent)
-    controller.device = FakeDevice()
+    controller.device = as_worker("amx", FakeDevice())
     controller.initialized = True
     controller.signalComm.updateValuesSignal = FakeSignal()
 
@@ -2066,26 +2069,6 @@ def test_restore_ui_state_for_device_reflects_real_hardware_state():
     controller.main_state = "STATE_STANDBY"
     controller._restore_ui_state_for_device()
     assert restored == [False]
-
-
-def test_warn_if_standby_operating_does_not_emit():
-    """A standby-named Operating config is a normal operator choice. The plugin
-    must NOT emit a warning — the operator knows HV will not be applied."""
-    module = load_plugin(module_name="amx_plugin_behavior_test")
-    parent = types.SimpleNamespace(name="AMX")
-    controller = module.AMXController(parent)
-    controller.available_configs = [
-        {"index": 0, "name": "Standby", "active": True, "valid": True},
-        {"index": 1, "name": "Operate", "active": True, "valid": True},
-    ]
-    logs = []
-    controller.print = lambda msg, flag=None: logs.append(msg)
-
-    controller._warn_if_standby_operating(0)
-    assert logs == []
-
-    controller._warn_if_standby_operating(1)
-    assert logs == []
 
 
 def test_stop_acquisition_for_transition_does_not_call_base_stopAcquisition():

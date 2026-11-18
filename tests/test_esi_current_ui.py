@@ -512,10 +512,12 @@ def probe(case, output):
         assert device.channels[2].value == 123. and not device.channels[2].enabled
         return 0
 
-    # A complete acquisition cycle: monitor updates -> Explorer.appendData ->
-    # DynamicNp buffers. No fresh measurement is fabricated after a failed read.
+    # A complete acquisition cycle: a reading, published with its time as the acquisition loop does ->
+    # Explorer's timer -> appendData -> DynamicNp buffers. No fresh measurement is fabricated after a
+    # failed read.
     device.plotableChannels = device.channels
     device.updateValues = controller.updateValues
+    device.recording = True
     device.liveDisplayActive = lambda: False
     device.measureInterval = lambda **kw: None
     t0 = 1_700_000_000.
@@ -529,6 +531,7 @@ def probe(case, output):
         if index in (100, 101):
             data["modules"][1]["current_valid"] = False
         controller._apply_snapshot(data)
+        controller._publish_sample(clock.now)
         device.appendData()
         expected.append([ch.monitor for ch in device.channels])
         clock.now += 1.

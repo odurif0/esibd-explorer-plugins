@@ -19,6 +19,12 @@ import sys
 
 TARGET_VERSION = "1.0.2"
 
+
+def is_target(version: str | None) -> bool:
+    """The targeted release, also with a local label: 1.0.2+od.1 is 1.0.2 with the fixes of the fork
+    odurif0/ESIBD-Explorer (the fixes install_explorer_fixes.py brings to an installed 1.0.2)."""
+    return version is not None and version.split("+", 1)[0] == TARGET_VERSION
+
 _VERSION = re.compile(r"""PROGRAM_VERSION\s*=\s*version\.parse\(\s*['"]([^'"]+)['"]\s*\)""")
 
 
@@ -67,7 +73,7 @@ def hosts() -> list[tuple[str, str | None]]:
 
 def mismatches(found: list[tuple[str, str | None]]) -> list[str]:
     return [f"{where}: {version}" for where, version in found
-            if version is not None and version != TARGET_VERSION]
+            if version is not None and not is_target(version)]
 
 
 def add_const_names(esibd_dir: Path, ns: dict) -> dict:

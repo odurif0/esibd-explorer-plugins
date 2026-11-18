@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from support.shutdown import FAMILIES, controller_for, runtime_for
+from support.worker import as_worker
 
 
 @pytest.mark.parametrize("family", FAMILIES)
@@ -36,7 +37,7 @@ def test_shutdown_failure_keeps_backend_and_next_off_can_retry(family, failure):
     device.shutdown = shutdown
     device.disconnect = disconnect
     device.close = lambda: calls.append("dispose")
-    controller.device = device
+    controller.device = as_worker(family, device)
     if family == "psu":
         controller._perform_shutdown_sequence_unlocked = lambda **kw: []
         controller._confirm_shutdown_unlocked = lambda **kw: (

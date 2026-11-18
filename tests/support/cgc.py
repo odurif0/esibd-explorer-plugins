@@ -16,10 +16,12 @@ import pytest
 from support.shutdown import FAMILIES, controller_for
 
 ROOT = Path(__file__).resolve().parents[2]
+# Plugins whose controller still accepts an inline Python driver: these rigs drive the real runtime's
+# Open/Close with a simulated DLL. The DMMR and AMX plugins accept their native worker only; their
+# blocked-open, OFF-during-open and worker-retirement cases are in tests/test_native_dmmr_adapter.py
+# and tests/test_native_amx_adapter.py (a blocked call ends with the worker stopped, not pending).
 SPECS = [
     ("ampr_a", "ampr", "AMPR"), ("ampr_b", "ampr", "AMPR"),
-    ("amx_a", "amx", "AMX"), ("amx_b", "amx", "AMX"),
-    ("amx_hd", "amx_hd", "AMXHD"),
     *((f"psu_{letter}", "psu", "PSU") for letter in "abcde"),
     ("esi", "esi", "ESI"),
 ]

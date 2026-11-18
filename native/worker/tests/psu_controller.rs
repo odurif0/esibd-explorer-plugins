@@ -1373,6 +1373,7 @@ fn manual_readback_failures_disable_without_activation() {
     for fault in [
         "voltage",
         "current",
+        "current_nan",
         "range",
         "interlock",
         "voltage_limit",
@@ -1387,6 +1388,10 @@ fn manual_readback_failures_disable_without_activation() {
                 }
                 "current" => {
                     h.currents[0] = 0.04;
+                    h.ignore.insert("SetPSUOutputCurrent".into());
+                }
+                "current_nan" => {
+                    h.currents[0] = f64::NAN;
                     h.ignore.insert("SetPSUOutputCurrent".into());
                 }
                 "range" => {
@@ -2165,4 +2170,250 @@ fn windows_bool_accepts_nonzero_i32_but_c_bool_remains_typed() {
             .message
             .contains("C bool")
     );
+}
+
+// The cases below were tested on the plugin's Python copy of this sequence until 2026-11-18, when the
+// plugin kept only the worker (tests/test_psu_live_setpoints.py, test_psu_safety_regressions.py).
+
+/// Both outputs ON at 100 V and 240 V, as when the operator edits a setpoint.
+fn live() -> (Controller, Arc<Mutex<Hardware>>) {
+    let (c, h) = connected();
+    {
+        let mut h = h.lock().unwrap();
+        h.enabled = true;
+        h.outputs = [true, true];
+        h.voltages = [100.0, 240.0];
+        h.currents = [0.01, 0.02];
+    }
+    (c, h)
+}
+
+fn live_state(voltages: [f64; 2], currents: [f64; 2], outputs: [bool; 2]) -> Value {
+    json!({"output_enabled":{"0":outputs[0],"1":outputs[1]}, "full_range_enabled":{"0":false,"1":false},
+        "voltage_values":{"0":voltages[0],"1":voltages[1]},
+        "current_limit_values":{"0":currents[0],"1":currents[1]}})
+}
+
+/// The writes, in order, with their arguments after the port.
+fn writes(h: &Hardware) -> Vec<(String, Vec<Value>)> {
+    h.calls
+        .iter()
+        .filter(|c| c.name.starts_with("Set"))
+        .map(|c| (c.name.clone(), c.args[1..].to_vec()))
+        .collect()
+}
+
+fn enabled_anything(h: &Hardware) -> bool {
+    h.calls.iter().any(|c| {
+        (c.name == "SetDeviceEnable" || c.name == "SetPSUEnable")
+            && c.args[1..].iter().any(|v| v == &json!(1))
+    })
+}
+
+#[test]
+fn a_live_voltage_edit_steps_only_its_channel_without_gate_commands() {
+    for (channel, start, target) in [
+        (0, 100.0, 80.0),
+        (1, 100.0, 80.0),
+        (0, 100.0, 120.0),
+        (0, 380.0, 80.0),
+        (0, 80.0, 380.0),
+        (0, 100.0, 0.0),
+        (0, 0.0, 100.0),
+        (0, 100.0, 100.0),
+        (0, 100.0, 100.001),
+    ] {
+        for partial in [false, true] {
+            let case = format!("CH{channel} {start} V -> {target} V, setpoints only {partial}");
+            let (mut c, h) = live();
+            let mut voltages = [100.0, 240.0];
+            voltages[channel] = start;
+            h.lock().unwrap().voltages = voltages;
+            let mut wanted = voltages;
+            wanted[channel] = target;
+            let state = if partial {
+                json!({"setpoints_only":true,"voltage_values":{"$map":[[channel, target]]}})
+            } else {
+                live_state(wanted, [0.01, 0.02], [true, true])
+            };
+            call(&mut c, "apply_manual_state", &[state], fast_profile()).unwrap();
+            let h = h.lock().unwrap();
+            let steps: Vec<f64> = writes(&h)
+                .iter()
+                .map(|(name, args)| {
+                    assert_eq!(name, "SetPSUOutputVoltage", "{case}");
+                    assert_eq!(args[0], json!(channel), "{case}");
+                    args[1].as_f64().unwrap()
+                })
+                .collect();
+            let mut values = vec![start];
+            values.extend(&steps);
+            if start == target {
+                assert!(steps.is_empty(), "{case}: {steps:?}");
+            } else {
+                assert_eq!(*values.last().unwrap(), target, "{case}");
+                for pair in values.windows(2) {
+                    let step = pair[1] - pair[0];
+                    assert!(
+                        step.abs() <= 100.0 && step * (target - start) > 0.0,
+                        "{case}: {values:?}"
+                    );
+                }
+            }
+            assert_eq!(h.voltages, wanted, "{case}");
+            assert!(h.enabled && h.outputs == [true, true], "{case}");
+        }
+    }
+}
+
+#[test]
+fn a_live_current_limit_edit_writes_only_that_limit() {
+    for partial in [false, true] {
+        let (mut c, h) = live();
+        let state = if partial {
+            json!({"setpoints_only":true,"current_limit_values":{"$map":[[0, 0.015]]}})
+        } else {
+            live_state([100.0, 240.0], [0.015, 0.02], [true, true])
+        };
+        call(&mut c, "apply_manual_state", &[state], fast_profile()).unwrap();
+        let h = h.lock().unwrap();
+        assert_eq!(
+            writes(&h),
+            [(
+                "SetPSUOutputCurrent".to_string(),
+                vec![json!(0), json!(0.015)]
+            )],
+            "setpoints only {partial}"
+        );
+        assert_eq!(h.voltages, [100.0, 240.0]);
+        assert!(h.enabled && h.outputs == [true, true]);
+    }
+}
+
+#[test]
+fn a_live_edit_of_an_output_left_off_sets_it_directly_and_leaves_it_off() {
+    let (mut c, h) = live();
+    h.lock().unwrap().outputs = [false, true];
+    let state = live_state([380.0, 240.0], [0.01, 0.02], [false, true]);
+    call(&mut c, "apply_manual_state", &[state], fast_profile()).unwrap();
+    let h = h.lock().unwrap();
+    assert_eq!(
+        writes(&h),
+        [(
+            "SetPSUOutputVoltage".to_string(),
+            vec![json!(0), json!(380.0)]
+        )]
+    );
+    assert!(h.enabled && h.outputs == [false, true]);
+}
+
+#[test]
+fn an_unverified_live_state_never_starts_a_voltage_ramp() {
+    for fault in [
+        "voltage_nan",
+        "voltage_negative",
+        "current_nan",
+        "voltage_limit_nan",
+        "voltage_limit_low",
+        "current_limit_nan",
+        "interlocks",
+    ] {
+        let (mut c, h) = live();
+        {
+            let mut h = h.lock().unwrap();
+            match fault {
+                "voltage_nan" => h.voltages[0] = f64::NAN,
+                "voltage_negative" => h.voltages[0] = -100.0,
+                "current_nan" => h.currents[0] = f64::NAN,
+                "voltage_limit_nan" => h.voltage_limits[0] = f64::NAN,
+                "voltage_limit_low" => h.voltage_limits[0] = 200.0,
+                "current_limit_nan" => h.current_limits[0] = f64::NAN,
+                _ => h.interlocks = [false, true],
+            }
+        }
+        let state = json!({"setpoints_only":true,"voltage_values":{"$map":[[0, 380.0]]}});
+        assert!(
+            call(&mut c, "apply_manual_state", &[state], fast_profile()).is_err(),
+            "{fault}"
+        );
+        let h = h.lock().unwrap();
+        assert!(
+            h.calls_named("SetPSUOutputVoltage").is_empty(),
+            "{fault}: {:?}",
+            writes(&h)
+        );
+        assert!(!enabled_anything(&h), "{fault}");
+    }
+}
+
+#[test]
+fn a_failed_live_write_is_not_retried_as_a_cold_start() {
+    for fault in ["ignored_voltage", "ignored_current"] {
+        let (mut c, h) = live();
+        let mut currents = [0.01, 0.02];
+        {
+            let mut h = h.lock().unwrap();
+            if fault == "ignored_voltage" {
+                h.ignore.insert("SetPSUOutputVoltage".into());
+            } else {
+                h.ignore.insert("SetPSUOutputCurrent".into());
+                currents[0] = 0.001;
+            }
+        }
+        let state = live_state([80.0, 240.0], currents, [true, true]);
+        assert!(
+            call(&mut c, "apply_manual_state", &[state], fast_profile()).is_err(),
+            "{fault}"
+        );
+        let h = h.lock().unwrap();
+        assert!(!enabled_anything(&h), "{fault}: {:?}", writes(&h));
+        let voltages = h.calls_named("SetPSUOutputVoltage");
+        if fault == "ignored_current" {
+            assert!(
+                voltages.is_empty(),
+                "limits are confirmed before any voltage moves"
+            );
+        } else {
+            assert_eq!(voltages.len(), 1, "{fault}");
+        }
+        assert_eq!(h.outputs, [false, false], "{fault}");
+    }
+}
+
+#[test]
+fn a_current_limit_readback_below_the_request_is_accepted() {
+    let (mut c, h) = connected();
+    {
+        let mut h = h.lock().unwrap();
+        h.ignore.insert("SetPSUOutputCurrent".into());
+        h.currents[0] = 0.005;
+    }
+    call(
+        &mut c,
+        "apply_manual_state",
+        &[manual(20.0)],
+        fast_profile(),
+    )
+    .unwrap();
+    let h = h.lock().unwrap();
+    assert!(h.enabled && h.outputs == [true, false]);
+}
+
+#[test]
+fn an_unchanged_range_is_not_switched() {
+    let (mut c, h) = connected();
+    call(
+        &mut c,
+        "apply_manual_state",
+        &[manual(300.0)],
+        fast_profile(),
+    )
+    .unwrap();
+    let h = h.lock().unwrap();
+    assert!(
+        h.calls_named("SetPSUFullRange").is_empty(),
+        "{:?}",
+        h.names()
+    );
+    assert!(h.enabled && h.outputs == [true, false]);
 }

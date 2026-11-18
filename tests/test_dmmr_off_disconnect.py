@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import ast
 from importlib.metadata import PackageNotFoundError, distribution
-import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from support.dmmr import dmmr_toggle_rig as toggle_rig, start
-from support.shutdown import runtime_for
 
 
 @pytest.fixture(name="rig")
@@ -93,7 +91,9 @@ def test_on_off_closes_port_and_clears_explorer_exit_warning(rig, explorer_close
     assert rig.parent.on is False
     last_readback = max(i for i, call in enumerate(rig.device.calls) if call[0] == "read")
     assert last_readback < rig.device.calls.index(("disconnect",))
-    assert rig.device.calls[last_readback + 1:] == [("disconnect",), ("disconnect",)]
+    # The port close (repeated, idempotent, by the disposal that also covers a failed open), then the
+    # native worker is released: the next ON starts a new one.
+    assert rig.device.calls[last_readback + 1:] == [("disconnect",), ("disconnect",), ("process_close",)]
     assert explorer_close(rig.controller) == (True, [], ["plugins"])
     # A different connected device must still trigger Explorer's warning.
     result, dialogs, _ = explorer_close(rig.controller, other_connected=True)
@@ -165,60 +165,3 @@ def test_unconfirmed_gate_does_not_discard_connection_needed_for_retry(rig, gate
     request_off(rig)
     assert rig.device.port_closes == 1
     assert rig.controller.device is None
-
-
-@pytest.mark.parametrize("close_status", [0, -2])
-def test_off_uses_real_runtime_disconnect_and_honors_native_close_result(rig, monkeypatch, close_status):
-    driver = runtime_for("dmmr")
-    driver._DEFAULT_IO_TIMEOUT_S = 0.2
-    base = importlib.import_module(type(driver).__module__).DMMRBase
-    native_closes = []
-    monkeypatch.setattr(base, "close_port", lambda self: native_closes.append("close") or close_status)
-    for name in ("set_enable", "set_automatic_current", "get_enable", "get_automatic_current"):
-        setattr(driver, name, getattr(rig.device, name))
-    rig.controller.device = driver
-    request_off(rig)
-    assert native_closes == ["close"]
-    if close_status == 0:
-        assert not driver.connected and not driver._dll_port_claimed
-        assert rig.controller.device is None and not rig.controller.initialized
-    else:
-        assert driver.connected and driver._dll_port_claimed
-        assert rig.controller.device is driver and rig.controller.initialized
-        assert rig.parent.on and rig.controller.main_state == "Shutdown unconfirmed"
-
-
-def test_blocked_native_close_keeps_port_claim_without_another_native_close(rig, monkeypatch):
-    import threading
-
-    driver = runtime_for("dmmr")
-    driver._DEFAULT_IO_TIMEOUT_S = 0.02
-    base = importlib.import_module(type(driver).__module__).DMMRBase
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
-    native_closes = []
-
-    def blocked_close(self):
-        native_closes.append("close")
-        entered.set()
-        release.wait(3)
-        finished.set()
-        return 0
-
-    monkeypatch.setattr(base, "close_port", blocked_close)
-    for name in ("set_enable", "set_automatic_current", "get_enable", "get_automatic_current"):
-        setattr(driver, name, getattr(rig.device, name))
-    rig.controller.device = driver
-    try:
-        request_off(rig)
-        assert entered.is_set() and not finished.is_set()
-        assert driver._transport_poisoned and driver._dll_port_claimed
-        assert rig.controller.device is driver and rig.controller.initialized
-        assert rig.parent.on and rig.controller.main_state == "Shutdown unconfirmed"
-        request_off(rig)
-        assert native_closes == ["close"]
-        assert driver._dll_port_claimed
-        assert rig.controller.device is driver and rig.controller.initialized
-        assert rig.parent.on
-    finally:
-        release.set()
-        assert finished.wait(1)

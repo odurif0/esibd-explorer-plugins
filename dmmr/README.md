@@ -113,6 +113,16 @@ such as a colour change no longer removes the curves of an acquisition stopped
 earlier than the display time. While recording, the window follows the current
 time as before; a range chosen with the mouse is kept.
 
+## Recording
+
+Every reading is recorded once, at the time it was read (the middle of its poll), whenever Explorer's
+Qt thread takes it: several readings, or none, per call of Explorer's timer. *Interval (measured)*
+shows the time between readings. A late Qt thread delays the display only: there is no lag
+tolerance, no recording pause and no closure for it on the DMMR. Explorer 1.0.2 recorded the latest
+value at each call of its timer, with the time of the call: a late Qt thread lost readings, recorded
+NaN and shifted times, then paused recording and closed the DMMR (2026-11-17: 38 % NaN on M03 and a
+closure at 13:40, while the DMMR answered 4.9 times a second).
+
 ## Startup Diagnostics
 
 If connection fails with the DMMR powered off, power it on and retry. The plugin
@@ -129,10 +139,12 @@ workers running. After retirement, a new explicit ON starts a fresh worker
 without restarting Explorer or replaying old writes. Port closure or process
 termination does not confirm that the hardware acquisition gates are OFF.
 
-Each ON attempt captures the native DLL startup exchanges, including failed-start
-cleanup, into `esibd explorer.log` under `[DMMR startup]` / `[DMMR native]`.
-To investigate an error, try ON once and share that Explorer log. No additional
-tool or setting is needed.
+The DMMR's native worker records every DLL call it makes, with its status, in
+`<Explorer data path>/logs/dmmr/native/dmmr/*.jsonl`: to investigate an error, keep
+that log with the Explorer log. The DLL's own debug file is no longer copied into the
+Explorer log at each ON (about 150 lines of normal DLL chatter such as "Command 'g' not
+available for automatic notifications", which are not errors); the zero-check notebook
+still keeps it with its results.
 
 Startup has one receive-error recovery budget for mode, range and final-state
 checks. If readbacks fail to communicate, one purge restores the link and baud
@@ -140,11 +152,9 @@ rate before rechecking settings. Configuration writes are never replayed.
 A lost enable ACK still triggers OFF, not another enable. Shutdown has its own
 single recovery attempt and confirms both OFF flags before closing the port.
 
-Capture stops before continuous polling. The raw file
-`<Explorer data path>/logs/dmmr/dmmr_startup_com*.log` is reused on each attempt
-and trimmed to 64 KiB after closing. A blocked DLL is never closed concurrently:
-any partial capture is reported, and the supervisor can retire its worker.
-An unavailable capture is explicitly reported, not silently omitted.
+The controller state is shown by name: `ST_ON` (modules on), `ST_OFF` (modules disabled,
+before ON enables them or after OFF), `ST_ERR_*` (faults). `ST_OFF` is not named in the CGC
+header; the DMMR reports it with its modules disabled (2026-11-15 and 11-17 worker logs).
 
 ## Read Errors
 

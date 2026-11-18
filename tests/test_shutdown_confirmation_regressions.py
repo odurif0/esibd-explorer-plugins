@@ -8,6 +8,7 @@ import pytest
 
 from support.psu_fakes import StatefulPSU
 from support.shutdown import FAMILIES, controller_for, runtime_for
+from support.worker import as_worker
 
 
 @pytest.mark.parametrize("family", FAMILIES)
@@ -31,11 +32,11 @@ def test_attention_state_survives_repeated_close_and_refresh(family, state):
 def test_missing_positive_driver_confirmation_is_not_success(family, result):
     _module, controller, messages = controller_for(family)
     calls = []
-    controller.device = types.SimpleNamespace(
+    controller.device = as_worker(family, types.SimpleNamespace(
         shutdown=lambda **kwargs: calls.append("shutdown") or result,
         disconnect=lambda: True,
         close=lambda: None,
-    )
+    ))
     assert controller.shutdownCommunication() is False
     assert controller.main_state == "Shutdown unconfirmed"
     assert calls == ["shutdown"]

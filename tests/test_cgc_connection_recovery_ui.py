@@ -8,7 +8,9 @@ import sys
 import pytest
 from support.qt import run_probe
 
-SLUGS = ("ampr_a", "amx_a", "amx_hd", "psu_a", "esi")
+# Plugins that still accept an inline Python driver (see support.cgc.SPECS); the AMX and DMMR are
+# native-worker only: tests/test_native_amx_adapter.py::test_native_buttons_and_reconnect_through_real_qt.
+SLUGS = ("ampr_a", "psu_a", "esi")
 
 
 @pytest.mark.parametrize("slug", SLUGS)

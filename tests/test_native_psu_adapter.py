@@ -114,42 +114,42 @@ def test_native_current_only_edit_needs_no_gui_voltage_reads(native_case):
     assert proxy.calls[0][1] == (state,)
 
 
+def edit(voltage=100.0, channel=0):
+    """A live edit of one setpoint: the worker ramps from the hardware setpoint."""
+    return {"setpoints_only": True, "voltage_values": {channel: voltage}}
+
+
 def test_native_ramp_uses_worker_readback_not_gui_start_and_never_python_steps(native_case):
     _module, controller, device, proxy, _updates, _messages = native_case
     proxy.readbacks[0] = (900.0, 1000.0)
     controller.controllerParent.ramp_step_v = 25.0
     controller.controllerParent.ramp_step_interval_s = 0.2
-    assert controller._ramp_channel_voltage(
-        device, 0, 80.0, timeout_s=1.0, cancel=controller._output_cancel, start_v=0.0,
-    )
-    assert [method for method, _, _ in proxy.calls] == ["get_channel_voltage_limits", "ramp_channel_voltage"]
+    assert controller._apply_manual_state_unlocked(device, edit(80.0), 1.0, controller._output_cancel)
+    assert [method for method, _, _ in proxy.calls] == ["get_channel_voltage_limits", "apply_manual_state"]
     method, args, kwargs = proxy.calls[-1]
-    assert method == "ramp_channel_voltage" and args == (0, 80.0)
-    assert "start_v" not in kwargs
+    assert args == (edit(80.0),)
     assert kwargs["ramp_step_v"] == 25.0 and kwargs["ramp_step_interval_s"] == 0.2
     steps = math.ceil((900.0 - 80.0) / 25.0)
-    assert kwargs["rpc_timeout_s"] >= steps * (1.0 + 0.2) + 32.0
+    assert kwargs["rpc_timeout_s"] >= steps * (1.0 + 0.2) + 48.0
     assert device.calls == []
 
 
 def test_budget_includes_front_panel_changes_within_reported_range(native_case):
     _module, controller, device, proxy, _updates, _messages = native_case
     proxy.readbacks[0] = (0.0, 1000.0)
-    assert controller._ramp_channel_voltage(device, 0, 100.0, timeout_s=1.0, cancel=controller._output_cancel)
+    assert controller._apply_manual_state_unlocked(device, edit(100.0), 1.0, controller._output_cancel)
     kwargs = proxy.calls[-1][2]
-    assert kwargs["rpc_timeout_s"] >= 9 * 1.05 + 32.0 + 5.0
+    assert kwargs["rpc_timeout_s"] >= 9 * 1.05 + 48.0 + 5.0
 
 
-@pytest.mark.parametrize("operation", ["manual", "ramp"])
+@pytest.mark.parametrize("operation", ["manual", "edit"])
 def test_unsupported_ramp_deadline_is_rejected_before_writes(native_case, operation):
     _module, controller, device, proxy, _updates, _messages = native_case
     controller.controllerParent.ramp_step_v = 0.01
     controller.controllerParent.ramp_step_interval_s = 0.05
     with pytest.raises(ValueError, match="one-hour deadline"):
-        if operation == "manual":
-            controller._apply_manual_state_unlocked(device, manual(), 1.0, controller._output_cancel)
-        else:
-            controller._ramp_channel_voltage(device, 0, 100.0, timeout_s=1.0, cancel=controller._output_cancel)
+        controller._apply_manual_state_unlocked(device, manual() if operation == "manual" else edit(),
+                                                1.0, controller._output_cancel)
     assert all(method == "get_channel_voltage_limits" for method, _, _ in proxy.calls)
     assert device.calls == []
 
@@ -164,16 +164,14 @@ def test_output_off_does_not_budget_irrelevant_slow_ramps(native_case):
     assert [method for method, _, _ in proxy.calls] == ["apply_manual_state"]
 
 
-@pytest.mark.parametrize("operation", ["manual", "ramp"])
+@pytest.mark.parametrize("operation", ["manual", "edit"])
 def test_pre_cancelled_operations_never_dispatch_and_old_tokens_stay_cancelled(native_case, operation):
     _module, controller, device, proxy, _updates, _messages = native_case
     old = Event()
     old.set()
     controller._output_cancel = Event()
-    if operation == "manual":
-        assert not controller._apply_manual_state_unlocked(device, manual(), 1.0, old)
-    else:
-        assert not controller._ramp_channel_voltage(device, 0, 100.0, timeout_s=1.0, cancel=old)
+    assert not controller._apply_manual_state_unlocked(device, manual() if operation == "manual" else edit(),
+                                                       1.0, old)
     assert proxy.calls == [] and device.calls == []
 
 
@@ -220,31 +218,24 @@ def test_native_unexpected_success_payload_is_not_a_successful_placeholder(nativ
         controller._apply_manual_state_unlocked(device, manual(), 1.0, controller._output_cancel)
 
 
-def test_process_reference_without_native_session_keeps_python_ramp(native_case, monkeypatch):
+@pytest.mark.parametrize("backend", ["inline", "no session"])
+def test_without_its_native_worker_the_plugin_commands_nothing(native_case, backend):
+    """Since 2026-11-18 the plugin has no Python copy of the HV sequence to fall back on."""
     _module, controller, device, proxy, _updates, _messages = native_case
-    proxy.session = None
-    monkeypatch.setattr(controller._output_cancel, "wait", lambda _: False)
-    assert controller._ramp_channel_voltage(device, 0, 200.0, timeout_s=1.0, cancel=controller._output_cancel)
-    assert device.calls == [("voltage", 0, 100.0), ("voltage", 0, 200.0)]
-    assert proxy.calls == []
-
-
-def test_inline_reference_manual_branch_is_preserved(native_case, monkeypatch):
-    _module, controller, device, proxy, _updates, _messages = native_case
-    device._backend_mode = "inline"
-    device.interlocks = (True, True)
-    monkeypatch.setattr(controller._output_cancel, "wait", lambda _: False)
-    assert controller._apply_manual_state_unlocked(device, manual(), 1.0, controller._output_cancel)
-    assert proxy.calls == []
-    assert device.outputs == (True, False) and device.enabled
-    assert device.voltages == {0: 300.0, 1: 777.12345}
+    if backend == "inline":
+        device._backend_mode = "inline"
+    else:
+        proxy.session = None
+    with pytest.raises(RuntimeError, match="requires its native worker"):
+        controller._apply_manual_state_unlocked(device, manual(), 1.0, controller._output_cancel)
+    assert proxy.calls == [] and device.calls == []
 
 
 def test_invalid_timeout_is_rejected_before_dispatch(native_case):
     _module, controller, device, proxy, _updates, _messages = native_case
     for timeout in [0.0, -1.0, float("nan"), float("inf"), 120.0]:
         with pytest.raises(ValueError):
-            controller._ramp_channel_voltage(device, 0, 100.0, timeout_s=timeout, cancel=controller._output_cancel)
+            controller._apply_manual_state_unlocked(device, edit(), timeout, controller._output_cancel)
     assert proxy.calls == []
 
 
