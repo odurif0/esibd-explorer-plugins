@@ -10,6 +10,7 @@ import sys
 import pytest
 
 import explorer_host
+from support.source import SHARED_FILES
 
 ROOT = Path(__file__).resolve().parents[1]
 # Names the plugins use for Explorer Channel objects.
@@ -17,7 +18,8 @@ CHANNEL_NAMES = {"ch", "channel", "chan"}
 
 
 def _plugin_sources():
-    return sorted(path for path in ROOT.glob("*/*_plugin.py") if "tests" not in path.parts)
+    patterns = ("*/*_plugin.py", *(f"*/{name}" for name in SHARED_FILES))  # The AMX plugins' shared code too.
+    return sorted(path for pattern in patterns for path in ROOT.glob(pattern) if "tests" not in path.parts)
 
 
 def test_no_plugin_writes_the_read_only_channel_loading():

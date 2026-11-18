@@ -3,7 +3,10 @@
 Siblings stay self-contained (no symlinks, no shared imports): each one keeps a
 full copy of the canonical entrypoint and runtime tree. Only the single
 ``name = "..."`` declaration of the Device class differs. README copies retain
-their own plugin name and folder. Edit the canonical plugin, then run:
+their own plugin name and folder. Files shared word for word by plugins of
+different families (``SHARED``: the code common to AMX and AMX HD) are copied
+as they are into each plugin folder, which runs its own copy. Edit the
+canonical plugin, then run:
 
     python3 tools/sync_family_siblings.py          # rewrite sibling copies
     python3 tools/sync_family_siblings.py --check  # report drift, change nothing
@@ -25,6 +28,10 @@ FAMILIES = {
     "ampr": ("ampr_a", ("ampr_b",), "ampr_plugin.py"),
     "amx": ("amx_a", ("amx_b",), "amx_plugin.py"),
     "psu": ("psu_a", ("psu_b", "psu_c", "psu_d", "psu_e"), "psu_plugin.py"),
+}
+# path inside a plugin folder: (canonical folder, the folders that hold an identical copy)
+SHARED = {
+    "_runtime/_amx_common.py": ("amx_a", ("amx_b", "amx_hd")),
 }
 
 
@@ -121,6 +128,20 @@ def sync(root: Path = REPO_ROOT, *, check: bool = False) -> list[str]:
                     drift.append(f"{(sibling_runtime_root / relative).relative_to(root)} (extra)")
                     if not check:
                         (sibling_runtime_root / relative).unlink()
+    for relative, (canonical_folder, folders) in SHARED.items():
+        canonical = root / canonical_folder / relative
+        _regular_path(canonical)
+        for folder in folders:
+            if not (root / folder).is_dir():
+                continue  # A partial tree (tests): a missing plugin folder is reported elsewhere.
+            target = root / folder / relative
+            _regular_path(target)
+            if not target.is_file() or target.read_bytes() != canonical.read_bytes():
+                drift.append(str(target.relative_to(root)))
+                if not check:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(canonical, target)
+                    shutil.copymode(canonical, target)
     return drift
 
 

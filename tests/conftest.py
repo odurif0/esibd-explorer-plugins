@@ -80,7 +80,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "amx",
         "COM-HVAMX4ED.h",
         "COM-HVAMX4ED.dll",
-        bundled_files=_native_bundled_files("amx"),
+        bundled_files=(*_native_bundled_files("amx"), "_runtime/_amx_common.py"),
     ),
     PluginSpec(
         "amx_b",
@@ -92,7 +92,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         "amx",
         "COM-HVAMX4ED.h",
         "COM-HVAMX4ED.dll",
-        bundled_files=_native_bundled_files("amx"),
+        bundled_files=(*_native_bundled_files("amx"), "_runtime/_amx_common.py"),
     ),
     PluginSpec(
         "amx_hd",
@@ -104,7 +104,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         None,
         "COM-HVAMX4EDH.h",
         "COM-HVAMX4EDH.dll",
-        bundled_files=_native_bundled_files("amx_hd"),
+        bundled_files=(*_native_bundled_files("amx_hd"), "_runtime/_amx_common.py"),
     ),
     PluginSpec(
         "dmmr",

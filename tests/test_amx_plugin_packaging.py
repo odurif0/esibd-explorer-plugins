@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+import pytest
 from support import explorer
 from support.amx import load_plugin
 
@@ -180,6 +181,7 @@ def test_amx_plugin_runtime_defaults_to_inline_backend(monkeypatch):
 def test_amx_plugin_fails_cleanly_when_runtime_is_missing(tmp_path):
     plugin_copy = tmp_path / "amx_plugin.py"
     shutil.copy2(PLUGIN_PATH, plugin_copy)
+    shutil.copytree(PLUGIN_PATH.parent / "_runtime", tmp_path / "_runtime")
     module = explorer.load_plugin(plugin_copy, "amx_plugin_missing_runtime_test", runtimes=("amx",))
 
     try:
@@ -188,6 +190,14 @@ def test_amx_plugin_fails_cleanly_when_runtime_is_missing(tmp_path):
         assert "vendor/runtime; plugin installation is incomplete" in str(exc)
     else:
         raise AssertionError("Expected ModuleNotFoundError when vendor/runtime is missing")
+
+
+def test_amx_plugin_fails_cleanly_when_its_common_code_is_missing(tmp_path):
+    """The code shared by the AMX plugins is a file of each plugin folder: without it, a clear error."""
+    plugin_copy = tmp_path / "amx_plugin.py"
+    shutil.copy2(PLUGIN_PATH, plugin_copy)
+    with pytest.raises(ModuleNotFoundError, match="Missing _runtime/_amx_common.py in .*installation is incomplete"):
+        explorer.load_plugin(plugin_copy, "amx_plugin_missing_common_test", runtimes=("amx",))
 
 
 def test_plugin_hides_framework_collapse_and_real_columns():

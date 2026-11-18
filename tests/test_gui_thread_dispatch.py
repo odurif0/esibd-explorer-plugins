@@ -20,6 +20,7 @@ import pytest
 
 from conftest import PLUGIN_SPECS
 from support.qt import run_probe
+from support.source import entrypoint_tree
 
 ROOT = Path(__file__).resolve().parents[1]
 # Device dispatchers only; MScan's separate Qt bridge is covered in test_mscan_ui.
@@ -38,7 +39,7 @@ def probe(path):
     except ImportError:
         return 77
 
-    tree = ast.parse(path.read_text())
+    tree = entrypoint_tree(path)  # With the code the AMX plugins share from their folder.
     names = {
         "_invoke_gui_callback", "_sync_status_to_gui", "_sync_status",
         "_restore_off_ui_state", "_restore_on_ui_state", "_set_on_ui_state",
