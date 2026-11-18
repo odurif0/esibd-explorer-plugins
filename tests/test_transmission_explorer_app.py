@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_transmission_runs_in_the_complete_explorer_application(tmp_path):
     python = os.environ.get("ESIBD_QT_PYTHON", sys.executable)
     version = explorer_host.interpreter_version(python)
-    if version != explorer_host.TARGET_VERSION:
+    if not explorer_host.is_target(version):
         pytest.skip(f"the complete-application test needs ESIBD Explorer {explorer_host.TARGET_VERSION}; found {version}")
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONUNBUFFERED="1", PYTHONFAULTHANDLER="1",
                HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "home" / ".config"))

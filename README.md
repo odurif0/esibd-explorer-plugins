@@ -26,7 +26,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.16.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.17.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -103,6 +103,10 @@ OFF is not contacted, and a normal start keeps every device OFF.
 
 - ESIBD Explorer `1.0.2` on Windows 10 or later (x86-64). No additional Python or Rust
   installation is needed: each plugin folder brings its own worker executable.
+- Recommended: [ESIBD Explorer `1.0.2+od.1`](https://github.com/odurif0/ESIBD-Explorer/releases/tag/v1.0.2%2Bod.1),
+  1.0.2 with fixes that long recordings need (no GUI freeze during the hourly save, live plots that
+  do not slow down as the history grows, settings read as UTF-8). Unzip it and start `ESIBD Explorer.exe`;
+  settings and data are kept.
 - Linux x86-64 workers are also supplied for TPG366, MScan and Transmission (glibc 2.35 or later).
 
 ## Notebooks

@@ -16,6 +16,9 @@ Faults (Section 9 of the plan):
 - a line that fails (spray out of its window, a worker or detector fault, a line much slower than
   expected) is reported as failed and the worker asks for it again; three failures of one line,
   or three failed lines within one hour, stop the map;
+- a spray current below its window, or none (ESI OFF), for 5 s stops the map, during a line,
+  before one or while waiting for the beam: such a spray never came back by itself (2026-11-12 to
+  11-17); only a spray above its window is waited for;
 - a line the PSU or a channel limit cannot reach is reported as unreachable: that setting closes;
 - anything else, or Stop, is a safe stop.
 
@@ -155,7 +158,13 @@ class MapRunner:
     # judged on its mean at the end (2026-11-16 lab: the emitter ran dry at 11:18 in a 36 min line,
     # which went on until the operator stopped it).
     SPRAY_OUT_S = 60.
-    SPRAY_CHECK_EVERY_S = 5.
+    # Below its window (or no current: ESI OFF) for 5 s the spray stops the map instead of being waited
+    # for (user, 2026-11-17). In the map logs of 11-12 to 11-16 it never came back (1.7 to 15.8 nA: three
+    # failed lines or the 30 min wait, then the stop); the only spray that did was above its window
+    # (117.6 nA, 11-15 00:05). 2026-11-17 lab: the operator switched the ESI OFF and the map went on.
+    # Read every second, a single missing ESI reading (a lost reply) does not stop the map.
+    SPRAY_LOST_S = 5.
+    SPRAY_CHECK_EVERY_S = 1.
     # Between two points, beyond settle_s: readback confirmation (2026-11-04: 1.0 s median, 2.6 s at most).
     POINT_OVERHEAD_S = 2.
 
@@ -305,20 +314,44 @@ class MapRunner:
             reply = self.engine('map_record', self.journal, result)
             self.journal = reply['journal']
             atomic_json(self.folder / JOURNAL, self.journal)
-            self._store(request, result, reply.get('analysis') or {})
+            analysis = reply.get('analysis') or {}
+            self._store(request, result, analysis)
             self._log(f'line {request["id"]} {request["role"]} {request["point"]} {request["variant"]}: '
                       f'{result["outcome"]} {result.get("error", "")}'.strip())
+            if result['outcome'] == 'done' and request.get('role') in ('reference', 'sentinel'):
+                self._say_resolution(request, analysis)
             if result['outcome'] == 'failed':
                 now = self.monotonic()
                 self._failures = [t for t in self._failures if now - t < 3600.] + [now]
                 if len(self._failures) >= self.FAILURES_PER_HOUR:
                     raise SafeStop(f'{len(self._failures)} failed lines within one hour; last: {result["error"]}')
 
+    def _say_resolution(self, request, analysis):
+        """The reference ion of a reference or sentinel line: R and height, to follow the day's drift
+        (2026-11-17: near the closing the instrument resolved 20–30 % less than on the other days)."""
+        peak = next((p for p in analysis.get('peaks') or () if p.get('found')), None)
+        if peak is None:
+            return
+        text = (f'{request["role"]} k {float(request["k"]):.5f}: {float(peak.get("mz", 0)):.0f} at '
+                f'{float(peak.get("center", 0)):.2f} V, R {float(peak.get("r", 0)):.1f}, '
+                f'{float(peak.get("height", 0)) * 1e12:.1f} pA')
+        self._log(text)
+        with contextlib.suppress(Exception):
+            self.scan._gui(lambda: self.scan.print(f'Map: {text}.'), cancel=False)
+
     def _wait(self, request) -> dict:
+        """Wait for the beam to come back: the spray must stay on meanwhile."""
         started = self.clock()
         deadline = self.monotonic() + float(request.get('seconds', 0.))
+        window, low_since = self._spray_window(), None
         while self.monotonic() < deadline:
-            if self.cancel.wait(min(5., max(0., deadline - self.monotonic()))):
+            if window is not None:
+                spray, state = self._spray_state(window)
+                now = self.monotonic()
+                low_since = (now if low_since is None else low_since) if state == 'low' else None
+                if low_since is not None and now - low_since >= self.SPRAY_LOST_S:
+                    raise SafeStop(self._spray_lost_text(spray, window, 'while the map waited for the beam'))
+            if self.cancel.wait(min(self.SPRAY_CHECK_EVERY_S, max(0., deadline - self.monotonic()))):
                 raise SafeStop('Stopped by the operator.')
         return dict(id=request['id'], outcome='done', started=started, duration_s=self.clock() - started)
 
@@ -331,6 +364,8 @@ class MapRunner:
             self._wait_static(request)
             self.scan._gui(lambda: self.scan._configure_map_line(request, self.journal['plan']['map']), cancel=False)
             data = self._run_scan(request)
+            if getattr(self, '_spray_lost', ''):
+                raise SafeStop(self._spray_lost)
             status, error = data.pop('status'), data.pop('error')
             result.update(data)
             if status != 'completed':
@@ -398,7 +433,8 @@ class MapRunner:
         begin = self.monotonic()
         progress, progressed = self._points_done(), begin
         reason, stop_requested = '', None
-        window, spray_checked, spray_out = self._spray_window(), begin, None
+        window, spray_checked, spray_out, spray_low = self._spray_window(), begin, None, None
+        self._spray_lost = ''
         while not self.scan._gui(lambda: bool(self.scan.finished), cancel=False):
             now = self.monotonic()
             done = self._points_done()
@@ -406,11 +442,14 @@ class MapRunner:
                 progress, progressed = done, now
             if window is not None and now - spray_checked >= self.SPRAY_CHECK_EVERY_S:
                 spray_checked = now
-                spray = self.scan._gui(self.scan._map_spray_now, cancel=False)
-                inside = spray is not None and math.isfinite(spray) and window[0] <= abs(spray) <= window[1]
-                spray_out = None if inside else (spray_out if spray_out is not None else (now, spray))
+                spray, state = self._spray_state(window)
+                spray_out = None if state == 'in' else (spray_out if spray_out is not None else (now, spray))
+                spray_low = ((now if spray_low is None else spray_low[0]), spray) if state == 'low' else None
             if not reason and not self.cancel.is_set():
-                if progress is not None and now - progressed > self.STALL_S:
+                if spray_low is not None and now - spray_low[0] >= self.SPRAY_LOST_S:
+                    reason = self._spray_lost = self._spray_lost_text(
+                        spray_low[1], window, 'during the line', again=True)
+                elif progress is not None and now - progressed > self.STALL_S:
                     reason = f'no new point for {self.STALL_S / 60:.0f} min'
                 elif now - begin > limit:
                     reason = f'line longer than {limit / 60:.0f} min, the time of every point of its axis'
@@ -601,22 +640,50 @@ class MapRunner:
         with contextlib.suppress(Exception):
             self.scan._gui(lambda: self.scan.print(text), cancel=False)
 
+    def _spray_state(self, window):
+        """The ESI current now and where it is: 'in' its window, 'high' above it, or 'low' below it or
+        unavailable (ESI OFF or not acquiring: MScan reads no current then)."""
+        spray = self.scan._gui(self.scan._map_spray_now, cancel=False)
+        if spray is None or not math.isfinite(spray) or abs(spray) < window[0]:
+            return spray, 'low'
+        return spray, 'high' if abs(spray) > window[1] else 'in'
+
+    def _spray_lost_text(self, spray, window, where, *, again=False):
+        reading = 'unavailable' if spray is None or not math.isfinite(spray) else f'{abs(spray) * 1e9:.1f} nA'
+        return (f'spray current {reading} below its window {self._window_text(window)} for '
+                f'{self.SPRAY_LOST_S:g} s {where}: the ESI is OFF or no longer sprays. Fix the spray, then '
+                f'Map… → Resume the map{": this line was not counted" if again else ""}.')
+
     def _wait_for_spray(self):
+        """Before a line. At Start or Resume the spray is waited for (up to 30 min): the operator has just
+        started it. Later, a spray below its window (or none) for 5 s stops the map; above it, it is
+        waited for."""
         window = self._spray_window()
         if window is None:
             return
         self._say_window(window)
+        first = len((self.journal or {}).get('records') or ()) <= getattr(self, '_session_start', 0)
         deadline = self.monotonic() + self.SPRAY_WAIT_S
+        low_since = None
         while True:
-            now = self.scan._gui(self.scan._map_spray_now, cancel=False)
-            if now is not None and math.isfinite(now) and window[0] <= abs(now) <= window[1]:
+            now, state = self._spray_state(window)
+            if state == 'in':
                 return
+            clock = self.monotonic()
+            low_since = (clock if low_since is None else low_since) if state == 'low' else None
             reading = 'unavailable' if now is None or not math.isfinite(now) else f'{abs(now) * 1e9:.1f} nA'
-            self._set_status('paused', f'Spray current {reading} outside {self._window_text(window)}; waiting '
-                             f'(up to {self.SPRAY_WAIT_S / 60:.0f} min, or Stop)')
-            if self.monotonic() > deadline:
+            if not first and low_since is not None:
+                if clock - low_since >= self.SPRAY_LOST_S:
+                    raise SafeStop(self._spray_lost_text(now, window, 'before the line', again=True))
+                self._set_status('paused', f'Spray current {reading} below {self._window_text(window)}; the map '
+                                 f'stops in {self.SPRAY_LOST_S - (clock - low_since):.0f} s unless it comes back '
+                                 '(or Stop)')
+            else:
+                self._set_status('paused', f'Spray current {reading} outside {self._window_text(window)}; '
+                                 f'waiting (up to {self.SPRAY_WAIT_S / 60:.0f} min, or Stop)')
+            if clock > deadline:
                 raise SafeStop(f'Spray current outside its window for {self.SPRAY_WAIT_S / 60:.0f} min')
-            if self.cancel.wait(5.):
+            if self.cancel.wait(self.SPRAY_CHECK_EVERY_S):
                 raise SafeStop('Stopped by the operator.')
 
     def _check_spray_during(self, spray):

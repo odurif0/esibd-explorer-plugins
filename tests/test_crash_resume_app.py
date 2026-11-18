@@ -36,7 +36,7 @@ def _run(tmp_path, phase):
 @pytest.mark.slow  # Three starts of the complete application.
 def test_a_device_left_on_by_a_crash_is_resumed_and_a_normal_close_is_not(tmp_path):
     python = os.environ.get("ESIBD_QT_PYTHON", sys.executable)
-    if explorer_host.interpreter_version(python) != explorer_host.TARGET_VERSION:
+    if not explorer_host.is_target(explorer_host.interpreter_version(python)):
         pytest.skip(f"needs ESIBD Explorer {explorer_host.TARGET_VERSION}")
     result, crash = _run(tmp_path, "crash")
     assert crash.get("on") is True and crash.get("record", {}).get("com"), (crash, result.stdout[-3000:], result.stderr[-3000:])

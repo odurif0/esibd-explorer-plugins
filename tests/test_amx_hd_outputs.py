@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from support.amx import load_module, make_case
+from support.worker import as_worker
 from support.amx import INVERT, OSC0, SWITCH_SYM, TIMER_OUT0, TIMER_RUN0, config273, routing, snapshot
 
 STATIC_FLAGS = ["ST_ENABLE", "ST_ENB_SWITCH", "ST_CLRN"]  # Configurations 100-121: generators off.
@@ -179,6 +180,7 @@ class RoutingDevice:
     def __init__(self, switches=SWITCH_SYM, statuses=None, missing=()):
         self.switches, self.statuses, self.missing = switches, statuses or {}, set(missing)
         self.calls = []
+        as_worker("amx_hd", self)
 
     def __getattr__(self, name):
         if not name.startswith("get_") or name in self.missing:
@@ -389,8 +391,7 @@ def test_routing_is_read_again_every_30_s_and_at_the_poll_after_a_write(hd, monk
     assert len(device.calls) > reads, "read again after 30 s"
     reads = len(device.calls)
     kept = controller.hd_routing
-    controller._native_backend = lambda device: None  # an inline facade: the call goes to the device
-    writer = SimpleNamespace(set_frequency_khz=lambda *args, **kwargs: 0)
+    writer = as_worker("amx_hd", SimpleNamespace(set_frequency_khz=lambda *args, **kwargs: 0))
     controller._device_call(writer, "set_frequency_khz", 450., timeout_s=1.)
     assert controller.hd_routing is kept, "the rest of the write sequence still reads it"
     controller._refresh_hd_routing(device, running)

@@ -1048,3 +1048,134 @@ fn a_beam_fading_step_by_step_is_lost_against_the_best_recent_reference() {
         "judged against the best of the last 2 h, it is lost"
     );
 }
+
+fn roles(records: &[Value]) -> Vec<String> {
+    records
+        .iter()
+        .filter(|r| r["outcome"] == json!("done") && r["request"]["role"] != json!("wait"))
+        .map(|r| r["request"]["role"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_sentinel_near_the_closing_follows_each_reference() {
+    // 2026-11-17 lab: a day that resolved 20–30 % less near the closing showed 6 % on the reference
+    // at k 0.200. The sentinel measures the same ion and setting at k 0.2094 after each reference.
+    let mut c = Controller::new(&json!({})).unwrap();
+    let out = simulate_with(
+        &mut c,
+        beam_plan(json!({"reference": {"sentinel_k": 0.2094}})),
+        json!({}),
+    );
+    assert_eq!(out["outcome"], json!("done"), "{}", out["reason"]);
+    let records = out["journal"]["records"].as_array().unwrap();
+    let seq = roles(records);
+    for (i, role) in seq.iter().enumerate() {
+        if role == "reference" {
+            assert_eq!(
+                seq.get(i + 1).map(String::as_str),
+                Some("sentinel"),
+                "{seq:?}"
+            );
+        }
+        if role == "sentinel" {
+            assert_eq!(seq[i - 1], "reference", "{seq:?}");
+        }
+    }
+    // The sentinel does not count among the lines between two references, and needs no probe.
+    let between: Vec<usize> = seq
+        .split(|r| r == "reference")
+        .skip(1)
+        .map(|run| {
+            run.iter()
+                .filter(|r| !matches!(r.as_str(), "sentinel" | "probe"))
+                .count()
+        })
+        .collect();
+    assert!(
+        between[..between.len() - 1].iter().all(|n| *n == 3),
+        "{seq:?}"
+    );
+    let sentinel = records
+        .iter()
+        .find(|r| r["request"]["role"] == json!("sentinel"))
+        .unwrap();
+    let request = &sentinel["request"];
+    assert!(
+        (request["k"].as_f64().unwrap() - 0.2094).abs() < 1e-9,
+        "{request}"
+    );
+    assert_eq!(request["axis"].as_array().unwrap().len(), 60);
+    assert_eq!(request["adaptive"], json!(false));
+    let reference = records
+        .iter()
+        .find(|r| r["request"]["role"] == json!("reference"))
+        .unwrap();
+    for key in ["f_hz", "energy_ev", "x_v", "stub_v"] {
+        assert_eq!(request[key], reference["request"][key], "{key}");
+    }
+    // Around the band of 922 at that k, and found there with a higher R than the reference.
+    let axis: Vec<f64> = request["axis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let peak = &sentinel["analysis"]["peaks"][0];
+    let centre = peak["center"].as_f64().unwrap();
+    assert!(
+        axis[0] < centre && centre < axis[59],
+        "{centre} in {axis:?}"
+    );
+    assert!(peak["r"].as_f64().unwrap() > reference["analysis"]["peaks"][0]["r"].as_f64().unwrap());
+    assert!(sentinel["duration_s"].as_f64().unwrap() < 300.0);
+}
+
+#[test]
+fn each_run_begins_with_its_warm_up_of_references_and_sentinels() {
+    let mut c = Controller::new(&json!({})).unwrap();
+    let plan =
+        beam_plan(json!({"reference": {"sentinel_k": 0.2094, "warmup_s": 1800}, "max_lines": 14}));
+    let out = simulate_with(&mut c, plan, json!({}));
+    let records = out["journal"]["records"].as_array().unwrap().clone();
+    let seq = roles(&records);
+    let first_other = seq
+        .iter()
+        .position(|r| !matches!(r.as_str(), "reference" | "sentinel"))
+        .unwrap();
+    assert!(first_other >= 6, "{seq:?}");
+    assert!(
+        seq[..first_other]
+            .chunks(2)
+            .all(|p| p == ["reference", "sentinel"]),
+        "{seq:?}"
+    );
+    let start = records[0]["started"].as_f64().unwrap();
+    let other = &records
+        .iter()
+        .find(|r| {
+            !matches!(
+                r["request"]["role"].as_str().unwrap(),
+                "reference" | "sentinel" | "wait"
+            )
+        })
+        .unwrap();
+    assert!(
+        other["started"].as_f64().unwrap() - start >= 1800.0,
+        "{seq:?}"
+    );
+    // A Resume warms up again.
+    let mut j = out["journal"].clone();
+    j["plan"]["map"]["max_lines"] = json!(600);
+    j["session_start"] = json!(records.len());
+    let next = call(&mut c, "map_next", &[j.clone()]).unwrap();
+    assert_eq!(next["request"]["role"], json!("reference"), "{next}");
+}
+
+#[test]
+fn without_a_sentinel_the_plan_measures_what_it_did() {
+    let mut c = Controller::new(&json!({})).unwrap();
+    let out = simulate_with(&mut c, beam_plan(json!({})), json!({}));
+    let seq = roles(out["journal"]["records"].as_array().unwrap());
+    assert!(!seq.iter().any(|r| r == "sentinel"), "{seq:?}");
+}

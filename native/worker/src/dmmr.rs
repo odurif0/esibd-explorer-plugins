@@ -11,8 +11,8 @@ use crate::error::{Error, Result};
 use crate::ffi::{Dll, NativeReply};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -37,8 +37,6 @@ pub const GUI_METHODS: &[&str] = &[
     "get_module_info",
     "collect_housekeeping",
     "get_product_info",
-    "begin_startup_diagnostics",
-    "end_startup_diagnostics",
     "record_protocol_event",
     "configure_protocol_log",
     "protocol_diagnostics",
@@ -65,7 +63,6 @@ pub const GUI_ATTRIBUTES: &[&str] = &[
     "_failed_open_released",
     "_failed_open_cleanup_outcome",
     "_opening_in_progress",
-    "_startup_log_path",
     "baudrate",
 ];
 pub const PYTHON_OBJECT_API_GAPS: &[&str] = &["new_read_recovery", "new_command_recovery"];
@@ -77,9 +74,12 @@ const RECOVERY_PAUSES_S: [f64; 4] = [0.0, 2.0, 5.0, 12.0];
 const RECOVERY_PAUSE_SCALE: f64 = 1.0;
 #[cfg(feature = "test-backend")]
 const RECOVERY_PAUSE_SCALE: f64 = 0.001;
-const DEBUG_SHA256: &str = "e3bb4674f88e5a894c36cdb5e544f0b5a35691c2a0dbdc56719c9928f05bcea3";
 const MAIN_STATE: &[(u64, &str)] = &[
     (0, "ST_ON"),
+    // Not named in COM-DMMR-8.h (its line is commented out there, as "HV PSUs overloaded" copied from
+    // another CGC device). Observed as the modules disabled: 1 before SetEnable(true) and 0 after
+    // (2026-11-15 16:04), 1 again after an OFF that disabled them (2026-11-17 13:05).
+    (1, "ST_OFF"),
     (0x8000, "ST_ERROR"),
     (0x8001, "ST_ERR_MODULE"),
     (0x8002, "ST_ERR_VSUP"),
@@ -184,8 +184,6 @@ pub struct Controller {
     events: VecDeque<Value>,
     event_count: u64,
     dll_path: String,
-    dll_sha256: String,
-    startup_path: Option<PathBuf>,
 }
 
 impl Controller {
@@ -246,12 +244,6 @@ impl Controller {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .into(),
-            dll_sha256: config
-                .get("dll_sha256")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-            startup_path: None,
         })
     }
 
@@ -1791,149 +1783,6 @@ impl Controller {
         }
     }
 
-    fn begin_startup(&mut self, ctx: &Context) -> Value {
-        let identity = format!(
-            "COM{}; baud={}; DLL={}; SHA-256={}",
-            self.com, self.baudrate, self.dll_path, self.dll_sha256
-        );
-        let outcome = (|| -> Result<PathBuf> {
-            ctx.check_cancelled()?;
-            if self.poisoned {
-                return Err(Error::runtime(
-                    "DLL blocked; native capture cannot be opened",
-                ));
-            }
-            if self.startup_path.is_some() {
-                return Err(Error::runtime("a native startup capture is already active"));
-            }
-            // This optional ABI is separately verified in one DLL, not declared by the SDK header.
-            if self.dll_sha256 != DEBUG_SHA256 {
-                return Err(Error::runtime(
-                    "unverified DLL: native debug ABI is not known",
-                ));
-            }
-            let root = self
-                .log_dir
-                .as_ref()
-                .ok_or_else(|| Error::runtime("Explorer log directory is not configured"))?;
-            fs::create_dir_all(root).map_err(|e| Error::runtime(e.to_string()))?;
-            let path = root.join(format!("dmmr_startup_com{}.log", self.com));
-            let path = if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()
-                    .map_err(|e| Error::runtime(e.to_string()))?
-                    .join(path)
-            };
-            let text = path
-                .to_str()
-                .ok_or_else(|| Error::runtime("Debug path is not representable as text"))?;
-            // fopen uses ANSI on Windows. Do not misaddress a non-ASCII path through UTF-8 IPC.
-            if !text.is_ascii() || text.contains('\0') || text.len() > 4095 {
-                return Err(Error::runtime(
-                    "Native debug capture requires a bounded ASCII path",
-                ));
-            }
-            self.startup_path = Some(path.clone());
-            let status = self.write("OpenDebugFile", &[json!(text)], ctx)?;
-            if status != 0 {
-                self.startup_path = None;
-                ensure(status, "OpenDebugFile")?;
-            }
-            Ok(path)
-        })();
-        json!(match outcome {
-            Ok(path) => format!(
-                "[DMMR startup] {identity}\n[DMMR startup] Native capture opened: {}",
-                path.display()
-            ),
-            Err(error) => format!(
-                "[DMMR startup] {identity}\n[DMMR startup] Native capture unavailable: {error}"
-            ),
-        })
-    }
-
-    fn end_startup(&mut self, ctx: &Context) -> Value {
-        let Some(path) = self.startup_path.clone() else {
-            return json!("");
-        };
-        let mut notes = Vec::new();
-        let mut closed = false;
-        if self.poisoned {
-            notes.push(format!(
-                "Native capture not closed: DLL still active; restart worker. Partial file: {}",
-                path.display()
-            ));
-        } else {
-            match self.write("CloseDebugFile", &[], ctx) {
-                Ok(status) => {
-                    closed = true;
-                    self.startup_path = None;
-                    if status != 0 {
-                        notes.push(format!(
-                            "CloseDebugFile returned {status}; capture may be incomplete."
-                        ));
-                    }
-                }
-                Err(error) => notes.push(format!(
-                    "Native capture not closed: {error}. File: {}",
-                    path.display()
-                )),
-            }
-        }
-        let outcome = (|| -> std::io::Result<Vec<u8>> {
-            let mut raw = Vec::new();
-            File::open(&path)?.take(65537).read_to_end(&mut raw)?;
-            Ok(raw)
-        })();
-        match outcome {
-            Ok(mut raw) => {
-                if raw.len() > 65536 {
-                    raw.truncate(65536);
-                    notes.push("Capture truncated to the first 65536 bytes.".into());
-                    if closed
-                        && let Err(error) = OpenOptions::new()
-                            .write(true)
-                            .open(&path)
-                            .and_then(|f| f.set_len(65536))
-                    {
-                        notes.push(format!("Could not trim native file: {error}"));
-                    }
-                }
-                let mut any = false;
-                for line in raw
-                    .split(|byte| *byte == b'\n')
-                    .filter(|line| !line.is_empty())
-                {
-                    let line = line.strip_suffix(b"\r").unwrap_or(line);
-                    let text: String = line
-                        .iter()
-                        .map(|byte| {
-                            if (32..127).contains(byte) {
-                                char::from(*byte).to_string()
-                            } else {
-                                format!("\\x{byte:02x}")
-                            }
-                        })
-                        .collect();
-                    notes.push(text);
-                    any = true;
-                }
-                if !any {
-                    notes.push("Native capture is empty.".into());
-                }
-            }
-            Err(error) => notes.push(format!("Native capture unavailable: {error}")),
-        }
-        json!(
-            notes
-                .into_iter()
-                .map(|note| format!("[DMMR native] {note}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    }
-
     fn low_level(
         &mut self,
         method: &str,
@@ -2241,7 +2090,6 @@ impl Backend for Controller {
                 | "stop_housekeeping"
                 | "hk_monitor"
                 | "do_housekeeping_cycle"
-                | "end_startup_diagnostics"
         ) {
             self.due_housekeeping(ctx)?;
         }
@@ -2562,14 +2410,6 @@ impl Backend for Controller {
                 Params::new(args, kwargs, &[], &[])?;
                 Ok(self.protocol_diagnostics())
             }
-            "begin_startup_diagnostics" => {
-                Params::new(args, kwargs, &["timeout_s"], &[])?;
-                Ok(self.begin_startup(ctx))
-            }
-            "end_startup_diagnostics" => {
-                Params::new(args, kwargs, &["timeout_s"], &[])?;
-                Ok(self.end_startup(ctx))
-            }
             "new_read_recovery" | "new_command_recovery" => Err(Error::unsupported(
                 "Python recovery objects/callbacks cannot cross native IPC; adapter must use configure_read_recovery or begin_command_recovery and explicit recover methods",
             )),
@@ -2608,11 +2448,6 @@ impl Backend for Controller {
                 Some(r) => json!({"phase": r.phase, "used": r.used, "last_incident": r.last}),
                 None => Value::Null,
             },
-            "_startup_log_path" => json!(
-                self.startup_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-            ),
             "verified_ranges" => ranges_value(&self.verified_ranges),
             "err_dict" => self.errors.clone(),
             "dmmr_dll_path" => json!(self.dll_path),

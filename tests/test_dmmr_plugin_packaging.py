@@ -235,7 +235,7 @@ def test_dmmr_recording_action_reflects_device_readiness():
         initializing=False,
         initialized=False,
         transitioning=False,
-        main_state="ST_STBY",
+        main_state="ST_OFF",
     )
     device.isOn = lambda: True
 
@@ -332,7 +332,7 @@ def test_dmmr_toggle_recording_rejects_unready_device():
         initializing=False,
         initialized=True,
         transitioning=False,
-        main_state="ST_STBY",
+        main_state="ST_OFF",
     )
     device.isOn = lambda: True
     device.printed = []
@@ -344,7 +344,7 @@ def test_dmmr_toggle_recording_rejects_unready_device():
     assert device.recordingAction.state is False
     assert device.recordingAction.enabled is False
     assert device.printed == [
-        ("Cannot start DMMR data acquisition: state is ST_STBY.", module.PRINT.WARNING)
+        ("Cannot start DMMR data acquisition: state is ST_OFF.", module.PRINT.WARNING)
     ]
 
 

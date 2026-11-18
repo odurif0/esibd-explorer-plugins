@@ -95,6 +95,12 @@ probe = true                    # before each measurement line of 5 min or more 
                                 # 44 min with the spray in range)
 probe_points = 9
 probe_min_line_s = 300
+sentinel_k = 0                  # > 0: after each reference, the same ion and setting at this k near the
+                                # closing (e.g. 0.2094), where R follows the resolution cap 2–3 times more
+                                # closely (2026-11-17: 20–30 % less near the closing, 6 % on the reference)
+sentinel_points = 60            # ... on this many points over ± sentinel_window of its band (about 4 min)
+sentinel_window = 0.06
+warmup_s = 0                    # > 0: each run begins with references (and sentinels) only, for this long
 
 [map.outer]
 max_ladders = 6

@@ -4400,7 +4400,7 @@
     "header_sha256": "fc8016ae07eb30862c54e9f485a8cc4619a489c1dd5cf46f3c060cfbf388f3b7"
   },
   "dmmr": {
-    "base_sha256": "669f515c2cd186413b99e794ded8b29d3ef711ba19d39ebe4c71344ab5c7fac3",
+    "base_sha256": "8cb9c9cacd84686d9151785870b70d3c7875e077d7d030858fda8ab23ac43a74",
     "exports": {
       "COM_DMMR_8_CheckAutoInput": {
         "args": [

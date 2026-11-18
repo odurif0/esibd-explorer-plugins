@@ -562,6 +562,17 @@ defaults!(Reference {
     probe: bool = true,
     probe_points: usize = 9,
     probe_min_line_s: f64 = 300.0,
+    // Sentinel: right after each reference, the same ion and setting at k = sentinel_k near the
+    // closing, on sentinel_points over ± sentinel_window of its band. R there changes by 0.6–0.8 ×
+    // the relative change of the resolution cap, against 0.28 × at k 0.200 (922, 26 eV). 2026-11-17
+    // lab: a day that resolved 20–30 % less near the closing showed only 6 % on the reference. 0: none.
+    sentinel_k: f64 = 0.0,
+    sentinel_points: usize = 60,
+    sentinel_window: f64 = 0.06,
+    // At the start of each run (Start or Resume), the reference (and its sentinel) again and again
+    // for this long before any other line: the RF warms up, and the drift is measured. 2026-11-13 to
+    // 11-17: the first reference after a pause put the 922 band 0.5 V lower with R 12 instead of 10.9.
+    warmup_s: f64 = 0.0,
 });
 
 defaults!(Outer {
@@ -1517,6 +1528,7 @@ const ROLE_LOCAL: &str = "local";
 const ROLE_BEST: &str = "best";
 const ROLE_WAIT: &str = "wait";
 const ROLE_PROBE: &str = "probe";
+const ROLE_SENTINEL: &str = "sentinel";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -2032,6 +2044,37 @@ impl<'a> View<'a> {
         r.ions = vec![cfg.ion];
         r.label = "reference".to_owned();
         r
+    }
+
+    /// The reference ion near the closing (k = sentinel_k): the line that follows the resolution
+    /// cap through the day. None when the plan has no sentinel.
+    fn sentinel_line(&self) -> Option<Request> {
+        let cfg = &self.cfg.reference;
+        if cfg.sentinel_k <= 0.0 {
+            return None;
+        }
+        let mut r = self.reference_line();
+        let a = self
+            .cfg
+            .filter(cfg.sentinel_k, 0.0)
+            .amplitude_for(cfg.ion, r.f_hz)
+            .unwrap_or(92.0);
+        let n = cfg.sentinel_points.max(5);
+        let (lo, hi) = (
+            a * (1.0 - cfg.sentinel_window),
+            a * (1.0 + cfg.sentinel_window),
+        );
+        r.axis = (0..n)
+            .map(|i| round_to(lo + (hi - lo) * i as f64 / (n - 1) as f64, 0.01))
+            .collect();
+        r.role = ROLE_SENTINEL.to_owned();
+        r.point = "SENT".to_owned();
+        r.k = round_to(cfg.sentinel_k, 1e-5);
+        r.adaptive = false;
+        r.coarse = 1;
+        r.expected_s = self.line_time(n);
+        r.label = "sentinel".to_owned();
+        Some(r)
     }
 
     /// The last good reference (not lost with the beam) and its ion's peak.
@@ -3906,11 +3949,40 @@ impl<'a> Engine<'a> {
                     any = true;
                     since = 0;
                 }
-                ROLE_WAIT => {}
+                ROLE_WAIT | ROLE_SENTINEL => {}
                 _ => since += 1,
             }
         }
-        !any || since >= self.cfg().reference_every.max(1)
+        !any || since >= self.cfg().reference_every.max(1) || self.warming_up()
+    }
+
+    /// Within warmup_s of the first line of this run (Start or Resume).
+    fn warming_up(&self) -> bool {
+        let warmup = self.cfg().reference.warmup_s;
+        if warmup <= 0.0 {
+            return false;
+        }
+        let first = self.view.records[self.view.session_start..]
+            .iter()
+            .filter(|r| r.request.role != ROLE_WAIT)
+            .map(|r| r.started)
+            .fold(f64::INFINITY, f64::min);
+        first.is_finite() && self.view.now() - first < warmup
+    }
+
+    /// The sentinel follows each reference of the run (a failed sentinel is tried again).
+    fn sentinel_due(&self) -> bool {
+        if self.cfg().reference.sentinel_k <= 0.0 {
+            return false;
+        }
+        self.view.records[self.view.session_start..]
+            .iter()
+            .rev()
+            .find(|r| {
+                r.request.role != ROLE_WAIT
+                    && !(r.request.role == ROLE_SENTINEL && r.outcome == FAILED)
+            })
+            .is_some_and(|r| r.outcome == DONE && r.request.role == ROLE_REFERENCE)
     }
 
     fn instrument_check(&self) -> Option<String> {
@@ -3998,7 +4070,7 @@ impl<'a> Engine<'a> {
         if !cfg.probe
             || matches!(
                 request.role.as_str(),
-                ROLE_REFERENCE | ROLE_PROBE | ROLE_WAIT
+                ROLE_REFERENCE | ROLE_PROBE | ROLE_WAIT | ROLE_SENTINEL
             )
             || request.expected_s < cfg.probe_min_line_s
         {
@@ -4009,7 +4081,12 @@ impl<'a> Engine<'a> {
             .iter()
             .rev()
             .find(|r| r.outcome == DONE && r.request.role != ROLE_WAIT)
-            .is_some_and(|r| matches!(r.request.role.as_str(), ROLE_REFERENCE | ROLE_PROBE));
+            .is_some_and(|r| {
+                matches!(
+                    r.request.role.as_str(),
+                    ROLE_REFERENCE | ROLE_PROBE | ROLE_SENTINEL
+                )
+            });
         if checked {
             return decision;
         }
@@ -4062,6 +4139,11 @@ impl<'a> Engine<'a> {
         }
         if let Some(loss) = &self.view.beam_lost {
             return self.beam_decision(loss);
+        }
+        if self.sentinel_due()
+            && let Some(sentinel) = self.view.sentinel_line()
+        {
+            return Decision::Line(sentinel);
         }
         if self.reference_due() {
             return Decision::Line(self.view.reference_line());
@@ -4159,7 +4241,10 @@ impl<'a> Engine<'a> {
         let durations: Vec<f64> = self
             .view
             .done()
-            .filter(|(_, r)| r.request.kind == KIND_AMPLITUDE && r.request.role != ROLE_REFERENCE)
+            .filter(|(_, r)| {
+                r.request.kind == KIND_AMPLITUDE
+                    && !matches!(r.request.role.as_str(), ROLE_REFERENCE | ROLE_SENTINEL)
+            })
             .map(|(_, r)| r.duration_s)
             .collect();
         let typical = median(&durations).unwrap_or(600.0);
@@ -4182,7 +4267,8 @@ impl<'a> Engine<'a> {
         if cfg.stages.best {
             left += cfg.best.repeats + 1;
         }
-        left += left / cfg.reference_every.max(1);
+        let references = left / cfg.reference_every.max(1);
+        left += references * if cfg.reference.sentinel_k > 0.0 { 2 } else { 1 };
         json!({
             "lines": self.view.records.len(),
             "done": self.view.done().count(),

@@ -61,11 +61,18 @@ def test_range_change_discards_cached_limits(psu_dll_case):
     assert reads == [0, 0]
 
 
-def test_ramp_uses_the_configured_step(psu_live_rig):
-    module, controller, device, _state, _messages = psu_live_rig
+def test_the_worker_ramps_with_the_configured_step(psu_live_rig):
+    """The operator's step goes to the worker, which ramps (native/worker/tests/psu_controller.rs)."""
+    _module, controller, device, _state, _messages = psu_live_rig
     controller.controllerParent.ramp_step_v = 25.
-    assert controller._ramp_channel_voltage(device, 0, 100., timeout_s=1., cancel=Event(), start_v=0.)
-    assert [call[2] for call in device.calls] == [25., 50., 75., 100.]
+    controller.controllerParent.ramp_step_interval_s = .2
+    sent = []
+    call = device._backend.call_method
+    device._backend.call_method = lambda name, *args, **kwargs: sent.append((name, kwargs)) or call(name, *args, **kwargs)
+    edit = {"setpoints_only": True, "voltage_values": {0: 200.}}
+    assert controller._apply_manual_state_unlocked(device, edit, 1., Event())
+    (_, options), = [item for item in sent if item[0] == "apply_manual_state"]
+    assert (options["ramp_step_v"], options["ramp_step_interval_s"]) == (25., .2)
 
 
 @pytest.mark.parametrize("bad", [0., -5., float("nan"), "x", None])

@@ -152,15 +152,11 @@ _PSU_CURRENT_ZERO_OK_ABS_TOLERANCE_A = 0.01
 _PSU_CURRENT_ZERO_WARN_ABS_TOLERANCE_A = 0.05
 _PSU_DROPOUT_WARN_V = 10.0
 _PSU_DROPOUT_ERROR_V = 5.0
-# Measured output voltage must fall below this before switching the Full/Half
-# range relay, and the maximum time to wait for that discharge to happen.
-_PSU_RANGE_SWITCH_SAFE_V = 5.0
+# The longest the worker waits for the outputs to discharge before switching the Full/Half range
+# relay (RANGE_SETTLE_S in native/worker/src/psu.rs): part of a native operation's time budget.
 _PSU_RANGE_SWITCH_SETTLE_S = 2.0
-# Software voltage ramp to limit dV/dt inrush on enabled channels. Channels
-# enabled with a target above the threshold are held at 0 V pre-enable and
-# stepped up after enable. Step and interval are only defaults for the advanced
-# "Ramp step" settings: tune them on the real hardware.
-_PSU_VOLTAGE_RAMP_THRESHOLD_V = 50.0
+# The worker ramps the voltage of an enabled channel to limit dV/dt inrush. Step and interval are
+# only defaults for the advanced "Ramp step" settings: tune them on the real hardware.
 _PSU_VOLTAGE_RAMP_STEP_V = 100.0
 _PSU_VOLTAGE_RAMP_STEP_S = 0.05
 _PSU_TEMPERATURE_WARN_C = 55.0
@@ -169,9 +165,6 @@ _PSU_TEMPERATURE_ERROR_C = 70.0
 # loop is closed (ST_ILOCK_*_ACT = input | disabled); readable also with monitoring off.
 _PSU_ST_ILOCK_OUT = 1 << 22
 _PSU_ST_ILOCK_BNC = 1 << 23
-_PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V = 0.01
-_PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A = 0.001
-_PSU_SETPOINT_VERIFY_REL_TOLERANCE = 0.01
 _PSU_FLOAT_SENTINEL = -1
 # Matches the vendor runtime config slot range (PSUBase.MAX_CONFIG = 168).
 _PSU_MAX_CONFIG_INDEX = 167
@@ -470,25 +463,6 @@ def _disable_spinbox_wheel(widget: Any) -> None:
     blocker = _WheelEventBlocker(widget)
     install_filter(blocker)
     setattr(widget, "_esibd_wheel_event_blocker", blocker)
-
-
-def _setpoint_matches(
-    actual: Any,
-    expected: Any,
-    *,
-    abs_tolerance: float,
-    rel_tolerance: float = _PSU_SETPOINT_VERIFY_REL_TOLERANCE,
-) -> bool:
-    actual_value = _coerce_float(actual, np.nan)
-    expected_value = _coerce_float(expected, np.nan)
-    if _is_nan(actual_value) or _is_nan(expected_value):
-        return False
-    return math.isclose(
-        actual_value,
-        expected_value,
-        rel_tol=float(rel_tolerance),
-        abs_tol=float(abs_tolerance),
-    )
 
 
 def _action_label(action: Any) -> str:
@@ -1141,6 +1115,26 @@ def _session_restart_recording(device: Any, deadline: float) -> None:
     QTimer.singleShot(1000, lambda: _session_restart_recording(device, deadline))
 # ---- end crash resume ----
 
+
+
+def _native_backend(device):
+    """The device's native-worker proxy, inspected without queuing a lifecycle RPC (None without one)."""
+    try:
+        backend = object.__getattribute__(device, "_backend")
+        mode = object.__getattribute__(device, "_backend_mode")
+    except (AttributeError, TypeError):
+        return None
+    if mode == "process" and getattr(backend, "session", None) is not None:
+        return backend
+    return None
+
+
+def _require_native_backend(device):
+    """The PSU is driven by its own Rust worker only; there is no Python DLL path in the plugin."""
+    backend = _native_backend(device)
+    if backend is None:
+        raise RuntimeError("PSU communication requires its native worker.")
+    return backend
 
 def providePlugins() -> "list[type[Plugin]]":
     return [PSUDevice]
@@ -5065,11 +5059,6 @@ class PSUController(DeviceController):
             )
             if self.main_state in (_PSU_SHUTDOWN_UNCONFIRMED_STATE, _PSU_COMMUNICATION_LOST_STATE):
                 self.main_state = "Connecting"  # That state would hide the readbacks of the new session.
-            backend_reason = str(
-                getattr(self.device, "_process_backend_disabled_reason", "")
-            ).strip()
-            if backend_reason:
-                self.print(backend_reason, flag=PRINT.WARNING)
             if cancel.is_set():
                 self._dispose_device()  # Construction finished, but Open was never sent.
                 return
@@ -5282,62 +5271,6 @@ class PSUController(DeviceController):
             return
         self._update_state()
         self._set_loaded_config_text("Manual outputs OFF")
-
-    def _verify_manual_state_unlocked(
-        self,
-        *,
-        device: Any,
-        voltage_values: dict[int, Any],
-        current_limit_values: dict[int, Any],
-        full_range_enabled: tuple[bool, bool],
-        timeout_s: float,
-        voltage_targets: dict[int, float] | None = None,
-    ) -> None:
-        # These are safety checks, not optional display metadata. A missing or
-        # invalid readback must prevent activation, just like a mismatched one.
-        for channel_index in _PSU_CHANNEL_IDS:
-            expected_voltage = float(voltage_values.get(channel_index, 0.0))
-            actual_voltage, voltage_limit = device.get_channel_voltage_limits(
-                channel_index, timeout_s=timeout_s
-            )
-            target = (voltage_targets or voltage_values).get(channel_index, 0.0)
-            if target > 0 and (
-                voltage_limit is None or not np.isfinite(voltage_limit)
-                or voltage_limit < target
-            ):
-                raise RuntimeError(f"CH{channel_index} voltage target exceeds a verified hardware limit.")
-            if not np.isfinite(actual_voltage) or not _setpoint_matches(
-                actual_voltage, expected_voltage,
-                abs_tolerance=_PSU_SETPOINT_VERIFY_ABS_TOLERANCE_V,
-            ):
-                raise RuntimeError(
-                    f"CH{channel_index} voltage setpoint readback "
-                    f"{_format_voltage_text(actual_voltage)} does not match requested "
-                    f"{_format_voltage_text(expected_voltage)}."
-                )
-            expected_current = float(current_limit_values.get(channel_index, 0.0))
-            actual_current, current_limit = device.get_channel_current_limits(
-                channel_index, timeout_s=timeout_s
-            )
-            if expected_current > 0 and (
-                current_limit is None or not np.isfinite(current_limit) or current_limit < 0
-            ):
-                raise RuntimeError(f"CH{channel_index} current hardware limit is invalid.")
-            if not np.isfinite(actual_current) or actual_current < 0:
-                raise RuntimeError(f"CH{channel_index} current limit readback is invalid.")
-            if actual_current > expected_current + _PSU_SETPOINT_VERIFY_ABS_TOLERANCE_A:
-                raise RuntimeError(
-                    f"CH{channel_index} current limit readback "
-                    f"{_format_current_text(actual_current)} exceeds configured limit "
-                    f"{_format_current_text(expected_current)}."
-                )
-
-        actual_range = tuple(device.get_output_full_range(timeout_s=timeout_s))
-        if actual_range != full_range_enabled:
-            raise RuntimeError(
-                "PSU full-range readback does not match the requested state: "
-                f"requested={full_range_enabled}, actual={actual_range}."
-            )
 
     def _verify_output_enable_state_unlocked(
         self,
@@ -6037,89 +5970,6 @@ class PSUController(DeviceController):
             manual_state, cancel = pending
             self.applyManualState(manual_state, cancel=cancel)
 
-    def _await_discharge_before_range_switch(
-        self, device, *, timeout_s: float, cancel: Event | None = None
-    ) -> None:
-        """Wait for HV to discharge near zero before switching the range relay.
-
-        Switching the Full/Half range relay while a channel still carries HV can
-        arc or damage the relay. Poll measured voltages until they fall below the
-        safe threshold; fail (raise) if the device does not discharge or the
-        voltages cannot be read, so the caller never switches under load.
-        """
-        import time
-
-        cancel = self._output_cancel if cancel is None else cancel
-        get_measured_voltage = getattr(device, "get_channel_measured_voltage", None)
-        if not callable(get_measured_voltage):
-            raise RuntimeError("Cannot verify PSU discharge: measured voltage is unavailable.")
-        deadline = time.monotonic() + _PSU_RANGE_SWITCH_SETTLE_S
-        while time.monotonic() < deadline:
-            if cancel.is_set():
-                return
-            try:
-                voltages = [
-                    get_measured_voltage(channel_index, timeout_s=timeout_s)
-                    for channel_index in _PSU_CHANNEL_IDS
-                ]
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(
-                    f"Cannot verify PSU discharge before range switch: {exc}"
-                ) from exc
-            if all(np.isfinite(v) and abs(v) < _PSU_RANGE_SWITCH_SAFE_V for v in voltages):
-                return
-            if cancel.wait(0.1):
-                return
-        raise RuntimeError(
-            "PSU outputs did not discharge below "
-            f"{_PSU_RANGE_SWITCH_SAFE_V} V within {_PSU_RANGE_SWITCH_SETTLE_S} s; "
-            "range switch aborted to avoid relay arcing."
-        )
-
-    def _ramp_channel_voltage(
-        self, device, channel: int, target_v: float, *, timeout_s: float, cancel: Event,
-        start_v: float = 0.0,
-    ) -> bool:
-        """Step from the confirmed setpoint to the target, in either direction.
-
-        Cold starts use zero; edits on an enabled output use its hardware
-        setpoint, never an assumed zero or the potentially stale GUI value.
-        Step size/cadence bound commanded increments, not measured output slew.
-        """
-        backend = getattr(device, "_backend", None)
-        if getattr(device, "_backend_mode", "") == "process" and getattr(backend, "session", None) is not None:
-            rpc_timeout_s = self._native_ramp_rpc_timeout(
-                backend, {channel: target_v}, timeout_s, cancel,
-                cold_start_possible=False, fixed_calls=32,
-            )
-            if rpc_timeout_s is None:
-                return False
-            step_v, step_s = self._ramp_profile()
-            result = backend.call_method(
-                "ramp_channel_voltage", channel, target_v,
-                timeout_s=timeout_s,
-                interlock_monitoring=bool(getattr(self.controllerParent, "interlock_monitoring", True)),
-                ramp_step_v=step_v, ramp_step_interval_s=step_s,
-                rpc_timeout_s=rpc_timeout_s, _cancel_event=cancel,
-            )
-            if result is not None:
-                raise RuntimeError("Unexpected result from native PSU ramp.")
-            return not cancel.is_set()
-        step_v, step_s = self._ramp_profile()
-        delta_v = target_v - start_v
-        steps = max(1, int(np.ceil(abs(delta_v) / step_v)))
-        cached_limits = getattr(device, "cached_setpoint_limits", None)
-        # The controller lock is held: one verified limit read per ramp, not per step.
-        with cached_limits() if callable(cached_limits) else contextlib.nullcontext():
-            for i in range(1, steps + 1):
-                if cancel.is_set():
-                    return False
-                voltage_v = target_v if i == steps else start_v + delta_v * i / steps
-                device.set_channel_voltage(channel, voltage_v, timeout_s=timeout_s)
-                if cancel.wait(step_s):
-                    return False
-        return True
-
     def _ramp_profile(self) -> tuple[float, float]:
         """Return the operator-tuned (step V, step interval s), else the defaults."""
         parent = self.controllerParent
@@ -6231,216 +6081,27 @@ class PSUController(DeviceController):
     def _apply_manual_state_unlocked(
         self, device, manual_state: dict[str, Any], timeout_s: float, cancel: Event
     ) -> bool:
-        backend = getattr(device, "_backend", None)
-        if getattr(device, "_backend_mode", "") == "process" and getattr(backend, "session", None) is not None:
-            targets = dict(manual_state.get("voltage_values") or {})
-            if not manual_state.get("setpoints_only"):
-                outputs = manual_state.get("output_enabled") or {}
-                targets = {ch: targets.get(ch, 0.0) for ch in _PSU_CHANNEL_IDS if outputs.get(ch, False)}
-            rpc_timeout_s = self._native_ramp_rpc_timeout(
-                backend, targets, timeout_s, cancel,
-                cold_start_possible=not bool(manual_state.get("setpoints_only")), fixed_calls=48,
-            )
-            if rpc_timeout_s is None:
-                return False
-            step_v, step_s = self._ramp_profile()
-            result = backend.call_method(
-                "apply_manual_state", manual_state, timeout_s=timeout_s,
-                interlock_monitoring=bool(getattr(self.controllerParent, "interlock_monitoring", True)),
-                ramp_step_v=step_v, ramp_step_interval_s=step_s,
-                rpc_timeout_s=rpc_timeout_s, _cancel_event=cancel,
-            )
-            if result is not None:
-                raise RuntimeError("Unexpected result from native PSU manual operation.")
-            return not cancel.is_set()
-        if manual_state.get("setpoints_only"):
-            targets = dict(manual_state.get("voltage_values") or {})
-            currents = dict(manual_state.get("current_limit_values") or {})
-            if (not (targets or currents)
-                    or any(ch not in _PSU_CHANNEL_IDS or not np.isfinite(v) or v < 0
-                           for values in (targets, currents) for ch, v in values.items())):
-                raise ValueError("PSU channel setpoints must be finite and non-negative.")
-            # Read enable/range states under the lock. An individual Vset/Ilim
-            # edit never asks to reconfigure them or touch another setting.
-            outputs = tuple(device.get_output_enabled(timeout_s=timeout_s))
-            ranges = tuple(device.get_output_full_range(timeout_s=timeout_s))
-            if cancel.is_set():
-                return False
-            if (len(outputs) != 2 or len(ranges) != 2
-                    or device.get_device_enabled(timeout_s=timeout_s) != any(outputs)):
-                raise RuntimeError("PSU output state is inconsistent; refusing setpoint-only update.")
-            return self._apply_setpoints_in_place_unlocked(
-                device, voltage_targets=targets, current_limits=currents,
-                output_enabled=outputs, full_range_enabled=ranges,
-                timeout_s=timeout_s, cancel=cancel,
-            )
-        output_enabled = tuple(
-            bool((manual_state.get("output_enabled") or {}).get(ch, False))
-            for ch in _PSU_CHANNEL_IDS
+        """One native operation: the worker reads the hardware, checks it and ramps (native/worker/src/psu.rs)."""
+        backend = _require_native_backend(device)
+        targets = dict(manual_state.get("voltage_values") or {})
+        if not manual_state.get("setpoints_only"):
+            outputs = manual_state.get("output_enabled") or {}
+            targets = {ch: targets.get(ch, 0.0) for ch in _PSU_CHANNEL_IDS if outputs.get(ch, False)}
+        rpc_timeout_s = self._native_ramp_rpc_timeout(
+            backend, targets, timeout_s, cancel,
+            cold_start_possible=not bool(manual_state.get("setpoints_only")), fixed_calls=48,
         )
-        full_range_enabled = tuple(
-            bool((manual_state.get("full_range_enabled") or {}).get(ch, False))
-            for ch in _PSU_CHANNEL_IDS
+        if rpc_timeout_s is None:
+            return False
+        step_v, step_s = self._ramp_profile()
+        result = backend.call_method(
+            "apply_manual_state", manual_state, timeout_s=timeout_s,
+            interlock_monitoring=bool(getattr(self.controllerParent, "interlock_monitoring", True)),
+            ramp_step_v=step_v, ramp_step_interval_s=step_s,
+            rpc_timeout_s=rpc_timeout_s, _cancel_event=cancel,
         )
-        voltage_targets = {
-            ch: float((manual_state.get("voltage_values") or {}).get(ch, 0.0))
-            for ch in _PSU_CHANNEL_IDS
-        }
-        current_limits = {
-            ch: float((manual_state.get("current_limit_values") or {}).get(ch, 0.0))
-            for ch in _PSU_CHANNEL_IDS
-        }
-        if any(not np.isfinite(v) or v < 0 for v in (*voltage_targets.values(), *current_limits.values())):
-            raise ValueError("PSU setpoints must be finite and non-negative.")
-
-        # An edit of Vset/Ilim is not an output restart. Decide from fresh
-        # readbacks under the lock, not the GUI or housekeeping cache.
-        actual_range = tuple(device.get_output_full_range(timeout_s=timeout_s))
-        if cancel.is_set():
-            return False
-        range_changes = actual_range != full_range_enabled
-        if (
-            not range_changes
-            and device.get_device_enabled(timeout_s=timeout_s) == any(output_enabled)
-            and tuple(device.get_output_enabled(timeout_s=timeout_s)) == output_enabled
-        ):
-            return self._apply_setpoints_in_place_unlocked(
-                device, voltage_targets=voltage_targets, current_limits=current_limits,
-                output_enabled=output_enabled, full_range_enabled=full_range_enabled,
-                timeout_s=timeout_s, cancel=cancel,
-            )
-
-        device.set_output_enabled(False, False, timeout_s=timeout_s)
-        if cancel.is_set():
-            return False
-        if tuple(device.get_output_enabled(timeout_s=timeout_s)) != (False, False):
-            raise RuntimeError("PSU outputs were not confirmed disabled before reconfiguration.")
-        if range_changes:
-            self._await_discharge_before_range_switch(device, timeout_s=timeout_s, cancel=cancel)
-            if cancel.is_set():
-                return False
-            device.set_output_full_range(*full_range_enabled, timeout_s=timeout_s)
-
-        ramp_channels = {
-            ch for ch in _PSU_CHANNEL_IDS
-            if output_enabled[ch] and voltage_targets[ch] > _PSU_VOLTAGE_RAMP_THRESHOLD_V
-        }
-        pre_ramp_voltages = {
-            ch: 0.0 if ch in ramp_channels else voltage_targets[ch]
-            for ch in _PSU_CHANNEL_IDS
-        }
-        for ch in _PSU_CHANNEL_IDS:
-            if cancel.is_set():
-                return False
-            device.set_channel_voltage(ch, pre_ramp_voltages[ch], timeout_s=timeout_s)
-            if cancel.is_set():
-                return False
-            device.set_channel_current(ch, current_limits[ch], timeout_s=timeout_s)
-        self._verify_manual_state_unlocked(
-            device=device, voltage_values=pre_ramp_voltages,
-            current_limit_values=current_limits, full_range_enabled=full_range_enabled,
-            timeout_s=timeout_s, voltage_targets=voltage_targets,
-        )
-        if cancel.is_set():
-            return False
-        if any(output_enabled):
-            self._apply_interlock_setting_unlocked(device, timeout_s=timeout_s)
-        if cancel.is_set():
-            return False
-        device.set_device_enabled(any(output_enabled), timeout_s=timeout_s)
-        if cancel.is_set():
-            return False
-        if any(output_enabled):
-            device.set_output_enabled(*output_enabled, timeout_s=timeout_s)
-        self._verify_output_enable_state_unlocked(
-            device=device, any_output_enabled=any(output_enabled),
-            output_enabled=output_enabled, timeout_s=timeout_s,
-        )
-        for ch in sorted(ramp_channels):
-            if not self._ramp_channel_voltage(
-                device, ch, voltage_targets[ch], timeout_s=timeout_s, cancel=cancel
-            ):
-                return False
-        if ramp_channels and not cancel.is_set():
-            self._verify_manual_state_unlocked(
-                device=device, voltage_values=voltage_targets,
-                current_limit_values=current_limits, full_range_enabled=full_range_enabled,
-                timeout_s=timeout_s,
-            )
-        return not cancel.is_set()
-
-    def _apply_setpoints_in_place_unlocked(
-        self, device, *, voltage_targets: dict[int, float], current_limits: dict[int, float],
-        output_enabled: tuple[bool, bool], full_range_enabled: tuple[bool, bool],
-        timeout_s: float, cancel: Event,
-    ) -> bool:
-        """Update only changed setpoints, leaving gates and the other channel alone."""
-        voltages: dict[int, float] = {}
-        currents: dict[int, float] = {}
-        voltage_targets = dict(voltage_targets)
-        current_limits = dict(current_limits)
-        for ch in _PSU_CHANNEL_IDS:
-            if cancel.is_set():
-                return False
-            voltages[ch], voltage_limit = device.get_channel_voltage_limits(ch, timeout_s=timeout_s)
-            currents[ch], current_limit = device.get_channel_current_limits(ch, timeout_s=timeout_s)
-            # Missing targets belong to untouched channels/settings. Preserve
-            # their fresh hardware readback, not a rounded/stale panel value.
-            voltage_targets.setdefault(ch, voltages[ch])
-            current_limits.setdefault(ch, currents[ch])
-            if any(not np.isfinite(v) or v < 0 for v in (voltages[ch], currents[ch])):
-                raise RuntimeError(f"CH{ch} setpoint readback is invalid.")
-            if voltage_targets[ch] > 0 and (
-                voltage_limit is None or not np.isfinite(voltage_limit)
-                or voltage_limit < voltage_targets[ch]
-            ):
-                raise RuntimeError(f"CH{ch} voltage target exceeds a verified hardware limit.")
-            if current_limits[ch] > 0 and (
-                current_limit is None or not np.isfinite(current_limit) or current_limit < 0
-            ):
-                raise RuntimeError(f"CH{ch} current hardware limit is invalid.")
-        if cancel.is_set():
-            return False
-        if any(output_enabled):
-            self._verify_interlock_setting_unlocked(device, timeout_s=timeout_s)
-
-        for ch in _PSU_CHANNEL_IDS:
-            if cancel.is_set():
-                return False
-            if currents[ch] != current_limits[ch]:
-                device.set_channel_current(ch, current_limits[ch], timeout_s=timeout_s)
-        if cancel.is_set():
-            return False
-        # Confirm limits before moving any voltage; a failed check is handled by
-        # applyManualState's locked safety recovery, never by a cold-start retry.
-        self._verify_manual_state_unlocked(
-            device=device, voltage_values=voltages, current_limit_values=current_limits,
-            full_range_enabled=full_range_enabled, timeout_s=timeout_s,
-            voltage_targets=voltage_targets,
-        )
-        for ch in _PSU_CHANNEL_IDS:
-            if cancel.is_set():
-                return False
-            if voltages[ch] == voltage_targets[ch]:
-                continue
-            if output_enabled[ch]:
-                if not self._ramp_channel_voltage(
-                    device, ch, voltage_targets[ch], start_v=voltages[ch],
-                    timeout_s=timeout_s, cancel=cancel,
-                ):
-                    return False
-            else:
-                device.set_channel_voltage(ch, voltage_targets[ch], timeout_s=timeout_s)
-        if cancel.is_set():
-            return False
-        self._verify_manual_state_unlocked(
-            device=device, voltage_values=voltage_targets, current_limit_values=current_limits,
-            full_range_enabled=full_range_enabled, timeout_s=timeout_s,
-        )
-        self._verify_output_enable_state_unlocked(
-            device=device, any_output_enabled=any(output_enabled),
-            output_enabled=output_enabled, timeout_s=timeout_s,
-        )
+        if result is not None:
+            raise RuntimeError("Unexpected result from native PSU manual operation.")
         return not cancel.is_set()
 
     def saveCurrentConfigFromThread(

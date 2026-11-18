@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import threading
 import types
 from pathlib import Path
 
@@ -76,423 +75,6 @@ def test_existing_config_is_merged_and_duplicates_are_neutralized():
         "Duplicate DMMR mapping detected for module 1: Duplicate",
         module.PRINT.WARNING,
     ) in log_entries
-
-
-def test_controller_read_numbers_polls_module_currents():
-    module = load_plugin()
-
-    class FakeDevice:
-        NO_ERR = 0
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def get_module_current(self, module, timeout_s=None):
-            return self.NO_ERR, module * 1e-12, module
-
-    class FakeChannel:
-        def __init__(self, module):
-            self._module = module
-            self.real = True
-            self.enabled = True
-
-        def module_address(self):
-            return self._module
-
-    parent = types.SimpleNamespace(
-        poll_timeout_s=2.5,
-        isOn=lambda: True,
-        getChannels=lambda: [FakeChannel(1), FakeChannel(2)],
-        getConfiguredModules=lambda: [1, 2],
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-        _update_status_widgets=lambda: None,
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-    controller.acquiring = True
-    controller.detected_module_ids = [1, 2]
-
-    controller.readNumbers()
-
-    assert controller.main_state == "ST_ON"
-    assert controller.values == {1: 1e-12, 2: 2e-12}
-    assert controller.device_state_summary == "DEVICE_OK"
-    assert controller.voltage_state_summary == "VS_3V3_OK, VS_5V0_OK, VS_12V_OK"
-
-
-def test_controller_read_numbers_does_not_block_on_zero_ready_flags():
-    module = load_plugin()
-
-    class FakeDevice:
-        NO_ERR = 0
-        MEAS_CUR_RDY = 1
-
-        def __init__(self):
-            self.current_calls = []
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def get_module_ready_flags(self, module, timeout_s=None):
-            return self.NO_ERR, 0
-
-        def get_module_current(self, module, timeout_s=None):
-            self.current_calls.append((module, timeout_s))
-            return self.NO_ERR, module * 1e-12, module
-
-    class FakeChannel:
-        def __init__(self, module):
-            self._module = module
-            self.real = True
-            self.enabled = True
-
-        def module_address(self):
-            return self._module
-
-    parent = types.SimpleNamespace(
-        poll_timeout_s=2.5,
-        isOn=lambda: True,
-        getChannels=lambda: [FakeChannel(1), FakeChannel(2)],
-        getConfiguredModules=lambda: [1, 2],
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-        _update_status_widgets=lambda: None,
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-    controller.acquiring = True
-    controller.detected_module_ids = [1, 2]
-
-    controller.readNumbers()
-
-    assert controller.values[1] == 1e-12
-    assert controller.values[2] == 2e-12
-    assert controller.device.current_calls == [(1, 2.5), (2, 2.5)]
-
-
-def test_controller_read_numbers_stops_if_manual_mode_has_changed():
-    module = load_plugin()
-
-    class FakeDevice:
-        NO_ERR = 0
-        ERR_COMMAND_WRONG = -13
-
-        def __init__(self):
-            self.current_calls = []
-            self.automatic_current = True
-            self.enabled = self.connected = True
-
-        def get_enable(self, **kw):
-            return 0, self.enabled
-
-        def get_automatic_current(self, **kw):
-            return 0, self.automatic_current
-
-        def set_enable(self, enabled, **kw):
-            self.enabled = enabled
-            return 0
-
-        def disconnect(self):
-            self.connected = False
-            return True
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def set_automatic_current(self, enabled, timeout_s=None):
-            assert enabled is False
-            self.automatic_current = False
-            return self.NO_ERR
-
-        def get_module_current(self, module, timeout_s=None):
-            self.current_calls.append((module, timeout_s, self.automatic_current))
-            if self.automatic_current:
-                return self.ERR_COMMAND_WRONG, np.nan, 0
-            return self.NO_ERR, module * 1e-12, module
-
-    class FakeChannel:
-        def __init__(self, module):
-            self._module = module
-            self.real = True
-            self.enabled = True
-
-        def module_address(self):
-            return self._module
-
-    logs = []
-    parent = types.SimpleNamespace(
-        connect_timeout_s=7.0,
-        poll_timeout_s=2.5,
-        isOn=lambda: True,
-        getChannels=lambda: [FakeChannel(3)],
-        getConfiguredModules=lambda: [3],
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-        _update_status_widgets=lambda: None,
-    )
-
-    controller = module.DMMRController(parent)
-    hardware = controller.device = FakeDevice()
-    controller.initialized = True
-    controller.acquiring = True
-    controller._verified_read_ranges = {3: (3, False)}
-    controller.detected_module_ids = [3]
-    controller.print = lambda message, flag=None: logs.append((message, flag))
-
-    controller.readNumbers()
-
-    assert np.isnan(controller.values[3])
-    assert not controller.acquiring and not controller.initialized
-    assert not hardware.connected
-    assert hardware.current_calls == [(3, 2.5, True)]
-    assert any('Current acquisition mode changed' in message for message, _ in logs)
-    assert not any('mode was active' in message for message, _ in logs)
-
-
-def test_controller_toggle_on_enables_measurement():
-    module = load_plugin()
-    calls = []
-
-    class FakeDevice:
-        NO_ERR = 0
-
-        def get_automatic_current(self, **kw):
-            return 0, False
-
-        def set_enable(self, enabled, timeout_s=None):
-            calls.append(("set_enable", enabled, timeout_s))
-            return self.NO_ERR
-
-        def set_automatic_current(self, enabled, timeout_s=None):
-            calls.append(("set_automatic_current", enabled, timeout_s))
-            return self.NO_ERR
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def format_status(self, status):
-            return str(status)
-
-    parent = types.SimpleNamespace(
-        connect_timeout_s=7.0,
-        poll_timeout_s=2.0,
-        isOn=lambda: True,
-        _update_status_widgets=lambda: None,
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    parent.getChannels = lambda: []
-
-    controller.toggleOn()
-
-    assert calls == [
-        ("set_enable", True, 7.0),
-        ("set_automatic_current", False, 7.0),
-    ]
-    assert controller.acquiring is True
-
-
-def test_controller_toggle_on_enables_module_auto_range_for_active_modules():
-    module = load_plugin()
-    calls, modes = [], {}
-
-    class FakeDevice:
-        NO_ERR = 0
-
-        def get_automatic_current(self, **kw):
-            return 0, False
-
-        def set_enable(self, enabled, timeout_s=None):
-            calls.append(("set_enable", enabled, timeout_s))
-            return self.NO_ERR
-
-        def set_module_auto_range(self, module, enabled, timeout_s=None):
-            calls.append(("set_module_auto_range", module, enabled, timeout_s))
-            modes[module] = enabled
-            return self.NO_ERR
-
-        def get_module_meas_range(self, module, timeout_s=None):
-            calls.append(("get_module_meas_range", module, timeout_s))
-            return self.NO_ERR, 0, modes.get(module, False)
-
-        def set_automatic_current(self, enabled, timeout_s=None):
-            calls.append(("set_automatic_current", enabled, timeout_s))
-            return self.NO_ERR
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def format_status(self, status):
-            return str(status)
-
-    parent = types.SimpleNamespace(
-        connect_timeout_s=7.0,
-        poll_timeout_s=2.0,
-        isOn=lambda: True,
-        getConfiguredModules=lambda: [1, 3],
-        _update_status_widgets=lambda: None,
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.detected_module_ids = [1, 2, 3]
-    parent.getChannels = lambda: []
-
-    controller.toggleOn()
-
-    assert calls == [
-        ("set_enable", True, 7.0),
-        ("set_automatic_current", False, 7.0),
-        ("get_module_meas_range", 1, 7.0),
-        ("set_module_auto_range", 1, True, 7.0),
-        ("get_module_meas_range", 1, 7.0),
-        ("get_module_meas_range", 3, 7.0),
-        ("set_module_auto_range", 3, True, 7.0),
-        ("get_module_meas_range", 3, 7.0),
-    ]
-    assert controller.acquiring is True
-
-
-def test_controller_toggle_off_syncs_status_back_to_gui():
-    module = load_plugin()
-    calls = []
-    sync_calls = []
-
-    class FakeDevice:
-        NO_ERR = 0
-        connected = True
-
-        def disconnect(self):
-            if self.connected:
-                calls.append(("disconnect",))
-                self.connected = False
-            return True
-
-        def get_enable(self, **kwargs):
-            return self.NO_ERR, False
-
-        def get_automatic_current(self, **kwargs):
-            return self.NO_ERR, False
-
-        def set_enable(self, enabled, timeout_s=None):
-            calls.append(("set_enable", enabled, timeout_s))
-            return self.NO_ERR
-
-        def set_automatic_current(self, enabled, timeout_s=None):
-            calls.append(("set_automatic_current", enabled, timeout_s))
-            return self.NO_ERR
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def format_status(self, status):
-            return str(status)
-
-    parent = types.SimpleNamespace(
-        connect_timeout_s=7.0,
-        poll_timeout_s=2.0,
-        isOn=lambda: False,
-        _update_status_widgets=lambda: sync_calls.append("sync"),
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.detected_modules_text = "3"
-
-    controller.toggleOn()
-
-    assert calls == [
-        ("set_automatic_current", False, 7.0),
-        ("set_enable", False, 7.0),
-        ("disconnect",),
-    ]
-    assert parent.main_state == "Disconnected"
-    assert controller.device is None and controller.initialized is False
-    assert sync_calls
 
 
 def test_controller_toggle_off_failure_restores_on_ui_state():
@@ -598,91 +180,6 @@ def test_controller_retains_backend_and_unconfirmed_shutdown_when_transport_is_u
     assert not hasattr(controller.signalComm.closeCommunicationSignal, 'last_emit')
 
 
-def test_controller_read_numbers_acquires_lock_for_state_and_module_polling():
-    module = load_plugin()
-
-    class FakeDevice:
-        NO_ERR = 0
-
-        def __init__(self):
-            self.calls = []
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def get_module_current(self, module, timeout_s=None):
-            self.calls.append((module, timeout_s))
-            return self.NO_ERR, 3.2e-12, 3
-
-    class FakeTimeoutLock:
-        def __init__(self):
-            self.calls = []
-
-        class _Section:
-            def __init__(self, owner, timeout, timeout_message, already_acquired):
-                self.owner = owner
-                self.payload = (timeout, timeout_message, already_acquired)
-
-            def __enter__(self):
-                self.owner.calls.append(self.payload)
-                return True
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        def acquire_timeout(self, timeout, timeoutMessage="", already_acquired=False):
-            return self._Section(self, timeout, timeoutMessage, already_acquired)
-
-    class FakeChannel:
-        def __init__(self, module):
-            self._module = module
-            self.real = True
-            self.enabled = True
-
-        def module_address(self):
-            return self._module
-
-    device = FakeDevice()
-    lock = FakeTimeoutLock()
-    parent = types.SimpleNamespace(
-        poll_timeout_s=2.5,
-        isOn=lambda: True,
-        getChannels=lambda: [FakeChannel(3)],
-        getConfiguredModules=lambda: [3],
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-        _update_status_widgets=lambda: None,
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = device
-    controller.lock = lock
-    controller.initialized = True
-    controller.acquiring = True
-    controller.detected_module_ids = [3]
-
-    controller.readNumbers()
-
-    assert lock.calls == [
-        (1, "Could not acquire lock to refresh the DMMR state.", False),
-        (1, "Could not acquire lock to read DMMR module 3.", False),
-    ]
-    assert device.calls == [(3, 2.5)]
-    assert controller.values == {3: 3.2e-12}
-
-
 def test_controller_retains_shutdown_uncertainty_after_repeated_state_failures():
     module = load_plugin()
     ui_states = []
@@ -764,77 +261,6 @@ def test_close_communication_preserves_forced_communication_lost_state():
     assert controller.device_state_summary == "Unknown"
     assert controller.voltage_state_summary == "Unknown"
     assert controller.temperature_state_summary == "Unknown"
-
-
-def test_controller_read_numbers_keeps_partial_results_on_timeout():
-    module = load_plugin()
-
-    class FakeDevice:
-        NO_ERR = 0
-
-        def __init__(self):
-            self.calls = []
-
-        def get_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", "ST_ON"
-
-        def get_device_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["DEVICE_OK"]
-
-        def get_voltage_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"]
-
-        def get_temperature_state(self, timeout_s=None):
-            return self.NO_ERR, "0x0000", ["TEMPERATURE_OK"]
-
-        def get_module_current(self, module, timeout_s=None):
-            self.calls.append((module, timeout_s))
-            if module == 2:
-                raise TimeoutError("module read timed out")
-            return self.NO_ERR, module * 1e-12, module
-
-    class FakeChannel:
-        def __init__(self, module):
-            self._module = module
-            self.real = True
-            self.enabled = True
-
-        def module_address(self):
-            return self._module
-
-    logs = []
-    parent = types.SimpleNamespace(
-        poll_timeout_s=2.5,
-        isOn=lambda: True,
-        getChannels=lambda: [FakeChannel(1), FakeChannel(2), FakeChannel(3)],
-        getConfiguredModules=lambda: [1, 2, 3],
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-        _update_status_widgets=lambda: None,
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-    controller.acquiring = True
-    controller.detected_module_ids = [1, 2, 3]
-    controller.print = lambda message, flag=None: logs.append((message, flag))
-
-    controller.readNumbers()
-
-    # A TimeoutError here means transient controller-lock contention (in
-    # production a real device-call timeout raises RuntimeError and is handled
-    # by except-Exception). Skip this module silently with NaN for the missing
-    # sample, and still read the remaining modules.
-    assert controller.device.calls == [(1, 2.5), (2, 2.5), (3, 2.5)]
-    assert controller.values[1] == 1e-12
-    assert np.isnan(controller.values[2])
-    assert controller.values[3] == 3e-12
-    assert controller.errorCount == 0
-    assert logs == []
 
 
 def test_controller_lock_section_rejects_unsupported_lock_type():
@@ -956,74 +382,6 @@ def test_controller_update_values_resyncs_monitor_widgets():
     assert np.isnan(channel_disabled.monitor)
     assert channel_enabled.sync_calls == 1
     assert channel_disabled.sync_calls == 1
-
-
-def test_controller_shutdown_failure_marks_state_unconfirmed():
-    module = load_plugin()
-
-    class FakeDevice:
-        def shutdown(self, timeout_s=None):
-            raise RuntimeError("boom")
-
-    parent = types.SimpleNamespace(
-        connect_timeout_s=7.0,
-        poll_timeout_s=2.0,
-        isOn=lambda: False,
-        _update_status_widgets=lambda: None,
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-
-    shutdown_confirmed = controller.shutdownCommunication()
-
-    assert shutdown_confirmed is False
-    assert controller.main_state == module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
-    assert isinstance(controller.device, FakeDevice)
-    assert controller.initialized is True
-
-
-def test_controller_shutdown_success_marks_state_disconnected():
-    module = load_plugin()
-
-    class FakeDevice:
-        connected = True
-
-        def shutdown(self, timeout_s=None):
-            self.connected = False  # Runtime shutdown has already closed the port.
-            return True
-
-        def disconnect(self):
-            return self.connected is False
-
-    parent = types.SimpleNamespace(
-        connect_timeout_s=7.0,
-        poll_timeout_s=2.0,
-        isOn=lambda: True,
-        _update_status_widgets=lambda: None,
-        main_state="",
-        detected_modules="",
-        device_state_summary="",
-        voltage_state_summary="",
-        temperature_state_summary="",
-    )
-
-    controller = module.DMMRController(parent)
-    controller.device = FakeDevice()
-    controller.initialized = True
-
-    shutdown_confirmed = controller.shutdownCommunication()
-
-    assert shutdown_confirmed is True
-    assert controller.main_state == "Disconnected"
-    assert controller.device is None
-    assert controller.initialized is False
 
 
 def test_dmmr_monitor_widget_formats_currents_with_si_prefixes():
@@ -1211,57 +569,6 @@ def test_init_failure_guidance_silent_without_prior_poisoning():
     assert controller._poisoned_com is None
 
 
-def test_disable_acquisition_confirms_both_off_gates():
-    """An OFF command only confirms shutdown when both gates read back OFF."""
-    module = load_plugin()
-    parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
-    controller = module.DMMRController(parent)
-    controller.lock = threading.Lock()
-    controller.print = lambda message, flag=None: None
-    calls = []
-
-    class FakeDevice:
-        NO_ERR = 0
-
-        def set_automatic_current(self, value, timeout_s=None):
-            calls.append(("automatic", value))
-            return self.NO_ERR
-
-        def set_enable(self, value, timeout_s=None):
-            calls.append(("enable", value))
-            return self.NO_ERR
-
-    controller.device = FakeDevice()
-    controller.device.get_enable = lambda **kwargs: (0, False)
-    controller.device.get_automatic_current = lambda **kwargs: (0, False)
-    assert controller._disable_acquisition() is True
-    assert ("automatic", False) in calls
-    assert ("enable", False) in calls
-
-
-def test_disable_acquisition_reports_failure_without_raising():
-    """Startup cleanup reports failure without masking the original error."""
-    module = load_plugin()
-    parent = types.SimpleNamespace(connect_timeout_s=5.0, getChannels=lambda: [])
-    controller = module.DMMRController(parent)
-    controller.lock = threading.Lock()
-    logs = []
-    controller.print = lambda message, flag=None: logs.append(message)
-
-    class BrokenDevice:
-        NO_ERR = 0
-
-        def set_automatic_current(self, value, timeout_s=None):
-            raise RuntimeError("comm down")
-
-        def set_enable(self, value, timeout_s=None):
-            raise OSError("device gone")
-
-    controller.device = BrokenDevice()
-    assert controller._disable_acquisition() is False
-    assert any("shutdown unconfirmed" in m for m in logs)
-
-
 def test_run_initialization_does_not_emit_success_after_fatal_state_update():
     """A device destroyed by _update_state() must not look like 'Test mode'."""
     module = load_plugin()
@@ -1386,3 +693,101 @@ def test_update_values_marshals_monitor_widget_updates(monkeypatch):
     channels[0]._sync_monitor_widget = lambda: None
     dispatched[0]()
     assert channels[0].monitor == 1.5e-12
+
+
+# ---------------------------------------------------------------- through the DMMR's (scripted) native worker
+# What the worker does behind each call (module polls, OFF gate commands, read recovery) is tested in
+# native/worker/tests/dmmr_facade.rs.
+
+def _worker_controller(module, *, on=True, channels=(1, 2)):
+    from support.dmmr import FaultingDMMR
+
+    class FakeChannel:
+        def __init__(self, address):
+            self._address, self.real, self.enabled = address, True, True
+
+        def module_address(self):
+            return self._address
+
+    sync_calls = []
+    parent = types.SimpleNamespace(
+        connect_timeout_s=7.0, poll_timeout_s=2.5, isOn=lambda: on,
+        getChannels=lambda: [FakeChannel(a) for a in channels], getConfiguredModules=lambda: list(channels),
+        main_state="", detected_modules="", device_state_summary="", voltage_state_summary="",
+        temperature_state_summary="", _update_status_widgets=lambda: sync_calls.append("sync"),
+    )
+    controller = module.DMMRController(parent)
+    device = controller.device = FaultingDMMR()
+    device.fail_start = None
+    controller.initialized = True
+    controller.detected_module_ids = list(channels)
+    device.get_device_state = lambda **kw: (0, "0x0000", ["DEVICE_OK"])
+    device.get_voltage_state = lambda **kw: (0, "0x0007", ["VS_3V3_OK", "VS_5V0_OK", "VS_12V_OK"])
+    return controller, device, parent, sync_calls
+
+
+def test_a_read_publishes_the_worker_poll_and_the_controller_state():
+    module = load_plugin()
+    controller, device, _, _ = _worker_controller(module)
+    device.poll_currents = lambda modules, **kw: {"token": 7, "values": {1: 1e-12, 2: 2e-12},
+                                                  "ranges": {1: 1, 2: 2}, "valid": {1: True, 2: True},
+                                                  "recovery": None}
+    controller.acquiring = True
+    controller.readNumbers()
+    assert controller.main_state == "ST_ON"
+    assert controller.values == {1: 1e-12, 2: 2e-12} and controller.meas_ranges == {1: 1, 2: 2}
+    assert controller.device_state_summary == "DEVICE_OK"
+    assert controller.voltage_state_summary == "VS_3V3_OK, VS_5V0_OK, VS_12V_OK"
+
+
+def test_a_read_takes_the_controller_lock_for_the_state_then_the_poll():
+    module = load_plugin()
+    controller, device, _, _ = _worker_controller(module, channels=(3,))
+    sections = []
+    original = controller._controller_lock_section
+
+    def section(message, **kwargs):
+        sections.append(message)
+        return original(message, **kwargs)
+    controller._controller_lock_section = section
+    controller.acquiring = True
+    controller.readNumbers()
+    assert sections == ["Could not acquire lock to refresh the DMMR state.",
+                        "Could not acquire lock to read DMMR modules."]
+    assert controller.values == {3: 1e-12}
+
+
+def test_off_verifies_both_gates_closes_the_port_and_syncs_the_status():
+    module = load_plugin()
+    controller, device, parent, sync_calls = _worker_controller(module, on=False)
+    device.enabled = True
+    controller.detected_modules_text = "3"
+    controller.toggleOn()
+    assert device.calls[:4] == [("automatic", False), ("enable", False), ("read", "automatic"), ("read", "enable")]
+    assert ("disconnect",) in device.calls
+    assert parent.main_state == "Disconnected"
+    assert controller.device is None and controller.initialized is False
+    assert sync_calls
+
+
+def test_a_confirmed_shutdown_marks_the_dmmr_disconnected():
+    module = load_plugin()
+    controller, device, _, _ = _worker_controller(module)
+    assert controller.shutdownCommunication() is True
+    assert controller.main_state == "Disconnected"
+    assert controller.device is None and controller.initialized is False
+
+
+@pytest.mark.parametrize("failure", ["raises", "unconfirmed"])
+def test_a_failed_shutdown_keeps_the_connection_for_another_off(failure):
+    module = load_plugin()
+    controller, device, _, _ = _worker_controller(module, on=False)
+    if failure == "raises":
+        def shutdown(**kwargs):
+            raise RuntimeError("boom")
+        device.shutdown = shutdown
+    else:
+        device.readback["enable"] = (0, True)
+    assert controller.shutdownCommunication() is False
+    assert controller.main_state == module._DMMR_SHUTDOWN_UNCONFIRMED_STATE
+    assert controller.device is device and controller.initialized is True

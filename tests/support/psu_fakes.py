@@ -1,7 +1,36 @@
 """Stateful PSU test double shared by behavioral and fault-injection tests."""
+from copy import deepcopy
+
+CHANNELS = (0, 1)
+
+
+class _Worker:
+    """The native-worker proxy of a StatefulPSU: each operation goes to the fake's method of that name."""
+
+    session = "psu-test"
+    closed = False
+
+    def __init__(self, device):
+        self.device = device
+
+    def call_method(self, name, *args, rpc_timeout_s=None, _io_timeout_s=None, _cancel_event=None, **kwargs):
+        if name == "apply_manual_state":
+            kwargs["cancel"] = _cancel_event
+        return getattr(self.device, name)(*args, **kwargs)
+
+    def close(self, grace_s=0):
+        return False  # A live worker is not reaped by a close request.
+
 
 class StatefulPSU:
-    """A controller whose setpoints, gates and interlocks can be read back."""
+    """A controller whose setpoints, gates and interlocks can be read back.
+
+    The plugin sends a manual state to its worker as one operation (``apply_manual_state``); this fake
+    gives that operation's end state only. Its checks, ramps and recoveries are tested on the worker
+    itself (native/worker/tests/psu_controller.rs).
+    """
+
+    _backend_mode = "process"
 
     def __init__(self):
         self.connected = True
@@ -12,6 +41,45 @@ class StatefulPSU:
         self.voltages = {0: 0.0, 1: 0.0}
         self.currents = {0: 0.0, 1: 0.0}
         self.calls = []
+        self.requests = []  # The manual states the plugin sent to its worker.
+        self.apply_failure = None  # Raised by the next apply, as the worker reports a refused state.
+        self._backend = _Worker(self)
+
+    def apply_manual_state(self, manual_state, *, cancel=None, interlock_monitoring=True, **kwargs):
+        self.requests.append(deepcopy(manual_state))
+        if self.apply_failure is not None:
+            failure, self.apply_failure = self.apply_failure, None
+            raise failure
+
+        def cancelled():
+            return cancel is not None and cancel.is_set()
+        voltages = {int(ch): float(v) for ch, v in (manual_state.get("voltage_values") or {}).items()}
+        currents = {int(ch): float(v) for ch, v in (manual_state.get("current_limit_values") or {}).items()}
+        if not manual_state.get("setpoints_only"):
+            outputs = tuple(bool((manual_state.get("output_enabled") or {}).get(ch, False)) for ch in CHANNELS)
+            ranges = tuple(bool((manual_state.get("full_range_enabled") or {}).get(ch, False)) for ch in CHANNELS)
+            if ranges != tuple(self.ranges) or tuple(self.outputs) != outputs or self.enabled != any(outputs):
+                self.set_output_enabled(False, False)
+                if ranges != tuple(self.ranges):
+                    self.set_output_full_range(*ranges)
+                for ch in CHANNELS:
+                    if cancelled():
+                        return None
+                    self.set_channel_voltage(ch, voltages.get(ch, 0.0))
+                    self.set_channel_current(ch, currents.get(ch, 0.0))
+                if any(outputs) and tuple(self.interlocks) != (interlock_monitoring,) * 2:
+                    self.set_interlock_enabled(interlock_monitoring, interlock_monitoring)
+                self.set_device_enabled(any(outputs))
+                if any(outputs) and not cancelled():
+                    self.set_output_enabled(*outputs)
+                return None
+        for ch, value in currents.items():
+            if not cancelled() and self.currents[ch] != value:
+                self.set_channel_current(ch, value)
+        for ch, value in voltages.items():
+            if not cancelled() and self.voltages[ch] != value:
+                self.set_channel_voltage(ch, value)
+        return None
 
     def connect(self, **kwargs):
         self.connected = True

@@ -9,7 +9,7 @@ from support.dmmr import NativeFunction
 
 
 @pytest.mark.parametrize('value,label', [
-    (0, 'ST_ON'), (1, 'UNKNOWN_STATE_0x0001'), (2, 'UNKNOWN_STATE_0x0002'),
+    (0, 'ST_ON'), (1, 'ST_OFF'), (2, 'UNKNOWN_STATE_0x0002'),
     (0x8000, 'ST_ERROR'), (0x8001, 'ST_ERR_MODULE'), (0x8002, 'ST_ERR_VSUP'),
     (0x8003, 'UNKNOWN_STATE_0x8003'),
 ])
@@ -28,4 +28,6 @@ def test_real_runtime_preserves_state_code_without_inventing_meaning(dmmr_native
 def test_main_state_names_match_active_cgc_definitions(dmmr_native):
     header = Path(__file__).resolve().parents[1] / 'dmmr/vendor/runtime/dmmr/vendor/COM-DMMR-8.h'
     active_names = set(re.findall(r'^#define\s+COM_DMMR_8_(ST_\w+)\s', header.read_text(), re.M))
-    assert set(dmmr_native.driver.MAIN_STATE.values()) == active_names
+    # State 1 is commented out in the header (borrowed there from HV PSUs); the DMMR reports it with its
+    # modules disabled (1 before SetEnable(True), 0 after, 2026-11-15/17): named ST_OFF from that.
+    assert set(dmmr_native.driver.MAIN_STATE.values()) == active_names | {'ST_OFF'}

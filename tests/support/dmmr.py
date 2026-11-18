@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import ast
-from collections import Counter
+from collections import Counter, deque
 import contextlib
 import importlib
 from importlib.metadata import distribution
@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+from threading import Event
 import types
 from types import MethodType, ModuleType, SimpleNamespace
 
@@ -365,6 +366,56 @@ def dmmr_native(tmp_path):
     return SimpleNamespace(driver=driver, calls=calls, state=state, directory=tmp_path)
 
 
+def confirm_off_gates(device, **kwargs):
+    """The worker's OFF rule: both OFF writes, then both readbacks must confirm OFF."""
+    failures = []
+    for name in ("set_automatic_current", "set_enable"):
+        try:
+            if getattr(device, name)(False, **kwargs) != 0:
+                failures.append(name)
+        except Exception as exc:  # noqa: BLE001 - the other gate is still attempted
+            failures.append(f"{name}: {exc}")
+    for name in ("get_automatic_current", "get_enable"):
+        try:
+            status, value = getattr(device, name)(**kwargs)
+            if status != 0 or value is not False:
+                failures.append(f"{name} -> {status}, {value!r}")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{name}: {exc}")
+    if failures:
+        raise RuntimeError("OFF not confirmed: " + "; ".join(failures))
+    return True
+
+
+class DriverAsWorker:
+    """A real Python driver behind the plugin's native-worker calls (open/close race rigs).
+
+    The plugin drives the DMMR through its worker only. These rigs keep the real driver's Open/Close
+    and port claim to test the plugin's races; ``close`` refuses, as a worker still in a DLL call does.
+    """
+
+    family = "dmmr"
+    session = "driver-as-worker"
+
+    def __init__(self, driver):
+        self.driver = driver
+
+    @property
+    def closed(self):
+        return bool(getattr(self.driver, "_transport_poisoned", False))
+
+    def call_method(self, method, *args, rpc_timeout_s=30.0, _cancel_event=None, **kwargs):
+        if method == "disable_acquisition":
+            return confirm_off_gates(self.driver, **kwargs)
+        return getattr(self.driver, method)(*args, **kwargs)
+
+    def cancel(self):
+        pass
+
+    def close(self, *, grace_s=0):
+        return False
+
+
 @pytest.fixture
 def dmmr_connection(monkeypatch, tmp_path):
     plugin = load_plugin()
@@ -426,6 +477,7 @@ def dmmr_connection(monkeypatch, tmp_path):
             driver.connect(timeout_s=timeout_s)
             return {address: {} for address in range(8)}
         driver.initialize = initialize
+        driver._backend = DriverAsWorker(driver)
         hw.drivers.append(driver)
         return driver
 
@@ -470,9 +522,22 @@ def finish_open(hw):
 
 
 class FaultingDMMR:
+    """The DMMR's native worker, scripted: the plugin's high-level calls with the faults of the lab.
+
+    It is its own facade and backend (``_backend``), as the worker proxy is for the plugin. The DLL
+    command sequences behind each call are tested in native/worker/tests/dmmr_facade.rs; this fake keeps
+    the switches of the fault cases (range failure, lost enable ACK, refused or unreadable OFF gates).
+    """
+
     NO_ERR = 0
+    family = "dmmr"
+    session = "faulting-dmmr"
+    closed = False
+    _transport_poisoned = False
+    _open_failed = _failed_open_released = _opening_in_progress = False
 
     def __init__(self):
+        self._backend = self
         self.enabled = False
         self.automatic = False
         self.calls = []
@@ -487,8 +552,24 @@ class FaultingDMMR:
         self.disconnect_result = True
         self.disconnect_error = None
         self.port_closes = 0
+        self.cancel_count = 0
+        self.token = 0
 
-    def disconnect(self):
+    # ---- the worker proxy
+    def call_method(self, method, *args, rpc_timeout_s=30.0, _cancel_event=None, **kwargs):
+        kwargs.pop("timeout_s", None)
+        return getattr(self, method)(*args, **kwargs)
+
+    def cancel(self):
+        self.cancel_count += 1
+
+    def close(self, *, grace_s=0):
+        self.calls.append(("process_close",))
+        self.closed, self.connected = True, False
+        return True
+
+    # ---- the worker's calls
+    def disconnect(self, **kwargs):
         self.calls.append(("disconnect",))
         if self.disconnect_error is not None:
             raise self.disconnect_error
@@ -516,17 +597,11 @@ class FaultingDMMR:
         self.automatic = value
         return 0
 
-    def set_module_auto_range(self, address, value, **kwargs):
-        self.calls.append(("range", address, value))
-        if address == 5 and self.fail_start == "range":
-            self.start_failed = True
-            return -12
-        self.auto_modes[address] = value
-        return 0
+    def get_automatic_current(self, **kwargs):
+        return self._get_gate("automatic", self.automatic)
 
-    def get_module_meas_range(self, address, **kwargs):
-        self.calls.append(("range_readback", address))
-        return self.NO_ERR, 0, self.auto_modes.get(address, False)
+    def get_enable(self, **kwargs):
+        return self._get_gate("enable", self.enabled)
 
     def _get_gate(self, name, value):
         self.calls.append(("read", name))
@@ -535,17 +610,69 @@ class FaultingDMMR:
             raise result
         return result
 
-    def get_enable(self, **kwargs):
-        return self._get_gate("enable", self.enabled)
-
-    def get_automatic_current(self, **kwargs):
-        return self._get_gate("automatic", self.automatic)
-
     def get_state(self, **kwargs):
         return (-13 if self.state_error else 0), "0x0000", "ST_ON"
 
-    def format_status(self, status):
+    def get_device_state(self, **kwargs):
+        return 0, "0x0000", []
+
+    get_voltage_state = get_temperature_state = get_device_state
+
+    def begin_command_recovery(self, phase, **kwargs):
+        self.calls.append(("recovery", phase))
+        return {"phase": phase, "used": False}
+
+    def recover_command(self, status, action, expected, **kwargs):
+        """A lost reply is verified from readbacks; here the readbacks do not confirm it."""
+        self.calls.append(("recover", action))
+        raise RuntimeError(f"{action} failed: {status}; the readbacks did not confirm it")
+
+    def verify_running(self, **kwargs):
+        return 0, 0, "ST_ON"
+
+    def configure_module_ranges(self, modes, **kwargs):
+        verified = {}
+        for address, mode in modes.items():
+            auto = mode == "Auto"
+            self.calls.append(("range", address, auto))
+            if address == 5 and self.fail_start == "range":
+                self.start_failed = True
+                raise RuntimeError(f"set_module_auto_range({address}, {auto}) failed: -12")
+            self.auto_modes[address] = auto
+            verified[address] = (2 if auto else int(mode), auto)
+        return verified
+
+    def configure_read_recovery(self, ranges, **kwargs):
+        return {"configured": True}
+
+    def disable_acquisition(self, **kwargs):
+        return confirm_off_gates(self)
+
+    def shutdown(self, **kwargs):
+        return self.disable_acquisition() and self.disconnect() is True
+
+    def poll_currents(self, modules, **kwargs):
+        self.calls.append(("poll",))
+        if getattr(self, "poll_error", None) is not None:
+            raise self.poll_error  # the worker's read recovery gave up
+        self.token += 1
+        return {"token": self.token, "values": {m: 1e-12 for m in modules},
+                "ranges": {m: 0 for m in modules}, "valid": {m: True for m in modules}, "recovery": None}
+
+    def format_status(self, status, **kwargs):
         return str(status)
+
+
+@pytest.fixture
+def dmmr_native_acquisition_rig(dmmr_acquisition_rig):
+    """The acquisition rig with the DMMR driven through its (scripted) native worker, acquiring."""
+    rig = dmmr_acquisition_rig
+    rig.controller.device = rig.device = FaultingDMMR()
+    rig.device.fail_start = None
+    rig.controller.toggleOn()
+    assert rig.controller.acquiring
+    rig.device.calls.clear()
+    return rig
 
 
 @pytest.fixture
@@ -929,3 +1056,158 @@ def hold_host_initialization(hw, monkeypatch):
     monkeypatch.setattr(base, 'initializeCommunication', ns['initializeCommunication'], raising=False)
     hw.controller.acquisitionThread = None
     return queued
+
+
+# ---------------------------------------------------------------- the DMMR's native worker, scripted
+# The plugin drives the DMMR through its Rust worker only: these fakes answer the worker's high-level
+# calls (configure_module_ranges, poll_currents, disable_acquisition, shutdown, recoveries). The DLL
+# command sequences behind them are tested in native/worker/tests/dmmr_facade.rs.
+
+
+class NativeBackend:
+    family = "dmmr"
+    session = "native-test-session"
+
+    def __init__(self):
+        self.closed = False
+        self.connected = True
+        self.enabled = False
+        self.automatic = False
+        self.calls = []
+        self.cancel_events = []
+        self.rpc_timeouts = []
+        self.cancel_count = 0
+        self.token = 0
+        self.poll_replies = deque()
+        self.failures = {}
+        self.after_poll = None
+
+    def call_method(self, method, *args, rpc_timeout_s=30.0,
+                    _cancel_event=None, **kwargs):
+        # Events belong to the proxy locally. Everything sent to Rust is JSON.
+        json.dumps({"args": args, "kwargs": kwargs}, allow_nan=False)
+        assert rpc_timeout_s > 0
+        self.rpc_timeouts.append((method, rpc_timeout_s))
+        assert _cancel_event is None or isinstance(_cancel_event, Event)
+        self.cancel_events.append((method, _cancel_event))
+        self.calls.append((method, args, kwargs))
+        failure = self.failures.get(method)
+        if isinstance(failure, Exception):
+            raise failure
+        if method == "begin_command_recovery":
+            return {"phase": args[0], "used": False}
+        if method == "set_enable":
+            self.enabled = args[0]
+            return 0 if failure is None else failure
+        if method == "get_enable":
+            return 0, self.enabled
+        if method == "set_automatic_current":
+            self.automatic = args[0]
+            return 0 if failure is None else failure
+        if method == "get_automatic_current":
+            return 0, self.automatic
+        if method == "get_state":
+            return (0 if failure is None else failure), 0, "ST_ON"
+        if method in ("get_device_state", "get_voltage_state", "get_temperature_state"):
+            return 0, 0, []
+        if method == "verify_running":
+            assert self.enabled and not self.automatic
+            return 0, 0, "ST_ON"
+        if method == "recover_command":
+            expected = args[2]
+            if "enabled" in expected:
+                assert self.enabled is expected["enabled"]
+            result = {"verified": True, "expected": expected}
+            if expected.get("running"):
+                assert self.enabled and not self.automatic
+                result["result"] = (0, 0, "ST_ON")
+            return result
+        if method == "configure_module_ranges":
+            return {address: (2 if mode == "Auto" else int(mode), mode == "Auto")
+                    for address, mode in args[0].items()}
+        if method == "configure_read_recovery":
+            return {"configured": True}
+        if method == "recover_read":
+            return {"verified": True, "awaiting_samples": [0, 3]}
+        if method == "poll_currents":
+            self.token += 1
+            reply = (self.poll_replies.popleft() if self.poll_replies else {
+                "token": self.token, "values": {0: 0.534e-12, 3: -2e-12},
+                "ranges": {0: 0, 3: 4}, "valid": {0: True, 3: True},
+                "recovery": None,
+            })
+            if self.after_poll:
+                self.after_poll()
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        if method == "disable_acquisition":
+            if failure is not None:
+                return failure
+            self.enabled = self.automatic = False
+            return True
+        if method == "shutdown":
+            if failure is not None:
+                return failure
+            self.enabled = self.automatic = False
+            self.connected = False
+            return True
+        if method == "disconnect":
+            self.connected = False
+            return True
+        if method == "format_status":
+            return str(args[0])
+        raise AssertionError(f"Unexpected native method: {method}")
+
+    def cancel(self):
+        self.cancel_count += 1
+
+    def close(self, *, grace_s=0):
+        self.calls.append(("process_close", (), {}))
+        self.closed, self.connected = True, False
+        return True
+
+
+class NativeFacade:
+    NO_ERR = 0
+    NO_DATA = 1
+    _transport_poisoned = False
+    _open_failed = False
+    _failed_open_released = False
+    _opening_in_progress = False
+
+    def __init__(self, backend):
+        self._backend = backend
+
+    @property
+    def connected(self):
+        return self._backend.connected
+
+    def new_command_recovery(self, **kwargs):
+        raise AssertionError("Python callback recovery must not reach a native worker")
+
+    def new_read_recovery(self, **kwargs):
+        raise AssertionError("Python object recovery must not reach a native worker")
+
+    def close(self):
+        self._backend.calls.append(("process_close", (), {}))
+        self._backend.closed = True
+
+    def __getattr__(self, name):
+        allowed = {
+            "set_enable", "set_automatic_current", "get_automatic_current", "get_state",
+            "get_device_state", "get_voltage_state", "get_temperature_state",
+            "disconnect", "format_status",
+        }
+        if name not in allowed:
+            raise AttributeError(name)
+        return lambda *args, **kwargs: self._backend.call_method(name, *args, **kwargs)
+
+
+@pytest.fixture
+def native_rig(dmmr_range_rig):
+    backend = NativeBackend()
+    dmmr_range_rig.backend = backend
+    dmmr_range_rig.hardware = NativeFacade(backend)
+    dmmr_range_rig.controller.device = dmmr_range_rig.hardware
+    return dmmr_range_rig

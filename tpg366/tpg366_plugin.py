@@ -503,6 +503,21 @@ class TPG366(Device):
         else:
             self.measureInterval()
 
+    def measureInterval(self, reset=True):
+        """No lag guard: a late Qt thread delays the display only, never the readings.
+
+        Explorer 1.0.2 closed a device after 60 s of late Qt calls; each pressure reading is recorded
+        with its reception time whatever the delay.
+        """
+        if reset or getattr(self, "lastIntervalTime", None) is None:
+            self.lastIntervalTime = time.time() * 1000
+        self.lagging = 0
+        self.lagging_seconds = 0
+
+    def bufferLagging(self, wait=None):
+        """Never pause pressure recording for a late display."""
+        return False
+
     def closeCommunication(self):
         _session_clear(self)  # A disconnection or Explorer closing is never resumed.
         self.recording = False
