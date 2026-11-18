@@ -25,6 +25,7 @@ def probe(output):
     import threading
     import numpy as np
     from support.dmmr import RangeDevice, load_plugin, use_real_label_parameters
+    from support.worker import as_worker
 
     app = QApplication([])
     module = load_plugin(module_name="dmmr_range_ui")
@@ -65,7 +66,7 @@ def probe(output):
     controller = module.DMMRController(parent)
     parent.controller = controller
     controller.print = parent.print
-    controller.device = hardware = RangeDevice()
+    controller.device = hardware = as_worker("dmmr", RangeDevice())  # The DMMR commands only through its worker.
     controller.detected_module_ids = [0, 3]
     controller.initialized = True
     # Only the two simulated addresses are polled/configured in this probe.

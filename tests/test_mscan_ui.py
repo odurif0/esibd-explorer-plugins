@@ -1939,8 +1939,10 @@ def run(scenario, target, app_holder=None):
                            k=float(scan.offset_factor), delta_v=0., energy_ev=26., x_v=float(scan.offset_fixed),
                            q1_dc_v=36., stub_v=20., amplitude_v=0., axis=[30. + 2. * i for i in range(51)],
                            adaptive=True, coarse=4, ions=[], expected_s=10., seconds=0., predicted=0., label='ladder')
-            scan._configure_map_line(request, dict(name='ui-map', detector='M03', point_s=.03, settle_s=.01))
-            assert scan.integration_s == .03 and scan.passes == 1 and scan.file_label == 'ui-map-L0003-ladder'
+            # 80 ms per point: about ten detector samples (8 ms ticks), so a busy machine that delays a few
+            # Qt ticks leaves no point empty (with 30 ms, three of them, a loaded run skipped peak points).
+            scan._configure_map_line(request, dict(name='ui-map', detector='M03', point_s=.08, settle_s=.01))
+            assert scan.integration_s == .08 and scan.passes == 1 and scan.file_label == 'ui-map-L0003-ladder'
         scan.recording = True
         scan.initData()
         assert scan.initScan(), f'initScan failed: {scan.scan_status}'
@@ -2023,7 +2025,8 @@ def run(scenario, target, app_holder=None):
         assert result['axis'] == [30. + 2. * i for i in range(51)]
         measured = [i for i, status in enumerate(statuses) if status == 'acquired']
         assert statuses.count('skipped') >= 10 and measured[0] == 0 and measured[-1] == 50, statuses
-        assert all(i in measured for i in range(18, 23)), 'every point of the peak at 70 V is measured'
+        assert all(i in measured for i in range(18, 23)), ('every point of the peak at 70 V is measured',
+                                                          statuses, result['signal'])
         assert all(np.isfinite(result['signal'][i]) for i in measured), result['signal']
         assert scan._plan['metadata']['map_line']['id'] == 3 and scan._plan['metadata']['axis'] == 'amplitude'
         name = scan._scan_file().name  # This harness saves to a fixed file; the map name is MScan's own.

@@ -116,3 +116,21 @@ def test_early_qt_expiry_also_reschedules_limit_sample(rig, monkeypatch):
     clock.now = 104.01
     for _, cb in callbacks[:]: cb()
     assert all(np.isnan(getattr(c, field)) for c in p.channels for field in FIELDS)
+
+
+def test_a_new_setpoint_request_makes_the_old_readback_stale_at_once(rig, monkeypatch):
+    """2026-11-18: until the PSU applied a new setpoint, on a later Qt turn, the setpoint read back before
+    it stayed valid; MScan reading in between took it for the confirmation of the new request, then stopped
+    on "PSU setpoint changed outside the scan" at the next readback."""
+    m, p, ctrl, _ = rig
+    ctrl.updateValues()
+    assert p.channels[0].voltage_setpoint_readback == 100.
+    base = next(cls for cls in m.PSUChannel.__mro__[1:] if 'valueChanged' in vars(cls))
+    monkeypatch.setattr(base, 'valueChanged', lambda self: None)  # Explorer's dispatch of the request
+    p._drop_pending_setpoints = lambda fields: None
+    request = m.PSUChannel.__new__(m.PSUChannel)
+    vars(request).update(id=0, channelParent=p, loading=False, value=120.)
+    request.valueChanged()
+    assert request.voltage_request_revision == 1
+    assert all(np.isnan(getattr(c, field)) for c in p.channels for field in FIELDS), \
+        [(field, getattr(c, field)) for c in p.channels for field in FIELDS]

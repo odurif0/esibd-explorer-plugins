@@ -32,6 +32,7 @@ def probe(family, output):
         return 77
 
     from support.shutdown import controller_for
+    from support.worker import as_worker
     app = QApplication([])
     module, controller, _ = controller_for(family)
     # Explorer's base toggleOn only logs; this loader leaves that hook undefined.
@@ -114,7 +115,8 @@ def probe(family, output):
     backend.close = lambda: calls.append("dispose")
     backend.set_enable = backend.set_automatic_current = lambda *a, **kw: 0
     backend.get_enable = backend.get_automatic_current = lambda **kw: (0, not backend.recover)
-    controller.device = backend
+    backend.disable_acquisition = lambda **kw: backend.recover  # The DMMR worker's OFF of both gates.
+    controller.device = as_worker(family, backend)  # DMMR and AMX command only through their worker.
     if family == "psu":
         controller._perform_shutdown_sequence_unlocked = lambda **kw: []
         controller._confirm_shutdown_unlocked = lambda **kw: (backend.recover, "simulated failure")

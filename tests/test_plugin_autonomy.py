@@ -190,3 +190,33 @@ def test_validator_rejects_static_sibling_import(
 
     assert str(entrypoint) in str(excinfo.value)
     assert "imports sibling plugin slug 'psu_b'" in str(excinfo.value)
+
+
+def _leaves_finally(statements: list[ast.stmt]) -> list[int]:
+    """Lines of a return, or of a break/continue not inside a loop of its own, in a finally block."""
+    found: list[int] = []
+
+    def visit(node: ast.AST, in_loop: bool) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return
+        if isinstance(node, ast.Return) or (isinstance(node, (ast.Break, ast.Continue)) and not in_loop):
+            found.append(node.lineno)
+        loop = isinstance(node, (ast.For, ast.AsyncFor, ast.While))
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_loop or (loop and child not in getattr(node, "orelse", [])))
+    for statement in statements:
+        visit(statement, False)
+    return found
+
+
+def test_no_plugin_leaves_a_finally_block_with_return_break_or_continue():
+    """Such a statement discards the error being raised (Python 3.14 warns about it, PEP 765). 2026-11-18:
+    the ESI OFF returned False from its finally and could hide an error raised while it reported the OFF."""
+    offenders = []
+    for folder in PLUGIN_FOLDERS:
+        for path in sorted((REPO_ROOT / folder).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Try) and node.finalbody:
+                    offenders += [f"{path.relative_to(REPO_ROOT)}:{line}" for line in _leaves_finally(node.finalbody)]
+    assert offenders == []

@@ -880,6 +880,29 @@ def test_map_checks_a_new_plan_and_starts_it_only_if_nothing_must_change(mscan_m
     assert cancelled.mapAction.state is False and len(calls) == 4
 
 
+@pytest.mark.parametrize('where', ['runner', 'dialog'])
+def test_a_map_button_that_cannot_open_says_why_and_comes_back(mscan_module, monkeypatch, where):
+    """2026-11-18 lab: the ESIBD Explorer 1.0.2+od.1 executable lacked tomllib; Map… stayed "started"
+    and nothing else happened. A failure before the map starts is said in the console."""
+    class Runner:
+        running = False
+    scan = _map_scan(mscan_module, monkeypatch, Runner(), None)
+    monkeypatch.setattr(mscan_module, 'PRINT', SimpleNamespace(MESSAGE='message', WARNING='warning', ERROR='error'))
+    missing = ModuleNotFoundError("No module named 'tomllib'", name='tomllib')
+
+    def fail():
+        raise missing
+    if where == 'runner':
+        scan._map_runner_instance = fail
+    else:
+        scan._map_choice = fail
+    scan.mapAction.state = True  # The click toggled the button.
+    scan._map_action()
+    assert scan.mapAction.state is False
+    assert 'Map… cannot open' in scan.printed[-1] and "'tomllib'" in scan.printed[-1], scan.printed
+    assert scan.map_status == 'not started: see the console'
+
+
 def test_start_scan_is_locked_while_the_map_starts(mscan_module, monkeypatch, tmp_path):
     """2026-11-11 lab: Start map waited 30 s for the first launch of its worker; Start scan was clicked
     meanwhile and the map stopped at its first engine call ("A scan is running")."""

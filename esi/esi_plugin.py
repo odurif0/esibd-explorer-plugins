@@ -3863,7 +3863,7 @@ class ESIController(DeviceController):
         def progress(report):
             if device is self.device and generation == self._connection_generation:
                 self._on_discharge_progress(report)
-        gone = False
+        gone = retired = False
         try:
             result = device.disconnect(
                 timeout_s=float(self.controllerParent.connect_timeout_s),
@@ -3895,47 +3895,53 @@ class ESIController(DeviceController):
                         flag=PRINT.ERROR,
                     )
         finally:
-            if device is not self.device or generation != self._connection_generation:
-                return False  # A retired reply cannot certify the replacement connection.
-            self.acquiring = False
-            self.initializeValues(reset=True)
-            if confirmed:
-                self._dispose_device(shutdown_confirmed=True)
-                self.initialized = False
-                self.shutdown_unconfirmed = False
-                self.discharge_unverified = ""
-                self.discharge_readings = {}
-                self._restore_off_ui_state(connection_generation=generation)
+            # A retired reply cannot certify the replacement connection. Not a return here: it would
+            # also discard an error raised while this OFF was being reported (Python 3.14 warns).
+            retired = device is not self.device or generation != self._connection_generation
+            if not retired:
+                self._finish_shutdown(device, generation, confirmed=confirmed, gone=gone)
+        return False if retired else confirmed
+
+    def _finish_shutdown(self, device, generation: int, *, confirmed: bool, gone: bool) -> None:
+        """After an OFF of the present connection: its state, its release or its OFF retry."""
+        self.acquiring = False
+        self.initializeValues(reset=True)
+        if confirmed:
+            self._dispose_device(shutdown_confirmed=True)
+            self.initialized = False
+            self.shutdown_unconfirmed = False
+            self.discharge_unverified = ""
+            self.discharge_readings = {}
+            self._restore_off_ui_state(connection_generation=generation)
+        else:
+            backend = getattr(device, '_backend', None)
+            if gone:
+                # The DLL blocks on a vanished port (a retry OFF hung 7 s on Purge): release at once.
+                self._release_failed_transport(device, outputs_off=True)
+            elif (callable(getattr(type(backend), 'lifecycle_attribute', None))
+                    and getattr(device, 'connected', False) is True
+                    and getattr(device, '_transport_poisoned', False) is False):
+                # A responsive native owner can retry OFF; only its cached
+                # lifecycle is read here, never a second worker request.
+                self.shutdown_unconfirmed = True
+                self.main_state = 'Shutdown unconfirmed'
+                self._restore_on_ui_state()
             else:
-                backend = getattr(device, '_backend', None)
-                if gone:
-                    # The DLL blocks on a vanished port (a retry OFF hung 7 s on Purge): release at once.
-                    self._release_failed_transport(device, outputs_off=True)
-                elif (callable(getattr(type(backend), 'lifecycle_attribute', None))
-                        and getattr(device, 'connected', False) is True
-                        and getattr(device, '_transport_poisoned', False) is False):
-                    # A responsive native owner can retry OFF; only its cached
-                    # lifecycle is read here, never a second worker request.
-                    self.shutdown_unconfirmed = True
-                    self.main_state = 'Shutdown unconfirmed'
-                    self._restore_on_ui_state()
-                else:
-                    self._release_failed_transport(device)
+                self._release_failed_transport(device)
+        if confirmed:
+            self.main_state = "Disconnected"
+            self.print(f"ESI HV discharge verified after {time.monotonic() - self._discharge_started_at:.0f} s; "
+                       "communication closed.")
+        self._discharge_outputs_off = False
+        self._sync_status()
+        if getattr(self, "_on_after_check", False):
+            self._on_after_check = False
             if confirmed:
-                self.main_state = "Disconnected"
-                self.print(f"ESI HV discharge verified after {time.monotonic() - self._discharge_started_at:.0f} s; "
-                           "communication closed.")
-            self._discharge_outputs_off = False
-            self._sync_status()
-            if getattr(self, "_on_after_check", False):
-                self._on_after_check = False
-                if confirmed:
-                    self.print("ESI ON, queued behind the discharge check: reconnecting.")
-                    _invoke_gui_callback(lambda: self.controllerParent.setOn(True))
-                else:
-                    self.print("The ON queued behind the discharge check is dropped: the discharge was not "
-                               "verified. Check the state, then ON.", flag=PRINT.WARNING)
-        return confirmed
+                self.print("ESI ON, queued behind the discharge check: reconnecting.")
+                _invoke_gui_callback(lambda: self.controllerParent.setOn(True))
+            else:
+                self.print("The ON queued behind the discharge check is dropped: the discharge was not "
+                           "verified. Check the state, then ON.", flag=PRINT.WARNING)
 
     def closeCommunication(self) -> None:
         # Explorer's base close forcibly releases the acquisition mutex. When called

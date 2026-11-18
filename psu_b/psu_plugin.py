@@ -4459,6 +4459,12 @@ class PSUChannel(Channel):
         if callable(drop):
             drop({self.channel_number(): ["voltage"]})
         self.voltage_request_revision += 1
+        # From this request on, the setpoint read back before it is stale, not merely until the worker
+        # applies it on a later Qt turn: a consumer reading in between took the previous setpoint for the
+        # confirmation of this one (MScan: "PSU setpoint changed outside the scan" at the next readback).
+        invalidate = getattr(getattr(self.channelParent, "controller", None), "_invalidate_hv_readback", None)
+        if callable(invalidate):
+            invalidate()
         self.channelParent._sync_channel_voltage(self)
         super().valueChanged()
 
