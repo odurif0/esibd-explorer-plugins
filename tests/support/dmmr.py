@@ -183,6 +183,40 @@ class RangeDevice(PollingDevice):
             raise sample
         return sample
 
+    # ---- the worker calls the plugin makes (since v0.5.17 the DMMR commands only through its worker;
+    # wrap with support.worker.as_worker), each built on the commands above
+    def begin_command_recovery(self, phase, **kwargs):
+        return {"phase": phase, "used": False}
+
+    def verify_running(self, **kwargs):
+        return 0, 0, "ST_ON"
+
+    def configure_module_ranges(self, modes, **kwargs):
+        """Auto, or a fixed range, then the readback: {address: (range, auto)}."""
+        verified = {}
+        for address, mode in modes.items():
+            auto = mode == "Auto"
+            self.set_module_auto_range(address, auto)
+            if not auto:
+                self.set_module_meas_range(address, int(mode))
+            _status, used, readback_auto = self.get_module_meas_range(address)
+            verified[address] = (used, readback_auto)
+        return verified
+
+    def configure_read_recovery(self, ranges, **kwargs):
+        return {"configured": True}
+
+    def disable_acquisition(self, **kwargs):
+        return confirm_off_gates(self)
+
+    def poll_currents(self, modules, **kwargs):
+        self.poll_token = getattr(self, "poll_token", 0) + 1
+        values, ranges = {}, {}
+        for address in modules:
+            _status, values[address], ranges[address] = self.get_module_current(address)
+        return {"token": self.poll_token, "values": values, "ranges": ranges,
+                "valid": {address: True for address in modules}, "recovery": None}
+
 
 @pytest.fixture
 def dmmr_range_rig():

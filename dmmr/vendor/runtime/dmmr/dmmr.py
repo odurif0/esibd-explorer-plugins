@@ -145,6 +145,16 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             except OSError as exc:
                 self._protocol_log_error = str(exc)
 
+    def _close_protocol_log(self):
+        """Close the protocol file with the port; the next event (after a reconnect) opens it again."""
+        if not hasattr(self, '_protocol_lock'):
+            return
+        with self._protocol_lock:
+            if self._protocol_handler is not None:
+                self._protocol_handler.close()
+                self._protocol_handler = None
+            self._protocol_log_path = None
+
     def record_protocol_event(self, event):
         if not hasattr(self, '_protocol_lock') or self._protocol_log_path is None:
             self.configure_protocol_log()
@@ -684,6 +694,7 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             if not was_connected and not self._dll_port_claimed:
                 self.connected = False
                 self._set_port_claimed(False)
+                self._close_protocol_log()
                 return True
 
             self.logger.info(f"Disconnecting DMMR device {self.device_id}")
@@ -695,6 +706,7 @@ class _DMMRController(DllPortClaimRegistryMixin, TimeoutSafeDllMixin, DMMRBase):
             if status == self.NO_ERR:
                 self.connected = False
                 self._set_port_claimed(False)
+                self._close_protocol_log()
                 self.logger.info(
                     f"Successfully disconnected DMMR device {self.device_id}"
                 )

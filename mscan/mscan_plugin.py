@@ -3402,7 +3402,11 @@ class MScan(Scan):
         A new map is checked first (what to change, lines and time) and starts only if nothing must change.
         The work runs in its own thread: the MScan worker can take 30 s on its first launch after an install.
         """
-        runner = self._map_runner_instance()
+        try:
+            runner = self._map_runner_instance()
+        except Exception as exc:  # noqa: BLE001 - said to the operator, never raised into Qt
+            self._map_click_failed(exc)
+            return
         if getattr(self, '_map_starting', False):  # Clicked again during the start: stop once started.
             self._map_stop_after_start = True
             self.print('The map stops as soon as it has started.')
@@ -3414,7 +3418,11 @@ class MScan(Scan):
             self.print('Finish the scan before a map.', flag=PRINT.WARNING)
             self.mapAction.state = False
             return
-        choice = self._map_choice()
+        try:
+            choice = self._map_choice()
+        except Exception as exc:  # noqa: BLE001
+            self._map_click_failed(exc)
+            return
         if choice is None:
             self.mapAction.state = False
             return
@@ -3454,6 +3462,17 @@ class MScan(Scan):
             finally:
                 self._map_starting = False  # runner.running takes over once the map thread runs
         threading.Thread(target=work, name='MScan map start', daemon=True).start()
+
+    def _map_click_failed(self, exc):
+        """Map… could not open: say why and put the button back (2026-11-18 lab: an Explorer executable
+        without the tomllib module left the button "started" with nothing else happening)."""
+        hint = ''
+        if isinstance(exc, ModuleNotFoundError):
+            hint = (f' This Explorer lacks the Python module {exc.name!r}: use an Explorer that has it '
+                    '(ESIBD Explorer 1.0.2+od.1 lacked tomllib; 1.0.2 and 1.0.2+od.2 have it).')
+        self.print(f'Map… cannot open: {type(exc).__name__}: {exc}.{hint}', flag=PRINT.ERROR)
+        self.mapAction.state = False
+        self.map_status = 'not started: see the console'
 
     @staticmethod
     def _map_check_text(result):

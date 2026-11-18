@@ -291,3 +291,38 @@ def test_cancelled_initial_diagnostics_cannot_publish_old_snapshot(monkeypatch, 
     c.runInitialization()
     assert not snapshots and not published
     assert c.device is None and c.main_state == "Disconnected"
+
+
+class _Abort(BaseException):
+    """Not an Exception: the OFF's own except does not catch it."""
+
+
+@pytest.mark.parametrize("ending", ["reply", "abort"])
+def test_an_off_overtaken_by_a_new_connection_certifies_nothing_and_hides_no_error(monkeypatch, ending):
+    """A reply to the OFF of a connection that a new one replaced cannot confirm that new connection: the
+    OFF returns False and leaves the new connection alone. An error ending the old OFF is not discarded any
+    more: a return inside finally used to swallow it (Python 3.14 warns about such returns)."""
+    module = _load_plugin()
+    c = module.ESIController(SimpleNamespace(onAction=SimpleNamespace(state=False), connect_timeout_s=.2))
+    monkeypatch.setattr(module, "_invoke_gui_callback", lambda callback: None)
+    printed = []
+    c.print = lambda message, **kwargs: printed.append(message)
+    for name in ("_stop_local_acquisition", "_sync_status", "_restore_on_ui_state"):
+        setattr(c, name, lambda *args, **kwargs: None)
+    new = SimpleNamespace(connected=True)
+
+    def disconnect(**kwargs):
+        c.device = new  # an explicit ON reconnected while this OFF was running
+        c._connection_generation += 1
+        c.main_state = "ST_ON"
+        if ending == "abort":
+            raise _Abort()
+        return True
+    c.device = SimpleNamespace(connected=True, _transport_poisoned=False, disconnect=disconnect)
+    if ending == "abort":
+        with pytest.raises(_Abort):
+            c._shutdown_communication_unlocked()
+    else:
+        assert c._shutdown_communication_unlocked() is False
+    assert c.device is new and c.main_state == "ST_ON"
+    assert not any("discharge verified" in message for message in printed)
