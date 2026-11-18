@@ -79,3 +79,25 @@ def test_sync_propagates_canonical_edits_and_keeps_device_names(tmp_path: Path) 
         assert f"{spec.manager_name}_last_setpoints.json" in readme
         assert f"`{spec.folder}/`" in readme
         assert readme.endswith("README sync probe\n")
+
+
+def test_the_code_shared_by_the_amx_plugins_is_one_file_copied_into_each(tmp_path: Path) -> None:
+    """AMX and AMX HD run the code they share from their own copy of _runtime/_amx_common.py: the copies stay equal."""
+    tool = _tool()
+    shared = "_runtime/_amx_common.py"
+    canonical_folder, folders = tool.SHARED[shared]
+    assert (canonical_folder, folders) == ("amx_a", ("amx_b", "amx_hd"))
+    canonical = (REPO_ROOT / canonical_folder / shared).read_bytes()
+    for folder in (canonical_folder, *folders):
+        copy = REPO_ROOT / folder / shared
+        assert copy.is_file() and not copy.is_symlink() and copy.read_bytes() == canonical, folder
+    _copy_families(tmp_path)
+    shutil.copytree(REPO_ROOT / "amx_hd", tmp_path / "amx_hd", ignore=shutil.ignore_patterns("__pycache__", "logs"))
+    edited = tmp_path / canonical_folder / shared
+    edited.write_text(edited.read_text(encoding="utf-8") + "# shared edit\n", encoding="utf-8")
+    assert sorted(tool.sync(tmp_path, check=True)) == [f"{folder}/{shared}" for folder in folders]
+    tool.sync(tmp_path)
+    assert tool.sync(tmp_path, check=True) == []
+    for folder in folders:
+        assert (tmp_path / folder / shared).read_text(encoding="utf-8").endswith("# shared edit\n"), folder
+

@@ -10,6 +10,7 @@ import pytest
 
 from conftest import PLUGIN_SPECS
 from support.qt import run_probe
+from support.source import entrypoint_tree
 from support.ui import explorer_state_action
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ def probe(path, output):
         return 77
 
     app = QApplication([])
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = entrypoint_tree(path)  # With the code the AMX plugins share from their folder.
     method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                   and node.name == "_sync_local_on_action")
     synced = []  # The crash-resume record follows every ON-state sync; it only writes a file.

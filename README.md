@@ -135,7 +135,9 @@ machine makes these probes late); a crash is not. The session ends with the list
 that needed their second run, and says when the machine was busy.
 
 `ampr_b`, `amx_b` and `psu_b`–`psu_e` are copies of `ampr_a`, `amx_a` and `psu_a`: edit the
-canonical plugin, then run `python3 tools/sync_family_siblings.py`.
+canonical plugin, then run `python3 tools/sync_family_siblings.py`. The code AMX and AMX HD share
+word for word is `amx_a/_runtime/_amx_common.py`; the same tool copies it into `amx_b` and `amx_hd`,
+and each plugin runs its own copy.
 
 Native workers:
 

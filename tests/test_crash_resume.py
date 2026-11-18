@@ -16,6 +16,7 @@ import types
 import pytest
 from conftest import PLUGIN_SPECS
 from support.amx import load_plugin as load_amx
+from support.source import entrypoint_code
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_ENTRYPOINTS = sorted(
@@ -36,7 +37,7 @@ def test_the_resume_block_is_identical_in_every_device_plugin():
     reference = blocks["psu_a"]
     assert all(block == reference for block in blocks.values()), [n for n, b in blocks.items() if b != reference]
     for path in DEVICE_ENTRYPOINTS:
-        source = path.read_text(encoding="utf-8")
+        source = entrypoint_code(path)  # The AMX plugins run their shared code in their own module.
         for hook in ("_session_start(self)", "_session_request(self", "_session_clear(self)", "_session_sync(self)"):
             assert hook in source, (path.parent.name, hook)
 

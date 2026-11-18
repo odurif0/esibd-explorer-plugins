@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import shutil
 from pathlib import Path
@@ -79,11 +80,13 @@ def validate_plugin_autonomy(
         if not path.is_file():
             problems.append(f"{path}: required regular file is missing")
 
-    entrypoint = plugin_root / spec.entrypoint
-    if entrypoint.is_file() and not entrypoint.is_symlink():
-        sibling_slugs = plugin_slugs - {spec.folder}
-        for module in sorted(set(import_top_level_modules(entrypoint)) & sibling_slugs):
-            problems.append(f"{entrypoint}: imports sibling plugin slug {module!r}")
+    # Every Python file the plugin carries: its entrypoint, the shared code it runs (_runtime/_amx_common.py),
+    # its runtimes.
+    sibling_slugs = plugin_slugs - {spec.folder}
+    for source in sorted(plugin_root.rglob("*.py")):
+        if source.is_file() and not source.is_symlink() and "__pycache__" not in source.parts:
+            for module in sorted(set(import_top_level_modules(source)) & sibling_slugs):
+                problems.append(f"{source}: imports sibling plugin slug {module!r}")
 
     assert problems == [], "\n".join(problems)
 
@@ -190,6 +193,45 @@ def test_validator_rejects_static_sibling_import(
 
     assert str(entrypoint) in str(excinfo.value)
     assert "imports sibling plugin slug 'psu_b'" in str(excinfo.value)
+
+
+def test_validator_rejects_a_sibling_import_in_the_shared_amx_code(
+    tmp_path: Path,
+    plugin_specs: tuple[PluginSpec, ...],
+) -> None:
+    spec, plugin_root, plugin_slugs = copied_plugin(tmp_path, plugin_specs, "amx_hd")
+    shared = plugin_root / "_runtime" / "_amx_common.py"
+    shared.write_text(f"{shared.read_text(encoding='utf-8')}\nimport amx_a\n", encoding="utf-8")
+
+    with pytest.raises(AssertionError) as excinfo:
+        validate_plugin_autonomy(spec, plugin_root, plugin_slugs)
+
+    assert str(shared) in str(excinfo.value)
+    assert "imports sibling plugin slug 'amx_a'" in str(excinfo.value)
+
+
+def test_python_files_beside_an_entrypoint_import_on_their_own() -> None:
+    """Explorer imports every .py file at the root of a plugin folder by itself (esibd.core
+    loadPluginsFromPath), not only the entrypoint: a file there that runs only inside its entrypoint would
+    open an import-error dialog at each start. The code the AMX plugins share is therefore in _runtime/."""
+    failures = []
+    for folder in PLUGIN_FOLDERS:
+        for path in sorted((REPO_ROOT / folder).glob("*.py")):
+            if path.name.endswith("_plugin.py"):
+                continue
+            spec = importlib.util.spec_from_file_location(f"_alone_{folder}_{path.stem}", path)
+            assert spec is not None and spec.loader is not None
+            try:
+                spec.loader.exec_module(importlib.util.module_from_spec(spec))
+            except ModuleNotFoundError as exc:
+                if (exc.name or "").split(".")[0] != "PyQt6":  # Explorer's own Qt, absent from a bare Python.
+                    failures.append(f"{path.relative_to(REPO_ROOT)}: {exc!r}")
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{path.relative_to(REPO_ROOT)}: {exc!r}")
+    assert failures == []
+    shared = REPO_ROOT / "amx_a" / "_runtime" / "_amx_common.py"
+    with pytest.raises(NameError):  # It needs the names of the entrypoint that runs it.
+        exec(compile(shared.read_text(encoding="utf-8"), str(shared), "exec"), {"__name__": "_amx_common_alone"})
 
 
 def _leaves_finally(statements: list[ast.stmt]) -> list[int]:
