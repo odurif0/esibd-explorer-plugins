@@ -16,6 +16,7 @@ import importlib.util
 import json
 import math
 from pathlib import Path
+import re
 import shutil
 import threading
 from threading import Event
@@ -332,6 +333,7 @@ class _Settings(SettingsManager):
         scan.notes = str(old_value('Notes', Parameter.VALUE) or '')
         super().updateSettings(items, file)
         scan._place_map_buttons()  # The tree was rebuilt: the map buttons are not settings.
+        scan._free_text_fields()
 
     def requireParentItem(self, name, parentItem):
         # Display-only groups: setting keys (INI sections, HDF5 'MScan/Settings/<key>') stay flat,
@@ -600,6 +602,7 @@ class MScan(Scan):
         self._line = None  # The map line being measured (a request of the map engine), else None.
         self._line_map = None
         self._map_runner = None
+        self._map_bound = {}  # Plan channel name → AMPR output, found at the start of the running map.
         self._map_starting = False  # Start map clicked, its first engine call still running.
         self._map_stop_after_start = False
         super().__init__(**kwargs)
@@ -851,6 +854,19 @@ class MScan(Scan):
         self._place_map_buttons()
         self._unfold_groups()
         self._layout_readonly_fields()
+
+    def _free_text_fields(self):
+        """Notes and file name take the text as typed.
+
+        Explorer's text field strips itself at each keystroke, so a space typed at the end vanished at once
+        (2026-11-19 lab), and drops characters such as é or µ. The notes are free text; the file name is
+        cleaned when it is used (_file_label).
+        """
+        settings = getattr(getattr(self, 'settingsMgr', None), 'settings', {})
+        for key in (self.SCAN_NOTES, self.FILE_LABEL):
+            line = getattr(settings.get(key), 'line', None)
+            if line is not None:
+                line.validateInput = lambda: None  # Called by its textChanged handler.
 
     def _set_map_label(self, label):
         """Label of the Map… button, set as its icon text too: a tool button shows the icon text, from which
@@ -1231,8 +1247,23 @@ class MScan(Scan):
             return False
 
     @staticmethod
-    def _offset_label(channel):
-        return f'{channel.getDevice().name} M{channel.module_address()} CH{channel.channel_number()} — {channel.name}'
+    def _offset_address(channel):
+        """The AMPR output wired to the rods: it stays when the channel is renamed."""
+        return f'{channel.getDevice().name} M{channel.module_address()} CH{channel.channel_number()}'
+
+    @classmethod
+    def _offset_label(cls, channel):
+        return f'{cls._offset_address(channel)} — {channel.name}'
+
+    def _offset_matches(self, selection):
+        """AMPR channels a rod pair selection names: by label or name, else by the address of its label, so the
+        selection follows a channel renamed in the AMPR (2026-11-19 lab). Explorer names cannot hold ' — '."""
+        ampr = [c for c in self.pluginManager.DeviceManager.channels() if self._is_ampr(c)]
+        matches = [c for c in ampr if selection in (self._offset_label(c), c.name)]
+        if not matches and ' — ' in selection:
+            address = selection.split(' — ', 1)[0]
+            matches = [c for c in ampr if self._offset_address(c) == address]
+        return matches
 
     def _offset_changed(self):
         if not self.loading and not self.settingsMgr.loading:
@@ -1245,8 +1276,7 @@ class MScan(Scan):
             selection = str(getattr(self, attr, self.NO_OFFSET)).strip()
             if not selection or selection == self.NO_OFFSET:
                 continue
-            matches = [c for c in self.pluginManager.DeviceManager.channels() if self._is_ampr(c)
-                       and selection in (self._offset_label(c), c.name)]
+            matches = self._offset_matches(selection)
             if len(matches) != 1:
                 raise ScanError(f'Rod pair channel {selection} is unavailable or ambiguous. Check the AMPR channels.')
             sources.append((matches[0], sign))
@@ -1390,7 +1420,9 @@ class MScan(Scan):
     def _offset_pair_observation(self, o):
         c, device, ctrl = o['channel'], o['device'], o['controller']
         self._registered(c)
-        if (c.name != o['name'] or self._plugin(device.name) is not device or device.controller is not ctrl
+        # A rename keeps the channel, its AMPR and its output: the scan goes on (2026-11-19 lab: a new name
+        # for a rod pair channel stopped the scan). The file keeps the name it started with.
+        if (self._plugin(device.name) is not device or device.controller is not ctrl
                 or ctrl.device is not o['backend'] or ctrl._setpoint_cancel is not o['token'] or o['token'].is_set()
                 or not device.isOn() or not ctrl.initialized or not c.enabled or not manual_control(c) or not c.real):
             raise ScanError(f'{o["name"]}: offset source changed or was stopped.')
@@ -1902,6 +1934,9 @@ class MScan(Scan):
                 continue
             choices = [self.NO_OFFSET, *[self._offset_label(c) for c in ampr]]
             selected_offset = str(offset_setting.value)
+            followed = self._offset_matches(selected_offset) if selected_offset not in choices else []
+            if len(followed) == 1:
+                selected_offset = self._offset_label(followed[0])  # renamed in the AMPR: show its new name
             if selected_offset not in choices:
                 choices.append(selected_offset)  # never silently replace a lost selection
             previous = offset_setting.combo.blockSignals(True)
@@ -2114,7 +2149,8 @@ class MScan(Scan):
         plan['detector_interval_ms'] = float(device.interval)
         plan['metadata']['detector'] = dict(
             device=device.name, interval_ms=plan['detector_interval_ms'],
-            modules=[dict(module=c.module_address(), channel=c.name) for c in modules],
+            modules=[dict(module=c.module_address(), channel=c.name, label=str(getattr(c, 'label', '') or '').strip())
+                     for c in modules],
             windows='DMMR time axis, shared by every recorded module; a tick is valid when at least one module '
                     'has a new reading. Each module is averaged over the same windows.')
         if plan['mode'] == self.CONTINUOUS:
@@ -2126,7 +2162,7 @@ class MScan(Scan):
             frequency = None
         plan['metadata']['rf'] = dict(frequency_hz=frequency, duty_percent=self._duty_percent(rows))
         plan['metadata']['software'] = self._software()
-        plan['metadata']['notes'] = str(getattr(self, 'scan_notes', '') or '')
+        plan['metadata']['notes'] = str(getattr(self, 'scan_notes', '') or '').strip()
         plan['context'] = self._context_channels()
         plan['metadata']['context'] = [dict(device=c.getDevice().name, channel=c.name, unit=self._channel_unit(c))
                                        for c in plan['context']]
@@ -3113,9 +3149,25 @@ class MScan(Scan):
         raise ScanError(f'Map detector {name} is not a recorded DMMR module: enable it, or set "detector" in the plan.')
 
     def _map_channel(self, name):
+        """The AMPR channel a plan names (Q1_DC, the entry stub, the channels that follow x).
+
+        A running map finds it by name once, at its start or Resume, then follows its AMPR output: a rename
+        in the AMPR does not stop the map, and a channel given that name later is never driven in its place
+        (user 2026-11-19: a rename is not a reason to stop a map).
+        """
+        running = getattr(getattr(self, '_map_runner', None), 'running', False)
+        address = self._map_bound.get(name) if running else None
+        if address is not None:
+            matches = [c for c in self.pluginManager.DeviceManager.channels()
+                       if self._is_ampr(c) and self._offset_address(c) == address]
+            if len(matches) != 1:
+                raise ScanError(f'{name} ({address}): this AMPR output is no longer a channel; check the AMPR.')
+            return matches[0]
         channel = self.pluginManager.DeviceManager.getChannelByName(name)
         if channel is None or not self._is_ampr(channel):
             raise ScanError(f'{name}: no AMPR channel of that name; set [map.channels] in the plan.')
+        if running:
+            self._map_bound[name] = self._offset_address(channel)
         return channel
 
     def _map_frequency_hz(self):
@@ -3443,6 +3495,7 @@ class MScan(Scan):
             self._queue_completion(lambda: (setattr(self.mapAction, 'state', False), setattr(self, 'map_status', status)))
 
         self._map_starting, self._map_stop_after_start = True, False
+        self._map_bound = {}  # Each start or Resume finds the plan's channels by name.
         self.map_status = 'starting: plan, instrument and map engine'
         self.print('Map starting: the MScan worker answers within seconds, or about 30 s on its first '
                    'launch after an install (antivirus check). Start scan is locked meanwhile.')
@@ -3587,7 +3640,7 @@ class MScan(Scan):
             passes = 1  # Older files: one sweep.
         n = len(x) // passes
         suffix = f' (mean of {passes})' if passes > 1 else ''
-        names = [f'{c.name}{suffix}' for c in outputs]
+        names = [f'{self._legend_name(c)}{suffix}' for c in outputs]
         if [line.get_label() for line in display.extra_lines] != names[1:]:
             for line in display.extra_lines:
                 line.remove()
@@ -3633,6 +3686,19 @@ class MScan(Scan):
         canvas = getattr(getattr(display, 'fig', None), 'canvas', None)
         if hasattr(canvas, 'draw_idle'):
             canvas.draw_idle()  # Redraw even when the file label could not be placed.
+
+    def _legend_name(self, output):
+        """'label (M03)', or 'M03' when the module has no label (user 2026-11-19): the DMMR label as recorded
+        at the start of the scan, so a file keeps the label of its day. Older files name the module only."""
+        modules = (((self._plan or {}).get('metadata') or {}).get('detector') or {}).get('modules') or []
+        record = next((m for m in modules if isinstance(m, dict) and m.get('channel') == output.name), {})
+        try:
+            module = f'M{int(record["module"]):02d}'
+        except (KeyError, TypeError, ValueError):
+            found = re.search(r'M(\d+)$', output.name)
+            module = f'M{int(found.group(1)):02d}' if found else output.name
+        label = str(record.get('label') or '').strip()
+        return f'{label} ({module})' if label else module
 
     def defaultLabelPlot(self):
         if len(self.outputChannels) > 1:
@@ -3682,7 +3748,7 @@ class MScan(Scan):
         if not self._validation:
             return
         with h5py.File(file, 'a') as handle:
-            notes = str(getattr(self, 'scan_notes', '') or '') or self.notes
+            notes = str(getattr(self, 'scan_notes', '') or '').strip() or self.notes
             if notes:
                 handle[self.name].attrs['notes'] = notes
             group = handle[self.name].require_group(self.VALIDATION)
@@ -3839,9 +3905,10 @@ class MScan(Scan):
 passes = PASSES  # the same sweep repeated in this file
 x = np.asarray(inputChannels[0].recordingData)
 n = len(x) // passes
-for output in outputChannels:  # Every recorded DMMR module, in A in the file.
+legend = LEGEND  # 'label (M03)' of each module, as recorded with the scan
+for output, name in zip(outputChannels, legend):  # Every recorded DMMR module, in A in the file.
     y = np.asarray(output.recordingData).reshape(passes, n) * 1e12
-    line, = ax.plot(x[:n], np.nanmean(y, axis=0), marker='.', markersize=4, label=output.name)
+    line, = ax.plot(x[:n], np.nanmean(y, axis=0), marker='.', markersize=4, label=name)
     for single in y if passes > 1 else ():
         ax.plot(x[:n], single, linewidth=.8, alpha=.35, color=line.get_color())
 ax.set_xlabel(AXIS_LABEL)
@@ -3849,4 +3916,5 @@ ax.set_ylabel('Current (pA)')
 if len(outputChannels) > 1 or passes > 1:
     ax.legend()
 plt.show()
-'''.replace('AXIS_LABEL', repr(self._axis_label())).replace('PASSES', str(passes))
+'''.replace('AXIS_LABEL', repr(self._axis_label())).replace('PASSES', str(passes)).replace(
+            'LEGEND', repr([self._legend_name(c) for c in self.outputChannels]))  # Last: labels are free text.

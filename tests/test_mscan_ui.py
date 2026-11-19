@@ -709,9 +709,9 @@ def run(scenario, target, app_holder=None):
     # Only unrelated desktop automation is stubbed; every Explorer/Qt class is real.
     sys.modules['pyautogui'] = ModuleType('pyautogui')
     try:
-        from PyQt6.QtCore import QTimer, QThread, QObject, Qt, QRect, QSignalBlocker
+        from PyQt6.QtCore import QEvent, QTimer, QThread, QObject, Qt, QRect, QSignalBlocker
         from PyQt6.QtTest import QTest
-        from PyQt6.QtGui import QIcon
+        from PyQt6.QtGui import QIcon, QKeyEvent
         from PyQt6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QTreeWidget, QLabel
         from esibd import core, plugins
         import h5py
@@ -867,7 +867,7 @@ def run(scenario, target, app_holder=None):
         second = dmmr.DMMRChannel(detector_device, detector_device.tree)
         detector_device.tree.addTopLevelItem(second)
         detector_device.channels.append(second)
-        second.initGUI({'Name': 'DMMR_M05', 'Module': '5'})
+        second.initGUI({'Name': 'DMMR_M05', 'Module': '5', 'Label': 'Faraday Q4'})
         second.values = core.DynamicNp(max_size=100000)
     detector_device.loading = False
     if scenario.startswith(('dmmr-', 'rate-')):
@@ -2089,14 +2089,15 @@ def run(scenario, target, app_holder=None):
             assert list(scan.display.ms.get_xdata()) == [60., 70., 80.]
             assert scan.display.ms.get_ydata() == pytest.approx(
                 [math_value(v) * 1e12 for v in (60, 70, 80)], rel=1e-6)
-            assert len(scan.display.pass_lines) == 2 and scan.display.ms.get_label() == 'DMMR_M03 (mean of 2)'
+            assert len(scan.display.pass_lines) == 2 and scan.display.ms.get_label() == 'M03 (mean of 2)'
             assert scan.display.pass_lines[1].get_color() == scan.display.ms.get_color()
         if scenario == 'multi-dmmr':
             assert scan.outputChannels[1].recordingData == pytest.approx(2 * scan.outputChannels[0].recordingData, rel=1e-6)
             assert scan._validation['samples'].shape == scan._validation['finite_samples'].shape == (3, 2)
             assert (scan._validation['finite_samples'] > 0).all()
             scan.plot(done=True)
-            assert [line.get_label() for line in (scan.display.ms, *scan.display.extra_lines)] == ['DMMR_M03', 'DMMR_M05']
+            # The module and its DMMR label (user 2026-11-19), not the channel name.
+            assert [line.get_label() for line in (scan.display.ms, *scan.display.extra_lines)] == ['M03', 'Faraday Q4 (M05)']
             assert scan.display.axes[0].get_legend() is not None
             assert scan.display.axes[0].get_ylabel() == 'Current (pA)'
     assert not any('Plot not updated' in str(message) for message in warnings), warnings
@@ -2218,6 +2219,17 @@ def run(scenario, target, app_holder=None):
         assert hw.calls == before_calls
         assert start_button.text() == 'Start scan' and start_button.isEnabled()
     if scenario == 'interface':
+        # Typed as is: 2026-11-19 lab, Explorer's text field dropped a space typed at the end (and drops é).
+        for key in (scan.SCAN_NOTES, scan.FILE_LABEL):
+            line = scan.settingsMgr.settings[key].line
+            line.clear()
+            QTest.keyClicks(line, 'spray 30 nA ')
+            for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):  # QTest types ASCII only.
+                QApplication.sendEvent(line, QKeyEvent(kind, Qt.Key.Key_Eacute, Qt.KeyboardModifier.NoModifier, 'é'))
+            QTest.keyClicks(line, ' ')
+            assert line.text() == 'spray 30 nA é ', (key, line.text())
+        assert scan.scan_notes == 'spray 30 nA é ' and scan._file_label() == 'spray-30-nA-é'
+        scan.scan_notes = scan.file_label = ''
         # A late device/name update must not clear an acquired/loaded spectrum.
         original_channels = list(scan.outputChannels)
         original = scan.outputChannels[0].recordingData.copy()
@@ -2318,7 +2330,8 @@ def run(scenario, target, app_holder=None):
         assert scan.outputChannels[1].recordingData == pytest.approx(
             [2 * math_value(v) for v in (60, 70, 80)], rel=1e-6, abs=1e-20)
         detector_metadata = scan._plan['metadata']['detector']
-        assert detector_metadata['modules'] == [dict(module=3, channel='DMMR_M03'), dict(module=5, channel='DMMR_Renamed')]
+        assert detector_metadata['modules'] == [dict(module=3, channel='DMMR_M03', label=''),
+                                                dict(module=5, channel='DMMR_Renamed', label='')]
         assert detector_metadata['interval_ms'] == detector_device.interval
         scan.saveData(target / 'module-5.mscan.h5')
         with h5py.File(target / 'module-5.mscan.h5') as f:
