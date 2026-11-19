@@ -1,8 +1,8 @@
 # Test dependencies (the plugins themselves only need ESIBD Explorer).
-# The tests run on the lab's Explorer: 1.0.2+od.5 of the fork odurif0/ESIBD-Explorer (Python 3.14,
+# The tests run on the lab's Explorer: 1.0.2+od.6 of the fork odurif0/ESIBD-Explorer (Python 3.14,
 # PyQt6 6.12), with the package versions of its Windows executable.
--c https://raw.githubusercontent.com/odurif0/ESIBD-Explorer/v1.0.2%2Bod.5/tools/windows-build/constraints-windows.txt
-esibd-explorer @ git+https://github.com/odurif0/ESIBD-Explorer@v1.0.2+od.5
+-c https://raw.githubusercontent.com/odurif0/ESIBD-Explorer/v1.0.2%2Bod.6/tools/windows-build/constraints-windows.txt
+esibd-explorer @ git+https://github.com/odurif0/ESIBD-Explorer@v1.0.2+od.6
 pytest
 pandas
 pyserial
