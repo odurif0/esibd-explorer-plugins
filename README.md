@@ -26,7 +26,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.5.18.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.5.19.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -103,10 +103,10 @@ OFF is not contacted, and a normal start keeps every device OFF.
 
 - ESIBD Explorer `1.0.2` on Windows 10 or later (x86-64). No additional Python or Rust
   installation is needed: each plugin folder brings its own worker executable.
-- Recommended: [ESIBD Explorer `1.0.2+od.2`](https://github.com/odurif0/ESIBD-Explorer/releases/tag/v1.0.2%2Bod.2),
+- Recommended: [ESIBD Explorer `1.0.2+od.5`](https://github.com/odurif0/ESIBD-Explorer/releases/tag/v1.0.2%2Bod.5),
   1.0.2 with fixes that long recordings need (no GUI freeze during the hourly save, live plots that
-  do not slow down as the history grows, settings read as UTF-8). Unzip it and start `ESIBD Explorer.exe`;
-  settings and data are kept.
+  do not slow down as the history grows, settings read as UTF-8), on Python 3.14 and Qt 6.12; the
+  plugins are tested with it. Unzip it and start `ESIBD Explorer.exe`; settings and data are kept.
 - Linux x86-64 workers are also supplied for TPG366, MScan and Transmission (glibc 2.35 or later).
 
 ## Notebooks
@@ -116,10 +116,11 @@ They are not part of the release ZIP.
 
 ## Development
 
-Tests run locally (no CI):
+Tests run locally (no CI), on the lab's Explorer: 1.0.2+od.5 of the fork, on Python 3.14 and PyQt6 6.12,
+with the package versions of its Windows executable (`requirements-dev.txt`):
 
 ```bash
-python3 -m venv .venv-explorer && .venv-explorer/bin/pip install -r requirements-dev.txt
+uv venv --python 3.14 .venv-explorer && uv pip install --python .venv-explorer/bin/python -r requirements-dev.txt
 .venv-explorer/bin/python -m pytest -q -m "not slow"      # after a change, before v0.X.Y: a few minutes
 .venv-explorer/bin/python -m pytest -q tests/test_mscan_map.py   # or only the files of the change
 .venv-explorer/bin/python -m pytest -q                    # before v0.X only: 20 to 50 minutes

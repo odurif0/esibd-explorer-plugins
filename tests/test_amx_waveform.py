@@ -9,6 +9,11 @@ def module(request):
     return load_module(request.param)
 
 
+def approx_segments(expected):
+    """One approx per (start, end) segment: pytest 9.2 refuses nested sequences in a single approx."""
+    return [pytest.approx(segment) for segment in expected]
+
+
 def rows_of(module, snapshot=None):
     if hasattr(module, "_amx_hd_output_rows"):
         return module._amx_hd_output_rows(*config273())
@@ -26,7 +31,7 @@ def test_reference_configs_draw_four_square_waves_from_the_reference_edge(module
     vpos_first = [(0.0, half), (2 * half, 3 * half)]
     vneg_first = [(half, 2 * half), (3 * half, 4 * half)]
     for trace, expected in zip(traces, (vpos_first, vneg_first, vpos_first, vneg_first)):
-        assert trace["segments"] == pytest.approx(expected)
+        assert trace["segments"] == approx_segments(expected)
 
 
 def test_changed_registers_static_and_hiz_rows():
@@ -37,8 +42,8 @@ def test_changed_registers_static_and_hiz_rows():
     snapshot["switches"][2]["trigger_config"] = 32
     snapshot["switches"][3]["enable_config"] = 0
     traces = module._amx_waveform_traces(module._amx_output_rows(snapshot))["traces"]
-    assert traces[0]["segments"] == pytest.approx([(0.0, 3.0), (8.0, 11.0)])  # 3 µs Vpos / 5 µs Vneg.
-    assert traces[1]["segments"] == pytest.approx([(3.0, 8.0), (11.0, 16.0)])
+    assert traces[0]["segments"] == approx_segments([(0.0, 3.0), (8.0, 11.0)])  # 3 µs Vpos / 5 µs Vneg.
+    assert traces[1]["segments"] == approx_segments([(3.0, 8.0), (11.0, 16.0)])
     assert traces[2] == {"channel": "CH2", "kind": "level", "high": True, "label": "Vpos (constant)"}
     assert traces[3]["kind"] == "hiz" and "not 0 V" in traces[3]["label"]
 
@@ -49,7 +54,7 @@ def test_a_delayed_pulser_is_drawn_shifted_and_edge_delays_are_not_drawn():
     snapshot["pulsers"][1] = dict(snapshot["pulsers"][0], pulser=1, delay_ticks=57)
     snapshot["switches"][1]["trigger_config"] = 11
     traces = module._amx_waveform_traces(module._amx_output_rows(snapshot))["traces"]
-    assert traces[1]["segments"] == pytest.approx([(0.5, 1.5), (2.5, 3.5)])
+    assert traces[1]["segments"] == approx_segments([(0.5, 1.5), (2.5, 3.5)])
     snapshot["switches"][1]["trigger_delay"]["rise"] = 1
     trace = module._amx_waveform_traces(module._amx_output_rows(snapshot))["traces"][1]
     assert trace["kind"] == "none" and "edge delays" in trace["label"]
