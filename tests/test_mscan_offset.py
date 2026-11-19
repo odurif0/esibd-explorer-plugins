@@ -14,7 +14,7 @@ import h5py
 import numpy as np
 import pytest
 
-from support.mscan import Request, add_offset, run
+from support.mscan import OffsetChannel, Request, add_offset, run
 
 
 def prepare(r, n=3):
@@ -115,6 +115,53 @@ def test_offset_changed_or_failed_outside_the_scan_aborts(mscan_rig, change):
     assert v['status'] == 'error', v
     assert np.isnan(mscan_rig.scan.outputChannels[0].recordingData[1:]).all()
     assert channel.writes == [2., 4.]
+
+
+def test_a_rod_pair_channel_renamed_during_the_scan_does_not_stop_it(mscan_rig):
+    """2026-11-19 lab: a new name given to a rod pair channel in the AMPR stopped the scan ("offset source
+    changed"). The channel, its AMPR and its output are the same: the scan goes on."""
+    channel = add_offset(mscan_rig)
+
+    def pause_hook():
+        mscan_rig.offset.settle()
+        if mscan_rig.current() == 20:
+            channel.name = 'Q2 rod pair 1'
+    mscan_rig.on_pause = pause_hook
+    prepare(mscan_rig)
+    mscan_rig.scan.runScan(lambda: True)
+    v = mscan_rig.scan._validation
+    assert v['status'] == 'completed', v
+    assert channel.writes == [2., 4., 6., 5.]
+
+
+def test_the_rod_pair_selection_follows_a_renamed_channel_by_its_ampr_output(mscan_rig):
+    """The selection names the AMPR output ("AMPR_A M2 CH3 — Q_offset"): renamed, the channel stays selected,
+    and a channel given its former name on another output is never driven in its place."""
+    channel = add_offset(mscan_rig)
+    selection = mscan_rig.scan.offset_channel
+    channel.name = 'Q2 rod pair 1'
+    mscan_rig.all_channels.append(OffsetChannel(mscan_rig.offset.device, module=3, number=1, name='Q_offset'))
+    assert mscan_rig.scan.offset_channel == selection
+    assert mscan_rig.scan._offset_sources() == [(channel, 1.)]
+    assert mscan_rig.scan._prepare()['offsets'][0]['channel'] is channel
+
+
+def test_a_running_map_follows_its_channels_by_their_ampr_output(mscan_rig):
+    """User 2026-11-19: a rename is not a reason to stop a map. Q1_DC, the entry stub and the channels that
+    follow x are found by name at the start (or Resume) of the map, then by their AMPR output."""
+    s = mscan_rig.scan
+    channel = add_offset(mscan_rig)  # Stands for Q1_DC.
+    s._map_bound, s._map_runner = {}, NS(running=True)
+    assert s._map_channel('Q_offset') is channel
+    channel.name = 'Q1 DC'
+    other = OffsetChannel(mscan_rig.offset.device, module=3, number=1, name='Q_offset')
+    mscan_rig.all_channels.append(other)
+    assert s._map_channel('Q_offset') is channel
+    mscan_rig.all_channels.remove(channel)
+    with pytest.raises(mscan_rig.module.ScanError, match='no longer a channel'):
+        s._map_channel('Q_offset')
+    s._map_runner.running = False  # Outside a map, names only.
+    assert s._map_channel('Q_offset') is other
 
 
 @pytest.mark.parametrize(('change', 'message'), [

@@ -94,7 +94,21 @@ def test_one_continuous_settling_duration_at_every_point_and_return(mscan_rig):
     assert times == [s.settling_s] * 4
     assert s._plan['average'] == s.integration_s
     assert s._plan['metadata']['settling_s'] == s.settling_s
-    assert s._plan['metadata']['detector']['modules'] == [dict(module=3, channel='Detector')]
+    assert s._plan['metadata']['detector']['modules'] == [dict(module=3, channel='Detector', label='')]
+
+
+def test_the_legend_names_each_module_by_its_dmmr_label(mscan_rig):
+    """User 2026-11-19: 'label (M03)' in the legend of the MScan plot rather than DMMR_M03, 'M03' without a
+    label. The label is the one recorded at the start of the scan, so a file keeps the label of its day."""
+    s = mscan_rig.scan
+    mscan_rig.detector.label = ' Faraday Q4 '
+    s._plan = s._preflight()
+    assert s._plan['metadata']['detector']['modules'] == [dict(module=3, channel='Detector', label='Faraday Q4')]
+    assert s._legend_name(NS(name='Detector')) == 'Faraday Q4 (M03)'
+    s._plan = {'metadata': {'detector': {'modules': [dict(module=5, channel='DMMR_M05', label='')]}}}
+    # Without a label; then files older than the record (module from the name, else the name).
+    names = [s._legend_name(NS(name=name)) for name in ('DMMR_M05', 'DMMR_M07', 'Former_detector')]
+    assert names == ['M05', 'M07', 'Former_detector']
 
 
 def test_second_pair_resolves_other_psu(mscan_rig):
