@@ -20,7 +20,7 @@ import types
 import pytest
 
 import explorer_host
-from support.qt import fatal_stack
+from support.qt import EXPLORER_QT_ENV, fatal_stack
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,7 +30,7 @@ def test_transmission_runs_in_the_complete_explorer_application(tmp_path):
     version = explorer_host.interpreter_version(python)
     if not explorer_host.is_target(version):
         pytest.skip(f"the complete-application test needs ESIBD Explorer {explorer_host.TARGET_VERSION}; found {version}")
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONUNBUFFERED="1", PYTHONFAULTHANDLER="1",
+    env = dict(os.environ, **EXPLORER_QT_ENV, PYTHONUNBUFFERED="1", PYTHONFAULTHANDLER="1",
                HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "home" / ".config"))
     result = subprocess.run([python, str(Path(__file__)), str(tmp_path)], env=env, text=True, capture_output=True,
                             timeout=300)

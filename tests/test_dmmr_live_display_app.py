@@ -19,6 +19,7 @@ import types
 import pytest
 
 import explorer_host
+from support.qt import EXPLORER_QT_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,7 +28,7 @@ def test_dmmr_axis_reads_pa_and_a_colour_change_keeps_stopped_curves(tmp_path):
     python = os.environ.get("ESIBD_QT_PYTHON", sys.executable)
     if not explorer_host.is_target(explorer_host.interpreter_version(python)):
         pytest.skip(f"needs ESIBD Explorer {explorer_host.TARGET_VERSION}")
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONUNBUFFERED="1",
+    env = dict(os.environ, **EXPLORER_QT_ENV, PYTHONUNBUFFERED="1",
                HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "home" / ".config"))
     result = subprocess.run([python, str(Path(__file__)), str(tmp_path)], env=env, text=True,
                             capture_output=True, timeout=240)

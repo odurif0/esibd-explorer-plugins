@@ -17,7 +17,9 @@ from support.source import entrypoint_code, shared_files
 ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINTS = (ROOT / "amx_a" / "amx_plugin.py", ROOT / "amx_b" / "amx_plugin.py", ROOT / "amx_hd" / "amx_hd_plugin.py")
 SHARED = ROOT / "amx_a" / "_runtime" / "_amx_common.py"
-MODULE_NAMES = {"__file__", "__name__", "__doc__", "__spec__", "__loader__", "__package__", "__builtins__"}
+MODULE_NAMES = {"__file__", "__name__", "__doc__", "__spec__", "__loader__", "__package__", "__builtins__",
+                # Python 3.14 (PEP 649): the compiler's own record of annotations made under a condition
+                "__conditional_annotations__"}
 
 
 def _module_bindings(tree: ast.Module) -> set[str]:

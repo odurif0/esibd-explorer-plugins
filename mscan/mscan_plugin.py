@@ -763,8 +763,8 @@ class MScan(Scan):
             toolTipTrue=self.MAP_STOP_TOOLTIP, iconTrue=self.makeCoreIcon('stop.png'))
         if self.titleBar is not None:
             self.titleBar.removeAction(self.mapAction)
-        self.mapAction.setText('Map…')
-        self.mapAction.toggled.connect(lambda state: self.mapAction.setText('Stop map' if state else 'Map…'))
+        self._set_map_label('Map…')
+        self.mapAction.toggled.connect(lambda state: self._set_map_label('Stop map' if state else 'Map…'))
         self._map_plan_changed()
         self.recordingAction = self.addStateAction(event=self.toggleRecording,
             toolTipFalse='Start the scan.', iconFalse=self.makeCoreIcon('play.png'),
@@ -851,6 +851,12 @@ class MScan(Scan):
         self._place_map_buttons()
         self._unfold_groups()
         self._layout_readonly_fields()
+
+    def _set_map_label(self, label):
+        """Label of the Map… button, set as its icon text too: a tool button shows the icon text, from which
+        Qt 6.12 drops a final "…" (Qt 6.6 kept it), and the ellipsis says the button opens a dialog."""
+        self.mapAction.setText(label)
+        self.mapAction.setIconText(label)
 
     def _place_map_buttons(self):
         """The Map… button in the Map group, between plan and status.

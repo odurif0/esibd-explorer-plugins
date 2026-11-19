@@ -75,6 +75,7 @@ def probe(folder, legacy, output, *, exercise=None):
         setattr(core, name, ns[name])
 
     class Plugin(QtCore.QObject):
+        UTF8 = "utf-8"  # Explorer's Plugin.UTF8: the lab's Explorer (1.0.2+od) reads INI files with it
         def initGUI(self):
             pass
         def finalizeInit(self):

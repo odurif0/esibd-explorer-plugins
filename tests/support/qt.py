@@ -11,6 +11,9 @@ import pytest
 import explorer_host
 
 SKIP = 77  # A probe exits 77 when real PyQt6 or the Explorer sources are unavailable.
+# A real Explorer under test: offscreen, with the Chromium flags esibd.__main__.main sets. Without --disable-gpu,
+# QtWebEngine 6.140 (Qt 6.12) kills a GPU-less process with SIGTRAP in its in-process GPU thread (6.6 did not).
+EXPLORER_QT_ENV = {"QT_QPA_PLATFORM": "offscreen", "QTWEBENGINE_CHROMIUM_FLAGS": "--no-sandbox --disable-gpu"}
 
 
 def fatal_stack(stderr: str) -> str:
@@ -79,7 +82,7 @@ def run_probe(script, *args, timeout: float, scale: str | None = None, env: dict
     ``ESIBD_PROBE_SECOND_RUN=0`` turns the second run off. ``timeout`` bounds a hang, with a floor
     of 60 s: it is not a speed requirement.
     """
-    environment = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONFAULTHANDLER": "1", **(env or {})}
+    environment = {**os.environ, **EXPLORER_QT_ENV, "PYTHONFAULTHANDLER": "1", **(env or {})}
     if scale is not None:
         environment["QT_SCALE_FACTOR"] = scale
     timeout = max(timeout, 60)
