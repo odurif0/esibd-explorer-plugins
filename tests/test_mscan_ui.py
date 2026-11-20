@@ -1075,7 +1075,7 @@ def run(scenario, target, app_holder=None):
     # name (Explorer's Add Item) starts from the fields shown; a renamed or removed name is forgotten.
     import json
     quadrupole = named[scan.QUADRUPOLE]
-    assert scan.quadrupole == 'Q2' and quadrupole.items == ['Q2']
+    assert scan.quadrupole == 'Q2' and quadrupole.items == ['Q2', 'Q4']  # Both always offered.
     scan._refresh_interface()
     def saved():
         return json.loads(scan._quadrupoles_path().read_text(encoding='utf-8'))
@@ -1093,8 +1093,10 @@ def run(scenario, target, app_holder=None):
     assert scan._quadrupole_definition() == q3
     quadrupole.editCurrentItem('Q3 bis')
     assert saved() == {'Q2': q2, 'Q3 bis': q3}
-    quadrupole.removeCurrentItem()
-    assert scan.quadrupole == 'Q2' and scan._quadrupole_definition() == q2 and saved() == {'Q2': q2}
+    quadrupole.removeCurrentItem()  # Q4, chosen then for the first time, keeps the rows shown.
+    assert scan.quadrupole == 'Q4' and saved() == {'Q2': q2, 'Q4': q3}, saved()
+    quadrupole.value = 'Q2'
+    assert scan._quadrupole_definition() == q2
     # A running map keeps its quadrupole: its rows are read-only, also between two of its lines.
     scan._map_runner = NS(running=True)
     scan._refresh_interface()

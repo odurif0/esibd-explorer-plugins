@@ -389,6 +389,7 @@ def test_panel_groups_every_setting_once_without_changing_its_key(mscan_module, 
     assert list(settings)[0] == M.STATUS and M.STATUS not in M.GROUP_OF
     assert [group for group, _ in M.LAYOUT] == [None, 'Live readback', 'Quadrupole', 'Scan', 'File']
     assert M.GROUP_OF[M.QUADRUPOLE] == 'Quadrupole' and list(settings).index(M.QUADRUPOLE) < list(settings).index(M.AMX)
+    assert settings[M.QUADRUPOLE]['items'] == 'Q2,Q4' and settings[M.QUADRUPOLE]['value'] == 'Q2'
     assert {key: M.GROUP_OF[key] for key in M.QUADRUPOLE_FIELDS} == dict.fromkeys(M.QUADRUPOLE_FIELDS, 'Quadrupole')
     assert all('/' not in key for key in settings)
     assert (M.START, M.OFFSET, M.OFFSET_FIXED) == ('Amplitude from (V)', 'Quadrupole offset', 'Fixed offset')

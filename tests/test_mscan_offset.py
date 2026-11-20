@@ -492,3 +492,17 @@ def test_start_warns_when_x_differs_from_the_rods(mscan_rig):
                                          '-9.5 eV per charge during the scan.')
     s.offset_fixed = .5
     assert s._prepare()['x_warning'] is None
+
+
+def test_a_quadrupole_driving_the_rods_of_another_one_is_said_at_start(mscan_rig):
+    """User 2026-11-20: choose between the Q2 and Q4 profiles. The lab's only profile, "Q2", held the Q4 rod pairs:
+    Start says so when the rod pairs bear another quadrupole's name, and a first choice of Q4 finds Q4_DC_1/2."""
+    first, second = two_pairs(mscan_rig)
+    s = mscan_rig.scan
+    s.quadrupole = 'Q2'
+    assert s._prepare()['quadrupole_warning'] is None  # Rods not named after a quadrupole.
+    first.name, second.name = 'Q4_DC_1', 'Q4_DC_2'
+    assert s._prepare()['quadrupole_warning'] == 'Q2 drives Q4_DC_1 and Q4_DC_2: check its rod pairs in Quadrupole.'
+    s.quadrupole = 'q4'
+    assert s._prepare()['quadrupole_warning'] is None
+    assert s._rods_named('Q4') == [first, second] and s._rods_named('Q2') is None
