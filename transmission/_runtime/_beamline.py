@@ -1,7 +1,7 @@
 """Simple beamline description -> optimizer configuration (TOML) for the Transmission GUI.
 
-The description maps each element setting (inlet, funnel, the apertures between
-the chambers, Q1-Q4) to Explorer channels, names the single detector (its current channel and where it sits),
+The description maps each element setting (inlet, funnels 1 and 2, the apertures
+between the chambers, Q1-Q4 and the stubs of Q2 and Q4) to Explorer channels, names the single detector (its current channel and where it sits),
 the electrospray current that must stay stable (30-60 nA by default) and
 optional gauges with soft pressure limits. Windows and steps come from
 defaults per kind of setting, scaled by the exploration level. Amplitudes are
@@ -26,25 +26,34 @@ from __future__ import annotations
 import json
 import math
 
-# key, element, label, kind; in beam order. Aperture k is the plate between two chambers (user, 2026-11-20:
-# they were missing), e.g. Ap_IF_Q1 and Ap_Q1_Q2 on the AMPR.
+# key, element, label, kind; in beam order. User, 2026-11-20: the apertures between the chambers (Ap_IF_Q1,
+# Ap_Q1_Q2… on the AMPR), the second funnel (IF2: Entry, Middle, Exit) and the stubs of Q2 and Q4 were missing.
+# Funnel 1 keeps the keys of the former single funnel, so saved beamlines read the same.
 KNOBS = (
     ("inlet", "Inlet", "Voltage", "inlet"),
-    ("funnel_rf", "Funnel", "RF amplitude", "rf"),
-    ("funnel_dc", "Funnel", "DC gradient", "dc"),
-    ("funnel_exit", "Funnel", "Exit", "offset"),
+    ("funnel_rf", "Funnel 1", "RF amplitude", "rf"),
+    ("funnel_dc", "Funnel 1", "DC gradient", "dc"),
+    ("funnel_exit", "Funnel 1", "Exit", "offset"),
+    ("funnel2_entry", "Funnel 2", "Entry", "offset"),
+    ("funnel2_rf", "Funnel 2", "RF amplitude", "rf"),
+    ("funnel2_dc", "Funnel 2", "DC gradient", "dc"),
+    ("funnel2_exit", "Funnel 2", "Exit", "offset"),
     ("ap1", "Aperture 1", "Funnel → Q1", "aperture"),
     ("q1_offset", "Q1", "Offset", "offset"),
     ("q1_rf", "Q1", "RF amplitude", "rf"),
     ("ap2", "Aperture 2", "Q1 → Q2", "aperture"),
+    ("q2_stub_entry", "Q2", "Entry stub", "offset"),
     ("q2_offset", "Q2", "Offset", "offset"),
     ("q2_rf", "Q2", "RF amplitude", "rf"),
+    ("q2_stub_exit", "Q2", "Exit stub", "offset"),
     ("ap3", "Aperture 3", "Q2 → Q3", "aperture"),
     ("q3_offset", "Q3", "Offset", "offset"),
     ("q3_rf", "Q3", "RF amplitude", "rf"),
     ("ap4", "Aperture 4", "Q3 → Q4", "aperture"),
+    ("q4_stub_entry", "Q4", "Entry stub", "offset"),
     ("q4_offset", "Q4", "Offset", "offset"),
     ("q4_rf", "Q4", "RF amplitude", "rf"),
+    ("q4_stub_exit", "Q4", "Exit stub", "offset"),
 )
 # Where the single detector sits, in beam order: behind aperture k (k = 1..4) or after Q4.
 DETECTOR_POSITIONS = (
@@ -58,14 +67,18 @@ DETECTOR_PLACES = {"A1": "behind aperture 1", "A2": "behind aperture 2", "A3": "
                    "A4": "behind aperture 4", "after_q4": "after Q4"}
 # key, label, knobs, position (index of the aperture closing it; 4 = Q4, before the standard detector).
 # A stage ends with the aperture closing it: a detector behind aperture k also optimizes aperture k.
+# The two funnels share the chambers before aperture 1 (no aperture between them): two stages at position 0,
+# funnel 2 closed by aperture 1. A quadrupole's stubs belong to its stage; the final refinement takes the
+# offsets, funnel exits and apertures that couple the stages.
 STAGES = (
-    ("funnel", "Inlet + funnel", ("inlet", "funnel_rf", "funnel_dc", "funnel_exit", "ap1"), 0),
+    ("funnel", "Inlet + funnel 1", ("inlet", "funnel_rf", "funnel_dc", "funnel_exit"), 0),
+    ("funnel2", "Funnel 2", ("funnel2_entry", "funnel2_rf", "funnel2_dc", "funnel2_exit", "ap1"), 0),
     ("q1", "Q1", ("q1_offset", "q1_rf", "ap2"), 1),
-    ("q2", "Q2", ("q2_offset", "q2_rf", "ap3"), 2),
+    ("q2", "Q2", ("q2_stub_entry", "q2_offset", "q2_rf", "q2_stub_exit", "ap3"), 2),
     ("q3", "Q3", ("q3_offset", "q3_rf", "ap4"), 3),
-    ("q4", "Q4", ("q4_offset", "q4_rf"), 4),
-    ("final", "Final refinement", ("funnel_exit", "ap1", "q1_offset", "ap2", "q2_offset", "ap3", "q3_offset", "ap4",
-                                   "q4_offset"), None),
+    ("q4", "Q4", ("q4_stub_entry", "q4_offset", "q4_rf", "q4_stub_exit"), 4),
+    ("final", "Final refinement", ("funnel_exit", "funnel2_exit", "ap1", "q1_offset", "ap2", "q2_offset", "ap3",
+                                   "q3_offset", "ap4", "q4_offset"), None),
 )
 FILTERS = (("q1", "Q1"), ("q2", "Q2"), ("q3", "Q3"), ("q4", "Q4"))
 FILTER_POSITION = {key: index + 1 for index, (key, _) in enumerate(FILTERS)}
@@ -77,7 +90,7 @@ KIND_DEFAULTS = {"inlet": (20.0, 2.0, False), "dc": (10.0, 1.0, False), "offset"
 KIND = {key: kind for key, _, _, kind in KNOBS}
 LABEL = {key: element if kind == "aperture" else
          f"{element} {label if label.isupper() or label.split()[0].isupper() else label.lower()}"
-         for key, element, label, kind in KNOBS}  # "Q2 RF amplitude", "Funnel DC gradient", "Inlet voltage", "Aperture 1".
+         for key, element, label, kind in KNOBS}  # "Q2 RF amplitude", "Funnel 1 DC gradient", "Q4 exit stub", "Aperture 1".
 RF_KEYS = tuple(key for key, _, _, kind in KNOBS if kind == "rf")
 PAIRS = ("CH0-CH1", "CH2-CH3")  # AMX output pairs, each fed by one PSU: CH0 = Vpos, CH1 = Vneg.
 SPRAY_RANGE_NA = (30.0, 60.0)  # A stable electrospray for the optimization (nA, magnitude).

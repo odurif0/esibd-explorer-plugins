@@ -1,7 +1,8 @@
 # Transmission Plugin
 
-Optimizes the ion transmission through the beamline (inlet, ion funnel, quadrupoles
-Q1–Q4 and the four apertures between their chambers), stage by stage, with a
+Optimizes the ion transmission through the beamline (inlet, two ion funnels,
+quadrupoles Q1–Q4 with the stubs of Q2 and Q4, and the four apertures between their
+chambers), stage by stage, with a
 noise-tolerant surrogate model and verified A/B decisions. It maximizes the current
 of the single detector, for all ions or for one mass selected by a quadrupole.
 
@@ -50,8 +51,10 @@ routine experimental use. These checks do not certify physical shutdown.
 The panel has three steps, then **▶ Optimize**.
 
 1. **Beamline** — **Configure…** once: which channel drives each setting (inlet
-   voltage; funnel RF amplitude, DC gradient and exit; offset and RF amplitude of
-   Q1–Q4; the voltage of the four apertures between the chambers, 1 funnel → Q1,
+   voltage; funnel 1 RF amplitude, DC gradient and exit; funnel 2 entry, RF amplitude,
+   DC gradient and exit, e.g. `Entry_IF2`, `Middle_IF2`, `Exit_IF2`; offset and RF
+   amplitude of Q1–Q4; the entry and exit stubs of Q2 and Q4, e.g. `Stub_Entry_Q2`;
+   the voltage of the four apertures between the chambers, 1 funnel → Q1,
    2 Q1 → Q2, 3 Q2 → Q3, 4 Q3 → Q4, e.g. `Ap_IF_Q1`, `Ap_Q1_Q2`), the **detector** (its current channel and its position), the **spray
    current** (the ESI HV current of the emitter, and its accepted range, 30–60 nA by
    default) and optionally which gauges to watch with their pressure range. The spray
@@ -78,7 +81,7 @@ The panel has three steps, then **▶ Optimize**.
    filter is recognised from MScan's rails) or on a quick sweep of the filter made
    here. The peak position and its half-width are filter amplitudes in volts, as in
    MScan. **The m/z calibration belongs to MScan**; this plugin never converts.
-3. **Stages** — tick the stages to run (Inlet + funnel, Q1, …, Q4, Final
+3. **Stages** — tick the stages to run (Inlet + funnel 1, Funnel 2, Q1, …, Q4, Final
    refinement) and the exploration: **Fine**, **Normal** or **Wide** windows.
 
 The devices driving the settings must be ON, and those measuring the currents and
@@ -132,14 +135,14 @@ The choices are kept in Explorer's configuration folder (`Transmission.beamline.
   run log records the limits of each stage.
 - **Small verified steps.** Every move is split into steps no larger than the setting's
   `max_step`; each step waits until the readback reaches the setpoint.
-- **Beam order.** Stages follow the beam (funnel, Q1, …, Q4), each with the aperture
-  closing it; the final stage refines the coupled offsets and apertures together with
-  finer windows.
+- **Beam order.** Stages follow the beam (funnel 1, funnel 2, Q1, …, Q4), each with the
+  aperture closing it and, for Q2 and Q4, its stubs; the final stage refines the coupled
+  funnel exits, offsets and apertures together with finer windows.
 - **Adopt only what is proven.** A new setting is kept only if paired A/B measurements
   against the stage start show a significant gain; otherwise the stage start is restored.
 
 Default windows (Normal; Fine × 0.4, Wide × 2.5): inlet ±20 V in 2 V steps, DC
-gradient, offsets and apertures ±10 V in 1 V steps, RF amplitudes ±15 % in 2 % steps of their
+gradients, funnel entry and exits, offsets, stubs and apertures ±10 V in 1 V steps, RF amplitudes ±15 % in 2 % steps of their
 start value. The final refinement uses at most the Fine windows.
 
 ## Criterion
@@ -202,7 +205,7 @@ errors; these weight the points of the Gaussian-process model and of the peak fi
 
 The budget is 12 measurements per setting + 16 (8 + 16 for a selected mass, where each
 measurement is a 5-point peak sweep). With the default timings (1 s settling, 2 s
-averaging), the Inlet + funnel stage takes about 4 min for the total ion current and
+averaging), the Inlet + funnel 1 stage takes about 4 min for the total ion current and
 about 15 min for a selected mass.
 
 ## Algorithms
