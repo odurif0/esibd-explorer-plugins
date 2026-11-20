@@ -499,7 +499,7 @@ checks.
 - **Figures** as listed in Section 5 G.
 
 **Built in v0.5.10 (2026-11-04).** The map engine (`native/worker/src/mscan_map.rs`), the line axes
-and the measurement-driven step of the MScan worker, the Map group of MScan and its runner
+and the measurement-driven step of the MScan worker, the Map… button of MScan and its runner
 (`mscan/_runtime/_map_runner.py`), the plan templates (`mscan/plans/`). Differences from the text
 above: the merit uses peak heights; the solver aims at R_target·(1 + r_noise) and a line reaches
 R_target from R_target·(1 − r_noise) (r_noise = 0.10, the scatter of R on one peak); when no setting
@@ -550,7 +550,7 @@ lose nothing, and Resume is the same call as a normal step.
    - PSU_A in Full range with its Ilim;
    - AMPR ON;
    - DMMR recording, TPG366 acquiring, ESI spraying from the syringe.
-2. In MScan, Map group, click **Map…** and choose a new map with a plan (or resume a stopped map).
+2. In MScan, click **Map…** (toolbar, beside Start scan) and choose a new map with a plan (or resume a stopped map).
    Three templates are provided:
    - `q2_P1_2h.toml`: stopping cut and the P1 ladder up to the R_target region (about 2 h);
    - `q2_cycles_6h.toml`: R against the number of RF cycles, ladders at (500 kHz, 12 eV), (500 kHz,

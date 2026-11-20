@@ -39,20 +39,26 @@ routine experimental use. These checks do not certify physical shutdown.
 
 ## Panel
 
-**Status** is the first row, next to **Start scan**: it says **Ready to scan** or why a
-scan cannot start, and a greyed **Start scan** shows the same reason in its tooltip. The
-other rows are in four groups, in the order a scan is prepared:
+The toolbar holds **Start scan** and **Map…**. **Status** is the first row: it says **Ready to
+scan** or why a scan cannot start, and a greyed **Start scan** shows the same reason in its
+tooltip. Once a map has run, **Map** under it gives the map's state. Then:
 
-- **Setup**: AMX, connectors, the PSU they drive, AMX frequency, the recorded DMMR modules
-  and interval, file name, and **Notes**: free text (sample, dilution, conditions) saved with
-  each scan and kept for the next ones until changed.
-- **Amplitude scan**: allowed range and PSU Ilim, mode, amplitudes, timing, duration.
-- **Mass filter**: the AMPR channels of the two rod pairs, k, δ, Minimum U, axis potential
-  x, and a **Preview** of what the scan will apply.
-- **m/z**: the field radius r0, the RF attenuation factor, the plot abscissa (A or m/z) and the m/z
-  range of the scan.
 - **Live readback**: PSU rails, rod pair channels, values restored after completion, samples
-  at the last point.
+  at the last point. Folded until **Start scan** opens it.
+- **Quadrupole**: the quadrupole scanned (**Q2**…) and what belongs to it: AMX and connectors,
+  the two rod pairs (AMPR), r0 and the RF attenuation factor; then, read from the devices, the
+  PSU they drive, the allowed amplitude, the PSU Ilim and the AMX frequency.
+- **Scan**: amplitudes, k, δ, Minimum U, the rod voltage x and a **Preview** of what the scan
+  will apply; mode, timing and duration; the recorded DMMR modules and their interval; the plot
+  abscissa (A or m/z) and the m/z range of the scan.
+- **File**: file name and **Notes**: free text (sample, dilution, conditions) saved with each
+  scan and kept for the next ones until changed.
+
+Each quadrupole name keeps its own AMX, connectors, rod pairs, r0 and RF attenuation (in
+`MScan_quadrupoles.json`, Explorer's configuration folder): choosing another name brings its
+values back, and a change of these rows is kept under the name shown. Right-click
+**Quadrupole** to add a name (it starts from the rows shown), rename or remove one. Each scan
+file records the quadrupole name.
 
 A folded group stays folded when settings are reloaded. Groups and displayed names are
 display only: settings files and HDF5 scans keep the earlier keys, so files written before
@@ -65,15 +71,15 @@ and after this layout read the same. The mass filter rows keep these keys:
 | U/V ratio k | `Offset coefficient` |
 | Resolution δ (V) | `Resolution offset` |
 | Minimum U (V) | `Minimum U` |
-| Axis potential x (V) | `Fixed offset` |
+| Rod voltage x (V) | `Fixed offset` |
 | Live readback → Rod pairs (AMPR) | `Offset readback` |
 
 ## Use
 
 1. Configure the PSU associations in AMX Settings and establish the waveform.
    Turn ON the required PSU rails and AMX. Start DMMR acquisition and recording.
-2. In **Setup**, choose **AMX** (`AMX_A`, `AMX_B` or `AMX_HD`) and one pair of **AMX
-   connectors**: **CH0-CH1** or **CH2-CH3**.
+2. In **Quadrupole**, choose the quadrupole. The first time, set its **AMX** (`AMX_A`, `AMX_B` or
+   `AMX_HD`) and one pair of **AMX connectors**: **CH0-CH1** or **CH2-CH3**.
    **Driven PSU** lists the supply channels swept together; shared outputs are
    identified too. **AMX frequency** comes from the AMX output readback, not
    an assumed oscillator frequency; MScan never changes it. Per-edge compensation delays are allowed
@@ -90,27 +96,28 @@ and after this layout read the same. The mass filter rows keep these keys:
    when two modules share a name, or when the DMMR does not acquire and record.
    **DMMR interval (ms)** edits the live DMMR acquisition/recording setting,
    shared by **all** its modules. It does not change the ADC configuration.
-4. In **Amplitude scan**, set **Amplitude from / to (V)** within **Allowed amplitude (V)**.
-   The voltage range and **PSU Ilim** are the first two rows of the group. **Allowed
-   amplitude** also shows what the PSU can reach now, when that is lower: see *PSU headroom* below.
+4. In **Scan**, set **Amplitude from / to (V)** within **Allowed amplitude (V)** (Quadrupole,
+   with **PSU Ilim**). **Allowed amplitude** also shows what the PSU can reach now, when that is lower: see *PSU headroom* below.
    **After completion** (Live readback) shows each channel's return voltage and live measured
    current, e.g. `PSU_D_CH0: +4 V, Iget 32 mA`.
 5. Choose **Scan mode**: **Step by step** (default), with **Amplitude step (V)**,
    or **Continuous**, with **Sweep rate (V/s)** and **Time step (s)**.
    Set the timing fields shown for that mode, described below.
-6. Optional, in **Mass filter**: **Rod pair 1 (AMPR)** and **Rod pair 2 (AMPR)** select the
+6. Optional: **Rod pair 1 (AMPR)** and **Rod pair 2 (AMPR)** (Quadrupole) select the
    AMPR channels (module and channel) of the two rod pairs; **None** (default)
-   leaves them alone, and only the RF amplitude is swept. During the scan, at every amplitude
+   leaves them alone, and only the RF amplitude is swept. k, δ, Minimum U and x are in **Scan**. During the scan, at every amplitude
    and together with the PSU rails, pair 1 is set to x + U and pair 2 to x − U, with
-   U = max(**Minimum U**, **k** × A − **δ**) and x the **Axis potential**.
-   k defaults to 0.2 (negative swaps the pairs, 0 is RF only), δ and x to 0 V and
-   Minimum U to 0.5 V. Pair 2 alone is refused; pair 1 alone works as before.
+   U = max(**Minimum U**, **k** × A − **δ**) and x the **Rod voltage**.
+   k defaults to 0.2 (negative swaps the pairs, 0 is RF only), δ to 0 V and
+   Minimum U to 0.5 V. With both pairs selected, x takes the mean of their AMPR values
+   whenever these change; a value typed in between holds until then, and Start warns when
+   it differs from the rods (the ion energy then changes during the scan). Pair 2 alone is refused; pair 1 alone works as before.
    **Preview** shows, before Start, U and both pair potentials at Amplitude from and to,
    says when the filter is RF only or when one pair is not driven, warns when k is above the
    apex of an ideal square wave, and estimates m/Δm when k is near it and δ is 0.
    **Rod pairs (AMPR)** in Live readback shows each channel's AMPR Monitor and setpoint;
    during a scan, its target and whether the AMPR confirmed it. See *Mass filter* below.
-7. When **Status** shows **Ready to scan**, click **Start scan** in this panel.
+7. When **Status** shows **Ready to scan**, click **Start scan** in the toolbar of this panel.
    It becomes **Stop scan**. Explorer's general acquisition button starts device
    recording, not the amplitude scan.
 
@@ -133,15 +140,15 @@ setpoints; Stop/error holds the last values. The HDF5 file keeps k (`coefficient
 point the commanded potentials (`offset_target`) and their Monitors (`offset_v`), one column per
 pair; continuous scans also keep them in the raw observations.
 
-Only U, of opposite sign on the two pairs, filters masses. The **axis potential x** is the
-potential of the quadrupole axis, so it sets the ion energy: keep it at the value the rods hold
-outside a scan. k = U/V
+Only U, of opposite sign on the two pairs, filters masses. The **rod voltage x**, mean of the
+two pairs, is the potential of the quadrupole axis, so it sets the ion energy, about Q1_DC − x per charge; by
+default it is the value the rods hold outside a scan. k = U/V
 sets the line in the stability diagram: for an ideal 50 % square wave nothing passes above
 about 0.215, and the resolution m/Δm is about 0.157 / (0.2153 − k), so about 10 at 0.20
 and 30 at 0.21. These values assume that the amplitude on the rods equals A: raise k until
 the signal disappears at k = c to measure the ratio, c / 0.2153. With δ = 0, peaks widen
 in proportion to A; with k at that limit, they keep about the same width, about 6.4 × δ in
-A. δ must stay small: it is not the axis potential, and adding it with the wrong sign closes the
+A. δ must stay small: it is not x, and adding it with the wrong sign closes the
 filter. As on commercial instruments, set k and δ on a light and a heavy known ion: the straight
 line only approaches the ideal curve between them.
 
@@ -398,9 +405,9 @@ Controls are locked until acquisition and saving finish.
 A **map** runs a plan file line by line, with no operator, to find, prove and record the best
 scan of the quadrupole (`docs/quadrupole_optimization_plan.md`). Every line is an ordinary MScan
 scan, started and saved like one from Start, with all of its checks; the decisions belong to the
-MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
+MScan worker (`mscan_map`, no device access). In the panel:
 
-- **Map plan**: the plan of the next map (TOML). Templates in `plans/`, named by content:
+- **Map plan**: the plan of the next map (TOML), chosen in the **Map…** dialog. Templates in `plans/`, named by content:
   `q2_P1_2h.toml` (stopping cut and the P1 ladder, about 3.5 h), `q2_cycles_6h.toml` (R against
   the number of RF cycles: ladders at 500 kHz with E 12 and 5 eV and at 300 kHz with 9.4 eV, about
   8 h), `q2_cycles_frequency_15h.toml` (one night: three numbers of cycles, each at three
@@ -408,12 +415,13 @@ MScan worker (`mscan_map`, no device access). Group **Map** of the panel:
   that follows the reference lines, about 15 h) and `q2_full.toml` (the full map, Ilim at least 330 mA; it lists every key with its default).
   The durations are those Check announces, at 3.6 s per point (2026-11-13). Change a copy, kept outside the plugin folder. Until 2026-11-12 they were
   q2_check_2h, q2_check_6h and q2_map; q2_cycles_6h replaced q2_P1_P5_6h after the 2026-11-12 map.
-- **Map…** (the only map button): a dialog to start a **new map** with a plan (Choose… to pick
+- **Map…** (the only map button, beside **Start scan**): a dialog to start a **new map** with a plan (Choose… to pick
   another) or to **resume** a map that did not complete (the newest is proposed; Choose… for
   another folder). A new map is checked first against the instrument (what to change, lines and
   time, in the console) and starts only if nothing must change. While a map runs, the button is
   **Stop map**. A running map keeps the plan it started with.
-- **Map status**: stage, line, point and what the map waits for; the same in `status.json`. A
+- **Map** (under Status, once a map has run): stage, line, point and what the map waits for; the
+  same in `status.json`. A
   finished map shows when and after how many lines (`stopped at 14:35 after 0 lines: …`).
 
 Before Map…, prepare the instrument as for a scan: AMX HD ON with its RF config (50 % duty,
@@ -581,7 +589,7 @@ one physical pair is explicitly selected; it never silently changes the wiring.
 Old data files, including multiple saved signals,
 remain viewable; every saved signal is plotted. Importing an old settings
 file does not rewrite it. Notes are metadata, not a scan control: a legacy `[Notes]` entry
-is kept as such, and **Notes** in Setup (key `Scan notes`) replaces it in new files when set.
+is kept as such, and **Notes** in File (key `Scan notes`) replaces it in new files when set.
 INI settings are read and written as UTF-8, including files with a Windows BOM;
 module names and saved selections do not depend on the Windows locale.
 

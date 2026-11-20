@@ -48,14 +48,16 @@ def test_default_coefficient_is_0_2(mscan_module, monkeypatch):
     monkeypatch.setattr(mscan_module, 'PARAMETERTYPE', NS(COMBO='COMBO', FLOAT='FLOAT', INT='INT', LABEL='LABEL', TEXT='TEXT'))
     settings = mscan_module.MScan.getDefaultSettings(NS(**{k: getattr(mscan_module.MScan, k) for k in dir(mscan_module.MScan) if k.isupper()},
                                                    _offset_changed=None, _setup_changed=None, _mz_changed=None,
-                                                   _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None, _map_plan_changed=None))
+                                                   _mode_changed=None, estimateScanTime=None, _dmmr_interval_changed=None, _map_plan_changed=None,
+                                                   _quadrupole_changed=None))
     assert settings[mscan_module.MScan.OFFSET_FACTOR]['value'] == .2
     assert settings[mscan_module.MScan.OFFSET_RESOLUTION]['value'] == 0.
     assert settings[mscan_module.MScan.OFFSET_MINIMUM]['value'] == .5
     assert settings[mscan_module.MScan.OFFSET]['value'] == 'None'
     keys = list(settings)
-    assert keys.index(mscan_module.MScan.RATE) < keys.index(mscan_module.MScan.OFFSET) < keys.index(mscan_module.MScan.OFFSET_FACTOR) \
-        < keys.index(mscan_module.MScan.OFFSET_READBACK) < keys.index(mscan_module.MScan.FINAL_VOLTAGES)
+    # Live readings first, the rod pairs with the quadrupole, the filter line with the scan (2026-11-20).
+    assert keys.index(mscan_module.MScan.OFFSET_READBACK) < keys.index(mscan_module.MScan.FINAL_VOLTAGES) \
+        < keys.index(mscan_module.MScan.OFFSET) < keys.index(mscan_module.MScan.OFFSET_FACTOR) < keys.index(mscan_module.MScan.RATE)
 
 
 def test_not_driven_by_default(mscan_rig):
@@ -308,7 +310,7 @@ def test_two_pairs_in_continuous_mode(mscan_continuous):
 
 @pytest.mark.parametrize(('change', 'message'), [
     ('pair-2-alone', 'pair 1'), ('same-channel', 'two different'), ('pair-2-range', 'exceeds allowed'),
-    ('fixed', 'Axis potential x must be finite'), ('resolution-sign', 'Resolution δ'),
+    ('fixed', 'Rod voltage x must be finite'), ('resolution-sign', 'Resolution δ'),
     ('resolution-nan', 'Resolution δ'), ('resolution-range', 'exceeds allowed'),
     ('minimum-zero', 'Minimum U'), ('minimum-nan', 'Minimum U'),
 ])
@@ -429,7 +431,7 @@ def test_the_preview_reports_invalid_settings_instead_of_values(mscan_rig):
     two_pairs(mscan_rig)
     s = mscan_rig.scan
     s.offset_fixed = float('nan')
-    with pytest.raises(mscan_rig.module.ScanError, match='Axis potential x must be finite'):
+    with pytest.raises(mscan_rig.module.ScanError, match='Rod voltage x must be finite'):
         s._filter_preview_text()
     s.offset_fixed, s.offset_factor = 10., float('nan')
     with pytest.raises(mscan_rig.module.ScanError, match='U/V ratio k must be finite'):
@@ -448,3 +450,45 @@ def test_the_rf_attenuation_factor_moves_the_closing_k(mscan_rig):
     assert 'no ion is expected' in s._prepare()['filter_warning']
     s.rf_attenuation = 1.
     assert s._prepare()['filter_warning'] is None
+
+
+def test_x_follows_the_mean_of_the_rod_pairs_until_a_value_is_typed(mscan_rig):
+    """User 2026-11-20: x defaults to the mean of the two rod pairs in the AMPR and stays editable. MScan kept
+    its own x: with the rods at 10 V and x at 0, a scan moved the ions by 10 eV without a word."""
+    first, second = two_pairs(mscan_rig, fixed=0.)  # Rods at 5 and −4 V.
+    s = mscan_rig.scan
+    s._follow_rods()
+    assert s.offset_fixed == .5
+    s.offset_fixed = 12.  # Typed: holds until the rods change.
+    s._follow_rods()
+    assert s.offset_fixed == 12.
+    first.value, second.value = 11., 9.
+    s._follow_rods()
+    assert s.offset_fixed == 10.
+    s.offset_fixed = 3.
+    s.offset_channel_2 = s.NO_OFFSET  # One pair: no mean of the rods, x stays as typed.
+    s._follow_rods()
+    assert s.offset_fixed == 3.
+    s.offset_channel_2 = s._offset_label(second)  # Same rods again: still as typed.
+    s._follow_rods()
+    assert s.offset_fixed == 3.
+    s._map_runner = NS(running=True)  # A map sets x for each line.
+    first.value = 13.
+    s._follow_rods()
+    assert s.offset_fixed == 3.
+    s._map_runner.running = False
+    s._follow_rods()
+    assert s.offset_fixed == 11.
+    s.offset_fixed = 10.
+    first.value, second.value = 12.35, 7.66  # Left at x ± U by a Stop, each rounded by the AMPR.
+    s._follow_rods()
+    assert s.offset_fixed == 10.
+
+
+def test_start_warns_when_x_differs_from_the_rods(mscan_rig):
+    two_pairs(mscan_rig)  # x 10 V, rods at 5 and −4 V.
+    s = mscan_rig.scan
+    assert s._prepare()['x_warning'] == ('x = 10 V, rods at 0.5 V in the AMPR: the ion energy changes by '
+                                         '-9.5 eV per charge during the scan.')
+    s.offset_fixed = .5
+    assert s._prepare()['x_warning'] is None
