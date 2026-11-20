@@ -391,7 +391,7 @@ class MScan(Scan):
     enabled, the DMMR recording; the ESI and TPG366 are read live if present.
     """
     name = 'MScan'
-    version = '0.2.0'
+    version = "0.6.0"
     TITLE = 'msScan — AMX/PSU'
     supportedVersion = '1.0'
     iconFile = 'mscan.png'

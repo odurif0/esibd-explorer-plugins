@@ -447,7 +447,7 @@ class AMXDevice(_AMXDeviceCommon, Device):
     )
 
     name = "AMX_B"
-    version = "0.1.0"
+    version = "0.6.0"
     supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.INPUTDEVICE
     log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.
