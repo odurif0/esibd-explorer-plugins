@@ -8,7 +8,7 @@ Enable the `Sync` plugin in Explorer's Plugin Manager. When installing or updati
 keep the whole `sync/` directory, including `_runtime/`: the entrypoint loads `_runtime/_sync.py` (what
 to copy and when) and `_runtime/_windows.py` (the network account) privately. The plugin imports
 no other plugin and drives no device. Windows only: the copy is made by robocopy, part of
-Windows. MIT license (see `LICENSE`).
+Windows.
 
 ## Panel
 
@@ -19,10 +19,17 @@ Windows. MIT license (see `LICENSE`).
   gives them to the Windows Credential Manager, which uses them for every later copy, as
   `cmdkey /add:hive` does. The password is never written in Explorer's files (`conf` is itself
   copied). Anyone using the same Windows account on this PC then reaches the folder with it:
-  prefer an account limited to that folder. Windows keeps one account per server: if another one
-  is already connected, disconnect it (`net use \\hive\esi /delete`) or log off first.
+  prefer an account limited to that folder. When the folder already opens (Windows already has a
+  connection to the server, for instance from the file explorer), **Connect…** only keeps the
+  account for later sessions: Windows refuses a second connection to a server with an account
+  given explicitly (error 1219), even the same one. It runs in the background: Explorer never
+  waits for the server.
 - **Automatic**: a copy every hour, and one after each new scan file (`.h5` in the data folder,
   outside `logs`), once it is 5 min old.
+- **State**: a light. Green: the network folder opens and the copies are up to date; orange: a
+  copy or a connection is running, or the last copy was incomplete; red: the folder does not open,
+  or the automatic copies stopped; grey: not checked yet. The folder is opened once at start, then
+  every 10 min (one opening, counted in the three attempts below).
 - **Last copy**: when, how many files were copied, how many were left for the next copy, or why
   it failed, in red. After a failure the next automatic attempt waits 10 min.
 - **Three attempts at most**: each copy opens the network folder once, before robocopy and its

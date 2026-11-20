@@ -61,6 +61,10 @@ def test_sync_copies_conf_and_data_in_the_complete_explorer_application(tmp_path
     assert "Automatic copies stopped" in stop["summary"] and "#c53030" in stop["style"]
     assert [w.split(".")[-2].strip() for w in stop["warnings"][:2]] == ["Attempt 1 of 3", "Attempt 2 of 3"], stop
     assert "automatic copies stopped" in stop["warnings"][2] and len(stop["warnings"]) == 3
+    # The state light (user, 2026-11-20): green when the destination opened and the copies are up to date.
+    assert report["light_after_copy"][0] == "ok" and "copies up to date" in report["light_after_copy"][1], report
+    assert "#2f855a" in report["light_style"]
+    assert report["light_stopped"] == ["fault", "Automatic copies stopped: check the account with Connect…, then Copy now."]
     assert report["close_s"] < 10 and "close_error" not in report
 
 
@@ -136,10 +140,15 @@ def main(work):
                     dialog.password.setText(PASSWORD)
                     return QDialog.DialogCode.Accepted
                 module._AccountDialog.exec = fill
-                plugin.connect_account()  # Refused on Linux: no copy starts from it.
+                plugin.connect_account()  # On a thread; refused on Linux (Windows only): no copy starts from it.
+                state.update(phase="connecting", plugin=plugin)
+            elif state["phase"] == "connecting":
+                plugin = state["plugin"]
+                if plugin._connecting:
+                    return
                 report["account"] = plugin.state()["summary"]
                 plugin.copy_button.click()
-                state.update(phase="copying", plugin=plugin, started=time.monotonic())
+                state.update(phase="copying", started=time.monotonic())
             elif state["phase"] == "copying":
                 plugin = state["plugin"]
                 summary = plugin.state()["summary"]
@@ -147,6 +156,9 @@ def main(work):
                     return
                 share = work / "share"
                 report["summary"] = summary
+                plugin._show()
+                report["light_after_copy"] = list(plugin.light_state())
+                report["light_style"] = plugin.light.styleSheet()
                 report["copied"] = sorted(p.relative_to(share).as_posix() for p in share.rglob("*") if p.is_file())
                 report["state"] = json.loads((Path(manager.Settings.configPath) / "Sync.json").read_text(encoding="utf-8"))
                 log = Path(manager.Settings.dataPath) / "logs" / "sync" / "sync.log"
@@ -163,6 +175,7 @@ def main(work):
                 warnings = list(plugin._warnings)
                 plugin._show()
                 after = plugin.state()
+                report["light_stopped"] = list(plugin.light_state())
                 report["stop"] = dict(failures=after["failures"], stopped=after["stopped"], summary=after["summary"],
                                       warnings=warnings, left=len(plugin._warnings), style=plugin.status.styleSheet(),
                                       log=len(log.read_text(encoding="utf-8").splitlines()))

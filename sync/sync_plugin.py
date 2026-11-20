@@ -20,7 +20,7 @@ from collections import deque
 from threading import Event, Lock, Thread
 import time
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QVBoxLayout)
 
@@ -94,16 +94,21 @@ class Sync(Plugin):
 
     name = "Sync"
     pluginType = PLUGINTYPE.CONTROL
-    version = "0.1.0"
+    version = "0.6.0"
     supportedVersion = "1.0"
     iconFile = "sync.png"
     STATE_FILE = "Sync.json"
     # failures/stopped: the destination did not open that many times in a row; after MAX_ATTEMPTS the automatic
     # copies stop until Connect… or Copy now succeeds. Kept in the file, so restarting Explorer does not retry.
     DEFAULTS = dict(destination="\\\\hive\\esi", account="", automatic=True, last=None, summary="No copy yet.",
-                    failures=0, stopped=False)
+                    failures=0, stopped=False, last_ok=None)
     CHECK_S = 60.0  # The background thread looks every minute whether a copy is due.
     RETRY_S = 600.0  # After a failed copy, the next automatic attempt waits this long.
+    # The state light (user, 2026-11-20): the destination is opened once at start, then every PROBE_S, like a copy
+    # (one opening, counted in the MAX_ATTEMPTS that protect the account).
+    PROBE_S = 600.0
+    FIRST_CHECK_S = 5.0
+    LIGHTS = {"ok": "#2f855a", "busy": "#dd6b20", "fault": "#c53030", "unknown": "#718096"}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -118,6 +123,11 @@ class Sync(Plugin):
         self._thread = None
         self._timer = None
         self._warnings = deque()  # From the copy thread, printed by the GUI.
+        self._connecting = False
+        self._connector = None
+        self._checked_at = None  # Last opening of the destination (copy or check), and its outcome.
+        self._reachable = None
+        self._unreachable_reason = ""
 
     # ---------------------------------------------------------------- state
     def _state_path(self):
@@ -172,6 +182,14 @@ class Sync(Plugin):
         self.automatic.setChecked(bool(state["automatic"]))
         self.automatic.toggled.connect(lambda checked: self._save_state(automatic=bool(checked)))
         form.addRow("Automatic", self.automatic)
+        state_row = QHBoxLayout()
+        self.light = QLabel()
+        self.light.setFixedSize(12, 12)
+        self.state_text = QLabel("Not checked yet.")
+        self.state_text.setWordWrap(True)
+        state_row.addWidget(self.light, 0, Qt.AlignmentFlag.AlignVCenter)
+        state_row.addWidget(self.state_text, 1)
+        form.addRow("State", state_row)
         self.status = QLabel(state["summary"])
         self.status.setWordWrap(True)
         form.addRow("Last copy", self.status)
@@ -201,7 +219,31 @@ class Sync(Plugin):
         style = "color: #c53030;" if state["failures"] and not self._copying else ""
         if self.status.styleSheet() != style:
             self.status.setStyleSheet(style)
+        light, words = self.light_state()
+        style = f"background-color: {self.LIGHTS[light]}; border-radius: 6px;"
+        if self.light.styleSheet() != style:
+            self.light.setStyleSheet(style)
+            self.light.setToolTip(light)
+        if self.state_text.text() != words:
+            self.state_text.setText(words)
         self.copy_button.setEnabled(not self._copying)
+        self.connect_button.setEnabled(not self._connecting)
+
+    def light_state(self):
+        """(light, words): ok, busy (copying, or the last copy incomplete), fault or unknown."""
+        state = self.state()
+        when = time.strftime("%H:%M", time.localtime(self._checked_at)) if self._checked_at else ""
+        if self._copying or self._connecting:
+            return "busy", "Copying…" if self._copying else "Connecting…"
+        if state["stopped"]:
+            return "fault", "Automatic copies stopped: check the account with Connect…, then Copy now."
+        if self._reachable is None:
+            return "unknown", "Not checked yet."
+        if not self._reachable:
+            return "fault", f"Destination not reachable ({when}): {self._unreachable_reason}"
+        if state["last_ok"] is False:
+            return "busy", f"Destination reachable ({when}); the last copy was incomplete."
+        return "ok", f"Destination reachable ({when}); copies up to date."
 
     def connect_account(self):
         share = self.destination.text().strip()
@@ -210,20 +252,37 @@ class Sync(Plugin):
             return
         account, password, keep = dialog.account.text().strip(), dialog.password.text(), dialog.remember.isChecked()
         dialog.password.clear()
+        self._save_state(destination=share)
+        self._connecting = True  # On a thread: a server slow to answer never freezes Explorer.
+        self._connector = Thread(target=self._connect, args=(share, account, password, keep), name="Sync connect",
+                                 daemon=True)
+        self._connector.start()
+
+    def _connect(self, share, account, password, keep):
+        """Open the share with the account, unless it already opens; keep the account in Windows.
+
+        2026-11-20 lab: Windows already had a session with hive (opened in the file explorer); a second connection
+        with an explicit account is refused (1219) even for the same account, while the copies went through.
+        """
         try:
-            _windows.connect(share, account, password)
+            already = _sync.reach(share) is None
+            if not already:
+                _windows.connect(share, account, password)
             if keep:
                 _windows.remember(share, account, password)
         except _windows.AccountError as exc:
-            self.print(f"{share}: {exc}", flag=PRINT.WARNING)
+            self._warnings.append(f"{share}: {exc}")
             self._save_state(summary=f"Not connected: {exc}.")
             return
         finally:
             password = None  # noqa: F841 - dropped as soon as Windows has it
+            self._connecting = False
+        note = " (Windows already had a connection)" if already else ""
         self._save_state(account=account, failures=0, stopped=False,
-                         summary=f"Connected to {share} as {account or 'the Windows account'}.")
-        self.account.setText(account or "Windows account")
-        self.copy_now()
+                         summary=f"Connected to {share} as {account or 'the Windows account'}{note}.")
+        self._reachable, self._checked_at = True, time.time()
+        self._forced = True
+        self._wake.set()
 
     def copy_now(self):
         self._save_state(destination=self.destination.text().strip())
@@ -236,8 +295,10 @@ class Sync(Plugin):
         return {"conf": str(settings.configPath), "data": str(settings.dataPath)}
 
     def _loop(self):
+        first = True
         while not self._stop.is_set():
-            self._wake.wait(self.CHECK_S)
+            self._wake.wait(self.FIRST_CHECK_S if first else self.CHECK_S)
+            first = False
             self._wake.clear()
             if self._stop.is_set():
                 break
@@ -250,15 +311,39 @@ class Sync(Plugin):
 
     def _maybe_copy(self, forced):
         state, now = self.state(), time.time()
-        if not forced:
-            if (not state["automatic"] or state["stopped"]
-                    or (self._failed_at is not None and now - self._failed_at < self.RETRY_S)):
-                return
+        if forced:
+            self._copy(state["destination"])
+            return
+        if state["stopped"] or (self._failed_at is not None and now - self._failed_at < self.RETRY_S):
+            return
+        if state["automatic"]:
             sources = self._sources()
             scan = _sync.newest_scan(sources["data"]) if os.path.isdir(sources["data"]) else None
-            if not _sync.due(now, state["last"], scan, settle_s=self.settle_s):
+            if _sync.due(now, state["last"], scan, settle_s=self.settle_s):
+                self._copy(state["destination"])
                 return
-        self._copy(state["destination"])
+        if self._checked_at is None or now - self._checked_at >= self.PROBE_S:
+            self._check(state["destination"])
+
+    def _check(self, destination):
+        """Open the destination once for the state light; a failure counts like a copy that could not start."""
+        reason = _sync.reach(destination)
+        self._checked_at = time.time()
+        if reason is None:
+            self._reachable = True
+            if self.state()["failures"]:
+                self._save_state(failures=0, stopped=False)
+            return
+        self._seen_unreachable(_sync.Result(self._checked_at, 0, 0, (f"Cannot open {destination}: {reason}.",),
+                                            unreachable=True), destination)
+
+    def _seen_unreachable(self, result, destination):
+        self._reachable, self._unreachable_reason = False, " ".join(result.problems)
+        self._failed_at = time.time()
+        failures, stopped, warning = _sync.after_copy(self.state()["failures"], result, destination)
+        self._save_state(failures=failures, stopped=stopped)
+        if warning:
+            self._warnings.append(warning)
 
     def _copy(self, destination):
         self._copying, self._cancel = True, Event()
@@ -267,16 +352,21 @@ class Sync(Plugin):
                                 cancel=self._cancel, settle_s=self.settle_s)
         finally:
             self._copying = False
+        self._checked_at = time.time()
         failures, stopped, warning = _sync.after_copy(self.state()["failures"], result, destination)
         summary = result.summary()
         if stopped:
             summary += " Automatic copies stopped: check the account with Connect…, then Copy now."
         if result.ok:
-            self._failed_at = None
-            self._save_state(last=result.started, summary=summary, failures=0, stopped=False)
+            self._failed_at, self._reachable = None, True
+            self._save_state(last=result.started, summary=summary, failures=0, stopped=False, last_ok=True)
+        elif result.unreachable:
+            self._save_state(summary=summary)
+            self._seen_unreachable(result, destination)
+            warning = None  # Given by _seen_unreachable.
         else:
-            self._failed_at = time.time()
-            self._save_state(summary=summary, failures=failures, stopped=stopped)
+            self._failed_at, self._reachable = time.time(), True
+            self._save_state(summary=summary, failures=0, stopped=False, last_ok=False)
         if warning:
             self._warnings.append(warning)
         self._log(destination, result)
