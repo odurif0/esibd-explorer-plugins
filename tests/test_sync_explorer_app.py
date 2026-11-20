@@ -56,6 +56,11 @@ def test_sync_copies_conf_and_data_in_the_complete_explorer_application(tmp_path
     assert state["destination"] == str(tmp_path / "share") and state["last"] and state["automatic"] is True
     assert report["log"][-1].split()[2] == "OK" and len(report["log"]) == 1, report["log"]
     assert not report["password_found"], report["password_found"]  # Never in a file of Explorer.
+    stop = report["stop"]  # Side note 2026-11-20, user: three attempts and a warning.
+    assert (stop["failures"], stop["stopped"], stop["log"], stop["left"]) == (3, True, 4, 0), stop
+    assert "Automatic copies stopped" in stop["summary"] and "#c53030" in stop["style"]
+    assert [w.split(".")[-2].strip() for w in stop["warnings"][:2]] == ["Attempt 1 of 3", "Attempt 2 of 3"], stop
+    assert "automatic copies stopped" in stop["warnings"][2] and len(stop["warnings"]) == 3
     assert report["close_s"] < 10 and "close_error" not in report
 
 
@@ -122,6 +127,7 @@ def main(work):
                 write(data / "MScan" / "2026-11-20" / "live.h5", age_s=5)  # Being written: left for later.
                 write(data / "logs" / "test" / "now.jsonl", age_s=1)  # A log: copied even while written.
                 plugin.runner = fake_robocopy
+                (work / "share").mkdir()
                 plugin.destination.setText(str(work / "share"))
                 plugin.destination.editingFinished.emit()
 
@@ -147,6 +153,19 @@ def main(work):
                 report["log"] = log.read_text(encoding="utf-8").splitlines()
                 report["password_found"] = [str(p) for p in home.rglob("*") if p.is_file() and p.stat().st_size < 5e7
                                             and PASSWORD.encode() in p.read_bytes()]
+                # A destination that does not open (a changed password): three automatic attempts, then they stop.
+                plugin.destination.setText(str(work / "missing"))
+                plugin.destination.editingFinished.emit()
+                plugin._save_state(last=None)  # Due at once.
+                for _ in range(4):
+                    plugin._failed_at = None  # The 10 min between automatic attempts, skipped here.
+                    plugin._maybe_copy(False)
+                warnings = list(plugin._warnings)
+                plugin._show()
+                after = plugin.state()
+                report["stop"] = dict(failures=after["failures"], stopped=after["stopped"], summary=after["summary"],
+                                      warnings=warnings, left=len(plugin._warnings), style=plugin.status.styleSheet(),
+                                      log=len(log.read_text(encoding="utf-8").splitlines()))
                 plugin.raiseDock(True)
                 app.processEvents()
                 window.grab().save(str(work / "explorer.png"))

@@ -31,6 +31,10 @@ LOG_SUFFIXES = (".log", ".jsonl")  # Copied at every copy by copy_logs, never by
 LOG_ERRORS_SHOWN = 3
 FAILED = 8  # robocopy exit codes: below 8 every file was copied or skipped as intended; 8 and above, failures.
 UNREACHABLE = 16  # robocopy: a serious error, no file copied (destination unreachable or refused).
+# A stale password retried without end can lock the account (side note 2026-11-20): each copy opens the
+# destination once, before robocopy and its retries, and the automatic copies stop after this many failures in a
+# row (user: 3 attempts and a warning).
+MAX_ATTEMPTS = 3
 TAIL_LINES = 6  # Lines of robocopy output kept in a failure message.
 
 
@@ -42,6 +46,7 @@ class Result:
     copied: int
     deferred: int
     problems: tuple[str, ...]
+    unreachable: bool = False  # The destination did not open (account, password, network): nothing was tried.
 
     @property
     def ok(self) -> bool:
@@ -173,10 +178,38 @@ def run_robocopy(arguments: list[str], cancel) -> tuple[int, str]:
     return process.returncode, output.decode(encoding, errors="replace")
 
 
+def reach(destination: str) -> str | None:
+    """Open the destination once (Windows sends the account once); None when it opens, else why not."""
+    try:
+        os.stat(destination)
+    except OSError as exc:
+        code = getattr(exc, "winerror", None)
+        return f"{exc.strerror or exc}" + (f" (Windows error {code})" if code else "")
+    return None if os.path.isdir(destination) else "not a folder"
+
+
+def after_copy(failures: int, result: Result, destination: str) -> tuple[int, bool, str | None]:
+    """(failures in a row, automatic copies stopped, warning) after a copy.
+
+    Only a destination that did not open counts: the account may be wrong, and retrying it could lock it.
+    """
+    if not result.unreachable:
+        return 0, False, None if result.ok else f"Copy to {destination} incomplete: {' '.join(result.problems)}"
+    failures += 1
+    reason = " ".join(result.problems)
+    if failures >= MAX_ATTEMPTS:
+        return failures, True, (f"{reason} {failures} failed attempts in a row: automatic copies stopped, so that a "
+                                "wrong password cannot lock the account. Check it with Connect…, then Copy now.")
+    return failures, False, f"{reason} Attempt {failures} of {MAX_ATTEMPTS}."
+
+
 def copy(sources: dict[str, str], destination: str, computer: str, *, runner=run_robocopy, cancel=None,
          now: float | None = None, settle_s: float = SETTLE_S) -> Result:
     """Copy each source folder to <destination>\\<computer>\\<folder>."""
     started = time.time() if now is None else now
+    reason = reach(destination)
+    if reason is not None:
+        return Result(started, 0, 0, (f"Cannot open {destination}: {reason}.",), unreachable=True)
     copied, deferred, problems = 0, 0, []
     for folder, source in sources.items():
         if not source or not os.path.isdir(source):

@@ -43,6 +43,7 @@ def test_the_command_copies_new_files_and_never_deletes():
 
 def test_conf_and_data_are_copied_one_way_leaving_files_being_written(tmp_path):
     conf, data, share = tmp_path / "conf", tmp_path / "data", tmp_path / "share"
+    share.mkdir()  # The network folder exists; <PC name>\conf and \data are made by the copy.
     write(conf / "MScan.ini")
     write(data / "MScan" / "2026-11-20" / "scan.h5")
     write(data / "MScan" / "__pycache__" / "x.pyc")
@@ -90,12 +91,37 @@ def test_a_failed_copy_says_why_with_the_end_of_the_robocopy_output(tmp_path):
 
     def unreachable(arguments, cancel):
         return 16, "2026/11/20 16:00:00 ERROR 53 (0x00000035) Accessing Destination Directory \\\\hive\\esi\\\nThe network path was not found."
-    result = sync.copy({"conf": str(conf), "data": str(tmp_path / "missing")}, r"\\hive\esi", "LABPC", runner=unreachable)
-    assert not result.ok
+    share = tmp_path / "share"
+    share.mkdir()  # Opened, then lost by robocopy.
+    result = sync.copy({"conf": str(conf), "data": str(tmp_path / "missing")}, str(share), "LABPC", runner=unreachable)
+    assert not result.ok and not result.unreachable
     assert result.problems[0].startswith("conf: robocopy 16: 2026/11/20 16:00:00 ERROR 53")
     assert "The network path was not found." in result.problems[0]
     assert result.problems[1].startswith("data: ") and result.problems[1].endswith("not found.")
     assert not any("logs" in problem for problem in result.problems)  # Unreachable: no log tried one by one.
+
+
+def test_a_destination_that_does_not_open_is_tried_once_and_three_times_at_most(tmp_path):
+    """Side note 2026-11-20: after a password change, retries with the former one can lock the account. User: three
+    attempts and a warning. Each copy opens the destination once, without robocopy and its retries."""
+    conf = tmp_path / "conf"
+    write(conf / "a.ini")
+
+    def never(arguments, cancel):
+        raise AssertionError("robocopy started on a destination that does not open")
+    missing = str(tmp_path / "hive" / "esi")
+    result = sync.copy({"conf": str(conf)}, missing, "LABPC", runner=never)
+    assert result.unreachable and not result.ok and result.problems[0].startswith(f"Cannot open {missing}: ")
+    failures, warnings = 0, []
+    for _ in range(3):
+        failures, stopped, warning = sync.after_copy(failures, result, missing)
+        warnings.append(warning)
+    assert (failures, stopped) == (3, True)
+    assert warnings[0].endswith("Attempt 1 of 3.") and warnings[1].endswith("Attempt 2 of 3.")
+    assert "automatic copies stopped" in warnings[2] and "Connect…" in warnings[2]
+    opened = sync.Result(result.started, 0, 0, ("conf: robocopy 8: ERROR 32",))  # Opened: the account is fine.
+    assert sync.after_copy(3, opened, missing) == (0, False, f"Copy to {missing} incomplete: conf: robocopy 8: ERROR 32")
+    assert sync.after_copy(2, sync.Result(result.started, 3, 0, ()), missing) == (0, False, None)
 
 
 def test_a_copy_is_due_every_hour_and_once_a_new_scan_file_has_settled():

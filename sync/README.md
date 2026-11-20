@@ -24,7 +24,13 @@ Windows. MIT license (see `LICENSE`).
 - **Automatic**: a copy every hour, and one after each new scan file (`.h5` in the data folder,
   outside `logs`), once it is 5 min old.
 - **Last copy**: when, how many files were copied, how many were left for the next copy, or why
-  it failed. After a failure the next automatic attempt waits 10 min.
+  it failed, in red. After a failure the next automatic attempt waits 10 min.
+- **Three attempts at most**: each copy opens the network folder once, before robocopy and its
+  retries. If it does not open (a changed password, the network), a warning is shown each time,
+  and after 3 failures in a row the automatic copies stop, so that a stale password cannot lock
+  the account. They start again after a successful **Connect…** or **Copy now**. The count is kept
+  in `conf/Sync.json`: restarting Explorer does not retry. After a password change, use
+  **Connect…** again.
 - **Copy now**: a copy at once.
 
 ## What is copied

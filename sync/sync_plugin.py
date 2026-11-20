@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from collections import deque
 from threading import Event, Lock, Thread
 import time
 
@@ -97,7 +98,10 @@ class Sync(Plugin):
     supportedVersion = "1.0"
     iconFile = "sync.png"
     STATE_FILE = "Sync.json"
-    DEFAULTS = dict(destination="\\\\hive\\esi", account="", automatic=True, last=None, summary="No copy yet.")
+    # failures/stopped: the destination did not open that many times in a row; after MAX_ATTEMPTS the automatic
+    # copies stop until Connect… or Copy now succeeds. Kept in the file, so restarting Explorer does not retry.
+    DEFAULTS = dict(destination="\\\\hive\\esi", account="", automatic=True, last=None, summary="No copy yet.",
+                    failures=0, stopped=False)
     CHECK_S = 60.0  # The background thread looks every minute whether a copy is due.
     RETRY_S = 600.0  # After a failed copy, the next automatic attempt waits this long.
 
@@ -113,6 +117,7 @@ class Sync(Plugin):
         self._failed_at = None
         self._thread = None
         self._timer = None
+        self._warnings = deque()  # From the copy thread, printed by the GUI.
 
     # ---------------------------------------------------------------- state
     def _state_path(self):
@@ -187,10 +192,15 @@ class Sync(Plugin):
         self._thread.start()
 
     def _show(self):
+        while self._warnings:
+            self.print(self._warnings.popleft(), flag=PRINT.WARNING)
         state = self.state()
         text = "Copying…" if self._copying else state["summary"]
         if self.status.text() != text:
             self.status.setText(text)
+        style = "color: #c53030;" if state["failures"] and not self._copying else ""
+        if self.status.styleSheet() != style:
+            self.status.setStyleSheet(style)
         self.copy_button.setEnabled(not self._copying)
 
     def connect_account(self):
@@ -210,7 +220,8 @@ class Sync(Plugin):
             return
         finally:
             password = None  # noqa: F841 - dropped as soon as Windows has it
-        self._save_state(account=account, summary=f"Connected to {share} as {account or 'the Windows account'}.")
+        self._save_state(account=account, failures=0, stopped=False,
+                         summary=f"Connected to {share} as {account or 'the Windows account'}.")
         self.account.setText(account or "Windows account")
         self.copy_now()
 
@@ -240,7 +251,8 @@ class Sync(Plugin):
     def _maybe_copy(self, forced):
         state, now = self.state(), time.time()
         if not forced:
-            if not state["automatic"] or (self._failed_at is not None and now - self._failed_at < self.RETRY_S):
+            if (not state["automatic"] or state["stopped"]
+                    or (self._failed_at is not None and now - self._failed_at < self.RETRY_S)):
                 return
             sources = self._sources()
             scan = _sync.newest_scan(sources["data"]) if os.path.isdir(sources["data"]) else None
@@ -255,12 +267,18 @@ class Sync(Plugin):
                                 cancel=self._cancel, settle_s=self.settle_s)
         finally:
             self._copying = False
+        failures, stopped, warning = _sync.after_copy(self.state()["failures"], result, destination)
+        summary = result.summary()
+        if stopped:
+            summary += " Automatic copies stopped: check the account with Connect…, then Copy now."
         if result.ok:
             self._failed_at = None
-            self._save_state(last=result.started, summary=result.summary())
+            self._save_state(last=result.started, summary=summary, failures=0, stopped=False)
         else:
             self._failed_at = time.time()
-            self._save_state(summary=result.summary())
+            self._save_state(summary=summary, failures=failures, stopped=stopped)
+        if warning:
+            self._warnings.append(warning)
         self._log(destination, result)
         return result
 
