@@ -323,6 +323,10 @@ class _Settings(SettingsManager):
                     if field in item and item[field] not in scan.PAIRS:
                         item[field] = scan.NO_PAIR
                 item[Parameter.ITEMS] = ','.join([scan.NO_PAIR, *scan.PAIRS])
+            if key == scan.QUADRUPOLE:
+                # Q2 and Q4 stay offered with the names the operator added.
+                names = [n.strip() for n in str(item.get(Parameter.ITEMS) or '').split(',') if n.strip()]
+                item[Parameter.ITEMS] = ','.join(dict.fromkeys([*scan.QUADRUPOLES, *names, str(item[Parameter.VALUE])]))
             if key in (scan.AMX, scan.OFFSET, scan.OFFSET_2):
                 # Keep missing selections explicit, without phantom old choices.
                 if key in (scan.OFFSET, scan.OFFSET_2):
@@ -429,6 +433,7 @@ class MScan(Scan):
     # The quadrupole scanned (user, 2026-11-20: "in MScan one chooses a quadrupole"): each name keeps its AMX
     # output, rod pairs, r0 and RF attenuation, in <config>/MScan_quadrupoles.json.
     QUADRUPOLE = 'Quadrupole'
+    QUADRUPOLES = ('Q2', 'Q4')  # Always offered (user, 2026-11-20: "choisir entre le profil Q2 et Q4").
     QUADRUPOLES_FILE = 'MScan_quadrupoles.json'
     LIVE_GROUP = 'Live readback'
     # Devices whose channels are recorded with each point, as the beam conditions of the scan
@@ -626,7 +631,7 @@ class MScan(Scan):
         settings[self.MODULES] = parameterDict(value='No DMMR module enabled', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
             toolTip='Every enabled DMMR current module is recorded; enable modules in the DMMR plugin.')
-        settings[self.QUADRUPOLE] = parameterDict(value='Q2', items='Q2', parameterType=PARAMETERTYPE.COMBO,
+        settings[self.QUADRUPOLE] = parameterDict(value='Q2', items=','.join(self.QUADRUPOLES), parameterType=PARAMETERTYPE.COMBO,
             fixedItems=False, attr='quadrupole', event=self._quadrupole_changed,
             toolTip='The quadrupole scanned. Each one keeps its AMX output, rod pairs, r0 and RF attenuation, '
                     'set below. Right-click "Quadrupole" to add, rename or remove one.')
@@ -1371,9 +1376,35 @@ class MScan(Scan):
             del definitions[gone]
         if name in definitions:
             self._apply_quadrupole(definitions[name])
+        else:
+            rods = self._rods_named(name)
+            if rods:  # A first choice keeps the rows shown, with the rod pairs named after it (Q4_DC_1, Q4_DC_2).
+                self._apply_quadrupole({self.OFFSET: self._offset_label(rods[0]), self.OFFSET_2: self._offset_label(rods[1])})
         definitions[name] = self._quadrupole_definition()
         self._save_quadrupoles()
         self._setup_changed()
+
+    def _rods_named(self, name):
+        """The AMPR channels <name>_DC_1 and <name>_DC_2, or None."""
+        ampr = [c for c in self.pluginManager.DeviceManager.channels() if self._is_ampr(c)]
+        rods = []
+        for suffix in ('_DC_1', '_DC_2'):
+            matches = [c for c in ampr if c.name.strip().lower() == f'{name}{suffix}'.lower()]
+            if len(matches) != 1:
+                return None
+            rods.append(matches[0])
+        return rods
+
+    def _quadrupole_warning(self, offsets):
+        """The rod pairs named after another quadrupole (Q4_DC_1 driven as Q2): a profile left as it was."""
+        name = str(getattr(self, 'quadrupole', '') or '').strip()
+        if not re.fullmatch(r'Q\d+', name, re.IGNORECASE):
+            return None
+        others = [o['name'] for o in offsets
+                  if (found := re.match(r'(Q\d+)_', o['name'], re.IGNORECASE)) and found.group(1).upper() != name.upper()]
+        if not others:
+            return None
+        return f'{name} drives {" and ".join(others)}: check its rod pairs in Quadrupole.'
 
     def _apply_quadrupole(self, definition):
         settings = self.settingsMgr.settings
@@ -2126,7 +2157,7 @@ class MScan(Scan):
             plan = self._preflight()
             self._ready = True
             status = 'Ready to scan'
-            for key in ('headroom_warning', 'filter_warning', 'x_warning', 'context_warning'):
+            for key in ('quadrupole_warning', 'headroom_warning', 'filter_warning', 'x_warning', 'context_warning'):
                 if plan.get(key):
                     status += f'\nWarning: {plan[key]}'
         except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -2284,7 +2315,7 @@ class MScan(Scan):
         try:
             self._plan = self._preflight()
             self._context_samples = deque(maxlen=self.CONTEXT_KEPT)
-            for key in ('headroom_warning', 'filter_warning', 'x_warning', 'context_warning'):
+            for key in ('quadrupole_warning', 'headroom_warning', 'filter_warning', 'x_warning', 'context_warning'):
                 if self._plan.get(key):
                     self.print(f'Warning: {self._plan[key]}', flag=PRINT.WARNING)
             configured = [c.name for c in self._plan['detectors']]
@@ -2620,6 +2651,7 @@ class MScan(Scan):
         if offsets and abs(offsets[0]['factor']) >= self._closing_k():
             filter_warning = (f'k = {abs(offsets[0]["factor"]):g} is at or above {self._closing_k():.4g} '
                               f'({self.SQUARE_WAVE_APEX:g} × RF attenuation factor): no ion is expected through the filter.')
+        quadrupole_warning = self._quadrupole_warning(offsets)
         x_warning = None
         if len(offsets) == 2 and getattr(self, '_line', None) is None:  # A map sets x for each line.
             x, rods = offsets[0]['fixed'], (offsets[0]['initial'] + offsets[1]['initial']) / 2
@@ -2627,6 +2659,7 @@ class MScan(Scan):
                 x_warning = (f'x = {x:g} V, rods at {rods:g} V in the AMPR: the ion energy changes by '
                              f'{rods - x:+g} eV per charge during the scan.')
         return dict(amx=amx, offsets=offsets, filter_warning=filter_warning, x_warning=x_warning,
+            quadrupole_warning=quadrupole_warning,
             amx_controller=amx.controller, amx_backend=amx.controller.device,
             selected=selected, links=links, waveform=waveform, rails=rails,
             expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),

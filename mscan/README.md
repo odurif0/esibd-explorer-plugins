@@ -56,9 +56,12 @@ tooltip. Once a map has run, **Map** under it gives the map's state. Then:
 
 Each quadrupole name keeps its own AMX, connectors, rod pairs, r0 and RF attenuation (in
 `MScan_quadrupoles.json`, Explorer's configuration folder): choosing another name brings its
-values back, and a change of these rows is kept under the name shown. Right-click
-**Quadrupole** to add a name (it starts from the rows shown), rename or remove one. Each scan
-file records the quadrupole name.
+values back, and a change of these rows is kept under the name shown. The PSU follows the AMX
+connectors (AMX Settings) and is shown as **Driven PSU**. **Q2** and **Q4** are always offered;
+right-click **Quadrupole** to add another name, rename or remove one. A name chosen for the
+first time starts from the rows shown, with the rod pairs named after it (`Q4_DC_1`,
+`Q4_DC_2`) when the AMPR has them. Start warns when the rod pairs bear the name of another
+quadrupole. Each scan file records the quadrupole name.
 
 A folded group stays folded when settings are reloaded. Groups and displayed names are
 display only: settings files and HDF5 scans keep the earlier keys, so files written before
