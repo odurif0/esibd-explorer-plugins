@@ -616,6 +616,25 @@ def test_a_detector_behind_an_aperture_optimizes_only_the_elements_before_it(rt,
         bl.build(beamline, mode="mass", filter_key="q2", center=300.0, width=20.0)
 
 
+def test_the_apertures_between_chambers_are_settings_of_the_stage_they_close(rt, bl):
+    # User 2026-11-20: the apertures between the chambers were missing (Ap_IF_Q1, Ap_Q1_Q2 on the AMPR). Aperture k
+    # ends the stage before it, so a detector behind aperture k also optimizes it, and the final refinement too.
+    engine, simulator = rt
+    assert [key for key, *_ in bl.KNOBS if bl.KIND[key] == "aperture"] == ["ap1", "ap2", "ap3", "ap4"]
+    assert [bl.LABEL[key] for key in ("ap1", "ap4")] == ["Aperture 1", "Aperture 4"]
+    apertures = {"ap1": {"Ap_IF_Q1": 1.0}, "ap2": {"Ap_Q1_Q2": 1.0}, "ap3": {"Ap_Q2_Q3": 1.0}, "ap4": {"Ap_Q3_Q4": 1.0}}
+    beamline = dict(simulator.BEAMLINE, knobs={**simulator.BEAMLINE["knobs"], **apertures},
+                    detector={"channel": "Collector", "position": "A2"})
+    assert bl.summary(beamline).startswith("16 settings")
+    stages = {s.name: [k.name for k in s.knobs] for s in engine.parse_config(bl.build(beamline)).stages}
+    assert stages == {"Inlet + funnel": ["Inlet voltage", "Funnel RF amplitude", "Funnel DC gradient", "Funnel exit",
+                                         "Aperture 1"],
+                      "Q1": ["Q1 offset", "Q1 RF amplitude", "Aperture 2"],
+                      "Final refinement": ["Funnel exit", "Aperture 1", "Q1 offset", "Aperture 2"]}
+    knob = next(k for s in engine.parse_config(bl.build(beamline)).stages for k in s.knobs if k.name == "Aperture 1")
+    assert knob.channels == {"Ap_IF_Q1": 1.0} and tuple(knob.window) == (-10.0, 10.0)
+
+
 # ---------------------------------------------------------------- peaks
 
 def _gaussian(x, mu, sigma):

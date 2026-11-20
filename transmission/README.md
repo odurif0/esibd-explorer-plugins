@@ -51,15 +51,16 @@ The panel has three steps, then **▶ Optimize**.
 
 1. **Beamline** — **Configure…** once: which channel drives each setting (inlet
    voltage; funnel RF amplitude, DC gradient and exit; offset and RF amplitude of
-   Q1–Q4), the **detector** (its current channel and its position), the **spray
+   Q1–Q4; the voltage of the four apertures between the chambers, 1 funnel → Q1,
+   2 Q1 → Q2, 3 Q2 → Q3, 4 Q3 → Q4, e.g. `Ap_IF_Q1`, `Ap_Q1_Q2`), the **detector** (its current channel and its position), the **spray
    current** (the ESI HV current of the emitter, and its accepted range, 30–60 nA by
    default) and optionally which gauges to watch with their pressure range. The spray
    current is always read on the ESI, never on the DMMR: only ESI currents are offered
    for it, and they are not offered as the detector. The detector normally sits
    **after Q4**; it can also be placed right behind one of the four apertures
    (1 funnel → Q1, 2 Q1 → Q2, 3 Q2 → Q3, 4 Q3 → Q4) to optimize what passes through
-   that aperture, and then only the elements before it are optimized (and offered
-   as mass filters). The apertures themselves are not measured. **Each RF amplitude is an AMX output**: an AMX
+   that aperture, and then only the elements before it, that aperture included, are
+   optimized (and offered as mass filters). The current on the apertures is not measured. **Each RF amplitude is an AMX output**: an AMX
    has two outputs, `CH0-CH1` and `CH2-CH3`, each feeding one quadrupole. Its two
    lines (CH0 and CH1) drive the two rod pairs and switch between the two outputs of
    one PSU (PSU CH0 = Vpos, CH1 = Vneg) in opposite phase; that PSU is the one linked
@@ -131,13 +132,14 @@ The choices are kept in Explorer's configuration folder (`Transmission.beamline.
   run log records the limits of each stage.
 - **Small verified steps.** Every move is split into steps no larger than the setting's
   `max_step`; each step waits until the readback reaches the setpoint.
-- **Beam order.** Stages follow the beam (funnel, Q1, …, Q4); the final stage refines
-  the coupled offsets together with finer windows.
+- **Beam order.** Stages follow the beam (funnel, Q1, …, Q4), each with the aperture
+  closing it; the final stage refines the coupled offsets and apertures together with
+  finer windows.
 - **Adopt only what is proven.** A new setting is kept only if paired A/B measurements
   against the stage start show a significant gain; otherwise the stage start is restored.
 
 Default windows (Normal; Fine × 0.4, Wide × 2.5): inlet ±20 V in 2 V steps, DC
-gradient and offsets ±10 V in 1 V steps, RF amplitudes ±15 % in 2 % steps of their
+gradient, offsets and apertures ±10 V in 1 V steps, RF amplitudes ±15 % in 2 % steps of their
 start value. The final refinement uses at most the Fine windows.
 
 ## Criterion

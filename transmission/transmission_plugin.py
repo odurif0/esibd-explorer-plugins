@@ -80,6 +80,45 @@ def _finite(value):
         return False
 
 
+# Plot axes (user, 2026-11-20): a current near 1e-11 A wrote its exponent on every tick ("2 × 10⁻¹¹") or above the
+# axis ("1e−11"), taking the room of the plot. Currents are shown in the unit that suits them, ticks as plain numbers.
+_CURRENT_UNITS = ((1.0, "A"), (1e-3, "mA"), (1e-6, "µA"), (1e-9, "nA"), (1e-12, "pA"), (1e-15, "fA"))
+
+
+def _current_unit(values):
+    """(factor, unit) bringing the largest current between 1 and 1000 in that unit."""
+    peak = max((abs(float(v)) for v in values if _finite(v) and float(v) != 0.0), default=0.0)
+    for size, unit in _CURRENT_UNITS:
+        if peak >= size:
+            return 1.0 / size, unit
+    return 1.0 / _CURRENT_UNITS[-1][0], _CURRENT_UNITS[-1][1]
+
+
+def _plain_log_ticks(axis):
+    """Plain numbers on a log axis (0.5, 2, 10); matplotlib still thins the minor labels over several decades."""
+    from matplotlib.ticker import LogFormatter
+
+    class PlainLog(LogFormatter):
+        def _num_to_string(self, x, vmin, vmax):
+            return f"{x:g}"
+    axis.set_major_formatter(PlainLog())
+    axis.set_minor_formatter(PlainLog())
+
+
+def _decade_limits(ax, values, decades=2):
+    """Whole decades, at least ``decades``: only 10ⁿ labels, never "4 × 10⁻⁶" on every minor tick."""
+    from matplotlib.ticker import NullFormatter
+    positive = [float(v) for v in values if _finite(v) and float(v) > 0]
+    if not positive:
+        return
+    low, high = math.floor(math.log10(min(positive))), math.ceil(math.log10(max(positive)))
+    missing = decades - (high - low)
+    if missing > 0:
+        low, high = low - (missing + 1) // 2, high + missing // 2
+    ax.set_ylim(10.0 ** low, 10.0 ** high)
+    ax.yaxis.set_minor_formatter(NullFormatter())
+
+
 def _jsonable(value):
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
@@ -310,6 +349,10 @@ class ExplorerInstrument(_engine.Instrument):
     # A PSU setpoint is applied by its own worker: wait for it before the next setpoint (as MScan).
     APPLYING = ("_manual_apply_active", "_manual_apply_worker_running")
     QUANTIZATION_V = 0.05  # Beyond it, a PSU setpoint readback is not the rounding of the request.
+    # A PSU shows no hardware voltage limit from a write until its next housekeeping read (every 2 s): on 2026-11-20
+    # (lab) a run stopped right after moving PSU_E, "hardware voltage limit not read yet". The last limit read in the
+    # run stands meanwhile; one never read is waited for this long.
+    LIMIT_WAIT_S = 5.0
 
     def __init__(self, plugin, config, cancel):
         self.plugin, self.config, self.cancel = plugin, config, cancel
@@ -327,6 +370,7 @@ class ExplorerInstrument(_engine.Instrument):
         self.log = None
         self._latency = []
         self._window_details = {}
+        self._ceilings = {}  # PSU channel → last hardware voltage limit read in this run.
 
     def _amx_switches(self, plugin, config):
         """The AMX of every driven output. An AMX output is one RF drive: a setting moves both of its rails,
@@ -458,13 +502,23 @@ class ExplorerInstrument(_engine.Instrument):
             if hasattr(c, "hardware_voltage_limit"):
                 # PSU: unsigned magnitudes, never above the hardware limit (as MScan).
                 ceiling = getattr(c, "hardware_voltage_limit", None)
-                if not (_finite(ceiling) and float(ceiling) > 0):
-                    raise _engine.InstrumentError(f"{channel}: hardware voltage limit not read yet from {c.getDevice().name}")
-                lo, hi = max(lo, 0.0), min(hi, float(ceiling))
+                if _finite(ceiling) and float(ceiling) > 0:
+                    self._ceilings[channel] = float(ceiling)
+                if channel not in self._ceilings:
+                    return c.getDevice().name  # Not read yet: waited for.
+                lo, hi = max(lo, 0.0), min(hi, self._ceilings[channel])
                 if lo >= hi:
                     raise _engine.InstrumentError(f"{channel}: no admissible voltage range in {c.getDevice().name}")
             return lo, hi
-        return self._gui(read)
+        deadline = time.monotonic() + self.LIMIT_WAIT_S
+        while True:
+            result = self._gui(read)
+            if not isinstance(result, str):
+                return result
+            if time.monotonic() >= deadline:
+                raise _engine.InstrumentError(f"{channel}: hardware voltage limit not read from {result} "
+                                              f"after {self.LIMIT_WAIT_S:g} s; is it ON?")
+            self.wait(0.25)
 
     def _applying(self, names):
         """Driven channels whose device plugin is still applying a previous setpoint."""
@@ -732,7 +786,7 @@ class _BeamlineDialog(QDialog):
         layout.addWidget(self.knobs, 3)
         detector_intro = QLabel("<b>Detector</b> — the one current measured and maximized. Standard: after Q4. "
                                 "Placed right behind an aperture, it optimizes what passes through it: only the "
-                                "elements before it are then optimized.")
+                                "elements before it, that aperture included, are then optimized.")
         detector_intro.setWordWrap(True)
         layout.addWidget(detector_intro)
         row = QHBoxLayout()
@@ -1076,14 +1130,16 @@ class _SpectrumDialog(QDialog):
 
     def _draw(self, title=""):
         self.axes.clear()
+        factor, unit = _current_unit(self.current)
         if self.amplitude:
-            self.axes.plot(self.amplitude, self.current, marker=".", linewidth=1)
+            self.axes.plot(self.amplitude, np.asarray(self.current, dtype=float) * factor, marker=".", linewidth=1)
         if self.selection:
             center, width = self.selection
             self.axes.axvline(center, color="tab:red")
             self.axes.axvspan(center - width, center + width, color="tab:red", alpha=0.15)
         self.axes.set_xlabel("Filter amplitude A (V)")
-        self.axes.set_ylabel("Current after the filter (A)")
+        self.axes.set_ylabel(f"Current after the filter ({unit})")
+        self.axes.ticklabel_format(axis="y", useOffset=False)
         self.axes.set_title(title, fontsize=9)
         self.canvas.draw_idle()
 
@@ -2499,6 +2555,7 @@ class Transmission(Scan):
             ax.clear()
         polarity = self._polarity()
         current = None
+        ratios, lines = [], []  # Plotted criterion ratios; current lines, drawn once their unit is known.
         for s, meta in enumerate(stages):
             rows = [r for r in records if r["stage"] == meta["name"]]
             if not rows:
@@ -2510,33 +2567,51 @@ class Transmission(Scan):
             for kind, marker in self.MARKERS.items():
                 chosen = [r for r in rows if r["kind"] == kind and r["valid"]]
                 if chosen:
-                    ax_objective.plot([r["index"] for r in chosen], [r["objective"] / scale for r in chosen], marker,
+                    values = [r["objective"] / scale for r in chosen]
+                    ratios += values
+                    ax_objective.plot([r["index"] for r in chosen], values, marker,
                                       color=color, markersize=6 if kind == "verify" else 4, linestyle="none")
             lost = [r for r in rows if not r["valid"]]
-            if lost:
-                ax_objective.plot([r["index"] for r in lost], [0.0] * len(lost), "x", color="grey", linestyle="none")
+            if lost:  # At the bottom of the axis, whatever its scale.
+                ax_objective.plot([r["index"] for r in lost], [0.03] * len(lost), "x", color="grey", linestyle="none",
+                                  transform=ax_objective.get_xaxis_transform())
             best = np.maximum.accumulate([r["objective"] / scale if r["valid"] and _finite(r["objective"]) else -np.inf for r in rows])
             ax_objective.step(index, np.where(np.isfinite(best), best, np.nan), where="post", color=color, linewidth=1,
                               label=meta["name"])
             ax_objective.axvline(index[0] - 0.5, color="grey", linewidth=0.5)
             current = (meta, rows, index)
             down = np.array([sum(polarity * r["currents"][c][0] for c in meta["downstream"]) for r in rows])
-            ax_currents.semilogy(index, np.where(down > 0, down, np.nan), color="tab:green", linewidth=1,
-                                 label=("after the aperture" if meta["aperture"] else "detector") if s == 0 else None)
+            lines.append((index, down, dict(color="tab:green", linewidth=1,
+                                            label=("after the aperture" if meta["aperture"] else "detector") if s == 0 else None)))
             if meta["aperture"]:
                 hit = np.array([polarity * r["currents"][meta["aperture"]][0] for r in rows])
-                ax_currents.semilogy(index, np.where(hit > 0, hit, np.nan), color="tab:red", linewidth=1,
-                                     label="on the aperture" if s == 0 else None)
-                ax_currents.semilogy(index, np.where(hit + down > 0, hit + down, np.nan), color="grey", linestyle="--",
-                                     linewidth=0.8, label="reaching the aperture" if s == 0 else None)
+                lines.append((index, hit, dict(color="tab:red", linewidth=1, label="on the aperture" if s == 0 else None)))
+                lines.append((index, hit + down, dict(color="grey", linestyle="--", linewidth=0.8,
+                                                      label="reaching the aperture" if s == 0 else None)))
+        factor, unit = _current_unit([v for _, values, _ in lines for v in values if v > 0])
+        for index, values, style in lines:
+            ax_currents.semilogy(index, np.where(values > 0, values * factor, np.nan), **style)
+        if lines:
+            _plain_log_ticks(ax_currents.yaxis)
+        finite = [v for v in ratios if _finite(v)]
+        if finite and min(finite) > 0 and max(finite) / min(finite) > 30:
+            ax_objective.set_yscale("log")  # A stage that started near zero: its ratio spans decades.
+            _plain_log_ticks(ax_objective.yaxis)
+        else:
+            ax_objective.ticklabel_format(axis="y", useOffset=False)
         if self._spectra:
+            spectra = {phase: self._spectra.get(phase) for phase in ("before", "after")}
+            spectrum_factor, spectrum_unit = _current_unit(
+                [v for data in spectra.values() if data for v in data.get("current") or []])
             for phase, color in (("before", "tab:grey"), ("after", "tab:green")):
-                data = self._spectra.get(phase)
+                data = spectra[phase]
                 if data and data.get("amplitude"):
-                    ax_second.plot(data["amplitude"], data["current"], marker=".", color=color, label=phase)
+                    ax_second.plot(data["amplitude"], np.asarray(data["current"], dtype=float) * spectrum_factor,
+                                   marker=".", color=color, label=phase)
             ax_second.set_title("Selected peak", fontsize=9)
             ax_second.set_xlabel("Filter amplitude (V)")
-            ax_second.set_ylabel("Current after the filter (A)")
+            ax_second.set_ylabel(f"Current ({spectrum_unit})")  # The title says where.
+            ax_second.ticklabel_format(axis="y", useOffset=False)
         else:
             if current is not None:
                 meta, rows, index = current
@@ -2550,16 +2625,23 @@ class Transmission(Scan):
             ax_second.set_ylim(-0.05, 1.05)
             ax_second.set_xlabel("Measurement")
         pressure_names = sorted({p for r in records for p in r["pressures"]})
+        pressures = []
         for p, name in enumerate(pressure_names):
-            ax_pressures.semilogy([r["index"] for r in records],
-                                  [r["pressures"][name][0] if r["pressures"].get(name) and r["pressures"][name][0] > 0 else np.nan
-                                   for r in records], marker=".", linewidth=0.8, color=f"C{p % 10}", label=name)
+            values = [r["pressures"][name][0] if r["pressures"].get(name) and r["pressures"][name][0] > 0 else np.nan
+                      for r in records]
+            pressures += values
+            ax_pressures.semilogy([r["index"] for r in records], values, marker=".", linewidth=0.8,
+                                  color=f"C{p % 10}", label=name)
+        _decade_limits(ax_pressures, pressures)
         ax_objective.set_ylabel("Criterion / stage start")
-        ax_currents.set_ylabel("Current (A)")
+        ax_currents.set_ylabel(f"Current ({unit})")
         ax_pressures.set_ylabel("Pressure (mbar)")
         for ax in (ax_objective, ax_currents, ax_pressures):
             ax.set_xlabel("Measurement")
-        for ax in self.display.axes:
+        for ax in self.display.axes:  # Four plots share the panel: room for the curves, not the labels.
+            ax.tick_params(labelsize=8)
+            ax.xaxis.label.set_size(9)
+            ax.yaxis.label.set_size(9)
             if ax.get_legend_handles_labels()[0]:
                 ax.legend(fontsize=7, loc="best")
         if stages and self.file and self.file.name:
