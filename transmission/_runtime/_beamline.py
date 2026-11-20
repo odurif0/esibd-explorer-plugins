@@ -1,7 +1,7 @@
 """Simple beamline description -> optimizer configuration (TOML) for the Transmission GUI.
 
-The description maps each element setting (inlet, funnel, Q1-Q4) to Explorer
-channels, names the single detector (its current channel and where it sits),
+The description maps each element setting (inlet, funnel, the apertures between
+the chambers, Q1-Q4) to Explorer channels, names the single detector (its current channel and where it sits),
 the electrospray current that must stay stable (30-60 nA by default) and
 optional gauges with soft pressure limits. Windows and steps come from
 defaults per kind of setting, scaled by the exploration level. Amplitudes are
@@ -10,7 +10,8 @@ in volts, like MScan; the m/z calibration belongs to MScan.
 The criterion is always the detector current. The detector normally sits after
 Q4; it can also be placed right behind one of the four apertures (funnel/Q1,
 Q1/Q2, Q2/Q3, Q3/Q4) to optimize what passes through it, and then only the
-elements before it are optimized. The apertures themselves are not measured.
+elements before it are optimized, that aperture included. The aperture currents
+are not measured; their voltages are settings like the offsets.
 
 Every RF amplitude is an AMX output, never free channels. An AMX has two
 outputs, CH0-CH1 and CH2-CH3, each feeding one quadrupole: its two lines drive
@@ -25,18 +26,23 @@ from __future__ import annotations
 import json
 import math
 
-# key, element, label, kind
+# key, element, label, kind; in beam order. Aperture k is the plate between two chambers (user, 2026-11-20:
+# they were missing), e.g. Ap_IF_Q1 and Ap_Q1_Q2 on the AMPR.
 KNOBS = (
     ("inlet", "Inlet", "Voltage", "inlet"),
     ("funnel_rf", "Funnel", "RF amplitude", "rf"),
     ("funnel_dc", "Funnel", "DC gradient", "dc"),
     ("funnel_exit", "Funnel", "Exit", "offset"),
+    ("ap1", "Aperture 1", "Funnel → Q1", "aperture"),
     ("q1_offset", "Q1", "Offset", "offset"),
     ("q1_rf", "Q1", "RF amplitude", "rf"),
+    ("ap2", "Aperture 2", "Q1 → Q2", "aperture"),
     ("q2_offset", "Q2", "Offset", "offset"),
     ("q2_rf", "Q2", "RF amplitude", "rf"),
+    ("ap3", "Aperture 3", "Q2 → Q3", "aperture"),
     ("q3_offset", "Q3", "Offset", "offset"),
     ("q3_rf", "Q3", "RF amplitude", "rf"),
+    ("ap4", "Aperture 4", "Q3 → Q4", "aperture"),
     ("q4_offset", "Q4", "Offset", "offset"),
     ("q4_rf", "Q4", "RF amplitude", "rf"),
 )
@@ -50,14 +56,16 @@ DETECTOR_POSITIONS = (
 )
 DETECTOR_PLACES = {"A1": "behind aperture 1", "A2": "behind aperture 2", "A3": "behind aperture 3",
                    "A4": "behind aperture 4", "after_q4": "after Q4"}
-# key, label, knobs, position (index of the aperture closing it; 4 = Q4, before the standard detector)
+# key, label, knobs, position (index of the aperture closing it; 4 = Q4, before the standard detector).
+# A stage ends with the aperture closing it: a detector behind aperture k also optimizes aperture k.
 STAGES = (
-    ("funnel", "Inlet + funnel", ("inlet", "funnel_rf", "funnel_dc", "funnel_exit"), 0),
-    ("q1", "Q1", ("q1_offset", "q1_rf"), 1),
-    ("q2", "Q2", ("q2_offset", "q2_rf"), 2),
-    ("q3", "Q3", ("q3_offset", "q3_rf"), 3),
+    ("funnel", "Inlet + funnel", ("inlet", "funnel_rf", "funnel_dc", "funnel_exit", "ap1"), 0),
+    ("q1", "Q1", ("q1_offset", "q1_rf", "ap2"), 1),
+    ("q2", "Q2", ("q2_offset", "q2_rf", "ap3"), 2),
+    ("q3", "Q3", ("q3_offset", "q3_rf", "ap4"), 3),
     ("q4", "Q4", ("q4_offset", "q4_rf"), 4),
-    ("final", "Final refinement", ("funnel_exit", "q1_offset", "q2_offset", "q3_offset", "q4_offset"), None),
+    ("final", "Final refinement", ("funnel_exit", "ap1", "q1_offset", "ap2", "q2_offset", "ap3", "q3_offset", "ap4",
+                                   "q4_offset"), None),
 )
 FILTERS = (("q1", "Q1"), ("q2", "Q2"), ("q3", "Q3"), ("q4", "Q4"))
 FILTER_POSITION = {key: index + 1 for index, (key, _) in enumerate(FILTERS)}
@@ -65,10 +73,11 @@ KNOB_POSITION = {knob: position for _, _, knobs, position in STAGES if position 
 LEVELS = {"fine": 0.4, "normal": 1.0, "wide": 2.5}
 # kind: (window half-width, max_step, relative). Relative values are fractions of the start amplitude.
 KIND_DEFAULTS = {"inlet": (20.0, 2.0, False), "dc": (10.0, 1.0, False), "offset": (10.0, 1.0, False),
-                 "rf": (0.15, 0.02, True)}
+                 "aperture": (10.0, 1.0, False), "rf": (0.15, 0.02, True)}
 KIND = {key: kind for key, _, _, kind in KNOBS}
-LABEL = {key: f"{element} {label if label.isupper() or label.split()[0].isupper() else label.lower()}"
-         for key, element, label, _ in KNOBS}  # "Q2 RF amplitude", "Funnel DC gradient", "Inlet voltage".
+LABEL = {key: element if kind == "aperture" else
+         f"{element} {label if label.isupper() or label.split()[0].isupper() else label.lower()}"
+         for key, element, label, kind in KNOBS}  # "Q2 RF amplitude", "Funnel DC gradient", "Inlet voltage", "Aperture 1".
 RF_KEYS = tuple(key for key, _, _, kind in KNOBS if kind == "rf")
 PAIRS = ("CH0-CH1", "CH2-CH3")  # AMX output pairs, each fed by one PSU: CH0 = Vpos, CH1 = Vneg.
 SPRAY_RANGE_NA = (30.0, 60.0)  # A stable electrospray for the optimization (nA, magnitude).

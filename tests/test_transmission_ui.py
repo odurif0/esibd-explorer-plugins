@@ -1041,9 +1041,12 @@ def psu_scenario(env, ctx):
     app.processEvents()
     assert not scan.recording and "ON/OFF transition in progress" in progress(), progress()
     psu.controller.transitioning = False
-    # 2. Each write starts the PSU's apply worker for 0.3 s: the next setpoint waits for it.
+    # 2. Each write starts the PSU's apply worker for 0.3 s: the next setpoint waits for it. The PSU also shows no
+    # hardware voltage limit until its next readback (2026-11-20 lab: a run stopped there, "not read yet"); the last
+    # limit read stands meanwhile, still capping the window.
     applying, overlaps, last = [], [], [0.0]
     original = type(knobs["Inlet"]).value.fset
+    ceilings = {name: channel.hardware_voltage_limit for name, channel in knobs.items()}
 
     def busy_write(channel, value):
         now = time.monotonic()
@@ -1054,13 +1057,16 @@ def psu_scenario(env, ctx):
         last[0] = now
         psu.controller._manual_apply_worker_running = True
         applying.append(now)
+        channel.hardware_voltage_limit = float("nan")
         threading.Timer(0.3, lambda: setattr(psu.controller, "_manual_apply_worker_running", False)).start()
+        threading.Timer(1.0, lambda: setattr(channel, "hardware_voltage_limit", ceilings[channel.name])).start()
     type(knobs["Inlet"]).value = property(type(knobs["Inlet"]).value.fget, busy_write)
     scan.start_optimization()
     deadline = time.monotonic() + 60
     while len(scan._records) < 6 and time.monotonic() < deadline:
         QTest.qWait(20)
     assert len(applying) > 6 and not overlaps, "a setpoint was written while the previous one was being applied"
+    assert scan.recording and "not read" not in progress(), progress()
     assert all(value <= 130.0 for name, value, _ in sets if name == "Inlet"), "hardware voltage limit exceeded"
     # 3. A rail at its current limit stops the run without any further command.
     count = len(sets)
