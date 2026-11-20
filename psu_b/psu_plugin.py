@@ -5000,6 +5000,11 @@ class PSUController(DeviceController):
                 self._apply_interlock_setting_unlocked(
                     device, timeout_s=timeout_s, enabled=enabled
                 )
+                if switched_off:
+                    # Standby, as an apply with both outputs OFF leaves it. With the device still
+                    # enabled, the PSU went from its interlock error to "PSUs disabled" (0x8005)
+                    # within 3 s, shown as an error until the next apply (PSU_B, 2026-11-19 lab).
+                    device.set_device_enabled(False, timeout_s=timeout_s)
         except Exception as exc:
             self._safe_disable_outputs_after_failure(timeout_s=timeout_s)
             self.print(f"Could not confirm interlock monitoring: {exc}", flag=PRINT.ERROR)
