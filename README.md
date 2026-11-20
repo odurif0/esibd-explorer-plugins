@@ -2,7 +2,7 @@
 
 Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIBD-Explorer).
 
-13 device plugins and two standalone scan plugins (15 folders).
+13 device plugins, two standalone scan plugins and a copy of the lab data to the network (16 folders).
 
 ## Available Plugins
 
@@ -23,6 +23,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
 | `mscan`  | Scans quadrupole amplitude through AMX-linked PSU channels |
 | `transmission` | Optimizes ion transmission through the beamline, stage by stage, on the detector current |
 | `tpg366` | Reads six Pfeiffer TPG 366 pressure inputs over USB |
+| `sync`   | Copies Explorer's `conf` and `data` folders to a network folder, one way, every hour |
 
 ## Quick Start
 
@@ -47,6 +48,7 @@ Ready-to-use plugin bundle for [ESIBD Explorer](https://github.com/ioneater/ESIB
    ├── amx_b/
    ├── amx_hd/
    ├── mscan/
+   ├── sync/
    ├── tpg366/
    └── transmission/
    ```
@@ -66,6 +68,9 @@ amplitude in volts, or m/z. **Stopping a scan does not turn the HV outputs off.*
 To optimize the transmission through the inlet, funnel and quadrupoles, see
 [Transmission](transmission/README.md). It drives only the mapped channels, in small verified
 steps, and measures only while the spray current is stable.
+
+To copy the lab data to a network folder (`\\hive\esi` by default), see [Sync](sync/README.md):
+one way, `conf` and `data`, every hour and after each new scan file; nothing is ever deleted.
 
 ## ON / OFF
 

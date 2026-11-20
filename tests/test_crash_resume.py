@@ -21,7 +21,7 @@ from support.source import entrypoint_code
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_ENTRYPOINTS = sorted(
     ROOT / spec.folder / spec.entrypoint for spec in PLUGIN_SPECS
-    if spec.folder not in {"mscan", "transmission"}
+    if spec.folder not in {"mscan", "transmission", "sync"}
 )
 START, END = "# ---- crash resume: identical", "# ---- end crash resume ----"
 

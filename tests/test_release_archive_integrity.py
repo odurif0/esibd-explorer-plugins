@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import PLUGIN_SPECS, PluginSpec
+from conftest import NATIVE_SPECS, PLUGIN_SPECS, PluginSpec
 from support.release import assert_archive_native_assets, required_members, validate_member_names
 
 
@@ -90,7 +90,7 @@ def test_release_archives_match_plugin_policy(
         assert_archive_native_assets(archive, plugin_specs)
 
 
-@pytest.mark.parametrize("spec", PLUGIN_SPECS, ids=lambda spec: f"{spec.folder}/native")
+@pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda spec: f"{spec.folder}/native")
 def test_validator_requires_every_plugins_native_assets(spec: PluginSpec) -> None:
     names = set(valid_members(PLUGIN_SPECS))
     assets = {f"{spec.folder}/{name}" for name in spec.bundled_files
