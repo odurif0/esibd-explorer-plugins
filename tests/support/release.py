@@ -100,7 +100,7 @@ def assert_archive_native_assets(path: Path, plugin_specs: tuple[PluginSpec, ...
             assert not info.is_dir() and stat.S_ISREG(info.external_attr >> 16), info.filename
         source_hashes, lock_hashes, supervisors = set(), set(), set()
         executable_workers = set()
-        for spec in plugin_specs:
+        for spec in (spec for spec in plugin_specs if spec.native):
             manifest = assert_native_payload(spec, lambda name: archive.read(f"{spec.folder}/native/{name}"))
             source_hashes.add(manifest["source_data_sha256"])
             lock_hashes.add(manifest["cargo_lock_sha256"])

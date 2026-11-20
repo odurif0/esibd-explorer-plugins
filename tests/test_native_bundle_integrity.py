@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from conftest import PLUGIN_SPECS
+from conftest import NATIVE_SPECS
 from support.native import assert_elf64, assert_native_payload, assert_pe64, family_for, sha, supervisor_for, target_keys
 
 
@@ -30,7 +30,7 @@ def _git_ignored(paths):
 def test_corresponding_sources_can_be_tracked_but_release_zips_remain_ignored():
     if shutil.which("git") is None or not (ROOT / ".git").exists():
         pytest.skip("Git ignore policy requires a repository checkout")
-    required = [f"{spec.folder}/native/source.zip" for spec in PLUGIN_SPECS]
+    required = [f"{spec.folder}/native/source.zip" for spec in NATIVE_SPECS]
     assert not _git_ignored(required), "Required corresponding sources must not be ignored"
     generated = "esibd-explorer-plugins-v9.9.9.zip"
     assert _git_ignored([generated]) == [generated]
@@ -51,7 +51,7 @@ def source_provenance():
 # Slash-delimited IDs retain all 15 folders under the default sibling filter.
 
 
-@pytest.mark.parametrize("spec", PLUGIN_SPECS, ids=lambda spec: f"{spec.folder}/native")
+@pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda spec: f"{spec.folder}/native")
 def test_every_native_bundle_matches_binary_source_and_notice_provenance(spec, source_provenance):
     directory = ROOT / spec.folder / "native"
 
@@ -69,7 +69,7 @@ def test_every_native_bundle_matches_binary_source_and_notice_provenance(spec, s
         assert stat.S_IMODE((directory / record["file"]).stat().st_mode) == (0o755 if target == "linux-x86_64" else 0o644)
 
 
-@pytest.mark.parametrize("spec", PLUGIN_SPECS, ids=lambda spec: f"{spec.folder}/native")
+@pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda spec: f"{spec.folder}/native")
 def test_plugin_tree_is_regular_and_supervision_is_plugin_local(spec):
     directory = ROOT / spec.folder
     for path in (directory, *directory.rglob("*")):
@@ -79,7 +79,7 @@ def test_plugin_tree_is_regular_and_supervision_is_plugin_local(spec):
     assert (directory / supervisor_for(spec)).read_bytes() == (ROOT / "native/python/_native_worker.py").read_bytes()
 
 
-SELECTIONS = tuple((spec, target) for spec in PLUGIN_SPECS for target in target_keys(spec))
+SELECTIONS = tuple((spec, target) for spec in NATIVE_SPECS for target in target_keys(spec))
 
 
 @pytest.mark.parametrize("spec,target", SELECTIONS, ids=[f"{spec.folder}/{target}" for spec, target in SELECTIONS])

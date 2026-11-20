@@ -35,6 +35,7 @@ class PluginSpec:
     header: str | None
     dll: str | None
     bundled_files: tuple[str, ...] = ()
+    native: bool = True  # Owns a native worker (native/, manifest, sources); Sync has none.
 
 
 def _native_bundled_files(family: str) -> tuple[str, ...]:
@@ -136,6 +137,9 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
     PluginSpec("transmission", "Transmission", "Transmission", "transmission_plugin.py", None, "transmission", None, None, None,
                bundled_files=(*_native_bundled_files("transmission"), "_runtime/__init__.py", "_runtime/_engine.py",
                               "_runtime/_simulator.py", "_runtime/_beamline.py", "_runtime/_log.py", "_runtime/_native_engine.py")),
+    # No device and no native worker: robocopy, part of Windows, copies in its own process.
+    PluginSpec("sync", "Sync", "Sync", "sync_plugin.py", None, "sync", None, None, None,
+               bundled_files=("_runtime/__init__.py", "_runtime/_sync.py", "_runtime/_windows.py"), native=False),
     PluginSpec("tpg366", "TPG366", "TPG366", "tpg366_plugin.py", None, "tpg366", None, None, None,
                bundled_files=(*_native_bundled_files("tpg366"), "_runtime/_tpg366.py", "_runtime/_native_link.py",
                               "_readout_panel.py", "tpg366.svg", "switch-medium_on.png", "switch-medium_off.png")),
@@ -200,6 +204,7 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
         bundled_files=_native_bundled_files("psu"),
     ),
 )
+NATIVE_SPECS: tuple[PluginSpec, ...] = tuple(spec for spec in PLUGIN_SPECS if spec.native)
 
 
 @pytest.fixture(scope="session")
