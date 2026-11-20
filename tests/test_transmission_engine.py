@@ -465,7 +465,7 @@ def test_builder_turns_the_simple_settings_into_a_valid_configuration(rt, bl):
     engine, simulator = rt
     text = bl.build(simulator.BEAMLINE, settings=SIM_SETTINGS)
     config = engine.parse_config(text)
-    assert [s.name for s in config.stages] == ["Inlet + funnel", "Q1", "Q2", "Q3", "Q4", "Final refinement"]
+    assert [s.name for s in config.stages] == ["Inlet + funnel 1", "Q1", "Q2", "Q3", "Q4", "Final refinement"]
     _, q1, *_, final = config.stages
     # One detector: every stage maximizes its current; the apertures are not measured, nothing is normalized.
     assert all(s.aperture is None and s.downstream == ("Collector",) and s.normalize_by == () for s in config.stages)
@@ -494,7 +494,7 @@ def test_builder_mass_mode_keeps_the_filter_off_the_knobs_and_marks_peak_stages(
         position = int(key[1])
         assert config.target.measure == ("Collector",)
         peaks = {s.name: s.peak for s in config.stages}
-        assert peaks["Inlet + funnel"] and peaks["Final refinement"]
+        assert peaks["Inlet + funnel 1"] and peaks["Final refinement"]
         assert all(peaks[f"Q{i}"] == (i <= position) for i in range(1, 5) if f"Q{i}" in peaks)
     # The filter's own stage keeps its offset when its amplitude is the filter.
     plan = {key: knobs for key, _, knobs, *_ in bl.stages(simulator.BEAMLINE, mode="mass", filter_key="q2")}
@@ -590,7 +590,7 @@ def test_partial_beamline_runs_only_what_is_measured(rt, bl):
                     detector={"channel": "DMMR 5", "position": "after_q4"})
     assert bl.filters(beamline) == [("q2", "Q2")] and bl.filter_measure(beamline, "q2") == ["DMMR 5"]
     config = engine.parse_config(bl.build(beamline, mode="mass", filter_key="q2", center=250.0, width=15.0))
-    assert [s.name for s in config.stages] == ["Inlet + funnel", "Q2", "Final refinement"]
+    assert [s.name for s in config.stages] == ["Inlet + funnel 1", "Q2", "Final refinement"]
     assert config.stages[0].aperture is None and config.stages[0].downstream == ("DMMR 5",)
     assert config.target.channels == {"AMX Vpos": 1.0, "AMX Vneg": 1.0}  # MScan rails: Vpos = Vneg = A.
     assert bl.stages(dict(knobs={"q4_rf": {"X": 1.0}})) == []  # No detector: nothing to maximize.
@@ -599,10 +599,10 @@ def test_partial_beamline_runs_only_what_is_measured(rt, bl):
 def test_a_detector_behind_an_aperture_optimizes_only_the_elements_before_it(rt, bl):
     engine, simulator = rt
     for position, stages, filters in (
-            ("A1", ["Inlet + funnel", "Final refinement"], []),
-            ("A2", ["Inlet + funnel", "Q1", "Final refinement"], ["q1"]),
-            ("A4", ["Inlet + funnel", "Q1", "Q2", "Q3", "Final refinement"], ["q1", "q2", "q3"]),
-            ("after_q4", ["Inlet + funnel", "Q1", "Q2", "Q3", "Q4", "Final refinement"], ["q1", "q2", "q3", "q4"])):
+            ("A1", ["Inlet + funnel 1", "Final refinement"], []),
+            ("A2", ["Inlet + funnel 1", "Q1", "Final refinement"], ["q1"]),
+            ("A4", ["Inlet + funnel 1", "Q1", "Q2", "Q3", "Final refinement"], ["q1", "q2", "q3"]),
+            ("after_q4", ["Inlet + funnel 1", "Q1", "Q2", "Q3", "Q4", "Final refinement"], ["q1", "q2", "q3", "q4"])):
         beamline = dict(simulator.BEAMLINE, detector={"channel": "Collector", "position": position})
         config = engine.parse_config(bl.build(beamline))
         assert [s.name for s in config.stages] == stages, position
@@ -627,12 +627,35 @@ def test_the_apertures_between_chambers_are_settings_of_the_stage_they_close(rt,
                     detector={"channel": "Collector", "position": "A2"})
     assert bl.summary(beamline).startswith("16 settings")
     stages = {s.name: [k.name for k in s.knobs] for s in engine.parse_config(bl.build(beamline)).stages}
-    assert stages == {"Inlet + funnel": ["Inlet voltage", "Funnel RF amplitude", "Funnel DC gradient", "Funnel exit",
-                                         "Aperture 1"],
+    assert stages == {"Inlet + funnel 1": ["Inlet voltage", "Funnel 1 RF amplitude", "Funnel 1 DC gradient", "Funnel 1 exit"],
+                      "Funnel 2": ["Aperture 1"],  # Funnel 2 not mapped here: its stage is closed by aperture 1.
                       "Q1": ["Q1 offset", "Q1 RF amplitude", "Aperture 2"],
-                      "Final refinement": ["Funnel exit", "Aperture 1", "Q1 offset", "Aperture 2"]}
+                      "Final refinement": ["Funnel 1 exit", "Aperture 1", "Q1 offset", "Aperture 2"]}
     knob = next(k for s in engine.parse_config(bl.build(beamline)).stages for k in s.knobs if k.name == "Aperture 1")
     assert knob.channels == {"Ap_IF_Q1": 1.0} and tuple(knob.window) == (-10.0, 10.0)
+
+
+
+def test_the_second_funnel_and_the_stubs_are_settings_of_their_stage(rt, bl):
+    # User 2026-11-20: IF2 (Entry, Middle, Exit and its RF, an AMX output) and the stubs of Q2 and Q4 were missing.
+    # Funnel 2 is its own stage before aperture 1, the stubs belong to their quadrupole's stage.
+    engine, simulator = rt
+    lab = {"funnel2_entry": {"Entry_IF2": 1.0}, "funnel2_dc": {"Middle_IF2": 1.0}, "funnel2_exit": {"Exit_IF2": 1.0},
+           "ap1": {"Ap_IF_Q1": 1.0}, "q2_stub_entry": {"Stub_Entry_Q2": 1.0}, "q2_stub_exit": {"Stub_Exit_Q2": 1.0},
+           "q4_stub_entry": {"Stub_Entry_Q4": 1.0}, "q4_stub_exit": {"Stub_Exit_Q4": 1.0}}
+    beamline = dict(simulator.BEAMLINE, knobs={**simulator.BEAMLINE["knobs"], **lab})
+    stages = {s.name: [k.name for k in s.knobs] for s in engine.parse_config(bl.build(beamline)).stages}
+    assert list(stages) == ["Inlet + funnel 1", "Funnel 2", "Q1", "Q2", "Q3", "Q4", "Final refinement"]
+    assert stages["Funnel 2"] == ["Funnel 2 entry", "Funnel 2 DC gradient", "Funnel 2 exit", "Aperture 1"]
+    assert stages["Q2"] == ["Q2 entry stub", "Q2 offset", "Q2 RF amplitude", "Q2 exit stub"]
+    assert stages["Q4"] == ["Q4 entry stub", "Q4 offset", "Q4 RF amplitude", "Q4 exit stub"]
+    assert stages["Final refinement"][:3] == ["Funnel 1 exit", "Funnel 2 exit", "Aperture 1"]
+    assert not any("stub" in name for name in stages["Final refinement"])
+    # Behind aperture 1, both funnels are optimized; the stubs of Q2 are not.
+    behind = dict(beamline, detector={"channel": "Collector", "position": "A1"})
+    assert [s.name for s in engine.parse_config(bl.build(behind)).stages] == ["Inlet + funnel 1", "Funnel 2",
+                                                                               "Final refinement"]
+    assert "funnel2_rf" in bl.RF_KEYS  # An AMX output, chosen like the other RF amplitudes.
 
 
 # ---------------------------------------------------------------- peaks

@@ -316,7 +316,7 @@ def scenario_body(env):
         # "From the simple settings" writes what the panel would run.
         scan.state.update(advanced=False, simulation=True)
         editor = module._ConfigEditor(scan, path, scan.generated_text())
-        assert module._engine.parse_config(editor.editor.toPlainText()).stages[0].name == "Inlet + funnel"
+        assert module._engine.parse_config(editor.editor.toPlainText()).stages[0].name == "Inlet + funnel 1"
         assert not exports and not errors, errors
         return 0
 
@@ -419,7 +419,7 @@ def scenario_body(env):
         assert progress() == "Completed.", progress()
         stages = result["stages"]
         if scenario == "simulation-total":
-            assert [s["stage"] for s in stages] == ["Inlet + funnel", "Final refinement"] and stages[0]["adopted"], stages
+            assert [s["stage"] for s in stages] == ["Inlet + funnel 1", "Final refinement"] and stages[0]["adopted"], stages
             assert panel.result.text().startswith("Collector: ") and "stage(s) improved" in panel.result.text()
         else:
             assert [s["stage"] for s in stages] == ["Q1"] and abs(result["target"]["final_center"] - 520.0) < 10.0
