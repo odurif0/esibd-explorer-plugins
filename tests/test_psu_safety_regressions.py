@@ -168,6 +168,10 @@ def test_disabling_a_tripped_interlock_switches_outputs_off_first(setup):
     assert device.outputs == (False, False) and device.interlocks == (False, False)
     calls = device.calls
     assert calls.index(("outputs", False, False)) < calls.index(("interlocks", False, False))
+    # Then standby: with the device still enabled the PSU reported "PSUs disabled" (0x8005),
+    # an error, until the next apply (PSU_B, 2026-11-19 lab).
+    assert calls.index(("interlocks", False, False)) < calls.index(("global", False))
+    assert not device.enabled
     assert controller.output_enabled_by_channel == {0: False, 1: False}
     assert any("switched OFF first" in msg for msg in messages)
 
@@ -179,7 +183,7 @@ def test_disabling_interlock_on_a_closed_loop_leaves_outputs_alone(setup):
     controller.controllerParent.interlock_monitoring = False
     assert controller._interlock_monitoring_changed()
     assert device.outputs == (True, False) and device.interlocks == (False, False)
-    assert not any(call[0] == "outputs" for call in device.calls)
+    assert not any(call[0] in ("outputs", "global") for call in device.calls) and device.enabled
 
 
 def test_interlock_loop_inputs_are_read_also_while_monitoring_is_off(setup):
