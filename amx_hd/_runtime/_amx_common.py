@@ -562,6 +562,41 @@ def _disable_spinbox_wheel(widget: Any) -> None:
     setattr(widget, "_esibd_wheel_event_blocker", blocker)
 
 
+_AMX_NUMBER_FIELD_TYPE: Any = None
+
+
+def _amx_number_field() -> Any:
+    """A QDoubleSpinBox whose value stays visible without buttons on Qt 6.12.0.
+
+    Qt 6.12.0 leaves the text field of a spin box without buttons 1 px wide once a style sheet gives it a
+    border, as Explorer's does to every spin box (QTBUG-151308): the value was not shown. The field gets
+    the width of the spin box back after each layout change; nothing changes with other Qt versions.
+    """
+    global _AMX_NUMBER_FIELD_TYPE
+    if _AMX_NUMBER_FIELD_TYPE is None:
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QDoubleSpinBox
+
+        layout_events = {QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.StyleChange, QEvent.Type.Polish,
+                         QEvent.Type.FontChange, QEvent.Type.LayoutRequest}
+
+        class AmxNumberField(QDoubleSpinBox):
+            def event(self, event: Any) -> bool:
+                handled = super().event(event)
+                try:
+                    if event is not None and event.type() in layout_events:
+                        edit = self.lineEdit()
+                        if edit is not None and edit.width() <= 1 < self.width():
+                            inset = min(edit.y(), (self.width() - 2) // 2)
+                            edit.setGeometry(inset, edit.y(), self.width() - 2 * inset, edit.height())
+                except Exception:  # an exception raised in event() would abort Explorer
+                    pass
+                return handled
+
+        _AMX_NUMBER_FIELD_TYPE = AmxNumberField
+    return _AMX_NUMBER_FIELD_TYPE()
+
+
 def _state_is_on(state: Any) -> bool:
     normalized = _normalize_runtime_state(state).strip().upper()
     return normalized in {"ST_ON", "STATE_ON"}
@@ -1233,9 +1268,9 @@ class _AMXDeviceCommon:
         return button
 
     def _create_frequency_widget(self) -> Any:
-        from PyQt6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox
+        from PyQt6.QtWidgets import QAbstractSpinBox
 
-        widget = QDoubleSpinBox()
+        widget = _amx_number_field()
         widget.setKeyboardTracking(False)
         widget.setRange(0.001, 10000.0)
         widget.setDecimals(3)

@@ -924,7 +924,6 @@ class AMXDevice(_AMXDeviceCommon, Device):
                 QHeaderView,
                 QTableWidget,
                 QTableWidgetItem,
-                QDoubleSpinBox,
                 QLabel,
                 QPushButton,
                 QVBoxLayout,
@@ -987,12 +986,12 @@ class AMXDevice(_AMXDeviceCommon, Device):
                 "Enable or stop this pulser while AMX is ON. Loading a config replaces this request. "
                 "Pulser numbers are not output channel numbers."
             )
-            width_widget = QDoubleSpinBox()
+            width_widget = _amx_number_field()
             width_widget.setRange(0.0, 1_000_000.0)
             width_widget.setDecimals(3)
             width_widget.setSingleStep(0.01)
             width_widget.setSuffix(" µs")
-            duty_widget = QDoubleSpinBox()
+            duty_widget = _amx_number_field()
             duty_widget.setRange(0.0, 100.0)
             duty_widget.setDecimals(2)
             duty_widget.setSingleStep(0.5)
