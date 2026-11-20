@@ -103,8 +103,8 @@ line of the textbook~\cite{steel}: $U/A=k$ constant, a straight line through the
 Symbol & MScan setting & Unit & Default & Role\\
 \midrule
 $A$ & \setting{Amplitude from / to / step} & V & -- & scanned RF amplitude, per rod (rails $\pm A$)\\
-$x$ & \setting{Axis potential x} & V & 0 & common potential of the four rods, i.e.\ the axis; sets the
-ion energy, does not filter. Keep the value the rods hold outside a scan.\\
+$x$ & \setting{Rod voltage x} & V & rods & mean potential of the two rod pairs, i.e.\ the axis; sets the
+ion energy, does not filter. Follows the rods in the AMPR; a typed value holds until they change.\\
 $k$ & \setting{U/V ratio k} & -- & 0.2 & slope $U/A$ of the scan line; sets the resolution.
 $0$ = RF-only, negative swaps the pairs.\\
 $\delta$ & \setting{Resolution $\delta$} & V & 0 & lowers the line: $U/A=k-\delta/A$ rises with

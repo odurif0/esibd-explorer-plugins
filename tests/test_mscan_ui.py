@@ -11,21 +11,14 @@ from support.qt import dispose_windows, run_probe
 
 
 def _map_buttons(scan):
-    """The Map… button of the Map group, between Map plan and Map status (one row only)."""
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QToolButton
-    status = scan.settingsMgr.settings[scan.MAP_STATUS]
-    group = status.parent()
-    rows = [group.child(i) for i in range(group.childCount())
-            if group.child(i).data(0, Qt.ItemDataRole.UserRole) == scan.MAP_BUTTON_ROW]
-    assert len(rows) == 1 and group.indexOfChild(rows[0]) == group.indexOfChild(status) - 1
-    assert group.child(0) is scan.settingsMgr.settings[scan.MAP_PLAN] and rows[0].isFirstColumnSpanned()
-    box = scan.settingsTree.itemWidget(rows[0], 0)
-    from PyQt6.QtWidgets import QWidget
-    former = [w for w in scan.settingsTree.viewport().findChildren(QWidget, scan.MAP_BUTTON_ROW)
-              if w is not box and not w.isHidden()]
-    assert box.objectName() == scan.MAP_BUTTON_ROW and not former, former  # Never left on screen after a reload.
-    return box.findChildren(QToolButton)
+    """The Map… button, right after Start scan in the toolbar (user, 2026-11-20). The plan row stays hidden (the
+    dialog shows it), the map's state too until a map has run."""
+    actions = scan.titleBar.actions()
+    assert actions.index(scan.mapAction) == actions.index(scan.recordingAction) + 1
+    settings = scan.settingsMgr.settings
+    assert settings[scan.MAP_PLAN].isHidden()
+    assert settings[scan.MAP_STATUS].isHidden() == (settings[scan.MAP_STATUS].value in ('', 'No map'))
+    return [scan.titleBar.widgetForAction(scan.mapAction)]
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1009,12 +1002,11 @@ def run(scenario, target, app_holder=None):
     start_button = scan.titleBar.widgetForAction(scan.recordingAction)
     assert start_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
     assert start_button.text() == 'Start scan'
-    # One Map… button in the Map group, none in the toolbar (user, 2026-11-12); its tooltip names the plan,
-    # also when its path is typed in the panel.
+    # One Map… button (user, 2026-11-12), beside Start scan (2026-11-20); its tooltip names the plan.
     assert not {'mapLoadAction', 'mapCheckAction', 'mapSimulateAction', 'mapResumeAction'} & set(vars(scan))
-    assert scan.mapAction not in scan.titleBar.actions()
     buttons = _map_buttons(scan)
     assert [b.text() for b in buttons] == ['Map…'] and 'No plan loaded' in buttons[0].toolTip()
+    assert buttons[0].toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
     plan_field = scan.settingsMgr.settings[scan.MAP_PLAN]
     plan_field.line.setText(str(ROOT / 'mscan' / 'plans' / 'q2_P1_2h.toml'))
     plan_field.line.userEditingFinished.emit()
@@ -1034,8 +1026,13 @@ def run(scenario, target, app_holder=None):
     assert buttons[0].text() == 'Stop map' and buttons[0].toolTip() == scan.MAP_STOP_TOOLTIP
     scan.mapAction.state = False
     assert buttons[0].text() == 'Map…'
-    scan._place_map_buttons()
-    assert len(_map_buttons(scan)) == 1  # Placed again, never twice.
+    scan.map_status = 'stopped at 02:00 after 3 lines: spray lost'
+    scan._layout_readonly_fields()
+    assert not scan.settingsMgr.settings[scan.MAP_STATUS].isHidden()  # Under Status once a map has run.
+    assert scan.settingsMgr.settings[scan.MAP_STATUS].text(0) == 'Map'
+    scan.map_status = 'No map'
+    scan._layout_readonly_fields()
+    assert len(_map_buttons(scan)) == 1
     scan.statusAction = NS(setVisible=lambda *a: None)
     manager.loading = False
     manager.Settings.loading = False
@@ -1051,17 +1048,22 @@ def run(scenario, target, app_holder=None):
     scan._refresh_interface()
     # Every enabled DMMR module is recorded; none is chosen (user request 2026-11-03).
     recorded = scan.settingsMgr.settings[scan.MODULES]
-    assert recorded.text(0) == 'DMMR modules' and recorded.parent().text(0) == 'Setup'
+    assert recorded.text(0) == 'DMMR modules' and recorded.parent().text(0) == 'Scan'
     assert recorded.value.splitlines()[0] == ('M3 DMMR_M03, M5 DMMR_M05' if scenario == 'multi-dmmr'
                                               else 'M3 DMMR_M03'), recorded.value
     assert 'DMMR module' not in scan.settingsMgr.settings
-    # Panel layout (user request 2026-11-03): Status first, next to Start, then four open groups.
+    # Panel layout (user, 2026-11-03 and 2026-11-20): Status first, next to Start, the live readings under it,
+    # folded until Start, then the quadrupole, the scan and the file.
     tree, named = scan.settingsTree, scan.settingsMgr.settings
     assert tree.indexOfTopLevelItem(named[scan.STATUS]) == 0
-    groups = [tree.topLevelItem(i) for i in range(1, tree.topLevelItemCount())]
-    assert [g.text(0) for g in groups] == ['Setup', 'Amplitude scan', 'Mass filter', 'm/z', 'Map', 'Live readback']
-    assert all(g.isExpanded() and g.isFirstColumnSpanned() and g.font(0).bold() for g in groups)
-    assert named[scan.OFFSET_FIXED].parent() is groups[2] and named[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
+    groups = scan._groups()
+    assert [g.text(0) for g in groups] == ['Live readback', 'Quadrupole', 'Scan', 'File']
+    assert [g.isExpanded() for g in groups] == [False, True, True, True]
+    assert all(g.isFirstColumnSpanned() and g.font(0).bold() for g in groups)
+    assert named[scan.QUADRUPOLE].parent() is groups[1] and groups[1].indexOfChild(named[scan.QUADRUPOLE]) == 0
+    assert all(named[key].parent() is groups[1] for key in scan.QUADRUPOLE_FIELDS)
+    assert named[scan.OFFSET_FIXED].parent() is groups[2] and named[scan.OFFSET_FIXED].text(0) == 'Rod voltage x (V)'
+    assert named[scan.SCAN_NOTES].parent() is groups[3]
     assert named[scan.OFFSET_FACTOR].text(0) == 'U/V ratio k'
     assert named[scan.FILTER_PREVIEW].value.startswith('No rod pair selected')
     if not start_button.isEnabled():  # A greyed Start says why, without scrolling to Status.
@@ -1069,6 +1071,40 @@ def run(scenario, target, app_holder=None):
     pairs = scan.settingsMgr.settings[scan.OUTPUTS]
     assert pairs.items == [scan.NO_PAIR, 'CH0-CH1', 'CH2-CH3']
     assert 'CH0-CH3' not in pairs.items
+    # One name per quadrupole (user, 2026-11-20): it keeps its AMX output, rod pairs, r0 and RF attenuation. A new
+    # name (Explorer's Add Item) starts from the fields shown; a renamed or removed name is forgotten.
+    import json
+    quadrupole = named[scan.QUADRUPOLE]
+    assert scan.quadrupole == 'Q2' and quadrupole.items == ['Q2']
+    scan._refresh_interface()
+    def saved():
+        return json.loads(scan._quadrupoles_path().read_text(encoding='utf-8'))
+    q2 = scan._quadrupole_definition()
+    assert saved() == {'Q2': q2} and q2[scan.OUTPUTS] == scan.amx_outputs
+    quadrupole.addItem('Q3')
+    assert scan.quadrupole == 'Q3' and saved() == {'Q2': q2, 'Q3': q2}
+    scan.amx_outputs, scan.mz_r0_mm = 'CH2-CH3', 3.1
+    scan._refresh_interface()
+    q3 = dict(q2, **{scan.OUTPUTS: 'CH2-CH3', scan.MZ_R0: 3.1})
+    assert saved() == {'Q2': q2, 'Q3': q3}, saved()
+    quadrupole.value = 'Q2'
+    assert scan._quadrupole_definition() == q2
+    quadrupole.value = 'Q3'
+    assert scan._quadrupole_definition() == q3
+    quadrupole.editCurrentItem('Q3 bis')
+    assert saved() == {'Q2': q2, 'Q3 bis': q3}
+    quadrupole.removeCurrentItem()
+    assert scan.quadrupole == 'Q2' and scan._quadrupole_definition() == q2 and saved() == {'Q2': q2}
+    # A running map keeps its quadrupole: its rows are read-only, also between two of its lines.
+    scan._map_runner = NS(running=True)
+    scan._refresh_interface()
+    combos = (scan.QUADRUPOLE, scan.AMX, scan.OUTPUTS, scan.OFFSET, scan.OFFSET_2)
+    assert not any(named[key].getWidget().isEnabled() for key in combos)
+    assert named[scan.MZ_R0].getWidget().isReadOnly() and named[scan.START].getWidget().isEnabled()
+    scan._map_runner = None
+    scan._refresh_interface()
+    assert all(named[key].getWidget().isEnabled() for key in combos)
+    assert not named[scan.MZ_R0].getWidget().isReadOnly()
     for p in (psu, detector_device):
         p.tree.setHeaderLabels([a.name for a in p.channels[0].parameters])
         for i, parameter in enumerate(p.channels[0].parameters):
@@ -1633,7 +1669,7 @@ def run(scenario, target, app_holder=None):
             def grouped_limits():
                 allowed = scan.settingsMgr.settings[scan.AMPLITUDE_LIMITS]
                 group = allowed.parent()
-                assert group is not None and group.text(0) == 'Amplitude scan' and limits.parent() is group
+                assert group is not None and group.text(0) == 'Quadrupole' and limits.parent() is group
                 assert group.indexOfChild(limits) == group.indexOfChild(allowed) + 1
             grouped_limits()
             assert scan.scan_status == 'Ready to scan', scan.scan_status
@@ -2300,10 +2336,9 @@ def run(scenario, target, app_holder=None):
         sections.read(target / 'roundtrip.ini', encoding='utf-8')
         assert {scan.OFFSET_FIXED, scan.START, scan.STATUS} <= set(sections.sections())
         assert not any('/' in section for section in sections.sections())
-        folded = {g.text(0): g.isExpanded() for g in (scan.settingsTree.topLevelItem(i)
-                  for i in range(1, scan.settingsTree.topLevelItemCount()))}
-        assert folded == {'Setup': True, 'Amplitude scan': True, 'Mass filter': True, 'm/z': True, 'Map': True, 'Live readback': False}, folded
-        assert scan.settingsMgr.settings[scan.OFFSET_FIXED].text(0) == 'Axis potential x (V)'
+        folded = {g.text(0): g.isExpanded() for g in scan._groups()}
+        assert folded == {'Live readback': False, 'Quadrupole': True, 'Scan': True, 'File': True}, folded
+        assert scan.settingsMgr.settings[scan.OFFSET_FIXED].text(0) == 'Rod voltage x (V)'
         scan.settingsTree.expandItem(scan.settingsMgr.settings[scan.SAMPLES].parent())
         assert scan.channelTree is None
         # A second scan with the renamed module: each module supplies its own current,

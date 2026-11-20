@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
@@ -28,8 +29,8 @@ import warnings
 import h5py
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-                             QSizePolicy, QToolButton, QTreeWidgetItem, QWidget)
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHeaderView, QSizePolicy,
+                             QTreeWidgetItem, QWidget)
 
 from esibd.core import INFO, INOUT, PARAMETERTYPE, PRINT, MetaChannel, Parameter, TreeWidget, infoDict, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
@@ -332,7 +333,7 @@ class _Settings(SettingsManager):
                 item[Parameter.ITEMS] = ','.join(dict.fromkeys(choices))
         scan.notes = str(old_value('Notes', Parameter.VALUE) or '')
         super().updateSettings(items, file)
-        scan._place_map_buttons()  # The tree was rebuilt: the map buttons are not settings.
+        scan._show_map_rows()  # The tree was rebuilt.
         scan._free_text_fields()
 
     def requireParentItem(self, name, parentItem):
@@ -418,14 +419,18 @@ class MScan(Scan):
     SCAN_NOTES = 'Scan notes'  # Not 'Notes': that legacy Explorer key is read as old metadata only.
     # Map of Q2 (v0.5.10, docs/quadrupole_optimization_plan.md): a plan file run line by line, each line
     # an ordinary scan of this plugin. The decisions belong to the MScan worker (mscan_map).
-    MAP_PLAN = 'Map plan'
-    MAP_STATUS = 'Map status'
-    # One Map… button in the Map group, not in the toolbar (user, 2026-11-12: on 2026-11-11 the play icon was
-    # taken for the start of a plan, then four map buttons were found confusing). It starts a new map, checked
-    # first, or resumes a stopped one; while a map runs it stops it.
+    MAP_PLAN = 'Map plan'  # Chosen in the Map… dialog; kept, not shown.
+    MAP_STATUS = 'Map status'  # Shown under Status once a map has run.
+    # One Map… button (user, 2026-11-12: four map buttons were found confusing), labelled, beside Start scan in the
+    # toolbar (user, 2026-11-20; on 2026-11-11 a bare play icon was taken for the start of a plan). It starts a new
+    # map, checked first, or resumes a stopped one; while a map runs it stops it.
     MAP_TOOLTIP = ('Start a new map (its plan is checked first) or resume a stopped one.')
     MAP_STOP_TOOLTIP = 'Stop the map safely.'
-    MAP_BUTTON_ROW = 'mscan-map-buttons'
+    # The quadrupole scanned (user, 2026-11-20: "in MScan one chooses a quadrupole"): each name keeps its AMX
+    # output, rod pairs, r0 and RF attenuation, in <config>/MScan_quadrupoles.json.
+    QUADRUPOLE = 'Quadrupole'
+    QUADRUPOLES_FILE = 'MScan_quadrupoles.json'
+    LIVE_GROUP = 'Live readback'
     # Devices whose channels are recorded with each point, as the beam conditions of the scan
     # (user, 2026-11-03: "le suivi de l'ESI est important"): spray HV and current, pressures. Read live from
     # each plugin at every MScan poll, not from Explorer's history: they need not be recording (user choice).
@@ -462,19 +467,21 @@ class MScan(Scan):
     # dmmr.h5' at 19:00:20 and 21:00:25, then a 5 s wait expired: a line aborted, then a map stopped).
     GUI_TIMEOUT_S = 30.
     PICOAMPERE = 1e12  # Plot unit; files keep amperes.
-    # Panel layout (user request 2026-11-03: the flat list was not intuitive). Status first, next to
-    # Start; then what to choose, in the order a scan is prepared; live readings last. None: top level.
+    # Panel layout (user, 2026-11-03: the flat list was not intuitive; 2026-11-20: three groups, what is measured,
+    # how it is swept, how it is recorded). Status first, next to Start; the live readings under it, opened at
+    # Start. None: top level.
     LAYOUT = (
-        (None, (STATUS,)),
-        ('Setup', (AMX, OUTPUTS, SUPPLIES, FREQUENCY, MODULES, DMMR_INTERVAL, CADENCE, FILE_LABEL, SCAN_NOTES)),
-        ('Amplitude scan', (AMPLITUDE_LIMITS, CURRENT_LIMITS, MODE, START, STOP, STEP, RATE, TIME_STEP, PASSES,
-                            SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE)),
-        ('Mass filter', (OFFSET, OFFSET_2, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED,
-                         FILTER_PREVIEW)),
-        ('m/z', (MZ_R0, MZ_ATTENUATION, MZ_AXIS, MZ_SCALE)),
-        ('Map', (MAP_PLAN, MAP_STATUS)),
-        ('Live readback', (SUPPLY_READBACK, OFFSET_READBACK, FINAL_VOLTAGES, SAMPLES)),
+        (None, (STATUS, MAP_STATUS, MAP_PLAN)),
+        (LIVE_GROUP, (SUPPLY_READBACK, OFFSET_READBACK, FINAL_VOLTAGES, SAMPLES)),
+        ('Quadrupole', (QUADRUPOLE, AMX, OUTPUTS, OFFSET, OFFSET_2, MZ_R0, MZ_ATTENUATION, SUPPLIES,
+                        AMPLITUDE_LIMITS, CURRENT_LIMITS, FREQUENCY)),
+        ('Scan', (START, STOP, STEP, OFFSET_FACTOR, OFFSET_RESOLUTION, OFFSET_MINIMUM, OFFSET_FIXED, FILTER_PREVIEW,
+                  MODE, RATE, TIME_STEP, PASSES, SETTLING, INTEGRATION, SCANTIME, TIMEOUT, TOLERANCE,
+                  MODULES, DMMR_INTERVAL, CADENCE, MZ_AXIS, MZ_SCALE)),
+        ('File', (FILE_LABEL, SCAN_NOTES)),
     )
+    QUADRUPOLE_FIELDS = (AMX, OUTPUTS, OFFSET, OFFSET_2, MZ_R0, MZ_ATTENUATION)  # What a quadrupole name keeps.
+    QUADRUPOLE_ROWS = (QUADRUPOLE, *QUADRUPOLE_FIELDS)  # Read-only while a map runs.
     GROUP_OF = {key: group for group, keys in LAYOUT if group for key in keys}
     # Read-only rows whose text wraps over several lines.
     WRAPPED = (STATUS, SUPPLIES, FREQUENCY, MODULES, CADENCE, SAMPLES, SCANTIME, AMPLITUDE_LIMITS, FINAL_VOLTAGES,
@@ -502,9 +509,9 @@ class MScan(Scan):
               TIMEOUT: 'Settle timeout (s)', TOLERANCE: 'Voltage tolerance (V)', FREQUENCY: 'AMX frequency',
               OFFSET: 'Rod pair 1 (AMPR)', OFFSET_2: 'Rod pair 2 (AMPR)', OFFSET_FACTOR: 'U/V ratio k',
               OFFSET_RESOLUTION: 'Resolution δ (V)', OFFSET_MINIMUM: 'Minimum U (V)',
-              OFFSET_FIXED: 'Axis potential x (V)', FILTER_PREVIEW: 'Preview',
+              OFFSET_FIXED: 'Rod voltage x (V)', FILTER_PREVIEW: 'Preview',
               SUPPLY_READBACK: 'PSU rails', OFFSET_READBACK: 'Rod pairs (AMPR)', MZ_R0: 'r0 (mm)', SCAN_NOTES: 'Notes',
-              MZ_SCALE: 'm/z range'}
+              MZ_SCALE: 'm/z range', MAP_STATUS: 'Map'}
 
     class Display(Scan.Display):
         def closeGUI(self):
@@ -597,7 +604,11 @@ class MScan(Scan):
         self._ready = False
         self.displayDefault = ''  # Plot selection only; never an acquisition setting.
         self.notes = ''
-        self._collapsed_groups = set()  # Groups the operator folded, kept when settings are reloaded.
+        # Groups the operator folded, kept when settings are reloaded. The live readings open at Start.
+        self._collapsed_groups = {self.LIVE_GROUP}
+        self._quadrupoles = None  # Name → definition (QUADRUPOLE_FIELDS), read from QUADRUPOLES_FILE when needed.
+        self._applying_quadrupole = False
+        self._quadrupole_rows_locked = False
         self._arranging = False
         self._line = None  # The map line being measured (a request of the map engine), else None.
         self._line_map = None
@@ -605,6 +616,7 @@ class MScan(Scan):
         self._map_bound = {}  # Plan channel name → AMPR output, found at the start of the running map.
         self._map_starting = False  # Start map clicked, its first engine call still running.
         self._map_stop_after_start = False
+        self._rods_seen = None  # Mean of the two rod pairs in the AMPR last given to x (_follow_rods).
         super().__init__(**kwargs)
         self.useDisplayChannel = False  # Every recorded DMMR module is plotted, with a legend.
         self._bridge = _GuiBridge(self)
@@ -614,6 +626,10 @@ class MScan(Scan):
         settings[self.MODULES] = parameterDict(value='No DMMR module enabled', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
             toolTip='Every enabled DMMR current module is recorded; enable modules in the DMMR plugin.')
+        settings[self.QUADRUPOLE] = parameterDict(value='Q2', items='Q2', parameterType=PARAMETERTYPE.COMBO,
+            fixedItems=False, attr='quadrupole', event=self._quadrupole_changed,
+            toolTip='The quadrupole scanned. Each one keeps its AMX output, rod pairs, r0 and RF attenuation, '
+                    'set below. Right-click "Quadrupole" to add, rename or remove one.')
         settings[self.AMX] = parameterDict(value='None', items=', '.join(['None', *self.AMX_PLUGINS]),
             parameterType=PARAMETERTYPE.COMBO, fixedItems=True, attr='amx_name', event=self._setup_changed,
             toolTip='AMX that drives the quadrupole; its PSU associations are set in its Settings.')
@@ -705,7 +721,8 @@ class MScan(Scan):
         settings[self.OFFSET_FIXED] = parameterDict(value=0., minimum=-1000., maximum=1000.,
             parameterType=PARAMETERTYPE.FLOAT, attr='offset_fixed', event=self._offset_changed,
             instantUpdate=False, displayDecimals=3,
-            toolTip='Axis potential x, common to both rod pairs; it sets the ion energy.')
+            toolTip='Mean potential of the two rod pairs (the axis); sets the ion energy, Q1_DC − x. '
+                    'Follows the rods in the AMPR; a value typed here holds until they change.')
         settings[self.FILTER_PREVIEW] = parameterDict(value='No rod pair selected', parameterType=PARAMETERTYPE.LABEL,
             indicator=True, restore=False,
             toolTip='U and rod pair potentials at both ends of the scan.')
@@ -760,24 +777,23 @@ class MScan(Scan):
         self.settingsMgr.init()
         self.addAction(event=lambda: self.loadSettings(file=None), toolTip='Load msScan settings.', icon=self.makeCoreIcon('blue-folder-import.png'))
         self.addAction(event=lambda: self.saveSettings(file=None), toolTip='Export msScan settings.', icon=self.makeCoreIcon('blue-folder-export.png'))
-        # The Map… button lives in the Map group (_place_map_buttons): the toolbar keeps Start scan alone.
-        self.mapAction = self.addStateAction(event=lambda: self._map_action(),
-            toolTipFalse=self.MAP_TOOLTIP, iconFalse=self.makeCoreIcon('clock.png'),
-            toolTipTrue=self.MAP_STOP_TOOLTIP, iconTrue=self.makeCoreIcon('stop.png'))
-        if self.titleBar is not None:
-            self.titleBar.removeAction(self.mapAction)
-        self._set_map_label('Map…')
-        self.mapAction.toggled.connect(lambda state: self._set_map_label('Stop map' if state else 'Map…'))
-        self._map_plan_changed()
         self.recordingAction = self.addStateAction(event=self.toggleRecording,
             toolTipFalse='Start the scan.', iconFalse=self.makeCoreIcon('play.png'),
             toolTipTrue='Stop the scan; HV stays ON.', iconTrue=self.makeCoreIcon('stop.png'))
+        # Map… beside Start scan (user, 2026-11-20): its plan is chosen in the dialog it opens.
+        self.mapAction = self.addStateAction(event=lambda: self._map_action(),
+            toolTipFalse=self.MAP_TOOLTIP, iconFalse=self.makeCoreIcon('clock.png'),
+            toolTipTrue=self.MAP_STOP_TOOLTIP, iconTrue=self.makeCoreIcon('stop.png'))
+        self._set_map_label('Map…')
+        self.mapAction.toggled.connect(lambda state: self._set_map_label('Stop map' if state else 'Map…'))
+        self._map_plan_changed()
         self.loading = False
         self.estimateScanTime()
         self.dummyInitialization()
         self.recordingAction.toggled.connect(self._update_scan_action)
-        button = self.titleBar.widgetForAction(self.recordingAction)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        for action in (self.recordingAction, self.mapAction):
+            button = self.titleBar.widgetForAction(action)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._update_scan_action()
         self._format_settings()
         self.toggleAdvanced(advanced=False)
@@ -839,7 +855,7 @@ class MScan(Scan):
         self.settingsTree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for spin in self.settingsTree.findChildren(QAbstractSpinBox):
             spin.setKeyboardTracking(False)
-        for key in (self.AMX, self.OUTPUTS, self.MODE, self.OFFSET, self.OFFSET_2):
+        for key in (self.QUADRUPOLE, self.AMX, self.OUTPUTS, self.MODE, self.OFFSET, self.OFFSET_2):
             combo = self.settingsMgr.settings[key].combo
             combo.setMaximumWidth(16777215)
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -851,7 +867,6 @@ class MScan(Scan):
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             label.setProperty('mscanWrappedLabel', True)
             label.installEventFilter(self)
-        self._place_map_buttons()
         self._unfold_groups()
         self._layout_readonly_fields()
 
@@ -873,51 +888,6 @@ class MScan(Scan):
         Qt 6.12 drops a final "…" (Qt 6.6 kept it), and the ellipsis says the button opens a dialog."""
         self.mapAction.setText(label)
         self.mapAction.setIconText(label)
-
-    def _place_map_buttons(self):
-        """The Map… button in the Map group, between plan and status.
-
-        Explorer rebuilds the settings tree on every settings load, so the row is placed again each time.
-        """
-        manager, tree = getattr(self, 'settingsMgr', None), getattr(self, 'settingsTree', None)
-        if (manager is None or tree is None or self.MAP_STATUS not in manager.settings
-                or getattr(self, 'mapAction', None) is None):
-            return  # The first settings load comes before the action.
-        status = manager.settings[self.MAP_STATUS]
-        group = status.parent()
-        if group is None:
-            return
-        for i in reversed(range(group.childCount())):
-            child = group.child(i)
-            if child.data(0, Qt.ItemDataRole.UserRole) == self.MAP_BUTTON_ROW:
-                tree.removeItemWidget(child, 0)
-                group.removeChild(child)
-        for old in tree.viewport().findChildren(QWidget, self.MAP_BUTTON_ROW):
-            old.hide()  # A rebuilt tree leaves its former row to a deferred delete: never shown meanwhile.
-            old.deleteLater()
-        item = QTreeWidgetItem()
-        item.setData(0, Qt.ItemDataRole.UserRole, self.MAP_BUTTON_ROW)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        group.insertChild(group.indexOfChild(status), item)
-        item.setFirstColumnSpanned(True)
-        box = QWidget()
-        box.setObjectName(self.MAP_BUTTON_ROW)
-        row = QHBoxLayout(box)
-        row.setContentsMargins(0, 2, 0, 2)
-        button = QToolButton(box)
-        button.setDefaultAction(self.mapAction)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        button.setMinimumWidth(120)
-        button.setObjectName(f'{self.MAP_BUTTON_ROW}/mapAction')
-        row.addWidget(button)
-        row.addStretch(1)
-        tree.setItemWidget(item, 0, box)
-        # The panel's style sheet sizes the button only once polished inside the tree: measure it then,
-        # or the row overlaps Map status.
-        for widget in (box, button):
-            widget.ensurePolished()
-        row.invalidate()
-        item.setSizeHint(0, box.sizeHint())
 
     def _groups(self):
         root = self.settingsTree.invisibleRootItem()
@@ -960,7 +930,23 @@ class MScan(Scan):
         for key in self.WRAPPED:
             label = self.settingsMgr.settings[key].label
             self._fit_readonly_label(label)
+        self._show_map_rows()
         self.settingsTree.scheduleDelayedItemsLayout()
+
+    def _show_map_rows(self):
+        """The plan is shown in the Map… dialog; the map's state, under Status, once a map has run."""
+        settings = getattr(getattr(self, 'settingsMgr', None), 'settings', {})
+        if self.MAP_PLAN not in settings or self.MAP_STATUS not in settings:
+            return
+        for key, hidden in ((self.MAP_PLAN, True),
+                            (self.MAP_STATUS, str(settings[self.MAP_STATUS].value) in ('', 'No map'))):
+            if settings[key].isHidden() != hidden:
+                settings[key].setHidden(hidden)
+
+    def _open_live_readback(self):
+        for item in self._groups():
+            if item.text(0) == self.LIVE_GROUP and not item.isExpanded():
+                item.setExpanded(True)  # Recorded as unfolded by _group_folded.
 
     def provideDock(self):
         created = super().provideDock()
@@ -1292,8 +1278,121 @@ class MScan(Scan):
         except (TypeError, ValueError):
             fixed = math.nan
         if not math.isfinite(fixed):
-            raise ScanError('Axis potential x must be finite.')
+            raise ScanError('Rod voltage x must be finite.')
         return fixed
+
+    def _rods_mean(self):
+        """Mean of the two rod pairs' AMPR setpoints; None unless both pairs are selected and readable."""
+        try:
+            values = [float(c.value) for c, _ in self._offset_sources()]
+        except (ScanError, AttributeError, TypeError, ValueError):
+            return None
+        if len(values) != 2 or not all(math.isfinite(v) for v in values):
+            return None
+        return round(sum(values) / 2, 3)
+
+    def _follow_rods(self):
+        """x takes the mean of the two rod pairs whenever it changes in the AMPR, or the pairs selected
+        change; a value typed in between holds until then (user, 2026-11-20). Idle only: a scan drives
+        the rods, and a map sets x for each of its lines."""
+        if self._map_owns_scans():
+            return
+        mean = self._rods_mean()
+        if mean is None or mean == getattr(self, '_rods_seen', None):
+            return
+        self._rods_seen = mean
+        try:
+            current = float(self.offset_fixed)
+        except (AttributeError, TypeError, ValueError):
+            current = math.nan
+        # Within the AMPR's 0.01 V: rods held at x ± U after a Stop, each rounded, give x back.
+        if not math.isclose(current, mean, abs_tol=.01):
+            self.offset_fixed = mean
+
+    def _lock_quadrupole_rows(self):
+        """A map keeps its quadrupole: between two of its lines every other setting opens again, but one click on
+        another quadrupole would change the AMX output and rod pairs it drives."""
+        locked = self._map_owns_scans()
+        if locked != getattr(self, '_quadrupole_rows_locked', False):
+            self._quadrupole_rows_locked = locked
+            for key in self.QUADRUPOLE_ROWS:
+                self.settingsMgr.settings[key].setEnabled(not locked)
+
+    def _quadrupoles_path(self):
+        try:
+            return Path(self.pluginManager.Settings.configPath) / self.QUADRUPOLES_FILE
+        except (AttributeError, TypeError):
+            return None
+
+    def _quadrupole_definitions(self):
+        if self._quadrupoles is None:
+            path, data = self._quadrupoles_path(), {}
+            if path is not None and path.is_file():
+                try:
+                    data = json.loads(path.read_text(encoding='utf-8'))
+                except (OSError, ValueError) as exc:
+                    self.print(f'{path.name} unreadable ({exc}): quadrupoles start from the panel.', flag=PRINT.WARNING)
+            self._quadrupoles = {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+        return self._quadrupoles
+
+    def _save_quadrupoles(self):
+        path = self._quadrupoles_path()
+        if path is None:
+            return
+        try:
+            temporary = path.with_name(path.name + '.tmp')
+            temporary.write_text(json.dumps(self._quadrupoles, indent=1, ensure_ascii=False), encoding='utf-8')
+            os.replace(temporary, path)
+        except OSError as exc:
+            self.print(f'Cannot save the quadrupoles in {path}: {exc}', flag=PRINT.WARNING)
+
+    def _quadrupole_definition(self):
+        settings = self.settingsMgr.settings
+        return {key: settings[key].value for key in self.QUADRUPOLE_FIELDS}
+
+    def _store_quadrupole(self):
+        """The fields below Quadrupole belong to the quadrupole selected: kept under its name when they change."""
+        if self._applying_quadrupole or self.loading or self.settingsMgr.loading:
+            return
+        definitions, name = self._quadrupole_definitions(), str(self.quadrupole)
+        definition = self._quadrupole_definition()
+        if definitions.get(name) != definition:
+            definitions[name] = definition
+            self._save_quadrupoles()
+
+    def _quadrupole_changed(self):
+        """Another quadrupole: bring back its fields. A new name (added or renamed) keeps the fields shown;
+        a name no longer in the list (renamed or removed) is forgotten."""
+        if self.loading or self.settingsMgr.loading:
+            return
+        definitions, name = self._quadrupole_definitions(), str(self.quadrupole)
+        names = set(self.settingsMgr.settings[self.QUADRUPOLE].items)
+        for gone in [n for n in definitions if n not in names]:
+            del definitions[gone]
+        if name in definitions:
+            self._apply_quadrupole(definitions[name])
+        definitions[name] = self._quadrupole_definition()
+        self._save_quadrupoles()
+        self._setup_changed()
+
+    def _apply_quadrupole(self, definition):
+        settings = self.settingsMgr.settings
+        self._applying_quadrupole = True
+        try:
+            for key in self.QUADRUPOLE_FIELDS:
+                if key not in definition:
+                    continue
+                setting, value = settings[key], definition[key]
+                if setting.parameterType is PARAMETERTYPE.COMBO:
+                    value = str(value)
+                    if value not in setting.items:
+                        setting.combo.addItem(value)  # Shown as saved, never replaced: Start says what is missing.
+                else:
+                    value = float(value)
+                if setting.value != value:
+                    setting.value = value
+        finally:
+            self._applying_quadrupole = False
 
     def _offset_resolution(self):
         try:
@@ -1945,6 +2044,9 @@ class MScan(Scan):
                 offset_setting.combo.addItems(choices)
             offset_setting.combo.setCurrentText(selected_offset)
             offset_setting.combo.blockSignals(previous)
+        self._follow_rods()
+        self._store_quadrupole()
+        self._lock_quadrupole_rows()
         self._acquisition_info()
         self.estimateScanTime()
         supplies, frequency = 'Select an AMX', 'Unavailable'
@@ -2024,7 +2126,7 @@ class MScan(Scan):
             plan = self._preflight()
             self._ready = True
             status = 'Ready to scan'
-            for key in ('headroom_warning', 'filter_warning', 'context_warning'):
+            for key in ('headroom_warning', 'filter_warning', 'x_warning', 'context_warning'):
                 if plan.get(key):
                     status += f'\nWarning: {plan[key]}'
         except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -2182,7 +2284,7 @@ class MScan(Scan):
         try:
             self._plan = self._preflight()
             self._context_samples = deque(maxlen=self.CONTEXT_KEPT)
-            for key in ('headroom_warning', 'filter_warning', 'context_warning'):
+            for key in ('headroom_warning', 'filter_warning', 'x_warning', 'context_warning'):
                 if self._plan.get(key):
                     self.print(f'Warning: {self._plan[key]}', flag=PRINT.WARNING)
             configured = [c.name for c in self._plan['detectors']]
@@ -2213,6 +2315,8 @@ class MScan(Scan):
             autoscale = getattr(self.display, 'autoscaleAction', None) if self.display else None
             if autoscale is not None:
                 autoscale.state = True  # A new scan follows its own data, whatever view the last one had.
+            if getattr(self, '_line', None) is None and getattr(self, 'settingsTree', None) is not None:
+                self._open_live_readback()  # At the operator's Start; a folded group stays folded during a map.
             self.scan_status = 'Ready'
             return True
         except (ScanError, AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -2516,12 +2620,19 @@ class MScan(Scan):
         if offsets and abs(offsets[0]['factor']) >= self._closing_k():
             filter_warning = (f'k = {abs(offsets[0]["factor"]):g} is at or above {self._closing_k():.4g} '
                               f'({self.SQUARE_WAVE_APEX:g} × RF attenuation factor): no ion is expected through the filter.')
-        return dict(amx=amx, offsets=offsets, filter_warning=filter_warning, amx_controller=amx.controller, amx_backend=amx.controller.device,
+        x_warning = None
+        if len(offsets) == 2 and getattr(self, '_line', None) is None:  # A map sets x for each line.
+            x, rods = offsets[0]['fixed'], (offsets[0]['initial'] + offsets[1]['initial']) / 2
+            if abs(x - rods) > .01:
+                x_warning = (f'x = {x:g} V, rods at {rods:g} V in the AMPR: the ion energy changes by '
+                             f'{rods - x:+g} eV per charge during the scan.')
+        return dict(amx=amx, offsets=offsets, filter_warning=filter_warning, x_warning=x_warning,
+            amx_controller=amx.controller, amx_backend=amx.controller.device,
             selected=selected, links=links, waveform=waveform, rails=rails,
             expected=[r['initial'] for r in rails], requested_range=(low, high), timeout=float(self.settle_timeout),
             headroom_warning=headroom_warning,
             tolerance=float(self.voltage_tolerance), average=duration, wait=float(self.settling_s), mode=mode,
-            metadata=dict(amx=amx.name, outputs=self.amx_outputs, waveform=json.loads(waveform), links=links,
+            metadata=dict(quadrupole=str(getattr(self, 'quadrupole', '') or ''), amx=amx.name, outputs=self.amx_outputs, waveform=json.loads(waveform), links=links,
                 mode=mode, passes=self._passes(), points_per_pass=len(self._scan_steps()) // self._passes(),
                 settling_s=float(self.settling_s), measurement_s=duration,
                 time_step_s=duration if mode == self.CONTINUOUS else None,
@@ -2548,7 +2659,7 @@ class MScan(Scan):
                                 ampr_channel=o['key'][1], sign=int(o['sign']), initial_v=o['initial'], final_v=o['initial'])
                            for o in offsets],
                     definition='U = max(minimum_u_v, coefficient × RF amplitude A − resolution_offset_v); pair 1 = fixed_v + U, '
-                               'pair 2 = fixed_v − U (coefficient = k = U/V; fixed_v = axis potential x). '
+                               'pair 2 = fixed_v − U (coefficient = k = U/V; fixed_v = x, mean of the two rod pairs). '
                                'Commanded on each AMPR channel at each amplitude (rounded to its display precision); '
                                'verified by its setpoint readback and Monitor. offset_v and offset_target have one '
                                'column per pair.'),
@@ -3083,7 +3194,7 @@ class MScan(Scan):
     def _line_axis(self):
         kind = (getattr(self, '_line', None) or {}).get('kind', 'amplitude')
         if kind == 'offset':
-            return 'Axis potential x', 'V'
+            return 'Rod voltage x', 'V'
         if kind == 'extra':
             return self._map_channels()['stub_entry'], 'V'
         if kind == 'frequency':
@@ -3568,9 +3679,11 @@ class MScan(Scan):
         if value and not self.finished:
             self._last_scan_status = self.scan_status
         Scan.finished.fset(self, value)
+        locked = self._map_owns_scans()
         for key, setting in self.settingsMgr.settings.items():
             if not setting.indicator:
-                setting.setEnabled(value)
+                setting.setEnabled(value and not (locked and key in self.QUADRUPOLE_ROWS))
+        self._quadrupole_rows_locked = locked
         self._update_scan_action()
 
     def _map_owns_scans(self):
