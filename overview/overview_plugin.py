@@ -253,7 +253,7 @@ class Overview(Plugin):
 
     name = "Overview"
     pluginType = PLUGINTYPE.CONTROL
-    version = "0.6.0"
+    version = "0.6.1"
     supportedVersion = "1.0"
     iconFile = "overview.png"
     CONFIG_FILE = "Overview.json"

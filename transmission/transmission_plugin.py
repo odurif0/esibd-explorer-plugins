@@ -1298,7 +1298,7 @@ class Transmission(Scan):
     The soft interlocks only stop the optimization; the protective interlock belongs in the hardware."""
 
     name = "Transmission"
-    version = "0.6.0"
+    version = "0.6.1"
     supportedVersion = "1.0"
     iconFile = "transmission.png"
     useInvalidWhileWaiting = False

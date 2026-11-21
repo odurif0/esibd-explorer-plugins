@@ -320,7 +320,7 @@ class TPG366(Device):
     LiveDisplay = _LiveDisplay  # Last 30 min by default.
 
     name = "TPG366"
-    version = "0.6.0"
+    version = "0.6.1"
     supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.OUTPUTDEVICE
     log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.
