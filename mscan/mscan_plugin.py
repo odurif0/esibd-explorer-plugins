@@ -92,20 +92,11 @@ def amplitude_steps(start: float, stop: float, step: float) -> np.ndarray:
 
 # m/z from the amplitude (user request 2026-11-03). Ideal 50 % square wave, conventions of Steel and Henchman
 # (U and V = A per rod, from the axis): a = 8eU/(m r0² Ω²), q = 4eA/(m r0² Ω²), so m/z = 4eA / (q r0² Ω²).
-# Derivation and figures: docs/mscan_quadrupole.pdf.
-_E_OVER_U = 1.602176634e-19 / 1.66053906660e-27  # Elementary charge over atomic mass unit (C/kg).
-_RF_ONLY_Q = .7120  # Largest stable q at a = 0 (RF only): the low-mass cut-off.
-
-
-def _square_wave_trace(a, q):
-    """Half-trace of the one-period transfer matrix, x direction; stable when |trace| < 2."""
-    w1 = np.sqrt((a + 2 * q).astype(complex)) + 1e-16
-    w2 = np.sqrt((a - 2 * q).astype(complex)) + 1e-16
-    h = np.pi / 2
-    return (2 * np.cos(w1 * h) * np.cos(w2 * h) - (w1 / w2 + w2 / w1) * np.sin(w1 * h) * np.sin(w2 * h)).real
-
-
-_BANDS = {}
+# Derivation and figures: docs/mscan_quadrupole.pdf. The quadrupole physics is shared word for word with
+# Transmission: _runtime/_quadrupole.py (canonical here; tools/sync_family_siblings.py copies it).
+_quadrupole = _load_native_runtime("_quadrupole")
+square_wave_band = _quadrupole.square_wave_band
+mz_from_amplitude = _quadrupole.mz_from_amplitude
 
 
 @contextlib.contextmanager
@@ -117,48 +108,6 @@ def _scan_write(channel):
         yield
     finally:
         channel.scan_driven = False
-
-
-def square_wave_band(k):
-    """Stable q interval on the scan line a = 2kq (k = U/A); None above the apex (k ≈ 0.2153).
-
-    k = 0 gives (0, 0.712): RF only, a high-pass whose upper q is the low-mass cut-off.
-    """
-    k = round(abs(float(k)), 5)
-    if k not in _BANDS:
-        if k == 0:
-            _BANDS[k] = (0., _RF_ONLY_Q)
-        else:
-            q = np.linspace(1e-4, .8, 16001)
-            a = 2 * k * q
-            stable = (np.abs(_square_wave_trace(a, q)) < 2) & (np.abs(_square_wave_trace(-a, -q)) < 2)
-            _BANDS[k] = (float(q[stable][0]), float(q[stable][-1])) if stable.any() else None
-    return _BANDS[k]
-
-
-def mz_from_amplitude(amplitudes, *, frequency_hz, r0_mm, factor=0., resolution=0., minimum=.5, pairs=2,
-                      attenuation=1.):
-    """m/z (Th) at the centre of the transmitted band for each amplitude A; RF only: the low-mass cut-off.
-
-    U = max(minimum, |factor| × A − resolution), as MScan drives the rod pairs, and the rods see an RF
-    amplitude attenuation × A. NaN where nothing is transmitted (above the apex) or where the DC between
-    the pairs is unknown (one driven pair).
-    """
-    amplitudes = np.asarray(amplitudes, dtype=float)
-    scale = 4 * _E_OVER_U / ((r0_mm * 1e-3) ** 2 * (2 * np.pi * frequency_hz) ** 2)
-    result = np.full(amplitudes.shape, np.nan)
-    if factor and pairs != 2:
-        return result  # Pair 2 keeps its own potential: the filtering DC is not known.
-    for i, amplitude in enumerate(amplitudes):
-        if not math.isfinite(amplitude) or amplitude <= 0:
-            continue
-        rods = attenuation * amplitude  # RF amplitude actually on the rods
-        k = max(minimum, abs(factor) * amplitude - resolution) / rods if factor else 0.
-        band = square_wave_band(k)
-        if band is not None:
-            q = band[1] if not factor else (band[0] + band[1]) / 2
-            result[i] = scale * rods / q
-    return result
 
 
 class _Call:
@@ -391,7 +340,7 @@ class MScan(Scan):
     enabled, the DMMR recording; the ESI and TPG366 are read live if present.
     """
     name = 'MScan'
-    version = "0.6.1"
+    version = "0.6.2"
     TITLE = 'msScan — AMX/PSU'
     supportedVersion = '1.0'
     iconFile = 'mscan.png'

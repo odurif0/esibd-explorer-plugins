@@ -786,6 +786,63 @@ def test_restore_initial_returns_the_filter_and_the_knobs(rt, bl):
         assert beamline.setpoint[channel] == simulator.KNOBS[channel][2]
 
 
+def test_a_selected_mz_moves_the_rods_with_the_coordinate_and_with_q1(rt, bl):
+    """2026-11-24: the filter's rods follow an affine law of the m/z coordinate and Q1 (x tracks the stopping
+    potential, 0.95 V per volt), with the target as their single owner; the native engine does the same."""
+    engine, simulator = rt
+    text = bl.build(simulator.BEAMLINE, selected=["q1"], mode="mass", filter_key="q2", center=520.0, width=30.0,
+                    settings=SIM_SETTINGS)
+    config = engine.parse_config(text)
+    old = config.target
+    q1_start, rods_start = simulator.KNOBS["Q1_offset"][2], simulator.KNOBS["Q2_offset"][2]
+    offset = rods_start - 0.01 * simulator.KNOBS["Q2_RF"][2]  # The present state already obeys the law.
+    config.target = engine.Target(dict(old.channels, Q2_offset=0.01), old.center, old.width, old.measure,
+                                  max_step=old.max_step, spectrum_points=old.spectrum_points,
+                                  offsets={"Q2_offset": offset}, follow={"Q2_offset": {"Q1_offset": 0.95}},
+                                  follow_origin={"Q1_offset": q1_start}, amplitude_channel="Q2_RF")
+    config.target.validate()
+    beamline = simulator.SimulatedBeamline(seed=2)
+    optimizer = engine.Optimizer(config, beamline)
+    result = optimizer.run()
+    assert result["status"] == "completed", result["reason"]
+    state, checked, with_q1 = {c: simulator.KNOBS[c][2] for c in simulator.KNOBS}, 0, 0
+    for _, command in beamline.commands:
+        state.update(command)
+        if "Q2_offset" in command:
+            expected = offset + 0.01 * state["Q2_RF"] + 0.95 * (state["Q1_offset"] - q1_start)
+            assert state["Q2_offset"] == pytest.approx(expected, abs=1e-9)
+            checked += 1
+            with_q1 += "Q1_offset" in command and "Q2_RF" not in command
+    assert checked > 10 and with_q1 > 0
+    assert optimizer.restore_initial() == dict(status="restored", reason="")
+    assert beamline.setpoint["Q2_offset"] == rods_start and beamline.setpoint["Q1_offset"] == q1_start
+    for bad, message in ((dict(offsets={"X": 1.0}), "offsets"), (dict(follow={"Q2_RF": {"Q1_offset": 1.0}}), "followed"),
+                         (dict(amplitude_channel="X"), "amplitude channel")):
+        with pytest.raises(engine.ConfigError, match=message):
+            engine.Target({"Q2_RF": 1.0}, 520.0, 30.0, ["Collector"], **dict(dict(amplitude_channel="Q2_RF"), **bad)).validate()
+
+
+def test_goto_sets_the_filter_and_moves_nothing_else(rt):
+    """Set filter (2026-11-24): the target channels to their values at the centre, in bounded steps."""
+    engine, simulator = rt
+    start_rf, start_offset = simulator.KNOBS["Q2_RF"][2], simulator.KNOBS["Q2_offset"][2]
+    target = engine.Target({"Q2_RF": 1.0, "Q2_offset": 0.01}, 520.0, 30.0, ["Collector"], max_step=10.0,
+                           offsets={"Q2_offset": start_offset - 0.01 * start_rf}, amplitude_channel="Q2_RF",
+                           spectrum_points=0)
+    beamline = simulator.SimulatedBeamline(seed=4)
+    optimizer = engine.Optimizer(engine.Config([], None, target, **SIM_SETTINGS), beamline)
+    outcome = optimizer.goto()
+    assert outcome["status"] == "completed", outcome["reason"]
+    assert beamline.setpoint["Q2_RF"] == 520.0
+    assert beamline.setpoint["Q2_offset"] == pytest.approx(start_offset + 0.01 * (520.0 - start_rf))
+    assert {c for _, command in beamline.commands for c in command} == {"Q2_RF", "Q2_offset"}
+    assert all(abs(b["Q2_RF"] - a["Q2_RF"]) <= 10.0 + 1e-9
+               for (_, a), (_, b) in zip(beamline.commands, beamline.commands[1:]))
+    far = engine.Target({"Q2_RF": 1.0}, 5000.0, 30.0, ["Collector"], spectrum_points=0)
+    refused = engine.Optimizer(engine.Config([], None, far, **SIM_SETTINGS), simulator.SimulatedBeamline(seed=4)).goto()
+    assert refused["status"] == "configuration error" and "leaves the device limits" in refused["reason"]
+
+
 # ---------------------------------------------------------------- logs
 
 @pytest.fixture(scope="module")

@@ -42,8 +42,21 @@ def export_config(config, *, stages=None, strategy=None):
             measure=list(target.measure), points=target.points, track=target.track,
             max_step=target.max_step, spectrum_points=target.spectrum_points,
             spectrum_span=target.spectrum_span, filter_name=target.filter_name,
-            amplitude_channel=next(iter(target.channels))),
+            amplitude_channel=getattr(target, "amplitude_channel", None) or next(iter(target.channels)),
+            # Sent only when used: a filter in volts keeps the message a worker built before 2026-11-24 accepts.
+            **_affine(target)),
     )
+
+
+def _affine(target):
+    """The affine law and the followed channels of a selected m/z (2026-11-24), when the target has them."""
+    offsets, follow = dict(getattr(target, "offsets", {})), {c: dict(s) for c, s in getattr(target, "follow", {}).items()}
+    extra = {}
+    if offsets:
+        extra["offsets"] = offsets
+    if follow:
+        extra.update(follow=follow, follow_origin=dict(getattr(target, "follow_origin", {})))
+    return extra
 
 
 def _plain(value):
@@ -311,6 +324,17 @@ class Optimizer:
     def restore_initial(self):
         self._stop.clear()
         return self._drive("restore_initial")
+
+    def retarget(self, target):
+        """Replace the filter of this idle session (a new k or frequency of the finest-filter ladder, 2026-11-24).
+        The native session starts again from the present setpoints: its undo then reaches back to here."""
+        self.config.target = target
+        self._update(self._rpc("configure", export_config(self.config, stages=self._selected, strategy=self.strategy_name)))
+
+    def goto(self):
+        """Set the filter: the target channels to their values at its centre, in bounded steps (2026-11-24)."""
+        self._stop.clear()
+        return self._drive("goto")
 
     def request_stop(self):
         already_requested = self._stop.is_set()

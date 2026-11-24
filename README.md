@@ -29,7 +29,7 @@ network (17 folders).
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.6.1.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.6.2.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.

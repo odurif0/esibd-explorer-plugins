@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import contextlib
+import html
 import importlib
 import importlib.util
 import json
@@ -27,7 +28,7 @@ import traceback
 
 import h5py
 import numpy as np
-from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                              QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
@@ -37,7 +38,8 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, Q
 from esibd.core import INOUT, PARAMETERTYPE, PRINT, TreeWidget, getTestMode, parameterDict, plotting
 from esibd.plugins import Plugin, Scan, SettingsManager
 
-_RUNTIME_FILES = ("__init__.py", "_engine.py", "_simulator.py", "_beamline.py", "_log.py", "_native_engine.py", "_native_worker.py")
+_RUNTIME_FILES = ("__init__.py", "_engine.py", "_simulator.py", "_beamline.py", "_log.py", "_native_engine.py", "_native_worker.py",
+                  "_quadrupole.py", "_filter_rules.py")
 
 
 def _load_runtime():
@@ -56,14 +58,15 @@ def _load_runtime():
             module = importlib.util.module_from_spec(spec)
             sys.modules[name] = module
             spec.loader.exec_module(module)
-        return tuple(importlib.import_module(f"{name}.{part}") for part in ("_engine", "_simulator", "_beamline", "_log", "_native_engine", "_native_worker"))
+        return tuple(importlib.import_module(f"{name}.{part}") for part in ("_engine", "_simulator", "_beamline", "_log", "_native_engine", "_native_worker",
+                                                                             "_filter_rules"))
     except BaseException:
         for key in [key for key in sys.modules if key == name or key.startswith(name + ".")]:
             sys.modules.pop(key, None)
         raise
 
 
-_engine, _simulator, _beamline, _log, _native_engine, _native_worker = _load_runtime()
+_engine, _simulator, _beamline, _log, _native_engine, _native_worker, _filter_rules = _load_runtime()
 
 LEVEL_LABELS = (("fine", "Fine"), ("normal", "Normal"), ("wide", "Wide"))
 SIMULATION_SETTINGS = dict(settle_s=0.5, average_s=1.0, seed=1)
@@ -379,19 +382,22 @@ class ExplorerInstrument(_engine.Instrument):
             if is_amx(channel.getDevice()):
                 raise _engine.ConfigError(f"{name}: AMX pulser channels are not driven; an RF amplitude is the PSU rails "
                                           "of an AMX output")
-        settings = [(knob.name, knob.channels) for stage in config.stages for knob in stage.knobs]
+        settings = [(knob.name, knob.channels, False) for stage in config.stages for knob in stage.knobs]
         if config.target is not None:
-            settings.append((f"{config.target.filter_name or 'Mass filter'} RF amplitude", config.target.channels))
+            # A selected m/z (2026-11-24) moves its filters' rails and rods together: each AMX output in it still
+            # moves both of its rails with the same gain (a symmetric RF), next to the other electrodes.
+            settings.append((f"{config.target.filter_name or 'Mass filter'} RF amplitude", config.target.channels, True))
         switches = {}
         for entry in amx_pairs(getattr(plugin.pluginManager, "plugins", None) or []):
             if not entry["rails"]:
                 continue
             rails = [rail.strip().lower() for rail in entry["rails"]]
-            for name, channels in settings:
+            for name, channels, target in settings:
                 gains = {channel.strip().lower(): gain for channel, gain in channels.items()}
                 if not set(rails) & set(gains):
                     continue
-                if set(gains) != set(rails) or gains[rails[0]] != gains[rails[1]]:
+                others_allowed = target and set(rails) <= set(gains)
+                if (set(gains) != set(rails) and not others_allowed) or gains[rails[0]] != gains[rails[1]]:
                     raise _engine.ConfigError(
                         f"{name}: {entry['amx']} {entry['pair']} is one RF drive; move both rails "
                         f"{' and '.join(entry['rails'])} together, with the same gain, and nothing else")
@@ -959,6 +965,7 @@ class _BeamlineDialog(QDialog):
 class _SpectrumSignals(QObject):
     point = pyqtSignal(float, float)
     done = pyqtSignal(object)
+    text = pyqtSignal(str)
 
 
 class _SpectrumDialog(QDialog):
@@ -1150,6 +1157,151 @@ class _SpectrumDialog(QDialog):
 
 # ============================================================================ panel
 
+class _MassFilterDialog(QDialog):
+    """Filter… (m/z selection): the m/z to select, or a peak picked in volts, the filter quadrupoles, and the settings the
+    rules give (user, 2026-11-24: the finest filter of one m/z on Q2 and/or Q4, the frequency optimized too)."""
+
+    FILTERS = (("Q2", ("q2",)), ("Q4", ("q4",)), ("Q2 + Q4", ("q2", "q4")))
+
+    def __init__(self, plugin):
+        super().__init__(plugin.panel)
+        self.plugin, self.source = plugin, ""
+        self.setWindowTitle("m/z selection")
+        state = plugin.state
+        layout = QVBoxLayout(self)
+        form = QGridLayout()
+        self.by_mz, self.by_volts = QRadioButton("m/z"), QRadioButton("peak in volts")
+        group = QButtonGroup(self)
+        group.addButton(self.by_mz)
+        group.addButton(self.by_volts)
+        self.mz = QDoubleSpinBox()
+        self.mz.setRange(10.0, 100000.0)
+        self.mz.setDecimals(2)
+        self.mz.setValue(float(state["mz"]))
+        row = QHBoxLayout()
+        for widget in (self.by_mz, self.mz):
+            row.addWidget(widget)
+        row.addSpacing(16)
+        row.addWidget(self.by_volts)
+        row.addStretch()
+        form.addWidget(QLabel("Select by"), 0, 0)
+        form.addLayout(row, 0, 1)
+        self.quads, quads = {}, QButtonGroup(self)
+        row = QHBoxLayout()
+        for label, keys in self.FILTERS:
+            button = QRadioButton(label)
+            quads.addButton(button)
+            row.addWidget(button)
+            self.quads[keys] = button
+        row.addStretch()
+        self.quads.get(tuple(state["filters"]), self.quads[("q2",)]).setChecked(True)
+        form.addWidget(QLabel("Filter on"), 1, 0)
+        form.addLayout(row, 1, 1)
+        self.frequency = QCheckBox("optimize (one AMX frequency for Q2 and Q4)")
+        self.frequency.setChecked(bool(state["optimize_frequency"]))
+        form.addWidget(QLabel("Frequency"), 2, 0)
+        form.addWidget(self.frequency, 2, 1)
+        self.filter = QComboBox()
+        for key, label in _beamline.filters(plugin.active_beamline()):
+            self.filter.addItem(label, key)
+        self.filter.setCurrentIndex(max(self.filter.findData(state["filter"]), 0))
+        self.center, self.width = QDoubleSpinBox(), QDoubleSpinBox()
+        for box, value in ((self.center, state["center"]), (self.width, state["width"])):
+            box.setRange(0.0, 100000.0)
+            box.setDecimals(1)
+            box.setSuffix(" V")
+            box.setValue(float(value or 0.0))
+        self.pick = QPushButton("Pick on spectrum…")
+        row = QHBoxLayout()
+        for widget in (self.filter, QLabel("peak"), self.center, QLabel("±"), self.width, self.pick):
+            row.addWidget(widget)
+        row.addStretch()
+        form.addWidget(QLabel("Peak in volts"), 3, 0)
+        form.addLayout(row, 3, 1)
+        layout.addLayout(form)
+        rules = QGroupBox("Rules")
+        self.rules = QLabel()
+        self.rules.setTextFormat(Qt.TextFormat.RichText)
+        self.rules.setWordWrap(True)
+        self.rules.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        QVBoxLayout(rules).addWidget(self.rules)
+        layout.addWidget(rules)
+        self.progress = QLabel()
+        self.progress.setWordWrap(True)
+        layout.addWidget(self.progress)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.set_button = buttons.addButton("Set filter", QDialogButtonBox.ButtonRole.ActionRole)
+        self.set_button.setToolTip("Set the filter now: its RF rails and rods, in small verified steps.")
+        self.finest_button = buttons.addButton("Finest filter", QDialogButtonBox.ButtonRole.ActionRole)
+        self.finest_button.setToolTip("Raise k step by step while R gains, measuring the peak at each step; "
+                                      "then compare the frequencies at that R. Keeps the best.")
+        self.stop_button = buttons.addButton("Stop", QDialogButtonBox.ButtonRole.ActionRole)
+        self.stop_button.setEnabled(False)
+        self.cancel_event = Event()
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.set_button.clicked.connect(self.set_filter)
+        self.finest_button.clicked.connect(self.finest)
+        self.stop_button.clicked.connect(self.cancel_event.set)
+        layout.addWidget(buttons)
+        (self.by_mz if state["mass_by"] == "mz" else self.by_volts).setChecked(True)
+        for signal in (self.by_mz.toggled, self.mz.valueChanged, quads.buttonToggled, self.frequency.toggled,
+                       self.filter.currentIndexChanged, self.center.valueChanged, self.width.valueChanged):
+            signal.connect(self.refresh)
+        self.pick.clicked.connect(self.pick_peak)
+        self.plan = None
+        self.refresh()
+
+    def values(self):
+        return dict(mass_by="mz" if self.by_mz.isChecked() else "volts", mz=self.mz.value(),
+                    filters=list(next(keys for keys, button in self.quads.items() if button.isChecked())),
+                    optimize_frequency=self.frequency.isChecked(),
+                    filter=self.filter.currentData() or self.plugin.state["filter"],
+                    center=self.center.value(), width=self.width.value())
+
+    def refresh(self, *_):
+        mz = self.by_mz.isChecked()
+        for widget in (self.mz, *self.quads.values(), self.frequency):
+            widget.setEnabled(mz)
+        for widget in (self.filter, self.center, self.width, self.pick):
+            widget.setEnabled(not mz)
+        if mz:
+            self.plan, text = self.plugin.mass_plan_text(self.values())
+            self.rules.setText(text)
+        else:
+            self.plan = None
+            self.rules.setText("The filter amplitude is the peak picked in volts; its DC is left as it is.")
+        ready = mz and self.plan is not None and not self.plan.refused and not self.plugin._busy()
+        self.set_button.setEnabled(ready)
+        self.finest_button.setEnabled(ready)
+
+    def pick_peak(self):
+        dialog = _SpectrumDialog(self.plugin, self.filter.currentData(), self.center.value() or None)
+        if dialog.exec() and dialog.selection:
+            self.filter.setCurrentIndex(max(self.filter.findData(dialog.filter_key()), 0))
+            self.center.setValue(float(dialog.selection[0]))
+            self.width.setValue(float(dialog.selection[1]))
+            self.source = dialog.source
+
+    def set_filter(self):
+        self.set_button.setEnabled(False)
+        self.progress.setText("Setting the filter…")
+        self.plugin.set_filter(self.values(), self._done)
+
+    def finest(self):
+        self.set_button.setEnabled(False)
+        self.finest_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.cancel_event.clear()
+        self.progress.setText("Finest filter: setting the starting k…")
+        self.plugin.finest_filter(self.values(), self.progress.setText, self._done, self.cancel_event)
+
+    def _done(self, text):
+        self.stop_button.setEnabled(False)
+        self.progress.setText(text)
+        self.refresh()
+
+
 class _Panel(QWidget):
     """The three steps: beamline, target, stages; then Optimize."""
 
@@ -1183,28 +1335,20 @@ class _Panel(QWidget):
         target = QGroupBox("2   Target")
         grid = QGridLayout(target)
         self.total = QRadioButton("Total ion current")
-        self.mass = QRadioButton("Selected mass")
+        self.mass = QRadioButton("m/z selection")
         self.modes = QButtonGroup(self)
         self.modes.addButton(self.total)
         self.modes.addButton(self.mass)
         grid.addWidget(self.total, 0, 0, 1, 3)
-        grid.addWidget(self.mass, 1, 0, 1, 3)
-        grid.addWidget(QLabel("Filter"), 2, 0)
-        self.filter = QComboBox()
-        grid.addWidget(self.filter, 2, 1)
-        grid.addWidget(QLabel("Peak"), 2, 2)
-        self.center = QDoubleSpinBox()
-        self.width = QDoubleSpinBox()
-        for box in (self.center, self.width):
-            box.setRange(0.0, 100000.0)
-            box.setDecimals(1)
-            box.setSuffix(" V")
-        grid.addWidget(self.center, 2, 3)
-        grid.addWidget(QLabel("±"), 2, 4)
-        grid.addWidget(self.width, 2, 5)
-        self.pick = QPushButton("Pick on spectrum…")
-        grid.addWidget(self.pick, 2, 6)
-        grid.setColumnStretch(7, 1)  # Keep the fields compact in a wide dock.
+        grid.addWidget(self.mass, 1, 0)
+        # The choices of the filter live in Filter… (user, 2026-11-24): an m/z or a peak in volts, Q2 / Q4.
+        self.mass_summary = QLabel()
+        self.mass_summary.setWordWrap(True)
+        grid.addWidget(self.mass_summary, 1, 1)
+        self.mass_filter = QPushButton("Filter…")
+        self.mass_filter.setToolTip("Choose the m/z, or a peak in volts, and the filter quadrupoles.")
+        grid.addWidget(self.mass_filter, 1, 2)
+        grid.setColumnStretch(1, 1)
         layout.addWidget(target)
 
         stages = QGroupBox("3   Stages")
@@ -1298,13 +1442,14 @@ class Transmission(Scan):
     The soft interlocks only stop the optimization; the protective interlock belongs in the hardware."""
 
     name = "Transmission"
-    version = "0.6.1"
+    version = "0.6.2"
     supportedVersion = "1.0"
     iconFile = "transmission.png"
     useInvalidWhileWaiting = False
     MARKERS = {"initial": "s", "probe": "^", "explore": "o", "reference": "D", "verify": "*"}
     PLOT_INTERVAL_S = 3.0  # Live redraws at most this often, and never during an averaging window.
     STATE_DEFAULTS = dict(mode="total", filter="q2", center=0.0, width=0.0, level="normal", skip=[],
+                          mass_by="volts", mz=922.0, filters=["q2"], optimize_frequency=True, mz_k=0.0,
                           simulation=False, advanced=False)
 
     class Display(Scan.Display):
@@ -1582,7 +1727,7 @@ class Transmission(Scan):
             iconTrue=self.makeCoreIcon("stop.png"))
         panel = self.panel
         panel.configure.clicked.connect(self.configure_beamline)
-        panel.pick.clicked.connect(self.pick_peak)
+        panel.mass_filter.clicked.connect(self.open_mass_filter)
         panel.advanced.clicked.connect(self.edit_advanced)
         panel.logs.clicked.connect(self.open_logs)
         panel.start_devices.clicked.connect(lambda: self.start_devices())
@@ -1592,8 +1737,7 @@ class Transmission(Scan):
         panel.revert.clicked.connect(self.undo)
         self._load_state()
         self._apply_state()
-        for signal in (panel.total.toggled, panel.simulation.toggled, panel.center.valueChanged, panel.width.valueChanged,
-                       panel.filter.currentIndexChanged, panel.levels.buttonToggled):
+        for signal in (panel.total.toggled, panel.simulation.toggled, panel.levels.buttonToggled):
             signal.connect(self.panel_changed)
         self.loading = False
         self.toggleAdvanced(advanced=False)
@@ -1613,8 +1757,6 @@ class Transmission(Scan):
             panel.total.setChecked(state["mode"] != "mass")
             panel.mass.setChecked(state["mode"] == "mass")
             panel.simulation.setChecked(bool(state["simulation"]))
-            panel.center.setValue(float(state["center"] or 0.0))
-            panel.width.setValue(float(state["width"] or 0.0))
             panel.level_buttons.get(state["level"], panel.level_buttons["normal"]).setChecked(True)
         finally:
             self._updating = updating
@@ -1625,9 +1767,6 @@ class Transmission(Scan):
         panel, state = self.panel, self.state
         state["mode"] = "mass" if panel.mass.isChecked() else "total"
         state["simulation"] = panel.simulation.isChecked()
-        state["center"], state["width"] = panel.center.value(), panel.width.value()
-        if panel.filter.currentData() is not None:
-            state["filter"] = panel.filter.currentData()
         state["level"] = next((k for k, b in panel.level_buttons.items() if b.isChecked()), "normal")
         if panel.stage_boxes:
             unchecked = {k for k, box in panel.stage_boxes.items() if not box.isChecked()}
@@ -1680,18 +1819,13 @@ class Transmission(Scan):
                 panel.beamline_label.setText("Not configured yet: choose which channels drive the elements, and the detector."
                                              + "".join(f"\n⚠ {problem}" for problem in problems))
             filters = _beamline.filters(beamline)
-            panel.filter.clear()
-            for key, label in filters:
-                panel.filter.addItem(label, key)
-            index = panel.filter.findData(self.state["filter"])
-            panel.filter.setCurrentIndex(index if index >= 0 else 0)
-            if filters:
-                self.state["filter"] = panel.filter.currentData()
+            if filters and self.state["filter"] not in dict(filters):
+                self.state["filter"] = filters[0][0]
             running = self._busy()
             editable = not self.state["advanced"] and not running
             mass = self.state["mode"] == "mass"
-            for widget in (panel.filter, panel.center, panel.width, panel.pick):
-                widget.setEnabled(mass and bool(filters) and editable)
+            panel.mass_filter.setEnabled(mass and bool(filters) and editable)
+            panel.mass_summary.setText(self.mass_summary() if mass else "")
             stages = self._plan(beamline)
             if [key for key, *_ in stages] != list(panel.stage_boxes):
                 panel.set_stages(stages, self.state["skip"])
@@ -1730,7 +1864,11 @@ class Transmission(Scan):
             return False, "Configure the beamline first."
         if self.state["mode"] == "mass" and not _beamline.filters(beamline):
             return False, "Map a quadrupole RF amplitude and a current after it (Configure…) to select a mass."
-        if self.state["mode"] == "mass" and not (self.state["center"] > 0 and self.state["width"] > 0):
+        if self.state["mode"] == "mass" and self.state["mass_by"] == "mz":
+            problem = self.mass_problem()
+            if problem:
+                return False, problem
+        elif self.state["mode"] == "mass" and not (self.state["center"] > 0 and self.state["width"] > 0):
             return False, "Pick the peak of the selected mass first."
         if not self._selected_stages(beamline):
             return False, "Choose at least one stage." if self._plan(beamline) else "No stage can run: map a setting and a current after it."
@@ -1742,6 +1880,10 @@ class Transmission(Scan):
 
     def _plan(self, beamline):
         state = self.state
+        if state["mode"] == "mass" and state["mass_by"] == "mz":
+            keys = [k for k in ("q2", "q4") if k in state["filters"]] or ["q2"]
+            return _beamline.stages(beamline, mode="mass", filter_key=keys[-1],
+                                    exclude=tuple(f"{key}_{part}" for key in keys for part in ("rf", "offset")))
         return _beamline.stages(beamline, mode=state["mode"], filter_key=state["filter"] if state["mode"] == "mass" else None)
 
     def _selected_stages(self, beamline):
@@ -1795,6 +1937,14 @@ class Transmission(Scan):
 
     def _generated(self):
         state, beamline = self.state, self.active_beamline()
+        if state["mode"] == "mass" and state["mass_by"] == "mz":
+            # The target is replaced by the m/z target of the rules (_configuration); the RF and the rods of each
+            # filter are left out of the stages, since the target owns them.
+            keys = [k for k in ("q2", "q4") if k in state["filters"]]
+            exclude = tuple(f"{key}_{part}" for key in keys for part in ("rf", "offset"))
+            return _beamline.build(beamline, selected=self._selected_stages(beamline), level=state["level"], mode="mass",
+                                   filter_key=keys[-1], center=float(state["mz"]), width=max(float(state["mz"]) / 100, 0.1),
+                                   exclude=exclude, settings=SIMULATION_SETTINGS if self._simulated() else None)
         return _beamline.build(beamline, selected=self._selected_stages(beamline), level=state["level"], mode=state["mode"],
                                filter_key=state["filter"] if state["mode"] == "mass" else None,
                                center=state["center"], width=state["width"],
@@ -1818,10 +1968,453 @@ class Transmission(Scan):
 
     def apply_peak(self, filter_key, center, width, source=""):
         self.session("peak_selected", filter=filter_key, center=center, width=width, source=source)
-        self.state.update(filter=filter_key, center=float(center), width=float(width), mode="mass")
+        self.state.update(filter=filter_key, center=float(center), width=float(width), mode="mass", mass_by="volts")
         self._save_state()
         self._apply_state()
         self.refresh_panel()
+
+    # ---------------------------------------------------------------- selected m/z (2026-11-24)
+    MSCAN_QUADRUPOLES = "MScan_quadrupoles.json"  # MScan's profiles: AMX output, rod pairs, r0, RF attenuation.
+
+    def _mscan_profiles(self):
+        path = Path(self.pluginManager.Settings.configPath) / self.MSCAN_QUADRUPOLES
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _rod_channel(selection, channels):
+        """The AMPR channel an MScan rod pair names: '<address> — <name>' or a name; by address when renamed."""
+        if not isinstance(selection, str) or selection in ("", "None"):
+            return None
+
+        def address(channel):
+            try:
+                return f"{channel.getDevice().name} M{channel.module_address()} CH{channel.channel_number()}"
+            except Exception:  # noqa: BLE001 - not an AMPR output
+                return None
+        for channel in channels:
+            where = address(channel)
+            if where and selection in (f"{where} — {channel.name}", channel.name):
+                return channel
+        if " — " in selection:
+            wanted = selection.split(" — ", 1)[0]
+            return next((c for c in channels if address(c) == wanted), None)
+        return None
+
+    def mass_filter_context(self):
+        """(quadrupoles, wiring, q1, problems) for the rules, read on the Qt thread.
+
+        Each quadrupole comes from MScan's profile of that name: its AMX output (its PSU rails), its rod pairs
+        (pair 1 = x + U), r0 and the RF attenuation; its limits from the PSU (hardware voltage limit, Ilim: read,
+        never written). Transmission's own mapping of the RF must name the same AMX output. q1: (channel, value)
+        of Transmission's Q1 offset, which the rods follow.
+        """
+        profiles, beamline = self._mscan_profiles(), self.active_beamline()
+        channels = [c for c in self.pluginManager.DeviceManager.channels() if getattr(c, "real", True)]
+        by_name = {c.name: c for c in channels}
+        pairs = self.amx_pairs()
+        quadrupoles, wiring, problems = {}, {}, []
+        for name in ("Q2", "Q4"):
+            profile = profiles.get(name) or {}
+            entry = next((e for e in pairs if e["amx"] == profile.get("AMX") and e["pair"] == profile.get("AMX connectors")), None)
+            if entry is None or not entry["rails"]:
+                why = f" ({entry['problem']})" if entry is not None and entry["problem"] else ""
+                problems.append(f"{name}: set its AMX output in MScan's {name} profile{why}")
+                continue
+            mapped = beamline["knobs"].get(f"{name.lower()}_rf")
+            if mapped and {c.lower() for c in mapped} != {c.lower() for c in entry["rails"]}:
+                problems.append(f"{name}: Transmission drives the RF of {', '.join(mapped)} but MScan's {name} profile "
+                                f"{entry['amx']} {entry['pair']} ({', '.join(entry['rails'])}): map the same AMX output")
+                continue
+            rods = [self._rod_channel(profile.get(key), channels) for key in ("Quadrupole offset", "Quadrupole offset pair 2")]
+            if None in rods or rods[0] is rods[1]:
+                problems.append(f"{name}: set its two rod pairs in MScan's {name} profile")
+                continue
+            rails = [by_name.get(rail) for rail in entry["rails"]]
+            limits = [float(c.hardware_voltage_limit) for c in rails if c is not None
+                      and _finite(getattr(c, "hardware_voltage_limit", None)) and float(c.hardware_voltage_limit) > 0]
+            ilims = [1e3 * float(c.current_limit_readback) for c in rails if c is not None
+                     and _finite(getattr(c, "current_limit_readback", None)) and float(c.current_limit_readback) > 0]
+            values = [float(rod.value) for rod in rods if _finite(getattr(rod, "value", None))]
+            amplitudes = [float(c.value) for c in rails if c is not None and _finite(getattr(c, "value", None))]
+            r0, attenuation = profile.get("Field radius r0"), profile.get("RF attenuation factor")
+            quadrupoles[name] = _filter_rules.Quadrupole(
+                name, float(r0) if _finite(r0) else None, float(attenuation) if _finite(attenuation) else None,
+                min(limits) if limits else None, min(ilims) if ilims else None,
+                sum(values) / 2 if len(values) == 2 else None, (values[0] - values[1]) / 2 if len(values) == 2 else None,
+                sum(amplitudes) / len(amplitudes) if amplitudes else None)
+            wiring[name] = dict(rails=tuple(entry["rails"]), rods=(rods[0].name, rods[1].name), amx=entry["amx"],
+                                device=entry["device"], pair=entry["pair"])
+        q1 = None
+        q1_channels = beamline["knobs"].get("q1_offset") or {}
+        if q1_channels:
+            channel = by_name.get(next(iter(q1_channels)))
+            if channel is not None and _finite(getattr(channel, "value", None)):
+                q1 = (channel.name, float(channel.value))
+        if q1 is None:
+            problems.append("Map the Q1 offset (Configure…): the axis potential of the filter follows Q1_DC")
+        return quadrupoles, wiring, q1, problems
+
+    def mass_plan(self, values=None, k=None, frequency_hz=None):
+        """(plan, wiring, q1, problem) of the m/z in ``values`` (default: the saved choice): at the AMX's frequency
+        and the k kept by the last finest-filter ladder (else the rules' starting k), unless given."""
+        values = dict(self.state, **(values or {}))
+        quadrupoles, wiring, q1, problems = self.mass_filter_context()
+        names = [key.upper() for key in ("q2", "q4") if key in values["filters"]]
+        missing = [name for name in names if name not in quadrupoles]
+        if not names or missing or q1 is None:
+            return None, wiring, q1, "; ".join(problems) or "Choose Q2, Q4 or both"
+        if len({wiring[name]["amx"] for name in names}) > 1:
+            return None, wiring, q1, "Q2 and Q4 on different AMX: one frequency is needed for both"
+        frequency = getattr(wiring[names[0]]["device"], "frequency_khz", None)
+        if frequency_hz is None and (not _finite(frequency) or float(frequency) <= 0):
+            return None, wiring, q1, f"{wiring[names[0]]['amx']}: frequency not known"
+        if k is None and _finite(values.get("mz_k")) and float(values["mz_k"]) > 0:
+            k = float(values["mz_k"])
+        try:
+            plan = _filter_rules.Rules().plan(float(values["mz"]), quadrupoles, names, q1[1],
+                                              frequency_hz=frequency_hz or float(frequency) * 1e3, k=k)
+        except ValueError as exc:
+            return None, wiring, q1, str(exc)
+        return plan, wiring, q1, plan.refused
+
+    def mass_problem(self):
+        """Why the selected m/z cannot run ('' when it can)."""
+        if self._simulated():
+            return "An m/z needs the instrument (MScan's quadrupoles): in simulation, pick a peak in volts."
+        return self.mass_plan()[3]
+
+    def mass_summary(self):
+        state = self.state
+        if state["mass_by"] != "mz":
+            if not state["center"]:
+                return "No peak picked yet."
+            label = dict(_beamline.FILTERS).get(state["filter"], state["filter"])
+            return f"Peak {state['center']:.1f} V ± {state['width']:.1f} V on {label}."
+        names = " + ".join(key.upper() for key in ("q2", "q4") if key in state["filters"])
+        try:
+            plan, _, _, problem = self.mass_plan()
+        except Exception as exc:  # noqa: BLE001 - shown, never raised into the panel
+            return f"m/z {state['mz']:g} on {names}: {exc}"
+        if plan is None or problem:
+            return f"m/z {state['mz']:g} on {names}: {problem}"
+        return (f"m/z {plan.mz:g} on {names} · k {plan.k:.4f} · {plan.frequency_hz / 1e3:.1f} kHz · R ≈ {plan.r_predicted:.0f}"
+                + (" (extrapolated)" if plan.flags else ""))
+
+    def mass_plan_text(self, values):
+        """(plan or None, rich text) for the Mass filter dialog."""
+        try:
+            plan, wiring, q1, problem = self.mass_plan(values)
+        except Exception as exc:  # noqa: BLE001
+            return None, f"<span style='color:#c53030'>{html.escape(str(exc))}</span>"
+        if plan is None:
+            return None, f"<span style='color:#c53030'>{html.escape(problem)}</span>"
+        lines = [f"R cap {plan.r_cap:.0f} (n {plan.cycles:.0f} RF periods) · starting k {plan.k:.5f}: R ≈ {plan.r_predicted:.0f}",
+                 f"{plan.frequency_hz / 1e3:.3f} kHz · E {plan.energy_ev:g} eV · Q1_DC {q1[1]:.2f} V"]
+        for setting in plan.settings:
+            if setting.role == "filter":
+                lines.append(f"{setting.name}: A {setting.amplitude_v:.2f} V · U {setting.u_v:.2f} V · x {setting.x_v:.2f} V "
+                             f"· rods {setting.rods[0]:.2f} / {setting.rods[1]:.2f} V · RF ~{setting.load_ma:.0f} mA per rail")
+            else:
+                u_now = "" if setting.u_present_v is None else f"U {setting.u_present_v:.2f} V → 0 · "
+                lines.append(f"{setting.name}: transmits all m/z above {setting.cutoff_mz:.0f} (RF only) · {u_now}"
+                             f"offset to ground {setting.x_v:.2f} V · A {setting.amplitude_v:.1f} V (both optimized in its stage)")
+        text = "<br>".join(html.escape(line) for line in lines)
+        if plan.flags:
+            text += "<br><span style='color:#dd6b20'>" + "<br>".join(html.escape(f) for f in plan.flags) + "</span>"
+        if plan.refused:
+            text += f"<br><span style='color:#c53030'>{html.escape(plan.refused)}</span>"
+        return plan, text
+
+    def _mz_target(self, parsed):
+        """The engine's target for the selected m/z: the coordinate is the m/z; rails and rods follow the rules'
+        law, the rods also follow Q1_DC."""
+        plan, wiring, q1, problem = self.mass_plan()
+        if plan is None or problem:
+            raise _engine.ConfigError(problem or "No plan for the selected m/z")
+        self.session("mz_plan", summary=plan.summary(), flags=plan.flags, k=plan.k, frequency_hz=plan.frequency_hz,
+                     r_predicted=plan.r_predicted, r_cap=plan.r_cap)
+        return self._target_of(plan, wiring, q1, parsed.measure, points=parsed.points,
+                               spectrum_points=parsed.spectrum_points, spectrum_span=parsed.spectrum_span)
+
+    @staticmethod
+    def _target_of(plan, wiring, q1, measure, **options):
+        gains, offsets, follow, origin, amplitude = _filter_rules.target_parts(plan, wiring, q1[0], q1[1])
+        width = plan.mz / (2 * plan.r_predicted)  # Half-width of the band, in m/z.
+        names = " + ".join(s.name for s in plan.settings if s.role == "filter")
+        return _engine.Target(gains, plan.mz, width, list(measure), filter_name=f"m/z {plan.mz:g} on {names}",
+                              offsets=offsets, follow=follow, follow_origin=origin, amplitude_channel=amplitude,
+                              **options)
+
+    def open_mass_filter(self):
+        dialog = _MassFilterDialog(self)
+        if dialog.exec():
+            self.apply_mass_filter(dialog.values(), source=getattr(dialog, "source", ""))
+
+    def apply_mass_filter(self, values, source=""):
+        if (values.get("mz", self.state["mz"]) != self.state["mz"]
+                or list(values.get("filters", self.state["filters"])) != list(self.state["filters"])):
+            values = dict(values, mz_k=0.0)  # Another m/z or filter: the rules' starting k again.
+        self.state.update({k: v for k, v in values.items() if k in self.STATE_DEFAULTS}, mode="mass")
+        self.session("mass_filter", **{k: self.state[k] for k in ("mass_by", "mz", "filters", "optimize_frequency",
+                                                                   "filter", "center", "width")}, source=source)
+        self._save_state()
+        if self.panel is not None:
+            self._apply_state()
+            self.refresh_panel()
+
+    def _u_zero_jobs(self, plan, wiring, cancel):
+        """Qt thread: (name, config, instrument) for each quadrupole that does not filter, sits before the detector
+        and still has a resolving DC (user, 2026-11-24): its rod pairs go to their mean, U = 0 between them, their DC
+        offset to ground kept; it then transmits all m/z above its RF cut-off. Behind the detector: left alone."""
+        beamline, jobs = self.active_beamline(), []
+        detector = beamline["detector"]["channel"] if beamline["detector"] else None
+        for setting in plan.settings:
+            if (setting.role != "rf only" or setting.u_present_v is None or abs(setting.u_present_v) < 0.005
+                    or detector is None or not _beamline.filter_measure(beamline, setting.name.lower())):
+                continue
+            gains, offsets, amplitude = _filter_rules.u_zero_parts(wiring[setting.name]["rods"], setting.x_v)
+            target = _engine.Target(gains, 0.0, 2.0, [detector], spectrum_points=0, offsets=offsets,
+                                    amplitude_channel=amplitude, filter_name=f"{setting.name} U = 0")
+            spray = beamline["spray"]
+            spray = _engine.Spray(spray["channel"], *(v / 1e9 for v in spray["range_na"])) if spray else None
+            config = _engine.Config([], {k: tuple(v) for k, v in beamline["gauges"].items()}, target, spray,
+                                    polarity=beamline["polarity"])
+            jobs.append((setting.name, config, self._instrument(config, cancel)))
+        return jobs
+
+    def _run_u_zero(self, jobs, log):
+        """Worker thread: run the jobs of ``_u_zero_jobs`` (1 V steps with readbacks); an error stops what follows."""
+        for name, config, instrument in jobs:
+            optimizer = None
+            try:
+                optimizer = self._new_native_optimizer(config, instrument, log=log)
+                outcome = optimizer.goto()
+            finally:
+                self._retire_native_optimizer(optimizer)
+            if outcome["status"] != "completed":
+                raise _engine.InstrumentError(f"{name}: U = 0 not set ({outcome['status']}: {outcome['reason']})")
+            self.session("u_zero", quadrupole=name, rods=list(config.target.channels), status=outcome["status"])
+
+    def set_filter(self, values, on_done):
+        """Set filter (Filter…): the rails and rods of the m/z target to their values, by the native engine
+        in bounded steps with readbacks, then left there. ``on_done(text)`` runs on the Qt thread."""
+        if self._busy():
+            on_done("Wait until the optimization has finished.")
+            return
+        self.apply_mass_filter(values)
+        try:
+            _, parsed = self._configuration()
+            target = parsed.target
+            beamline = self.active_beamline()
+            spray = beamline["spray"]
+            spray = _engine.Spray(spray["channel"], *(v / 1e9 for v in spray["range_na"])) if spray else None
+            config = _engine.Config([], {k: tuple(v) for k, v in beamline["gauges"].items()}, target, spray,
+                                    polarity=beamline["polarity"])
+            cancel = Event()
+            instrument = self._instrument(config, cancel)
+            plan, wiring, _, _ = self.mass_plan()
+            u_zero = self._u_zero_jobs(plan, wiring, cancel) if plan is not None else []
+        except (_engine.ConfigError, _engine.InstrumentError, KeyError, ValueError) as exc:
+            on_done(f"Filter not set: {exc}")
+            return
+        self._sweeping = True
+        self.refresh_panel()
+        log = self._open_run_log("set_filter", target=dict(channels=target.channels, offsets=target.offsets,
+                                                          center=target.center, follow=target.follow),
+                                 channels=self._channel_snapshot(instrument))
+        if isinstance(instrument, ExplorerInstrument):
+            instrument.log = log.write
+        signals = _SpectrumSignals()
+        signals.text.connect(on_done)
+        self._filter_signals = signals  # Kept alive until the worker has reported.
+
+        def work():
+            optimizer = None
+            try:
+                self._run_u_zero(u_zero, log.write)
+                optimizer = self._new_native_optimizer(config, instrument, log=log.write)
+                outcome = optimizer.goto()
+            except Exception as exc:  # noqa: BLE001 - reported to the dialog, kept in the log
+                log.write("exception", traceback=traceback.format_exc())
+                outcome = dict(status="error", reason=f"{type(exc).__name__}: {exc}")
+            finally:
+                self._retire_native_optimizer(optimizer)
+                self._sweeping = False
+                log.close()
+            self.session("set_filter", status=outcome["status"], reason=outcome.get("reason", ""),
+                         log=str(log.path) if log.path else None)
+            if not self._closing:
+                signals.text.emit("Filter set." if outcome["status"] == "completed"
+                                  else f"Filter not set ({outcome['status']}): {outcome.get('reason', '')}")
+                self._bridge.refresh.emit()
+        Thread(target=work, name="Transmission set filter", daemon=True).start()
+
+    FINEST_POINTS = 21  # Spectrum points across ± 3 predicted half-widths, at each k of the ladder.
+    AMX_APPLY_S = 20.0  # An AMX frequency is applied by the AMX plugin in its own thread: waited for this long.
+
+    def _set_amx_frequency(self, device, khz):
+        """Write the AMX frequency as its operator would (the AMX keeps its duty), then wait until it has applied it;
+        the frequency is common to both outputs (Q2 and Q4). Worker thread."""
+        def write():
+            if not device_on(device):
+                raise _engine.InstrumentError(f"{device.name} is OFF: its frequency cannot be applied")
+            device.frequency_khz = float(khz)
+            return float(device.frequency_khz)
+        applied = self._gui_call(write)
+        began = time.monotonic()
+        while time.monotonic() - began < self.AMX_APPLY_S:
+            time.sleep(0.5)
+            if time.monotonic() - began >= 2.0 and not self._gui_call(lambda: device_busy(device)):
+                return applied
+        raise _engine.InstrumentError(f"{device.name} still busy {self.AMX_APPLY_S:g} s after a frequency change")
+
+    def finest_filter(self, values, on_progress, on_done, cancel):
+        """Finest filter (Filter…, user 2026-11-24): the finest useful filter of the m/z, measured.
+
+        From the present k, k climbs in the rules' steps; at each k the filter is set and a spectrum across the band
+        measures R and the height. The ladder stops when R no longer gains 5 % per step, when the peak is no longer
+        measurable (10 × the noise of its flanks), or at the closing; the best R measured wins. With the frequency
+        optimized, the candidates are then compared at that R (the highest signal at equal R). The filter is left at
+        the best setting and that k is kept for the next optimizations. Stopped or failed, the filter and the
+        frequency return to where they started. ``on_progress`` and ``on_done`` run on the Qt thread.
+        """
+        if self._busy():
+            on_done("Wait until the optimization has finished.")
+            return
+        self.apply_mass_filter(values)
+        try:
+            if self._simulated():
+                raise _engine.ConfigError(self.mass_problem())
+            start, wiring, q1, problem = self.mass_plan()
+            if start is None or problem:
+                raise _engine.ConfigError(problem or "No plan for the selected m/z")
+            beamline = self.active_beamline()
+            keys = [k for k in ("q2", "q4") if k in self.state["filters"]]
+            measure = _beamline.filter_measure(beamline, keys[-1])
+            if not measure:
+                raise _engine.ConfigError("The detector must sit behind the filter")
+            spray = beamline["spray"]
+            spray = _engine.Spray(spray["channel"], *(v / 1e9 for v in spray["range_na"])) if spray else None
+            config = _engine.Config([], {k: tuple(v) for k, v in beamline["gauges"].items()},
+                                    self._target_of(start, wiring, q1, measure, spectrum_points=0), spray,
+                                    polarity=beamline["polarity"])
+            instrument = self._instrument(config, cancel)
+            u_zero = self._u_zero_jobs(start, wiring, cancel)
+            amx = wiring[keys[0].upper()]["device"]
+            quad = next(s.name for s in start.settings if s.role == "filter")
+        except (_engine.ConfigError, _engine.InstrumentError, KeyError, ValueError) as exc:
+            on_done(f"Finest filter not started: {exc}")
+            return
+        self._sweeping = True
+        self.refresh_panel()
+        log = self._open_run_log("finest_filter", mz=start.mz, start=start.summary(), flags=start.flags,
+                                 channels=self._channel_snapshot(instrument))
+        if isinstance(instrument, ExplorerInstrument):
+            instrument.log = log.write
+        signals = _SpectrumSignals()
+        signals.text.connect(on_progress)
+        signals.done.connect(on_done)
+        self._filter_signals = signals
+        rules = _filter_rules.Rules()
+
+        def plan_at(k, frequency_hz):
+            plan = self._gui_call(lambda: self.mass_plan(k=k, frequency_hz=frequency_hz))[0]
+            if plan is None or plan.refused:
+                raise _engine.ConfigError(plan.refused if plan is not None else "No plan")
+            return plan
+
+        def work():
+            optimizer, text, kept = None, "", None
+            try:
+                self._run_u_zero(u_zero, log.write)
+                optimizer = self._new_native_optimizer(config, instrument, log=log.write)
+
+                def measure_at(plan):
+                    """Set the filter at ``plan``, then measure its band until it can be trusted (rules.measured)."""
+                    if cancel.is_set():
+                        raise _engine.Stopped("Stopped by the operator")
+                    optimizer.retarget(self._target_of(plan, wiring, q1, measure, spectrum_points=0))
+                    moved = optimizer.goto()
+                    if moved["status"] != "completed":
+                        raise _engine.InstrumentError(f"filter at k {plan.k:.5f}: {moved['status']} {moved['reason']}")
+
+                    def sweep(center, half_span):
+                        coordinates = list(np.linspace(max(center - half_span, 1.0), center + half_span,
+                                                       self.FINEST_POINTS))
+                        result = optimizer.spectrum(coordinates, measure)  # Back at the centre afterwards.
+                        if result["status"] != "completed":
+                            raise _engine.InstrumentError(f"spectrum at k {plan.k:.5f}: {result['status']} {result['reason']}")
+                        band = _filter_rules.measure_band(result["amplitude"], result["current"])
+                        log.write("finest_sweep", k=plan.k, frequency_hz=plan.frequency_hz, band=band,
+                                  mz=result["amplitude"], current=result["current"])
+                        return band
+                    band = _filter_rules.measured(rules, plan, sweep)
+                    log.write("finest_step", k=plan.k, frequency_hz=plan.frequency_hz, r_predicted=plan.r_predicted, band=band)
+                    return band
+
+                best, _, why = _filter_rules.climb(
+                    rules, start.k, lambda k: plan_at(k, start.frequency_hz), measure_at,
+                    report=lambda plan, band: signals.text.emit(
+                        f"k {plan.k:.5f}: R {band['r']:.0f}, peak {1e12 * band['height']:.2f} pA"))
+                if best is None:
+                    raise _engine.InstrumentError("no measurable peak at the starting k")
+                plan, band = best
+                if self.state["optimize_frequency"]:
+                    candidates = sorted({rules.snap_frequency(f * 1e3) for f in rules.c["frequencies_khz"]}
+                                        | {start.frequency_hz})
+                    r_equal = plan.r_predicted  # The same predicted R at every frequency; the measure checks it.
+                    found = {start.frequency_hz: (plan, band)}
+                    for frequency in candidates:
+                        if frequency == start.frequency_hz:
+                            continue
+                        self._set_amx_frequency(amx, frequency / 1e3)
+                        k_f = rules.k_for_resolution(r_equal, start.mz, frequency, quad=None)[0]
+                        candidate = plan_at(k_f, frequency)
+                        found[frequency] = (candidate, measure_at(candidate))
+                        signals.text.emit(f"{frequency / 1e3:.3f} kHz: k {k_f:.5f}, R {found[frequency][1]['r']:.0f}, "
+                                          f"peak {1e12 * found[frequency][1]['height']:.2f} pA")
+                    _, (plan, band) = _filter_rules.choose_frequency(found, band["r"])
+                    self._set_amx_frequency(amx, plan.frequency_hz / 1e3)
+                ladder = band
+                band = measure_at(plan)  # The kept setting is measured once more, never chosen on one measurement.
+                signals.text.emit(f"Kept k {plan.k:.5f}: R {band['r']:.0f} again (ladder {ladder['r']:.0f})")
+                kept = plan
+                text = (f"Finest filter: k {plan.k:.5f} at {plan.frequency_hz / 1e3:.3f} kHz, R {band['r']:.0f} "
+                        f"(ladder {ladder['r']:.0f}, model {plan.r_predicted:.0f}), peak {1e12 * band['height']:.2f} pA "
+                        f"({why}). Kept for the next optimizations.")
+            except Exception as exc:  # noqa: BLE001 - stopped or failed: back to the start, said and logged
+                stopped = isinstance(exc, _engine.Stopped)
+                log.write("exception", traceback=traceback.format_exc())
+                text = "Stopped" if stopped else f"Finest filter failed: {exc}"
+                try:
+                    cancel.clear()
+                    if optimizer is not None:
+                        if amx is not None and float(getattr(amx, "frequency_khz", 0.0)) * 1e3 != start.frequency_hz:
+                            self._set_amx_frequency(amx, start.frequency_hz / 1e3)
+                        optimizer.retarget(self._target_of(start, wiring, q1, measure, spectrum_points=0))
+                        back = optimizer.goto()
+                        text += "; the filter is back at its start" if back["status"] == "completed" else \
+                            f"; returning to the start failed: {back['reason']}"
+                except Exception as again:  # noqa: BLE001
+                    log.write("return_failed", traceback=traceback.format_exc())
+                    text += f"; returning to the start failed: {again}"
+                text += "."
+            finally:
+                self._retire_native_optimizer(optimizer)
+                self._sweeping = False
+                log.close()
+            if kept is not None:
+                self._gui_call(lambda: (self.state.update(mz_k=kept.k), self._save_state()))
+            self.session("finest_filter", text=text, k=kept.k if kept else None,
+                         frequency_hz=kept.frequency_hz if kept else None, log=str(log.path) if log.path else None)
+            if not self._closing:
+                signals.done.emit(text)
+                self._bridge.refresh.emit()
+        Thread(target=work, name="Transmission finest filter", daemon=True).start()
 
     def edit_advanced(self):
         path = self.default_config_path()
@@ -2193,6 +2786,10 @@ class Transmission(Scan):
             except ValueError as exc:
                 raise _engine.ConfigError(str(exc)) from None
         config = _engine.parse_config(text)
+        if not self.state["advanced"] and self.state["mode"] == "mass" and self.state["mass_by"] == "mz":
+            config.target = self._mz_target(config.target)
+            config = _engine.Config(config.stages, config.pressure, config.target, config.spray,
+                                    **{key: getattr(config, key) for key in _engine.Config.DEFAULTS})
         if not self._simulated():
             device_of = {}
             for channel in self.pluginManager.DeviceManager.channels():
@@ -2234,6 +2831,10 @@ class Transmission(Scan):
         try:
             text, config = self._configuration()
             instrument = self._instrument(config, self._cancel)
+            self._u_zero = []
+            if not self.state["advanced"] and self.state["mode"] == "mass" and self.state["mass_by"] == "mz":
+                plan, wiring, _, _ = self.mass_plan()
+                self._u_zero = self._u_zero_jobs(plan, wiring, self._cancel)
             previous = getattr(self, "_optimizer", None)
             optimizer = self._new_native_optimizer(config, instrument, on_event=self._on_event)
         except Exception as exc:  # noqa: BLE001 - startup/protocol failures are not retried
@@ -2313,6 +2914,7 @@ class Transmission(Scan):
     def runScan(self, recording):
         optimizer = self._optimizer
         try:
+            self._run_u_zero(getattr(self, "_u_zero", []), self._run_log.write)  # The other quadrupole: U = 0.
             self._result = optimizer.run()
         except Exception as exc:  # noqa: BLE001 - never leave the scan running
             self._result = dict(status="error", reason=f"{type(exc).__name__}: {exc}", stages=list(optimizer.results),
@@ -2364,7 +2966,7 @@ class Transmission(Scan):
             before, after = checks["before"]["currents"].get(channel), checks["after"]["currents"].get(channel)
             if _finite(before) and _finite(after):
                 target = result.get("target")
-                label = (f"Selected mass ({target['filter'] or 'filter'} at {target['final_center']:.1f} V) on {channel}"
+                label = (f"m/z selection ({target['filter'] or 'filter'} at {target['final_center']:.1f}) on {channel}"
                          if target else channel)
                 ratio = f" (×{after / before:.2g})" if before > 0 else ""
                 parts.append(f"{label}: {format_current(before)} → {format_current(after)}{ratio}")

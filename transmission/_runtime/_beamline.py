@@ -257,7 +257,7 @@ def resolve(beamline, rails, amx_rails=()):
     return normalize(resolved), problems
 
 
-def stages(beamline, *, mode="total", filter_key=None):
+def stages(beamline, *, mode="total", filter_key=None, exclude=()):
     """[(key, label, knob keys, aperture, downstream, peak)] before the detector, which they all maximize.
 
     Only the elements upstream of the detector act on its current: with the detector behind aperture k,
@@ -275,6 +275,8 @@ def stages(beamline, *, mode="total", filter_key=None):
         knobs = [k for k in knobs if k in beamline["knobs"] and KNOB_POSITION[k] < upstream]
         if mode == "mass" and filter_key:
             knobs = [k for k in knobs if k != f"{filter_key}_rf"]
+        # A selected m/z (2026-11-24): the RF and the rods of each filter belong to the target, never to a stage.
+        knobs = [k for k in knobs if k not in exclude]
         if not knobs:
             continue
         peak = mode == "mass" and position_of_filter is not None and (position is None or position <= position_of_filter)
@@ -305,7 +307,7 @@ def _toml_table(mapping):
 
 
 def build(beamline, *, selected=None, level="normal", mode="total", filter_key=None, center=None, width=None,
-          settings=None):
+          settings=None, exclude=()):
     """TOML configuration for the engine. ``selected``: stage keys to run (default: all available)."""
     beamline = normalize(beamline)
     if level not in LEVELS:
@@ -319,7 +321,7 @@ def build(beamline, *, selected=None, level="normal", mode="total", filter_key=N
             raise ValueError("The mass filter must sit before the detector")
         if center is None or width is None or not (center >= 0 and width > 0):
             raise ValueError("Choose the peak: its amplitude and half-width in volts")
-    plan = stages(beamline, mode=mode, filter_key=filter_key)
+    plan = stages(beamline, mode=mode, filter_key=filter_key, exclude=exclude)
     if selected is not None:
         plan = [stage for stage in plan if stage[0] in selected]
     if not plan:

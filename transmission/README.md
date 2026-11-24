@@ -75,12 +75,16 @@ The panel has three steps, then **▶ Optimize**.
    is shown as that output; any other mapping of an RF amplitude, or a rail used as a
    DC setting, is reported under the beamline summary and never driven. Unmapped
    settings are simply skipped.
-2. **Target** — **Total ion current**, or **Selected mass**: choose the quadrupole
-   used as the filter (usually Q2 or Q4; any quadrupole can be used), then
-   **Pick on spectrum…** and click the peak, either on a saved MScan file (the
-   filter is recognised from MScan's rails) or on a quick sweep of the filter made
-   here. The peak position and its half-width are filter amplitudes in volts, as in
-   MScan. **The m/z calibration belongs to MScan**; this plugin never converts.
+2. **Target** — **Total ion current**, or **m/z selection**, set in **Filter…**:
+   - **by m/z**: type the m/z and choose the filter, **Q2**, **Q4** or **Q2 + Q4**. The
+     filter settings come from the rules below (see *Selected m/z*); the dialog shows
+     them, with what is extrapolated. **Set filter** applies them; **Finest filter**
+     makes the filter as fine as it usefully gets.
+   - **by a peak in volts**: choose the quadrupole used as the filter (any quadrupole
+     can be used), then **Pick on spectrum…** and click the peak, either on a saved
+     MScan file (the filter is recognised from MScan's rails) or on a quick sweep of
+     the filter made here. The peak position and its half-width are filter amplitudes
+     in volts; the filter's DC is left as it is.
 3. **Stages** — tick the stages to run (Inlet + funnel 1, Funnel 2, Q1, …, Q4, Final
    refinement) and the exploration: **Fine**, **Normal** or **Wide** windows.
 
@@ -170,6 +174,50 @@ setting changes is therefore never mistaken for a change of transmission; its ce
 is tracked within ± twice the half-width of the picked position. The stages after the
 filter maximize the (already filtered) current. A spectrum around the peak is recorded
 before and after the run.
+
+### Selected m/z
+
+The filter of an m/z comes from internal rules built on the physics of the quadrupole
+and validated by the Q2 data of 2–18 November 2026 (the m/z calibration and the
+square-wave stability of MScan, shared word for word):
+
+- **Settings.** The RF amplitude A of the m/z, from MScan's calibration with its profile's
+  r0 and RF attenuation, corrected by the centre offset measured per frequency. The
+  resolving DC U = k A on the rod pairs (x + U, x − U; δ = 0, U_min 0.5 V). The axis
+  potential x = x50 − E: E = 5 eV, x50 the stopping potential of the m/z, which follows
+  Q1_DC.
+- **Resolution.** R is limited by the RF periods n an ion spends in the rods:
+  1/R = s/R_ideal(k) + transit(n). The starting k gives half of that cap; above it R
+  gains little while the signal falls.
+- **Wiring.** Each filter is read from **MScan's quadrupole profile** of that name: AMX
+  output, rod pairs, r0, RF attenuation. Transmission's own mapping of the RF must name
+  the same AMX output; otherwise nothing runs and the panel says why.
+- **The other quadrupole transmits all m/z (RF only).** When it sits before the detector,
+  Set filter, Finest filter and every m/z optimization first bring its rod pairs to their
+  mean: U = 0 between them, their DC offset to ground kept. It then passes every m/z above
+  its RF cut-off (shown in the dialog with its U, offset and RF amplitude). Its stage
+  optimizes its offset and RF amplitude without creating any U.
+- **During an optimization.** The filter is never a stage setting. The peak is swept in
+  m/z: rails and rods move together, so k stays constant across the sweep. The rods
+  also follow Q1_DC (0.95 V per volt), so the ions keep their energy in the filter while
+  the Q1 stage moves.
+- **Finest filter.** From the present k, k climbs by 0.0002. At each step the filter is
+  set and a spectrum across the band measures R and the height. It stops when R gains
+  less than 5 % per step, when the peak falls under 10 × the noise of its flanks, or
+  before the closing. With **Frequency: optimize**, the frequencies 500 and 549.451 kHz
+  are then compared at that R (the highest signal at equal R); the AMX frequency is
+  written as its operator would, and it is common to Q2 and Q4. The kept setting is
+  measured once more; it is used by the next optimizations. Stopped or failed, the filter
+  and the frequency return to where they started.
+- **A band measured to be trusted.** An isolated point (both neighbours under half of it)
+  is a spike, not a band. A band with fewer than 5 samples inside its FWHM is swept again,
+  finer. An R above 1.5 × the model counts only if a second measurement agrees within
+  15 % (else the lower R). On the raw Q2 files, single-point spikes on weak peaks had
+  given R up to 27 × the model.
+- **Limits.** Ilim is read, never written: a setting whose predicted RF current
+  exceeds 90 % of Ilim, or whose amplitude exceeds the PSU's limit, is refused. Outside
+  the measured domain (k 0.200–0.20936, 299–549 kHz, 5–26 eV, m/z 622–2122, Q2 only),
+  the rules extrapolate and the dialog says so.
 
 ## Method (one stage)
 
@@ -375,4 +423,5 @@ and Explorer's console says why.
 - An unstable spray degrades every method; normalization helps.
 - Couplings between stages call for the final refinement.
 - The simulator is a test bench, not a physical model; validate on the instrument.
-- No m/z: the target is a filter amplitude in volts. Convert with MScan's calibration.
+- A selected m/z needs the instrument (MScan's quadrupole profiles): in simulation, pick a peak in volts.
+- The rules are fitted on Q2; Q4 is built alike but not characterized: check its peaks.

@@ -134,10 +134,11 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
                        "_heater_limits.py", "vendor/runtime/esi/_process.py"),
     ),
     PluginSpec("mscan", "MScan", "MScan", "mscan_plugin.py", None, "mscan", None, None, None,
-               bundled_files=(*_native_bundled_files("mscan"), "_runtime/_native_scan.py")),
+               bundled_files=(*_native_bundled_files("mscan"), "_runtime/_native_scan.py", "_runtime/_quadrupole.py")),
     PluginSpec("transmission", "Transmission", "Transmission", "transmission_plugin.py", None, "transmission", None, None, None,
                bundled_files=(*_native_bundled_files("transmission"), "_runtime/__init__.py", "_runtime/_engine.py",
-                              "_runtime/_simulator.py", "_runtime/_beamline.py", "_runtime/_log.py", "_runtime/_native_engine.py")),
+                              "_runtime/_simulator.py", "_runtime/_beamline.py", "_runtime/_log.py", "_runtime/_native_engine.py",
+                              "_runtime/_quadrupole.py", "_runtime/_filter_rules.py")),
     # No device and no native worker: robocopy, part of Windows, copies in its own process.
     PluginSpec("sync", "Sync", "Sync", "sync_plugin.py", None, "sync", None, None, None,
                bundled_files=("_runtime/__init__.py", "_runtime/_sync.py", "_runtime/_windows.py"), native=False,

@@ -675,3 +675,101 @@ def test_mscan_spectra_use_the_beamline_detector_column(module, tmp_path):
     assert module.read_mscan(new, "DMMR_M09")[2] == "DMMR_M00"
     assert module.read_mscan(old)[2] == "DMMR_M04"
     assert module.read_mscan(old, "DMMR_M03")[2] == "DMMR_M03"
+
+
+def mass_rig(module, tmp_path, profile=None, q2_rf=("PSU_A_CH0", "PSU_A_CH1"), q4=False):
+    """A selected m/z (2026-11-24): MScan's Q2 profile, AMX_HD CH2-CH3 → PSU_A, the rods on AMPR_A, Q1_DC."""
+    import json
+    ampr = NS(name="AMPR_A")
+    psu = NS(name="PSU_A")
+    rails = [NS(name=f"PSU_A_CH{n}", real=True, value=90.0, channel_number=(lambda n=n: n), hardware_voltage_limit=350.0,
+                current_limit_readback=0.3, getDevice=lambda: psu) for n in (0, 1)]
+    psu.getChannels = lambda: rails
+    rods = [NS(name=name, real=True, value=value, module_address=lambda: 3, channel_number=(lambda n=n: n),
+               getDevice=lambda: ampr) for n, name, value in ((1, "Q2_DC_1", 40.0), (2, "Q2_DC_2", 20.0))]
+    q1 = NS(name="Q1_DC", real=True, value=36.0, getDevice=lambda: ampr)
+    amx = NS(name="AMX_HD", psu_ch01="PSU_B" if q4 else "None", psu_ch23="PSU_A", frequency_khz=500.0,
+             getChannels=lambda: [])
+    psu_b = NS(name="PSU_B")
+    rails_b = [NS(name=f"PSU_B_CH{n}", real=True, value=66.0, channel_number=(lambda n=n: n), hardware_voltage_limit=350.0,
+                  current_limit_readback=0.3, getDevice=lambda: psu_b) for n in (0, 1)]
+    psu_b.getChannels = lambda: rails_b
+    rods_b = [NS(name=name, real=True, value=value, module_address=lambda: 4, channel_number=(lambda n=n: n),
+                 getDevice=lambda: ampr) for n, name, value in ((1, "Q4_DC_1", 10.0), (2, "Q4_DC_2", -30.0))]
+    config = tmp_path / "conf"
+    config.mkdir(parents=True, exist_ok=True)
+    profiles = {"Q2": profile if profile is not None else {
+        "AMX": "AMX_HD", "AMX connectors": "CH2-CH3", "Quadrupole offset": "AMPR_A M3 CH1 — Q2_DC_1",
+        "Quadrupole offset pair 2": "AMPR_A M3 CH2 — Q2_DC_2", "Field radius r0": 2.625, "RF attenuation factor": 0.978}}
+    if q4:
+        profiles["Q4"] = {"AMX": "AMX_HD", "AMX connectors": "CH0-CH1", "Quadrupole offset": "AMPR_A M4 CH1 — Q4_DC_1",
+                          "Quadrupole offset pair 2": "AMPR_A M4 CH2 — Q4_DC_2"}
+    (config / "MScan_quadrupoles.json").write_text(json.dumps(profiles), encoding="utf-8")
+    scan = module.Transmission(pluginManager=NS(Settings=NS(dataPath=tmp_path, configPath=config),
+                                                DeviceManager=NS(channels=lambda: [*rails, *rods, q1, *rails_b, *rods_b]),
+                                                plugins=[amx, psu, ampr, psu_b]))
+    scan.session = lambda *args, **kwargs: None
+    beamline = dict(knobs={"q1_offset": {"Q1_DC": 1.0}, "q2_rf": {name: 1.0 for name in q2_rf},
+                           **({"q4_rf": {"PSU_B_CH0": 1.0, "PSU_B_CH1": 1.0}} if q4 else {})},
+                    detector={"channel": "DMMR_M03", "position": "after_q4"}, gauges={}, spray=None, polarity=1)
+    scan.active_beamline = lambda: beamline
+    scan.state.update(simulation=False, mode="mass", mass_by="mz", mz=922.0098, filters=["q2"])
+    return NS(scan=scan, rods=rods, rails=rails, q1=q1, amx=amx)
+
+
+def test_a_selected_mz_reads_mscans_quadrupole_and_drives_rails_and_rods(module, tmp_path):
+    rig = mass_rig(module, tmp_path)
+    plan, wiring, q1, problem = rig.scan.mass_plan()
+    assert problem == "" and q1 == ("Q1_DC", 36.0)
+    assert wiring["Q2"]["rails"] == ("PSU_A_CH0", "PSU_A_CH1") and wiring["Q2"]["rods"] == ("Q2_DC_1", "Q2_DC_2")
+    assert plan.k == pytest.approx(0.20904, abs=2e-5) and plan.frequency_hz == 5e5
+    assert rig.scan.mass_summary().startswith("m/z 922.01 on Q2 · k 0.2090 · 500.0 kHz · R ≈ 60")
+    target = rig.scan._mz_target(NS(measure=["DMMR_M03"], points=5, spectrum_points=21, spectrum_span=3.0))
+    target.validate()
+    q2 = plan.settings[0]
+    assert target.amplitude_channel == "PSU_A_CH0" and target.center == pytest.approx(922.0098)
+    assert target.value("PSU_A_CH1", target.center) == pytest.approx(q2.amplitude_v)
+    assert target.value("Q2_DC_1", target.center) == pytest.approx(q2.rods[0])
+    assert target.value("Q2_DC_2", target.center, {"Q1_DC": 38.0}) == pytest.approx(q2.rods[1] + 1.90)
+    assert target.follow == {"Q2_DC_1": {"Q1_DC": 0.95}, "Q2_DC_2": {"Q1_DC": 0.95}}
+    rig.rods[0].name = "Rod A"  # A rename in the AMPR: followed by its output.
+    assert rig.scan.mass_plan()[1]["Q2"]["rods"] == ("Rod A", "Q2_DC_2")
+    rig.scan.state.update(mz_k=0.2094)  # Kept by a finest-filter ladder.
+    assert rig.scan.mass_plan()[0].k == pytest.approx(0.2094)
+    rig.scan.apply_mass_filter(dict(mz=1521.9715))  # Another m/z: the rules' starting k again.
+    assert rig.scan.state["mz_k"] == 0.0 and rig.scan.mass_plan()[0].k > 0.2094
+
+
+def test_a_selected_mz_refuses_a_disagreement_or_a_missing_profile(module, tmp_path):
+    other = mass_rig(module, tmp_path, q2_rf=("PSU_B_CH0", "PSU_B_CH1"))
+    assert "map the same AMX output" in other.scan.mass_plan()[3]
+    empty = mass_rig(module, tmp_path / "empty", profile={})
+    assert "set its AMX output in MScan's Q2 profile" in empty.scan.mass_plan()[3]
+    assert "MScan's Q2 profile" in empty.scan.mass_summary()
+    rig = mass_rig(module, tmp_path / "simulation")
+    rig.scan.state.update(simulation=True)
+    assert rig.scan.mass_problem().startswith("An m/z needs the instrument")
+    rig.rails[0].hardware_voltage_limit = 60.0
+    rig.scan.state.update(simulation=False)
+    assert "above the PSU limit 60.0 V" in rig.scan.mass_plan()[3]
+
+
+def test_the_quadrupole_that_does_not_filter_gets_u_zero_when_it_is_before_the_detector(module, tmp_path):
+    """User, 2026-11-24: the other quadrupole transmits all m/z (RF only): U = 0 between its rod pairs, its DC
+    offset to ground kept. Behind the detector it changes nothing measured and is left alone."""
+    rig = mass_rig(module, tmp_path, q4=True)
+    rig.scan._instrument = lambda config, cancel: config
+    plan, wiring, _, problem = rig.scan.mass_plan()
+    assert problem == "" and [s.name for s in plan.settings] == ["Q2", "Q4"]
+    q4 = plan.settings[1]
+    assert (q4.role, q4.u_present_v, q4.x_v, q4.amplitude_v) == ("rf only", 20.0, -10.0, 66.0)
+    jobs = rig.scan._u_zero_jobs(plan, wiring, Event())
+    assert [name for name, *_ in jobs] == ["Q4"]
+    target = jobs[0][1].target
+    target.validate()
+    assert target.values(0.0) == {"Q4_DC_1": -10.0, "Q4_DC_2": -10.0} and target.center == 0.0
+    assert target.values(20.0) == {"Q4_DC_1": 10.0, "Q4_DC_2": -30.0}  # The present state, U = 20 V.
+    text = rig.scan.mass_plan_text({})[1]
+    assert "Q4: transmits all m/z above 514 (RF only) · U 20.00 V → 0 · offset to ground -10.00 V" in text
+    rig.scan.active_beamline()["detector"]["position"] = "A3"  # Between Q2 and Q3: Q4 is behind the detector.
+    assert rig.scan._u_zero_jobs(plan, wiring, Event()) == []

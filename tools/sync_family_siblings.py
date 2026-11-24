@@ -4,7 +4,8 @@ Siblings stay self-contained (no symlinks, no shared imports): each one keeps a
 full copy of the canonical entrypoint and runtime tree. Only the single
 ``name = "..."`` declaration of the Device class differs. README copies retain
 their own plugin name and folder. Files shared word for word by plugins of
-different families (``SHARED``: the code common to AMX and AMX HD) are copied
+different families (``SHARED``: the code common to AMX and AMX HD, the quadrupole physics of MScan
+and Transmission) are copied
 as they are into each plugin folder, which runs its own copy. Edit the
 canonical plugin, then run:
 
@@ -32,6 +33,7 @@ FAMILIES = {
 # path inside a plugin folder: (canonical folder, the folders that hold an identical copy)
 SHARED = {
     "_runtime/_amx_common.py": ("amx_a", ("amx_b", "amx_hd")),
+    "_runtime/_quadrupole.py": ("mscan", ("transmission",)),  # Quadrupole physics: MScan's m/z, Transmission's filter.
 }
 
 

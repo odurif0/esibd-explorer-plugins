@@ -1020,3 +1020,116 @@ fn shutdown_does_not_claim_off_and_cannot_reopen_a_closed_session() {
         .is_err()
     );
 }
+
+/// A selected m/z (2026-11-24): the filter's rods carry x ± k A, an affine law of the coordinate, and follow the
+/// knob X (Q1_DC in the plugin) with gain 0.95, so the ions keep their energy in the filter while X moves. The
+/// target stays the rods' single owner; every commanded state satisfies the law, and an X step is not cut into
+/// the small steps of the peak sweep.
+fn followed_filter_configuration() -> Value {
+    let mut config = target_configuration(true);
+    config["target"]["channels"] = json!({"F":1.0,"R1":0.2,"R2":-0.2});
+    config["target"]["offsets"] = json!({"R1":30.0,"R2":30.0});
+    config["target"]["follow"] = json!({"R1":{"X":0.95},"R2":{"X":0.95}});
+    config["target"]["follow_origin"] = json!({"X":0.0});
+    config["target"]["amplitude_channel"] = json!("F");
+    config
+}
+
+#[test]
+fn rods_follow_the_coordinate_and_a_knob_and_keep_one_owner() {
+    let mut c = Controller::new(&followed_filter_configuration()).unwrap();
+    let mut i = Instrument::new();
+    i.filter = true;
+    i.values.insert("R1".into(), 31.0);
+    i.values.insert("R2".into(), 29.0);
+    i.limits.insert("R1".into(), [0.0, 60.0]);
+    i.limits.insert("R2".into(), [0.0, 60.0]);
+    let start = i.values.clone();
+    let t = drive(&mut c, &mut i, "run", &[], |_, _| {});
+    assert_eq!(t.result["status"], "completed", "{}", t.result);
+    let mut state = start.clone();
+    let mut checked = 0;
+    for command in &i.commands {
+        state.extend(command.iter().map(|(n, v)| (n.clone(), *v)));
+        if command.contains_key("R1") || command.contains_key("X") {
+            let (f, x) = (state["F"], state["X"]);
+            if command.contains_key("F") || command.contains_key("R1") {
+                assert!((state["R1"] - (30.0 + 0.2 * f + 0.95 * x)).abs() < 1e-9, "{state:?}");
+                assert!((state["R2"] - (30.0 - 0.2 * f + 0.95 * x)).abs() < 1e-9, "{state:?}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 10, "{checked}");
+    // X moved by the knob in steps of up to 1 V; the rods followed it within the same command.
+    assert!(i.commands.iter().any(|m| m.contains_key("X") && m.contains_key("R1") && !m.contains_key("F")));
+    assert_steps(
+        &i,
+        &start,
+        &BTreeMap::from([("X".into(), 1.0), ("F".into(), 0.5), ("R1".into(), 1.05), ("R2".into(), 1.05)]),
+    );
+    let undo = drive(&mut c, &mut i, "restore_initial", &[], |_, _| {});
+    assert_eq!(undo.result["status"], "restored");
+    assert_eq!((i.values["R1"], i.values["R2"], i.values["X"]), (31.0, 29.0, start["X"]));
+}
+
+#[test]
+fn followed_filter_channels_are_validated() {
+    for (field, value, why) in [
+        ("offsets", json!({"Z":1.0}), "offsets"),
+        ("follow", json!({"R1":{"F":1.0}}), "followed"),
+        ("follow", json!({"R1":{"X":1.0}}), "followed"),  // No origin for X.
+    ] {
+        let mut config = followed_filter_configuration();
+        config["target"][field] = value;
+        if why == "followed" && config["target"]["follow"]["R1"].get("X").is_some() {
+            config["target"]["follow_origin"] = json!({});
+        }
+        let error = Controller::new(&config).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(error.contains(why), "{field}: {error}");
+    }
+}
+
+/// Set filter (2026-11-24): `goto` brings the target channels to their values at the centre in bounded steps,
+/// moves nothing else and needs a target.
+#[test]
+fn goto_sets_the_filter_in_bounded_steps_and_nothing_else() {
+    let mut c = Controller::new(&followed_filter_configuration()).unwrap();
+    let mut i = Instrument::new();
+    i.values.insert("R1".into(), 31.0);
+    i.values.insert("R2".into(), 29.0);
+    i.limits.insert("R1".into(), [0.0, 60.0]);
+    i.limits.insert("R2".into(), [0.0, 60.0]);
+    let start = i.values.clone();
+    let t = drive(&mut c, &mut i, "goto", &[], |_, _| {});
+    assert_eq!(t.result["status"], "completed", "{}", t.result);
+    assert_eq!(i.values["F"], 10.0);
+    assert!((i.values["R1"] - 32.0).abs() < 1e-9 && (i.values["R2"] - 28.0).abs() < 1e-9);
+    assert_eq!(i.values["X"], start["X"]);
+    assert!(i.commands.iter().all(|m| m.keys().all(|n| ["F", "R1", "R2"].contains(&n.as_str()))));
+    assert_steps(&i, &start, &BTreeMap::from([("F".into(), 0.5), ("R1".into(), 0.1), ("R2".into(), 0.1)]));
+    let mut bare = Controller::new(&configuration("coordinate")).unwrap();
+    let error = bare.call("goto", &[], &json!({}), &Context::test(1.0)).err().unwrap().to_string();
+    assert!(error.contains("needs a target"), "{error}");
+}
+
+/// The quadrupole that does not filter transmits all m/z (RF only, 2026-11-24): its rod pairs go to their mean
+/// (U = 0) by a `goto` whose coordinate is U, the rods being x + U and x - U.
+#[test]
+fn goto_brings_a_resolving_dc_to_zero() {
+    let mut config = configuration("coordinate");
+    config["stages"] = json!([]);
+    config["target"] = json!({"channels":{"R1":1.0,"R2":-1.0},"offsets":{"R1":30.0,"R2":30.0},"center":0.0,
+        "width":2.0,"measure":["D"],"points":5,"spectrum_points":0,"amplitude_channel":"R1"});
+    let mut c = Controller::new(&config).unwrap();
+    let mut i = Instrument::new();
+    i.values.insert("R1".into(), 39.0);
+    i.values.insert("R2".into(), 21.0);
+    i.limits.insert("R1".into(), [0.0, 60.0]);
+    i.limits.insert("R2".into(), [0.0, 60.0]);
+    let start = i.values.clone();
+    let t = drive(&mut c, &mut i, "goto", &[], |_, _| {});
+    assert_eq!(t.result["status"], "completed", "{}", t.result);
+    assert_eq!((i.values["R1"], i.values["R2"]), (30.0, 30.0));
+    assert_steps(&i, &start, &BTreeMap::from([("R1".into(), 1.0), ("R2".into(), 1.0)]));
+}

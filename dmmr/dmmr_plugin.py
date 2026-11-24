@@ -1104,7 +1104,7 @@ class DMMRDevice(Device):
     )
 
     name = "DMMR"
-    version = "0.6.1"
+    version = "0.6.2"
     supportedVersion = "1.0.2"
     # Explorer stamps each record with time.time(), whose Windows resolution can be 15.6 ms (Python before
     # 3.13). Records bunched by a busy GUI thread then got an equal or slightly earlier stamp; on 2026-11-03

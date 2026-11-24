@@ -105,8 +105,16 @@ class Target:
     """
 
     def __init__(self, channels, center, width, measure, points=5, track=None, max_step=None,
-                 spectrum_points=21, spectrum_span=3.0, filter_name=""):
+                 spectrum_points=21, spectrum_span=3.0, filter_name="", offsets=None, follow=None, follow_origin=None,
+                 amplitude_channel=None):
         self.channels = dict(channels)
+        # A selected m/z (2026-11-24): each channel = offset + gain × coordinate (the rods carry x and U = k A), and
+        # a channel may follow other driven channels, + gain × (commanded − origin) (the rods follow Q1_DC, so the
+        # ions keep their energy in the filter). The target remains the filter's single owner.
+        self.offsets = {c: float(v) for c, v in (offsets or {}).items()}
+        self.follow = {c: {s: float(g) for s, g in sources.items()} for c, sources in (follow or {}).items()}
+        self.follow_origin = {s: float(v) for s, v in (follow_origin or {}).items()}
+        self.amplitude_channel = amplitude_channel or next(iter(self.channels))
         self.center = float(center)
         self.width = float(width)
         self.measure = tuple(measure)
@@ -117,8 +125,26 @@ class Target:
         self.spectrum_span = float(spectrum_span)
         self.filter_name = filter_name
 
-    def values(self, amplitude):
-        return {channel: gain * amplitude for channel, gain in self.channels.items()}
+    def value(self, channel, amplitude, reference=None):
+        value = self.offsets.get(channel, 0.0) + self.channels[channel] * amplitude
+        for source, gain in self.follow.get(channel, {}).items():
+            origin = self.follow_origin[source]
+            value += gain * ((reference or {}).get(source, origin) - origin)
+        return value
+
+    def values(self, amplitude, reference=None):
+        return {channel: self.value(channel, amplitude, reference) for channel in self.channels}
+
+    def validate(self):
+        if any(c not in self.channels or not math.isfinite(v) for c, v in self.offsets.items()):
+            raise ConfigError("target offsets need finite values of target channels")
+        for channel, sources in self.follow.items():
+            if channel not in self.channels or not sources or any(
+                    s in self.channels or not math.isfinite(g) or not math.isfinite(self.follow_origin.get(s, math.nan))
+                    for s, g in sources.items()):
+                raise ConfigError("a followed target channel needs finite gains of other channels with an origin")
+        if self.amplitude_channel not in self.channels:
+            raise ConfigError("unknown amplitude channel")
 
 
 def _short(value, digits=2):
@@ -167,6 +193,8 @@ class Config:
             raise ConfigError(f"Unknown setting(s): {', '.join(sorted(options))}")
         self.stages = tuple(stages)
         self.pressure = {name: (float(lo), float(hi)) for name, (lo, hi) in (pressure or {}).items()}
+        if target is not None:
+            target.validate()
         self.target = target
         self.spray = spray
 
@@ -925,8 +953,20 @@ class Optimizer:
         self._pause(dwell, interlocks=interlocks)
         return dict(settle_s=settled, polls=polls, readbacks=readbacks)
 
+    def _with_follow(self, targets):
+        """A move of driven channels also moves the filter channels that follow them, at the filter's present
+        coordinate; a move of the filter itself is computed by ``Target.values``."""
+        target = self.config.target
+        if (target is None or not target.follow or any(c in targets for c in target.channels)
+                or not all(c in self.commanded for c in target.channels)
+                or not any(s in targets for sources in target.follow.values() for s in sources)):
+            return targets
+        amplitude = self._filter_amplitude()
+        reference = dict(self.commanded, **targets)
+        return dict(targets, **{c: target.value(c, amplitude, reference) for c in target.follow})
+
     def _move(self, targets, *, interlocks=True):
-        targets = {c: float(v) for c, v in targets.items()}
+        targets = self._with_follow({c: float(v) for c, v in targets.items()})
         start = {c: self.commanded[c] for c in targets}
         count = max([1] + [math.ceil(abs(targets[c] - start[c]) / self.max_step[c] - 1e-9) for c in targets])
         for i in range(1, count + 1):
@@ -1023,8 +1063,8 @@ class Optimizer:
     # ---- mass filter
     def _filter_amplitude(self):
         target = self.config.target
-        channel, gain = next(iter(target.channels.items()))
-        return self.commanded[channel] / gain
+        channel = target.amplitude_channel
+        return (self.commanded[channel] - target.value(channel, 0.0, self.commanded)) / target.channels[channel]
 
     def _prepare_filter(self):
         """Record the filter channels (for undo and step limits) without moving them."""
@@ -1043,14 +1083,14 @@ class Optimizer:
         start = self._prepare_filter()
         half = max(target.track + target.width, target.spectrum_span * target.width if target.spectrum_points else 0.0)
         reach = (max(0.0, target.center - half), target.center + half)
-        for channel, gain in target.channels.items():
+        for channel in target.channels:
             lo, hi = self.instrument.limits(channel)
-            if not all(lo <= gain * amplitude <= hi for amplitude in reach):
+            if not all(lo <= target.value(channel, amplitude, start) <= hi for amplitude in reach):
                 raise ConfigError(f"{channel}: the target {target.center:g} V ± {half:g} V (peak tracking and spectra) "
                                   f"leaves the device limits [{lo:g}, {hi:g}]")
         self._stage_start = dict(start)
         self._emit("status", text=f"Mass filter to the selected peak ({target.center:g} V)")
-        self._move(target.values(target.center))
+        self._move(target.values(target.center, self.commanded))
         self.peak_center = target.center
 
     def sweep(self, amplitudes, measure=None, label="spectrum"):
@@ -1061,14 +1101,14 @@ class Optimizer:
         result = dict(amplitude=[], current=[], sem=[])
         started = self.instrument.now()
         for amplitude in amplitudes:
-            self._move(target.values(float(amplitude)))
+            self._move(target.values(float(amplitude), self.commanded))
             _, _, data = self._measure(measure)
             value, sem = self._filtered(data, measure)
             result["amplitude"].append(float(amplitude))
             result["current"].append(value)
             result["sem"].append(sem)
             self._emit("sweep", label=label, amplitude=float(amplitude), current=value)
-        self._move(target.values(back))
+        self._move(target.values(back, self.commanded))
         self._log("sweep", label=label, measure=measure, filter=target.channels, duration_s=self.instrument.now() - started,
                   **result)
         return result
@@ -1096,7 +1136,7 @@ class Optimizer:
         amplitudes, currents, sems, center_data = [], [], [], None
         for u in np.linspace(-1.0, 1.0, target.points):
             amplitude = max(0.0, center + u * target.width)
-            self._move(target.values(amplitude))
+            self._move(target.values(amplitude, self.commanded))
             begin, end, data = self._measure([*stage.currents, *target.measure])
             value, sem = self._filtered(data, measure)
             amplitudes.append(amplitude)
@@ -1106,7 +1146,7 @@ class Optimizer:
                 center_data = (begin, end, data)
         height, height_sem, fitted = fit_peak(np.array(amplitudes), np.array(currents), np.array(sems))
         self.peak_center = float(np.clip(fitted, lo, hi))
-        self._move(target.values(self.peak_center))
+        self._move(target.values(self.peak_center, self.commanded))
         return dict(amplitudes=amplitudes, currents=currents, sems=sems, height=height, height_sem=height_sem,
                     center=self.peak_center, fitted_center=fitted, measure=measure, center_data=center_data)
 
@@ -1222,6 +1262,13 @@ class Optimizer:
         for knob, step in zip(stage.knobs, steps):
             for channel, gain in knob.channels.items():
                 self.max_step[channel] = abs(gain) * step
+        target = self.config.target
+        if target is not None:  # A followed filter channel moves with its source: allow the followed share.
+            for channel, sources in target.follow.items():
+                followed = sum(abs(g) * self.max_step[s] for s, g in sources.items() if s in self.max_step)
+                if channel in self.max_step:
+                    self.max_step[channel] = max(self.max_step[channel], abs(target.channels[channel]) * target.max_step
+                                                 + followed)
         lower, upper = self._bounds(stage, start, resolved)
         self._stage_start = dict(start)
         if self.config.target is not None:
@@ -1380,9 +1427,9 @@ class Optimizer:
         try:
             self._stage_start = dict(self._prepare_filter())
             target = self.config.target
-            for channel, gain in target.channels.items():  # Refuse before any move, never stop half-way.
+            for channel in target.channels:  # Refuse before any move, never stop half-way.
                 lo, hi = self.instrument.limits(channel)
-                outside = [float(a) for a in amplitudes if not lo <= gain * a <= hi]
+                outside = [float(a) for a in amplitudes if not lo <= target.value(channel, float(a), self.commanded) <= hi]
                 if outside:
                     raise ConfigError(f"{channel}: sweep {min(outside):g}–{max(outside):g} V leaves the device limits "
                                       f"[{lo:g}, {hi:g}]")
@@ -1400,6 +1447,39 @@ class Optimizer:
             self.status, self.reason = ("configuration error" if isinstance(exc, ConfigError) else "instrument error"), str(exc)
         self._end_log("sweep", began, failure)
         return dict(status=self.status, reason=self.reason, **data)
+
+    def goto(self):
+        """Set the filter (2026-11-24): the target channels to their values at its centre, in bounded steps with
+        readbacks; stopped or refused, they return to where they started."""
+        target = self.config.target
+        if target is None:
+            raise ConfigError("Setting the filter needs a target")
+        self.status, self.reason = "running", ""
+        began = self._start_log("sweep")
+        failure = None
+        try:
+            start = self._prepare_filter()
+            self._stage_start = dict(start)
+            for channel in target.channels:  # Refuse before any move.
+                lo, hi = self.instrument.limits(channel)
+                value = target.value(channel, target.center, self.commanded)
+                if not lo <= value <= hi:
+                    raise ConfigError(f"{channel}: {value:g} leaves the device limits [{lo:g}, {hi:g}]")
+            self._emit("status", text=f"Mass filter to the selected peak ({target.center:g} V)")
+            self._move(target.values(target.center, self.commanded))
+            self.status = "completed"
+        except Stopped:
+            self.status, self.reason = "stopped", "Stopped by the operator"
+            self._restore_after_abort()
+        except ConfigError as exc:
+            self.status, self.reason = "configuration error", str(exc)
+        except (SoftInterlock, InstrumentError) as exc:
+            failure = traceback.format_exc()
+            self.status, self.reason = "error", str(exc)
+            self._restore_after_abort()
+        self._log("sweep_end", status=self.status, reason=self.reason, duration_s=self.instrument.now() - began,
+                  commanded=self.commanded, traceback=failure)
+        return dict(status=self.status, reason=self.reason, commanded=dict(self.commanded))
 
     def restore_initial(self):
         """Return every driven channel to its value before the run, step by step (undo)."""

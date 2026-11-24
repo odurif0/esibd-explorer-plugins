@@ -137,9 +137,11 @@ def run(scenario, target, app_holder):
     assert sorted(runtime) == ["_esibd_bundled_transmission_transmission",
                                "_esibd_bundled_transmission_transmission._beamline",
                                "_esibd_bundled_transmission_transmission._engine",
+                               "_esibd_bundled_transmission_transmission._filter_rules",
                                "_esibd_bundled_transmission_transmission._log",
                                "_esibd_bundled_transmission_transmission._native_engine",
                                "_esibd_bundled_transmission_transmission._native_worker",
+                               "_esibd_bundled_transmission_transmission._quadrupole",
                                "_esibd_bundled_transmission_transmission._simulator"], runtime
 
     window = QWidget()
@@ -252,10 +254,16 @@ def scenario_body(env):
         assert not panel.keep.isVisibleTo(window) and not panel.revert.isVisibleTo(window)
         panel.simulation.setChecked(True)
         assert panel.optimize.isEnabled() and progress() == "Ready." and "Simulation" in panel.beamline_label.text()
-        assert [panel.filter.itemData(i) for i in range(panel.filter.count())] == ["q1", "q2", "q3", "q4"]
+        mass_dialog = module._MassFilterDialog(scan)  # The filter's choices (2026-11-24): an m/z or a peak in volts.
+        assert [mass_dialog.filter.itemData(i) for i in range(mass_dialog.filter.count())] == ["q1", "q2", "q3", "q4"]
+        assert mass_dialog.by_volts.isChecked() and not mass_dialog.set_button.isEnabled()
+        mass_dialog.by_mz.setChecked(True)  # Simulation: an m/z needs MScan's quadrupoles, the dialog says why.
+        assert "MScan" in mass_dialog.rules.text() and not mass_dialog.set_button.isEnabled()
+        mass_dialog.deleteLater()
         panel.mass.setChecked(True)
         assert scan.state["mode"] == "mass" and not panel.optimize.isEnabled()
-        assert progress() == "Pick the peak of the selected mass first." and panel.pick.isEnabled()
+        assert progress() == "Pick the peak of the selected mass first." and panel.mass_filter.isEnabled()
+        assert panel.mass_summary.text() == "No peak picked yet."
         panel.total.setChecked(True)
         stage_choice()
         assert not panel.optimize.isEnabled() and progress() == "Choose at least one stage."
@@ -267,7 +275,8 @@ def scenario_body(env):
         start = session_events()[0]
         assert start["event"] == "plugin_start" and start["log_directory"] == str(logs)
         assert set(start["environment"]["code"]) == {"transmission_plugin.py", "__init__.py", "_engine.py", "_simulator.py",
-                                                     "_beamline.py", "_log.py", "_native_engine.py", "_native_worker.py"}
+                                                     "_beamline.py", "_log.py", "_native_engine.py", "_native_worker.py",
+                                                     "_quadrupole.py", "_filter_rules.py"}
         opened = []
         module.QDesktopServices.openUrl = lambda url: opened.append(url.toLocalFile())
         panel.logs.click()
@@ -377,7 +386,8 @@ def scenario_body(env):
         assert scan.state["mode"] == "mass" and scan.state["filter"] == "q2" and panel.mass.isChecked()
         picked = [e for e in session_events() if e["event"] == "peak_selected"][-1]
         assert picked["source"] == str(target / "S001_mscan.h5") and picked["filter"] == "q2"
-        assert abs(panel.center.value() - 520.0) < 5.0 and panel.width.value() > 20.0 and panel.optimize.isEnabled()
+        assert abs(scan.state["center"] - 520.0) < 5.0 and scan.state["width"] > 20.0 and panel.optimize.isEnabled()
+        assert panel.mass_summary.text().startswith("Peak 5") and panel.mass_summary.text().endswith("on Q2.")
         assert [key for key in panel.stage_boxes] == ["funnel", "q1", "q2", "q3", "q4", "final"]
         assert "Q2 RF amplitude" not in scan.generated_text() and 'filter = "Q2"' in scan.generated_text()
         assert not exports and not errors, errors
@@ -423,7 +433,7 @@ def scenario_body(env):
             assert panel.result.text().startswith("Collector: ") and "stage(s) improved" in panel.result.text()
         else:
             assert [s["stage"] for s in stages] == ["Q1"] and abs(result["target"]["final_center"] - 520.0) < 10.0
-            assert panel.result.text().startswith("Selected mass (Q2 at 5"), panel.result.text()
+            assert panel.result.text().startswith("m/z selection (Q2 at 5"), panel.result.text()
             assert set(scan._spectra) == {"before", "after"}
             assert len(scan.display.axes[1].get_lines()) == 2  # Peak before/after.
     assert not errors, errors
@@ -904,7 +914,7 @@ def explorer_scenario(env):
         assert abs(result["target"]["final_center"] - 520.0) <= 60.0 and knobs["Q2_RF"].value == result["target"]["final_center"]
         assert knobs["Q2_RF neg"].value == knobs["Q2_RF"].value  # The pair moved as one.
         assert len(result["spectra"]["before"]["amplitude"]) == 7 and "after" in result["spectra"]
-        assert panel.result.text().startswith("Selected mass (Q2 at "), panel.result.text()
+        assert panel.result.text().startswith("m/z selection (Q2 at "), panel.result.text()
     elif scenario in ("explorer-external-change", "explorer-device-off"):
         assert result["status"] == "instrument error", result
         assert ("changed outside" if scenario == "explorer-external-change" else "is OFF") in result["reason"], result

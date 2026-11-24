@@ -257,6 +257,17 @@ pub struct Target {
     pub filter_name: String,
     #[serde(default)]
     pub amplitude_channel: Option<String>,
+    /// Affine law: each channel = offset + gain x coordinate (a selected m/z: the rods carry the axis potential
+    /// x and the resolving DC U = k A; 2026-11-24). Missing offsets are 0 (the RF rails, as before).
+    #[serde(default)]
+    pub offsets: Values,
+    /// A channel of the filter also follows other driven channels: + gain x (commanded - origin). The rods
+    /// follow Q1_DC (x50 moves 0.95 V per volt), so the ions keep their energy in the filter while the Q1
+    /// stage moves Q1_DC (user, 2026-11-24). The filter keeps its single owner: the target.
+    #[serde(default)]
+    pub follow: BTreeMap<String, Values>,
+    #[serde(default)]
+    pub follow_origin: Values,
 }
 fn default_points() -> usize {
     5
@@ -274,10 +285,21 @@ impl Target {
     fn step(&self) -> f64 {
         self.max_step.unwrap_or(self.width / 2.0)
     }
-    fn values(&self, amplitude: f64) -> Values {
+    /// One channel at ``coordinate``; followed channels are read in ``reference`` (their origin when absent).
+    fn value(&self, n: &str, coordinate: f64, reference: &Values) -> f64 {
+        let mut v = self.offsets.get(n).copied().unwrap_or(0.0) + self.channels[n] * coordinate;
+        if let Some(sources) = self.follow.get(n) {
+            for (source, gain) in sources {
+                let origin = self.follow_origin[source];
+                v += gain * (reference.get(source).copied().unwrap_or(origin) - origin);
+            }
+        }
+        v
+    }
+    fn values(&self, coordinate: f64, reference: &Values) -> Values {
         self.channels
-            .iter()
-            .map(|(n, g)| (n.clone(), g * amplitude))
+            .keys()
+            .map(|n| (n.clone(), self.value(n, coordinate, reference)))
             .collect()
     }
 }
@@ -502,6 +524,26 @@ impl Config {
                 .is_some_and(|n| !t.channels.contains_key(n))
             {
                 return Err(config_error("Unknown amplitude channel"));
+            }
+            if t.offsets.keys().any(|n| !t.channels.contains_key(n))
+                || t.offsets.values().any(|v| !v.is_finite())
+            {
+                return Err(config_error("Target offsets need finite values of target channels"));
+            }
+            for (n, sources) in &t.follow {
+                if !t.channels.contains_key(n)
+                    || sources.is_empty()
+                    || sources.iter().any(|(s, g)| {
+                        !valid_name(s)
+                            || t.channels.contains_key(s)
+                            || !g.is_finite()
+                            || !t.follow_origin.get(s).is_some_and(|o| o.is_finite())
+                    })
+                {
+                    return Err(config_error(
+                        "A followed target channel needs finite gains of other channels with an origin",
+                    ));
+                }
             }
             if self
                 .stages
@@ -1635,7 +1677,28 @@ impl Controller {
             .amplitude_channel
             .as_ref()
             .unwrap_or_else(|| t.channels.keys().next().unwrap());
-        self.commanded[n] / t.channels[n]
+        (self.commanded[n] - t.value(n, 0.0, &self.commanded)) / t.channels[n]
+    }
+    /// A move of driven channels also moves the filter channels that follow them (rods following Q1_DC),
+    /// at the filter's present coordinate; a move of the filter itself is computed by ``Target::values``.
+    fn with_follow(&self, mut targets: Values) -> Values {
+        let Some(t) = self.config.target.as_ref() else {
+            return targets;
+        };
+        if t.follow.is_empty()
+            || t.channels.keys().any(|n| targets.contains_key(n))
+            || !t.channels.keys().all(|n| self.commanded.contains_key(n))
+            || !t.follow.values().any(|s| s.keys().any(|source| targets.contains_key(source)))
+        {
+            return targets;
+        }
+        let coordinate = self.amplitude();
+        let mut reference = self.commanded.clone();
+        reference.extend(targets.iter().map(|(n, v)| (n.clone(), *v)));
+        for n in t.follow.keys() {
+            targets.insert(n.clone(), t.value(n, coordinate, &reference));
+        }
+        targets
     }
     fn peak_measure(&self, stage: &Stage) -> Vec<String> {
         let t = self.config.target.as_ref().unwrap();
@@ -1781,7 +1844,14 @@ impl Controller {
                     return Ok(());
                 }
             }
-            _ => return Err(Error::argument("mode must be run, spectrum, or revert")),
+            // Set the filter (2026-11-24): the target channels to their values at the centre, in bounded steps
+            // with readbacks, and nothing else; stopped, it returns to where it started.
+            "goto" => {
+                if self.config.target.is_none() {
+                    return Err(config_error("Setting the filter needs a target"));
+                }
+            }
+            _ => return Err(Error::argument("mode must be run, spectrum, goto, or revert")),
         }
         self.config.validate()?;
         self.operation = mode.into();
@@ -1921,6 +1991,8 @@ impl Controller {
                     }
                     let amplitudes = if self.operation == "spectrum" {
                         self.spectrum_amplitudes.clone()
+                    } else if self.operation == "goto" {
+                        vec![t.center]
                     } else {
                         let half = (t.track() + t.width).max(if t.spectrum_points > 0 {
                             t.spectrum_span * t.width
@@ -1931,7 +2003,7 @@ impl Controller {
                     };
                     if amplitudes
                         .iter()
-                        .any(|a| !a.is_finite() || t.channels[n] * a < lo || t.channels[n] * a > hi)
+                        .any(|a| !a.is_finite() || t.value(n, *a, &start) < lo || t.value(n, *a, &start) > hi)
                     {
                         return Err(config_error(format!(
                             "{n}: target or sweep leaves the device limits [{lo}, {hi}]"
@@ -1945,13 +2017,13 @@ impl Controller {
                         .insert(n.clone(), t.channels[n].abs() * t.step());
                 }
                 self.stage_start = start;
-                if self.operation == "run" {
+                if self.operation == "run" || self.operation == "goto" {
                     self.emit(
                         "status",
                         json!({"text":format!("Mass filter to the selected peak ({} V)",t.center)}),
                     );
                     self.peak_center = Some(t.center);
-                    self.tasks.push(Task::Move(t.values(t.center), true));
+                    self.tasks.push(Task::Move(t.values(t.center, &self.commanded), true));
                 }
             }
             Reply::PreparedStage(index) => self.prepare_stage(index, value)?,
@@ -2264,6 +2336,20 @@ impl Controller {
                 self.max_step.insert(n.clone(), step);
             }
         }
+        // A filter channel that follows a channel of this stage moves with it: its own step limit must allow
+        // the followed share of each knob step (rods: 0.95 V per volt of Q1_DC), or every knob move would be
+        // cut into the small steps of the peak sweep.
+        if let Some(t) = &self.config.target {
+            for (n, sources) in &t.follow {
+                let followed: f64 = sources
+                    .iter()
+                    .filter_map(|(s, g)| self.max_step.get(s).map(|step| g.abs() * step))
+                    .sum();
+                if let Some(step) = self.max_step.get_mut(n) {
+                    *step = step.max(t.channels[n].abs() * t.step() + followed);
+                }
+            }
+        }
         self.stage_start = start.clone();
         if let Some(t) = &self.config.target {
             for n in t.channels.keys() {
@@ -2500,7 +2586,9 @@ impl Controller {
                         "sweep_start"
                     };
                     self.log(event,json!({"strategy":o.strategy,"options":o,"stages":stages,"pressure":self.config.pressure,"spray":self.config.spray,"target":target}));
-                    if self.operation == "spectrum" {
+                    if self.operation == "goto" {
+                        self.schedule(vec![Task::PrepareTarget, Task::Finish]);
+                    } else if self.operation == "spectrum" {
                         self.schedule(vec![
                             Task::PrepareTarget,
                             Task::Sweep(
@@ -2786,7 +2874,10 @@ impl Controller {
                 let s = self.sweep.as_ref().unwrap();
                 if index == s.amplitudes.len() {
                     self.schedule(vec![
-                        Task::Move(self.config.target.as_ref().unwrap().values(s.back), true),
+                        Task::Move(
+                            self.config.target.as_ref().unwrap().values(s.back, &self.commanded),
+                            true,
+                        ),
                         Task::SweepDone,
                     ]);
                 } else {
@@ -2796,7 +2887,7 @@ impl Controller {
                                 .target
                                 .as_ref()
                                 .unwrap()
-                                .values(s.amplitudes[index]),
+                                .values(s.amplitudes[index], &self.commanded),
                             true,
                         ),
                         Task::Measure(s.measure.clone(), 1),
@@ -2848,7 +2939,7 @@ impl Controller {
                             .chain(t.measure.clone()),
                     );
                     self.schedule(vec![
-                        Task::Move(t.values(p.amplitudes[index]), true),
+                        Task::Move(t.values(p.amplitudes[index], &self.commanded), true),
                         Task::Measure(channels, 1),
                         Task::PeakCollect(index),
                     ]);
@@ -2863,7 +2954,7 @@ impl Controller {
                         json!({"amplitudes":p.amplitudes,"currents":p.currents,"sems":p.sems,"height":vf(height),"height_sem":vf(height_sem),"center":center,"fitted_center":fitted,"measure":p.measure}),
                     );
                     self.last_measurement = p.center_data;
-                    self.tasks.push(Task::Move(t.values(center), true));
+                    self.tasks.push(Task::Move(t.values(center, &self.commanded), true));
                 }
             }
             Task::PeakCollect(index) => {
@@ -2881,6 +2972,7 @@ impl Controller {
                 self.tasks.push(Task::PeakPoint(index + 1));
             }
             Task::Move(targets, interlocks) => {
+                let targets = self.with_follow(targets);
                 let mut start = Values::new();
                 let mut count = 1_usize;
                 for (n, v) in &targets {
@@ -3019,6 +3111,8 @@ impl Controller {
             if self.operation == "run" {
                 self.result = Some(self.summary());
                 self.emit("done", json!({"status":self.status,"reason":self.reason}));
+            } else if self.operation == "goto" {
+                self.result = Some(json!({"status":self.status,"reason":self.reason,"commanded":values_json(&self.commanded)}));
             } else {
                 let mut data = self.result.take().unwrap_or_else(|| {
                     if let Some(s) = &self.sweep { json!({"amplitude":s.amplitudes[..s.current.len()],"current":s.current.iter().copied().map(vf).collect::<Vec<_>>(),"sem":s.sem.iter().copied().map(vf).collect::<Vec<_>>()}) }
@@ -3107,6 +3201,12 @@ impl Backend for Controller {
                 no_arguments(args, kwargs)?;
                 ctx.check_cancelled()?;
                 self.begin("revert", &json!({}))?;
+                self.drive(ctx)
+            }
+            "goto" => {
+                no_arguments(args, kwargs)?;
+                ctx.check_cancelled()?;
+                self.begin("goto", &json!({}))?;
                 self.drive(ctx)
             }
             "observe" => self.observe(payload(args, kwargs, "observation")?, ctx),
