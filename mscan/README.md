@@ -601,8 +601,7 @@ including `_runtime/` and `native/`.
 
 ## Origin and license
 
-Originally forked from `esibd/scans/ms/ms.py` in `ioneater/ESIBD-Explorer`, commit
-`9945145`; the interface and acquisition protocol have since been rewritten.
-Copyright (C) 2021–2026 Tim Esser. Modifications by ESIBD Explorer Plugins
-contributors. GPL-2.0-or-later; the original LICENSE and icon are included.
-No changes to the installed Explorer or its historical scan.
+MScan started in September 2026 from the MS scan of ESIBD Explorer (`esibd/scans/ms/ms.py`,
+Tim Esser) and has been rewritten since: none of its code or images remains (checked line by
+line against Explorer commit `9945145` on 2026-11-24). MIT, like the whole repository (see
+`LICENSE` at its root). No changes to the installed Explorer or its historical scan.

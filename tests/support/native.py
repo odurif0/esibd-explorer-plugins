@@ -72,7 +72,7 @@ def proxy(binary, tmp_path, family):
 
 
 PORTABLE_FAMILIES = frozenset({"mscan", "tpg366", "transmission"})
-GPL_FAMILIES = frozenset({"mscan", "tpg366"})
+VENDORED_FAMILIES = frozenset({"mscan", "tpg366"})
 SOURCE_PLATFORMS = ("x86_64-pc-windows-gnu", "x86_64-unknown-linux-gnu")
 TARGET_TRIPLES = {"windows-x86_64": {"x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"},
                   "linux-x86_64": {"x86_64-unknown-linux-gnu"}}
@@ -150,7 +150,7 @@ def _record_map(records) -> dict:
 
 def _assert_source_archive(data: bytes, notices: bytes, manifest: dict) -> None:
     family = manifest["family"]
-    vendored = family in GPL_FAMILIES
+    vendored = family in VENDORED_FAMILIES
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = archive.namelist()
         assert names == sorted(set(names)), "source ZIP paths must be sorted and unique"
@@ -187,7 +187,7 @@ def _assert_source_archive(data: bytes, notices: bytes, manifest: dict) -> None:
         assert {"Cargo.toml", "Cargo.lock", "worker/Cargo.toml", "worker/src/main.rs", "worker/src/lib.rs",
                 "worker/src/ffi.rs", "worker/src/context.rs", f"worker/src/{family}.rs",
                 "worker/src/generated/abi.json", "worker/src/generated/error_codes.json", "LICENSES.md",
-                "licenses/Explorer-GPL-2.0-or-later.txt", "licenses/Transmission-MIT.txt",
+                "licenses/MIT.txt",
                 "BUILD.md", "THIRD_PARTY_NOTICES.txt"} <= set(records)
         replacements = {"Cargo.lock": "provenance/Cargo.lock", "worker/Cargo.toml": "provenance/worker-Cargo.toml"}
         for name, record in originals.items():
@@ -275,6 +275,6 @@ def assert_native_payload(spec: PluginSpec, read_asset, *, expected_source_data=
     source = _asset(manifest["source"], "source.zip", read_asset)
     notices = _asset(manifest["third_party_notices"], "THIRD_PARTY_NOTICES.txt", read_asset)
     assert manifest["source"]["source_data_sha256"] == manifest["source_data_sha256"]
-    assert manifest["source"]["vendored"] is (family in GPL_FAMILIES)
+    assert manifest["source"]["vendored"] is (family in VENDORED_FAMILIES)
     _assert_source_archive(source, notices, manifest)
     return manifest

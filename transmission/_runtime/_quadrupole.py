@@ -6,8 +6,7 @@ transmission/_runtime/_quadrupole.py (``SHARED``); each plugin loads its own cop
 Per-rod parameters for an ion of mass m and charge e (m/z in Th): a = 8 e U / (m r0² Ω²), q = 4 e V / (m r0² Ω²),
 V the RF amplitude on the rods (attenuation × A, A the commanded PSU magnitude). On the scan line a = 2 (U/V) q a
 band of q is stable; MScan drives U = max(minimum, |k| A − δ) on the rod pairs. Derivation: docs/mscan_quadrupole.pdf.
-SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-(Dual: it ships with MScan, GPL, and with Transmission, MIT.)
+SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
 

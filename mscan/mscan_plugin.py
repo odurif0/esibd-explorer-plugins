@@ -1,9 +1,7 @@
 """Quadrupole amplitude scan for AMX/PSU with DMMR current acquisition.
 
-Upstream: ioneater/ESIBD-Explorer, esibd/scans/ms/ms.py, commit 9945145.
-Copyright (C) 2021-2026 Tim Esser. GPL-2.0-or-later; see LICENSE.
-Modified 2026-09-22 for ESIBD Explorer Plugins: coupled rails, verified settling,
-time-windowed acquisition and explicit missing data. No driver access here.
+Coupled rails, verified settling, time-windowed acquisition and explicit missing data; no driver access here.
+SPDX-License-Identifier: MIT (see LICENSE at the root of the repository).
 """
 from __future__ import annotations
 
@@ -340,7 +338,7 @@ class MScan(Scan):
     enabled, the DMMR recording; the ESI and TPG366 are read live if present.
     """
     name = 'MScan'
-    version = "0.6.2"
+    version = "0.6.3"
     TITLE = 'msScan — AMX/PSU'
     supportedVersion = '1.0'
     iconFile = 'mscan.png'
@@ -540,12 +538,14 @@ class MScan(Scan):
         def initFig(self):
             super().initFig()
             self.extra_lines, self.pass_lines = [], []
-            if self.fig and self.canvas:
-                self.axes.append(self.fig.add_subplot(111))
-                self.ms = self.axes[0].plot([], [], marker='.', markersize=4)[0]
-                self.scan.labelAxis = self.axes[0]
-                self.axes[0].callbacks.connect('xlim_changed', self.limits_changed)
-                self.axes[0].callbacks.connect('ylim_changed', self.limits_changed)
+            if not (self.fig and self.canvas):
+                return
+            axis = self.fig.add_subplot(1, 1, 1)
+            self.axes.append(axis)
+            self.ms, = axis.plot([], [], marker='.', markersize=4)
+            self.scan.labelAxis = axis  # Explorer places the file label on this axis.
+            for limits in ('xlim_changed', 'ylim_changed'):
+                axis.callbacks.connect(limits, self.limits_changed)
                 # No MZCalculator: these abscissae are volts, not calibrated m/z.
 
     def __init__(self, **kwargs):
@@ -3776,7 +3776,7 @@ class MScan(Scan):
                 ax.get_xlim()  # Resolve any deferred autoscale now, not as a later "user" change.
             finally:
                 self._rescaling = False
-        self.updateToolBar(update=update)
+        self.updateToolBar(update=update)  # Explorer's toolbar, then its file label on the plot.
         self.defaultLabelPlot()
         canvas = getattr(getattr(display, 'fig', None), 'canvas', None)
         if hasattr(canvas, 'draw_idle'):

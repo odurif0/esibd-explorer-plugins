@@ -36,7 +36,6 @@ class PluginSpec:
     dll: str | None
     bundled_files: tuple[str, ...] = ()
     native: bool = True  # Owns a native worker (native/, manifest, sources); Sync has none.
-    license: bool = True  # Ships a LICENSE file (plugins without vendor runtime); not Sync (user, 2026-11-20).
 
 
 def _native_bundled_files(family: str) -> tuple[str, ...]:
@@ -141,11 +140,10 @@ PLUGIN_SPECS: tuple[PluginSpec, ...] = (
                               "_runtime/_quadrupole.py", "_runtime/_filter_rules.py")),
     # No device and no native worker: robocopy, part of Windows, copies in its own process.
     PluginSpec("sync", "Sync", "Sync", "sync_plugin.py", None, "sync", None, None, None,
-               bundled_files=("_runtime/__init__.py", "_runtime/_sync.py", "_runtime/_windows.py"), native=False,
-               license=False),
+               bundled_files=("_runtime/__init__.py", "_runtime/_sync.py", "_runtime/_windows.py"), native=False),
     # No device and no native worker: reads the other plugins' channels and presses their ON buttons.
     PluginSpec("overview", "Overview", "Overview", "overview_plugin.py", None, "overview", None, None, None,
-               bundled_files=("_runtime/__init__.py", "_runtime/_overview.py"), native=False, license=False),
+               bundled_files=("_runtime/__init__.py", "_runtime/_overview.py"), native=False),
     PluginSpec("tpg366", "TPG366", "TPG366", "tpg366_plugin.py", None, "tpg366", None, None, None,
                bundled_files=(*_native_bundled_files("tpg366"), "_runtime/_tpg366.py", "_runtime/_native_link.py",
                               "_readout_panel.py", "tpg366.svg", "switch-medium_on.png", "switch-medium_off.png")),

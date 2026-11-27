@@ -58,6 +58,7 @@ def release_tool(monkeypatch):
                 destination = snapshot / spec.folder / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, destination)
+        shutil.copy2(ROOT / "LICENSE", snapshot / "LICENSE")  # The repository's one license (MIT).
         _git(snapshot, "init", "--quiet")
         _git(snapshot, "add", "--all")
         _git(snapshot, "commit", "--quiet", "-m", "Disposable packaging fixture")

@@ -1,6 +1,6 @@
 """Pfeiffer TPG 366 pressure acquisition over the rear USB-B virtual COM port.
 
-SPDX-License-Identifier: GPL-2.0-or-later
+SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
 
@@ -320,7 +320,7 @@ class TPG366(Device):
     LiveDisplay = _LiveDisplay  # Last 30 min by default.
 
     name = "TPG366"
-    version = "0.6.2"
+    version = "0.6.3"
     supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.OUTPUTDEVICE
     log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.
@@ -338,9 +338,9 @@ class TPG366(Device):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.channelType = PressureChannel
+        self.channelType = GaugeChannel
         self.maxDataPoints = 100_000
-        self.controller = PressureController(controllerParent=self)
+        self.controller = GaugeController(controllerParent=self)
         self._status_label = None
         self._pressure_panel = None
 
@@ -441,7 +441,7 @@ class TPG366(Device):
             self.loading = True
             try:
                 for i, color in enumerate(("#3182ce", "#d97706", "#2f855a", "#805ad5", "#c53030", "#319795"), 1):
-                    self.addChannel({Channel.NAME: f"P{i}", PressureChannel.INPUT: i, Channel.COLOR: color})
+                    self.addChannel({Channel.NAME: f"P{i}", GaugeChannel.INPUT: i, Channel.COLOR: color})
             finally:
                 self.loading = False
         super().loadConfiguration(file=file, useDefaultFile=useDefaultFile, append=append)
@@ -537,7 +537,7 @@ class _MissedReading:
         self.received_at = received_at
 
 
-class PressureChannel(Channel):
+class GaugeChannel(Channel):
     INPUT = "Input"
     STATUS = "Status"
     GAUGE = "Gauge"
@@ -600,7 +600,7 @@ class PressureChannel(Channel):
         return QColor()
 
 
-class PressureController(DeviceController):
+class GaugeController(DeviceController):
     """One serial worker owns open/query/close; GUI state changes use queued Qt slots."""
 
     update = pyqtSignal(object)

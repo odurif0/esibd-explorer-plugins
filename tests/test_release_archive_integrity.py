@@ -74,7 +74,7 @@ def write_zip(path: Path, members: Iterable[str]) -> Path:
 
 
 def valid_members(plugin_specs: tuple[PluginSpec, ...]) -> tuple[str, ...]:
-    members: set[str] = set()
+    members: set[str] = {"LICENSE"}
     for spec in plugin_specs:
         members.add(f"{spec.folder}/")
         members.update(required_members(spec))

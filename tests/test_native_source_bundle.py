@@ -107,7 +107,7 @@ def test_family_archives_are_regular_bounded_and_have_verifiable_provenance(bund
         assert archive.read("worker/src/generated/error_codes.json") == bundles["original"]["worker/src/generated/error_codes.json"].data
         for name, entry in bundles["original"].items():
             original_path = name
-            if family in BUNDLE.GPL_FAMILIES:
+            if family in BUNDLE.VENDORED_FAMILIES:
                 original_path = {"worker/Cargo.toml": "provenance/worker-Cargo.toml", "Cargo.lock": "provenance/Cargo.lock"}.get(name, name)
             assert archive.read(original_path) == entry.data
 
@@ -145,7 +145,13 @@ def test_dependencies_licenses_and_resolver_roles_do_not_become_a_blanket_mit_cl
                    for license in records["transmission"][package]["license_files"])
     assert "Unicode-3.0" in records["psu"]["unicode-ident"]["license"]
     assert any(file["file"].endswith("LICENSE-UNICODE") for file in records["psu"]["unicode-ident"]["license_files"])
-    for family in BUNDLE.GPL_FAMILIES:
+    # Offered as MIT OR GPL-3.0-only: distributed under MIT, only that text in the notices (user 2026-11-24).
+    unescaper = records["tpg366"]["unescaper"]
+    assert unescaper["elected_license"] == "MIT"
+    assert [file["file"].rsplit("/", 1)[1] for file in unescaper["license_files"]] == ["LICENSE-MIT"]
+    for family, product in bundles["products"].items():
+        assert "GPL" not in (product["destination"] / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8"), family
+    for family in BUNDLE.VENDORED_FAMILIES:
         product = bundles["products"][family]
         assert product["metadata"]["source"]["vendored"] is True
         assert any(package["role"] == "resolution-only" and not package["platforms"]
@@ -185,8 +191,7 @@ def test_gpl_bundle_builds_offline_without_developer_cargo_cache(bundles, tmp_pa
 
 def test_preserved_project_license_bytes_and_cargo_metadata():
     native = ROOT / "native"
-    assert (native / "licenses/Explorer-GPL-2.0-or-later.txt").read_bytes() == (ROOT / "mscan/LICENSE").read_bytes() == (ROOT / "tpg366/LICENSE").read_bytes()
-    assert (native / "licenses/Transmission-MIT.txt").read_bytes() == (ROOT / "transmission/LICENSE").read_bytes()
+    assert (native / "licenses/MIT.txt").read_bytes() == (ROOT / "LICENSE").read_bytes()  # The repository's MIT terms.
     manifest = tomllib.loads((native / "worker/Cargo.toml").read_text())
     assert manifest["package"]["license-file"] == "../LICENSES.md"
     assert manifest["package"]["rust-version"] == "1.89"

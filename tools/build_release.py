@@ -2,8 +2,8 @@
 
     python3 tools/build_release.py 0.3.0      # -> esibd-explorer-plugins-v0.3.0.zip
 
-The archive holds exactly the plugin folders (every folder with a *_plugin.py),
-without READMEs, tests, logs, caches or .gitignore. Entries use the last commit
+The archive holds exactly the plugin folders (every folder with a *_plugin.py) and the repository's
+LICENSE (MIT) at its root, without READMEs, tests, logs, caches or .gitignore. Entries use the last commit
 time, so rebuilding the same commit gives the same SHA-256.
 """
 from __future__ import annotations
@@ -91,10 +91,13 @@ def build(version: str, output_dir: Path = ROOT, *, allow_dirty: bool = False) -
     if not re.fullmatch(r"\d+(?:\.\d+)*", version):
         raise ValueError(f"Version must look like 0.3.0, got {version!r}")
     folders = plugin_folders()
-    if not allow_dirty and _git("status", "--porcelain", "--", *folders).strip():
+    if not allow_dirty and _git("status", "--porcelain", "--", *folders, "LICENSE").strip():
         raise RuntimeError("Plugin folders have uncommitted changes; commit them first.")
     files = release_files(folders)
     modes = _validate_native_files(folders, files)
+    if _git("ls-files", "--", "LICENSE").strip() != "LICENSE":
+        raise RuntimeError("The repository's LICENSE must be tracked at its root.")
+    files, modes = [*files, "LICENSE"], {**modes, "LICENSE": 0o100644}
     stamp = datetime.fromtimestamp(int(_git("log", "-1", "--format=%ct").strip()), timezone.utc)
     date_time = (max(stamp.year, 1980), stamp.month, stamp.day, stamp.hour, stamp.minute, stamp.second)
     archive = Path(output_dir) / f"esibd-explorer-plugins-v{version}.zip"

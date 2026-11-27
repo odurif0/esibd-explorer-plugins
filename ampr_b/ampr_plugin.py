@@ -888,7 +888,7 @@ class AMPRDevice(Device):
     )
 
     name = "AMPR_B"
-    version = "0.6.2"
+    version = "0.6.3"
     supportedVersion = "1.0.2"
     pluginType = PLUGINTYPE.INPUTDEVICE
     log = False  # Explorer's per-device Logging switch is removed: nothing here reads it.

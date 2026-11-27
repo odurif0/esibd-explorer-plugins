@@ -20,7 +20,6 @@ def required_members(spec: PluginSpec) -> frozenset[str]:
     root = spec.folder
     if spec.runtime_family is None:
         return frozenset({f"{root}/{spec.entrypoint}", f"{root}/{spec.icon_stem}.png",
-                          *((f"{root}/LICENSE",) if spec.license else ()),
                           *(f"{root}/{name}" for name in spec.bundled_files)})
     runtime = f"{root}/vendor/runtime"
     device = f"{runtime}/{spec.runtime_family}"
@@ -52,7 +51,8 @@ def validate_member_names(
     plugin_specs: tuple[PluginSpec, ...],
 ) -> list[str]:
     names = tuple(members)
-    expected_roots = {spec.folder for spec in plugin_specs}
+    # The plugin folders and the repository's one LICENSE (MIT, user 2026-11-24: no license per plugin).
+    expected_roots = {spec.folder for spec in plugin_specs} | {"LICENSE"}
     actual_roots = {
         parts[0] for name in names if (parts := member_segments(name))
     }
@@ -85,6 +85,8 @@ def validate_member_names(
         if parts[1:3] == ("vendor", "python"):
             problems.append(f"{name}: private Python interpreters are not allowed in native releases")
 
+    if "LICENSE" not in normalized_files:
+        problems.append("LICENSE: the repository's license is missing at the root of the archive")
     for spec in plugin_specs:
         missing = sorted(required_members(spec) - normalized_files)
         if missing:

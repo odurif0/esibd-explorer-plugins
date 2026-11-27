@@ -9,7 +9,22 @@ import pytest
 from support.esi import load_plugin as _load_plugin
 from explorer_host import compile_definition
 
-HOST = Path(__file__).parent / "fixtures/esibd_1_0_1_export.txt"
+def _installed_host():
+    """The installed Explorer's plugins.py: the host's own export methods (its source, run by AST)."""
+    from importlib.metadata import PackageNotFoundError, distribution
+    try:
+        path = Path(distribution("esibd-explorer").locate_file("esibd/plugins.py"))
+    except PackageNotFoundError:
+        pytest.skip("ESIBD Explorer is not installed")
+    if not path.is_file() or "def exportOutputData" not in path.read_text(encoding="utf-8"):
+        pytest.skip("this Explorer has no exportOutputData")
+    return path
+
+
+def _no_lock(*args, **kwargs):
+    """Explorer"s @synchronized(): the probe runs on one thread."""
+    return lambda function: function
+
 
 
 @pytest.fixture
@@ -37,10 +52,11 @@ def esi(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("history", [True, False])
-def test_explorer_1_0_1_export_reaches_the_esi_override(esi, history):
-    ns = dict(np=np, Path=Path, h5py=esi.h5py, PRINT=esi.module.PRINT, cast=lambda kind, value: value)
-    exec(compile_definition(HOST, "exportOutputData", "Device"), ns)
-    # Exactly the call Explorer 1.0.1 makes at shutdown and on Ctrl+S.
+def test_the_hosts_export_reaches_the_esi_override(esi, history):
+    ns = dict(np=np, Path=Path, h5py=esi.h5py, PRINT=esi.module.PRINT, cast=lambda kind, value: value,
+              synchronized=_no_lock)
+    exec(compile_definition(_installed_host(), "exportOutputData", "Device"), ns)
+    # Exactly the call Explorer makes at shutdown and on Ctrl+S.
     ns["exportOutputData"](esi.device, useDefaultFile=True, useAllHistory=history)
     assert esi.received == [history]
 

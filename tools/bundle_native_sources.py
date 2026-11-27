@@ -19,7 +19,14 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FAMILIES = ("ampr", "amx", "amx_hd", "dmmr", "esi", "psu", "tpg366", "mscan", "transmission")
-GPL_FAMILIES = frozenset({"mscan", "tpg366"})
+# Families whose source.zip carries the sources of their dependencies (MPL-2.0 serialport among them).
+VENDORED_FAMILIES = frozenset({"mscan", "tpg366"})
+# Crates offered under alternative licenses that this project distributes under one of them, with only
+# that license's text in the notices (user 2026-11-24: no GPL in the notices). The published expression
+# is checked, so a new crate version with other terms stops the bundle.
+ELECTED_LICENSES = {
+    "unescaper": {"published": "MIT OR GPL-3.0-only", "elected": "MIT", "files": ("LICENSE-MIT",)},
+}
 PLATFORMS = ("x86_64-pc-windows-gnu", "x86_64-unknown-linux-gnu")
 ZIP_STAMP = (1980, 1, 1, 0, 0, 0)
 MAX_FILE_BYTES = 128 * 1024 * 1024
@@ -143,7 +150,7 @@ def _cargo(command: list[str], *, cwd: Path, env=None):
 
 def _resolve(family: str) -> list[dict]:
     packages = {}
-    platforms = (*PLATFORMS, None) if family in GPL_FAMILIES else PLATFORMS
+    platforms = (*PLATFORMS, None) if family in VENDORED_FAMILIES else PLATFORMS
     for platform in platforms:
         command = ["cargo", "metadata", "--format-version", "1", "--offline", "--locked",
                    "--manifest-path", str(ROOT / "native/Cargo.toml"),
@@ -213,12 +220,29 @@ def _license_files(package: dict) -> list[Path]:
         paths.update(_upstream_licenses(package))
     if not paths:
         raise ValueError(f"No full license/notice text available for {package['name']} {package['version']}")
+    election = ELECTED_LICENSES.get(package.get("name"))
+    if election:
+        if package.get("license") != election["published"]:
+            raise ValueError(f"{package['name']} {package['version']}: license {package.get('license')!r} is not "
+                             f"the {election['published']!r} the election was made for")
+        paths = {path for path in paths if path.name in election["files"]}
+        if sorted(path.name for path in paths) != sorted(election["files"]):
+            raise ValueError(f"{package['name']} {package['version']}: missing elected license text")
     return sorted(paths)
+
+
+def _notice_license(package: dict) -> str:
+    election = ELECTED_LICENSES.get(package["name"])
+    if election:
+        return f"{election['elected']} (one of the crate's alternatives, chosen for this distribution)"
+    return package.get("license") or "See upstream license-file"
 
 
 def _record(package: dict, checksum: str, licenses: list[dict]) -> dict:
     name, version = package["name"], package["version"]
+    election = ELECTED_LICENSES.get(name)
     return {"name": name, "version": version, "license": package.get("license"),
+            **({"elected_license": election["elected"]} if election else {}),
             "source": package["source"], "repository": package.get("repository"),
             "authors": package.get("authors", []),
             "registry_url": f"https://crates.io/crates/{name}/{version}",
@@ -281,7 +305,7 @@ def _build_instructions(family: str, vendored: bool, rust_version: str) -> bytes
             "SHA-256 hashes the original native project file records before manifest/lock\n"
             "specialization. The archive-data SHA-256 covers the sorted archive records,\n"
             "independently of ZIP compression.\n"
-            "`LICENSES.md` distinguishes ported plugin terms and third-party licenses from\n"
+            "`LICENSES.md` distinguishes the project's MIT terms and third-party licenses from\n"
             "vendor SDK terms. Full upstream texts are retained in `THIRD_PARTY_NOTICES.txt`\n"
             "and `third_party/licenses/`; no SDK redistribution rights are granted.\n").encode("utf-8")
 
@@ -388,7 +412,7 @@ def _prepare(family: str) -> tuple[dict[str, Entry], bytes, dict]:
     lock = tomllib.loads(entries["Cargo.lock"].data.decode("utf-8"))
     checksums = {(package["name"], package["version"], package.get("source")): package.get("checksum")
                  for package in lock["package"]}
-    vendored = family in GPL_FAMILIES
+    vendored = family in VENDORED_FAMILIES
     notices = ["Native Worker Third-Party Notices\n",
                f"Family: {family}\nPlatforms: {', '.join(PLATFORMS)}\n",
                "These are preserved component terms, not an SDK or blanket project license grant.\n",
@@ -417,7 +441,7 @@ def _prepare(family: str) -> tuple[dict[str, Entry], bytes, dict]:
         record = _record(package, checksum, licenses)
         records.append(record)
         notices.extend([f"\n{'=' * 72}\n{package['name']} {package['version']}\n",
-                        f"License expression: {package.get('license') or 'See upstream license-file'}\n",
+                        f"License expression: {_notice_license(package)}\n",
                         f"Dependency role: {record['role']}\n",
                         f"Registry: {record['registry_url']}\nSource: {record['download_url']}\n",
                         f"Repository: {record['repository'] or '(not specified)'}\n",

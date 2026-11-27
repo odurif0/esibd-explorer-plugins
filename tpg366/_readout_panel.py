@@ -1,6 +1,6 @@
 """Read-only pressure cards; editing affects Explorer channels, never gauge hardware.
 
-SPDX-License-Identifier: GPL-2.0-or-later
+SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
 

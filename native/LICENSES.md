@@ -7,27 +7,12 @@ Original copyright notices and license texts remain applicable to their
 respective components. Including source or notices does not relicense a vendor
 DLL, header, API, or SDK and does not grant additional SDK redistribution rights.
 
-## Ported Plugin Components
+## Project Code
 
-| Component | Reference and preserved terms | Full text |
-| --- | --- | --- |
-| `worker/src/mscan.rs` | `mscan/LICENSE`: Copyright (C) 2021-2026 Tim Esser; GNU GPL version 2 or later | `licenses/Explorer-GPL-2.0-or-later.txt` |
-| `worker/src/tpg366.rs` | `tpg366/LICENSE`: Copyright (C) 2021-2026 Tim Esser; GNU GPL version 2 or later | `licenses/Explorer-GPL-2.0-or-later.txt` |
-| `worker/src/transmission.rs` | `transmission/LICENSE`: Copyright (c) 2026 Olivier Durif; MIT | `licenses/Transmission-MIT.txt` |
-
-The GPL text is copied verbatim from the identical existing MScan and TPG366
-license files, including their copyright and version-or-later notice. The
-Transmission text is copied verbatim from its existing plugin license. Those
-notices are retained even when these modules are present but their features are
-disabled in a different worker's source archive.
-
-The native port and worker integration were developed in October 2026. The Rust
-implementations replace hardware/process or scan-engine code; Python GUI and
-Explorer adapters remain separate. This records the port, not an additional
-license grant. Device-family implementations and common native code must retain
-applicable project and upstream terms; their presence here must not be interpreted
-as a new repository-wide MIT license. Proprietary vendor SDK components are not
-included in the source archive.
+The native worker source (`worker/src`, every family) is part of this repository and is
+MIT, like the whole repository: `licenses/MIT.txt` is a verbatim copy of its root `LICENSE`
+(Copyright (c) 2026 Olivier Durif). The Rust implementations replace the hardware/process
+and scan-engine code of the plugins; the Python GUI and Explorer adapters remain separate.
 
 ## Rust Dependencies
 
@@ -37,7 +22,8 @@ and build dependency edges for that family's enabled feature, using the union of
 Windows GNU x86-64 and Linux GNU x86-64 resolution. Dependency SPDX expressions,
 registry/repository URLs, Cargo checksums, and full available license/notice files
 are preserved, rather than collapsed into a single license label.
-GPL bundles may additionally include inactive-platform packages marked
+The MScan and TPG366 bundles, which carry their dependency sources, may additionally include
+inactive-platform packages marked
 `resolution-only`, because Cargo must resolve those manifest dependencies even
 when the two supported platforms do not compile them. They are not described as
 linked dependencies. Archive-only family manifests and lockfiles specialize the
@@ -62,9 +48,10 @@ does not substitute another project's generic MIT or Apache notice.
 
 The package-specific records are authoritative for a particular build. Alternate
 license expressions are preserved as published; this index does not choose an
-alternative on a recipient's behalf. The official MPL text is available at
-<https://www.mozilla.org/en-US/MPL/2.0/> and the GNU GPL v2 text at
-<https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>.
+alternative on a recipient's behalf, with one exception: `unescaper`, linked by the
+Linux TPG366 worker only, is distributed here under MIT, one of its alternatives
+(`elected_license` in `SOURCE_MANIFEST.json`), and its notice carries only the MIT text. The official MPL text is available at
+<https://www.mozilla.org/en-US/MPL/2.0/>.
 
 ## Source Bundles And Builds
 

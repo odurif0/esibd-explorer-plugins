@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "6982a4e936858490cf8779475e28afd30aed1c4525aafad38e13bd0634d8ce2f",
-    "size_bytes": 12399440,
-    "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+    "sha256": "d8b56fe8c9f15f42787b768a1a2438a61cf6d31147a9841fe102ffcd69781250",
+    "size_bytes": 12364830,
+    "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
     "vendored": true
   },
-  "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+  "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
   "targets": {
     "linux-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-tpg366-worker",
       "sha256": "0940906d33b0c40d6c6e34cfcd50647fffa6d204282163492acc98ff1408edbe",
       "size_bytes": 643152,
-      "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+      "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
       "target": "x86_64-unknown-linux-gnu"
     },
     "windows-x86_64": {
@@ -30,16 +30,16 @@
         "tpg366"
       ],
       "file": "esibd-tpg366-worker.exe",
-      "sha256": "35114a1c75d1cc3f9aa6cda174cf96e7fe9898754ee92c2b8d3bfe3e037c50fd",
+      "sha256": "78d7c8087ee0e9077e91232a35e9e79cb8cd9b8ccaae636265a4846ce04001d3",
       "size_bytes": 568320,
-      "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+      "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
       "target": "x86_64-pc-windows-gnu"
     }
   },
   "third_party_notices": {
     "file": "THIRD_PARTY_NOTICES.txt",
-    "sha256": "a8f8c94b46aec96b52dfec17feaa469c7dc95e529ddd8b1458edbccec1c7a0d3",
-    "size_bytes": 521835
+    "sha256": "dd930aca1444b41fb641e450bdcfac1b2c0e0aeb0b54013a88d1fbcf96aa1888",
+    "size_bytes": 485841
   },
   "validation": "hardware-not-validated",
   "worker_version": "0.1.0"

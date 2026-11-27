@@ -458,7 +458,7 @@ def run_harness(rig, *, stop_after_sample=True, simulation=False, settings=None)
     """Run the actual GUI helper-thread body without constructing unrelated Qt docks."""
     path = PLUGIN / 'tpg366_plugin.py'
     tree = ast.parse(path.read_text())
-    controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'PressureController')
+    controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'GaugeController')
     body = next(node for node in controller.body if isinstance(node, ast.FunctionDef) and node.name == '_run')
     loads = []
 

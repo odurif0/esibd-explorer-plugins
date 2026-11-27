@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "475cf7c363109132e759b54f16b316795e5c200bd0869a368c4c3801acb8dfd2",
-    "size_bytes": 396690,
-    "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+    "sha256": "12f5d5a4a59754460aa364fed62983cae43701b9f6cfd7b51003efb67aba5bc8",
+    "size_bytes": 389873,
+    "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
     "vendored": false
   },
-  "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+  "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
   "targets": {
     "windows-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,14 +20,14 @@
       "file": "esibd-amx_hd-worker.exe",
       "sha256": "ce60f3918ef3ffa3bbe862c485e9de792a01fc3a482861c0552c39aa0a46537e",
       "size_bytes": 853504,
-      "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+      "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
       "target": "x86_64-pc-windows-gnu"
     }
   },
   "third_party_notices": {
     "file": "THIRD_PARTY_NOTICES.txt",
-    "sha256": "7270db18708f7c470ef333139bc2c6cbc63084b8dc3aaed6fa8fb9fc5dd9b39c",
-    "size_bytes": 279627
+    "sha256": "8152056a8afab392ff3a03c2aa87385f315040570deda396f517a43b5cab84a4",
+    "size_bytes": 278787
   },
   "validation": "hardware-not-validated",
   "worker_version": "0.1.0"

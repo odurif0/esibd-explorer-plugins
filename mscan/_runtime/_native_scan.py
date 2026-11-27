@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
-# Based on mscan/mscan_plugin.py, Copyright (C) 2021-2026 Tim Esser.
+# SPDX-License-Identifier: MIT
+# MScan's native scan adapter (see LICENSE at the root of the repository).
 """Privately loaded Explorer adapter for the native MScan action/observation engine.
 
 The entrypoint loads this module privately. The caller first runs the existing

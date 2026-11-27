@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-// Ported from mscan/mscan_plugin.py, originally Copyright (C) 2021-2026 Tim Esser.
+// SPDX-License-Identifier: MIT
+// MScan's native scan engine (see LICENSE at the root of the repository).
 //! MScan's deterministic engine. Explorer owns all channels and performs the
 //! returned `command` actions on Qt; this module never accesses a device DLL.
 //!

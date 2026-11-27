@@ -4,7 +4,7 @@ The caller owns the serial port and serializes all operations, including close.
 No gauge, relay, calibration, unit or EEPROM setting is written.
 SystemAwakeRequest (same as the CGC runtimes) keeps Windows from idle sleep
 while the port is open.
-SPDX-License-Identifier: GPL-2.0-or-later
+SPDX-License-Identifier: MIT
 """
 from __future__ import annotations
 

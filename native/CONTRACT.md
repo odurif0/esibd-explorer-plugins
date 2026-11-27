@@ -171,10 +171,10 @@ hash/size records. The archive records every source file's digest, retains raw
 build provenance and license terms, and contains no deployed worker executable or
 private Python. Preserved upstream crate payloads can include platform import
 libraries required by Cargo's Windows builds.
-MScan/TPG366 GPL corresponding sources include vendored dependencies and an
-archive-specific family manifest; tests rebuild offline from an empty Cargo home
-and compare active dependency versions with the original locked build. Preserve
-MIT/GPL/MPL/ISC/Apache and vendor terms per component, not a blanket license.
+MScan/TPG366 sources include vendored dependencies (MPL-2.0 serialport among them) and
+an archive-specific family manifest; tests rebuild offline from an empty Cargo home and
+compare active dependency versions with the original locked build. The project code is
+MIT; preserve the MPL/ISC/Apache/MIT terms of each dependency and the vendor terms.
 
 Deployment checks, canonical sync, temporary tracked-file release archives and
 Explorer 1.0.2 tests run locally. Keep physical Windows-instrument qualification

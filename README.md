@@ -29,7 +29,7 @@ network (17 folders).
 
 ## Quick Start
 
-1. **Download the latest release** `esibd-explorer-plugins-v0.6.2.zip` from the
+1. **Download the latest release** `esibd-explorer-plugins-v0.6.3.zip` from the
    [Releases page](https://github.com/odurif0/esibd-explorer-plugins/releases).
 
 2. **Extract the zip** into your ESIBD Explorer `plugins` folder.
@@ -53,10 +53,11 @@ network (17 folders).
    ├── overview/
    ├── sync/
    ├── tpg366/
-   └── transmission/
+   ├── transmission/
+   └── LICENSE
    ```
 
-   Put only these plugin folders there, never a copy of this repository: Explorer
+   Put only these plugin folders and the LICENSE there, never a copy of this repository: Explorer
    imports every `.py` file of every folder in its plugin path, including `tools/`
    and `tests/`.
 
@@ -164,3 +165,10 @@ python3 tools/build_release.py X.Y.Z
 
 Each plugin carries its native sources and third-party notices; see
 [native/LICENSES.md](native/LICENSES.md).
+
+## License
+
+MIT for the whole repository: see [LICENSE](LICENSE), which the release ZIP carries at its root.
+Third-party components keep their own terms: the CGC files of each device plugin (`COM-*.h`
+headers and DLLs under `vendor/`), the Python runtime embedded in `esi/vendor/python` (PSF), and
+the Rust dependencies listed in each `native/THIRD_PARTY_NOTICES.txt`.

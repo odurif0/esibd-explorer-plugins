@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: MIT
 """MScan map runner (v0.5.10): the Q2 map of docs/quadrupole_optimization_plan.md, line by line.
 
 Every line of the map is an ordinary MScan scan, started, stopped and saved exactly like one from

@@ -1,4 +1,4 @@
-"""DMMR export against the actual 1.0.1 host, not only local Explorer 0.8.x."""
+"""DMMR export against the installed host's own export methods (Explorer 1.0.2), not only the plugin's."""
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,16 +7,31 @@ import pytest
 
 from explorer_host import compile_definition
 
-HOST = Path(__file__).parent / 'fixtures/esibd_1_0_1_export.txt'
+def _installed_host():
+    """The installed Explorer's plugins.py: the host's own export methods (its source, run by AST)."""
+    from importlib.metadata import PackageNotFoundError, distribution
+    try:
+        path = Path(distribution("esibd-explorer").locate_file("esibd/plugins.py"))
+    except PackageNotFoundError:
+        pytest.skip("ESIBD Explorer is not installed")
+    if not path.is_file() or "def exportOutputData" not in path.read_text(encoding="utf-8"):
+        pytest.skip("this Explorer has no exportOutputData")
+    return path
 
 
-@pytest.fixture(params=['installed', '1.0.1'])
+def _no_lock(*args, **kwargs):
+    """Explorer's @synchronized(): the probe runs on one thread."""
+    return lambda function: function
+
+
+
+@pytest.fixture(params=['plugin', 'host'])
 def host_export(dmmr_history_rig, request, monkeypatch):
-    if request.param == '1.0.1':
+    if request.param == 'host':
         ns = dict(np=np, Path=Path, h5py=dmmr_history_rig.h5py, PRINT=dmmr_history_rig.module.PRINT,
                   cast=lambda kind, value: value, INPUTCHANNELS='Input Channels',
-                  OUTPUTCHANNELS='Output Channels', UNIT='Unit')
-        exec(compile_definition(HOST, 'appendOutputData', 'Device'), ns)
+                  OUTPUTCHANNELS='Output Channels', UNIT='Unit', synchronized=_no_lock)
+        exec(compile_definition(_installed_host(), 'appendOutputData', 'Device'), ns)
         monkeypatch.setattr(dmmr_history_rig.module.Device, 'appendOutputData', ns['appendOutputData'])
     for _ in range(2):
         ch = dmmr_history_rig.add()
@@ -51,12 +66,12 @@ def test_export_selection_keeps_time_current_range_aligned(host_export, options,
             assert values.shape == ranges.shape == times.shape
 
 
-def test_explorer_1_0_1_automatic_save_and_restore(dmmr_history_rig, monkeypatch):
+def test_the_hosts_automatic_save_and_restore(dmmr_history_rig, monkeypatch):
     ns = dict(np=np, Path=Path, h5py=dmmr_history_rig.h5py, PRINT=dmmr_history_rig.module.PRINT,
               cast=lambda kind, value: value, INPUTCHANNELS='Input Channels',
-              OUTPUTCHANNELS='Output Channels', UNIT='Unit')
+              OUTPUTCHANNELS='Output Channels', UNIT='Unit', synchronized=_no_lock)
     for name in ('appendOutputData', 'exportOutputData'):
-        exec(compile_definition(HOST, name, 'Device'), ns)
+        exec(compile_definition(_installed_host(), name, 'Device'), ns)
     monkeypatch.setattr(dmmr_history_rig.module.Device, 'appendOutputData', ns['appendOutputData'])
     ch = dmmr_history_rig.add()
     ch.getRecordedParameters = lambda: []
@@ -80,8 +95,8 @@ def test_hourly_store_survives_samples_arriving_during_the_export(dmmr_history_r
     # stores of 10:37 (DMMR_M00) and 11:37 (DMMR_M01).
     ns = dict(np=np, Path=Path, h5py=dmmr_history_rig.h5py, PRINT=dmmr_history_rig.module.PRINT,
               cast=lambda kind, value: value, INPUTCHANNELS='Input Channels',
-              OUTPUTCHANNELS='Output Channels', UNIT='Unit')
-    exec(compile_definition(HOST, 'appendOutputData', 'Device'), ns)
+              OUTPUTCHANNELS='Output Channels', UNIT='Unit', synchronized=_no_lock)
+    exec(compile_definition(_installed_host(), 'appendOutputData', 'Device'), ns)
     host_append = ns['appendOutputData']
     first, second = dmmr_history_rig.add(), dmmr_history_rig.add()
     for channel in (first, second):
@@ -108,8 +123,8 @@ def test_hourly_store_survives_samples_arriving_during_the_export(dmmr_history_r
 def test_a_real_range_misalignment_is_still_refused(dmmr_history_rig, monkeypatch, tmp_path):
     ns = dict(np=np, Path=Path, h5py=dmmr_history_rig.h5py, PRINT=dmmr_history_rig.module.PRINT,
               cast=lambda kind, value: value, INPUTCHANNELS='Input Channels',
-              OUTPUTCHANNELS='Output Channels', UNIT='Unit')
-    exec(compile_definition(HOST, 'appendOutputData', 'Device'), ns)
+              OUTPUTCHANNELS='Output Channels', UNIT='Unit', synchronized=_no_lock)
+    exec(compile_definition(_installed_host(), 'appendOutputData', 'Device'), ns)
     monkeypatch.setattr(dmmr_history_rig.module.Device, 'appendOutputData', ns['appendOutputData'])
     channel = dmmr_history_rig.add()
     channel.getRecordedParameters = lambda: []

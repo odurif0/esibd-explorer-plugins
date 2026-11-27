@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 //! MScan map engine (v0.5.10): the plan of `docs/quadrupole_optimization_plan.md`.
 //!
 //! Pure and event-sourced. The journal (normalized plan, instrument readings at Start, every

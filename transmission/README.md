@@ -15,7 +15,7 @@ supervisor; `_engine.py`, configuration/types and the Python optimizer reference
 `_simulator.py`, a simulated beamline; `_log.py`, the logs). The
 plugin imports no other plugin: it drives the channels of the device plugins only
 through Explorer, like a user edit, so each device keeps its own ramps, limits and
-OFF logic. MIT license (see `LICENSE`).
+OFF logic. MIT, like the whole repository (see `LICENSE` at its root).
 
 ## Native Worker
 

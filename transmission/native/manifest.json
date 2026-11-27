@@ -4,12 +4,12 @@
   "protocol": 1,
   "source": {
     "file": "source.zip",
-    "sha256": "6821a8e8e189ac1a80be656eb6a580f04698f4e48bb95af8fd4c523904f99576",
-    "size_bytes": 601830,
-    "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+    "sha256": "577b6a5dbb3eb76a46b86f95f7f3f99e5f48384332023d008ba660e9631b7cd3",
+    "size_bytes": 594946,
+    "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
     "vendored": false
   },
-  "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+  "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
   "targets": {
     "linux-x86_64": {
       "cargo_lock_sha256": "8158ed65a74549cb9e5c2514a9abd5f51ec41c5adbd2cdddc49e4f3955770ea4",
@@ -20,7 +20,7 @@
       "file": "esibd-transmission-worker",
       "sha256": "ffb52ca56ef6067e7a15bcc2ab9971724f93efbdd89225dd7315a88024fbc2c9",
       "size_bytes": 1212960,
-      "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+      "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
       "target": "x86_64-unknown-linux-gnu"
     },
     "windows-x86_64": {
@@ -32,14 +32,14 @@
       "file": "esibd-transmission-worker.exe",
       "sha256": "aa5529c8a6e69e6e3720e048c0e9a7812ed57cd40d6e8485f1d76fa65f891b1e",
       "size_bytes": 1153024,
-      "source_data_sha256": "29a3b5f5aa2e04a11170f59d0dee95717a5f1f09301b569b206de2f6d2c63c67",
+      "source_data_sha256": "7eb13cb8cc26ecdeb92fffc2de3bec1491bd870d01c44803d6092fda8933d8d6",
       "target": "x86_64-pc-windows-gnu"
     }
   },
   "third_party_notices": {
     "file": "THIRD_PARTY_NOTICES.txt",
-    "sha256": "502bec6d6f50a0a03297875452bc122c43e67dccd7101a08f598cb6b2926cd5c",
-    "size_bytes": 747548
+    "sha256": "8b01a320818cdc244cdd39a7253efa993ae9d3b6cdce177242291079aac2a4f1",
+    "size_bytes": 746708
   },
   "validation": "hardware-not-validated",
   "worker_version": "0.1.0"
