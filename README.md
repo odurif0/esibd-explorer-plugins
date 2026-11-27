@@ -114,10 +114,12 @@ OFF is not contacted, and a normal start keeps every device OFF.
 
 - ESIBD Explorer `1.0.2` on Windows 10 or later (x86-64). No additional Python or Rust
   installation is needed: each plugin folder brings its own worker executable.
-- Recommended: [ESIBD Explorer `1.0.2+od.6`](https://github.com/odurif0/ESIBD-Explorer/releases/tag/v1.0.2%2Bod.6),
+- Recommended: [ESIBD Explorer `1.0.2+od.7`](https://github.com/odurif0/ESIBD-Explorer/releases/tag/v1.0.2%2Bod.7),
   1.0.2 with fixes that long recordings need (no GUI freeze during the hourly save, live plots that
-  do not slow down as the history grows, settings read as UTF-8), on Python 3.14 and Qt 6.12; the
-  plugins are tested with it. Unzip it and start `ESIBD Explorer.exe`; settings and data are kept.
+  do not slow down as the history grows, settings read as UTF-8), on Python 3.14 and Qt 6.12.1; the
+  plugins are tested with it. Run its setup, or unzip it and start `ESIBD Explorer.exe`; settings and
+  data are kept. With 1.0.2+od.5 and od.6 (Qt 6.12.0), the values of the channel tables and of the
+  AMX pulser fields do not show.
 - Linux x86-64 workers are also supplied for TPG366, MScan and Transmission (glibc 2.35 or later).
 
 ## Notebooks
@@ -127,7 +129,7 @@ They are not part of the release ZIP.
 
 ## Development
 
-Tests run locally (no CI), on the lab's Explorer: 1.0.2+od.6 of the fork, on Python 3.14 and PyQt6 6.12,
+Tests run locally (no CI), on the lab's Explorer: 1.0.2+od.7 of the fork, on Python 3.14 and Qt 6.12.1,
 with the package versions of its Windows executable (`requirements-dev.txt`):
 
 ```bash
